@@ -101,6 +101,61 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     assert_match "expected 1 ABI word", error.message
   end
 
+  test "RPC response with non hex result fails clearly" do
+    stub_rpc(result: "0xzz")
+
+    error = assert_raises(AerodromeSlipstreamService::DecodeError) do
+      @service.owner_of(5016)
+    end
+    assert_match "not hex", error.message
+  end
+
+  test "RPC response with trailing partial ABI word fails clearly" do
+    stub_rpc(result: "0x#{"0" * 65}")
+
+    error = assert_raises(AerodromeSlipstreamService::DecodeError) do
+      @service.owner_of(5016)
+    end
+    assert_match "expected 1 ABI word", error.message
+  end
+
+  test "RPC missing result fails clearly" do
+    stub_request(:post, RPC_URL)
+      .to_return(status: 200, body: { jsonrpc: "2.0", id: 1 }.to_json, headers: { "Content-Type" => "application/json" })
+
+    error = assert_raises(AerodromeSlipstreamService::DecodeError) do
+      @service.owner_of(5016)
+    end
+    assert_match "missing result", error.message
+  end
+
+  test "JSON-RPC error object fails clearly" do
+    stub_rpc_sequence({ error: { code: -32000, message: "execution reverted" } })
+
+    error = assert_raises(AerodromeSlipstreamService::RpcError) do
+      @service.owner_of(5016)
+    end
+    assert_match "execution reverted", error.message
+  end
+
+  test "HTTP failure fails clearly" do
+    stub_request(:post, RPC_URL).to_return(status: 503, body: "unavailable")
+
+    error = assert_raises(AerodromeSlipstreamService::RpcError) do
+      @service.owner_of(5016)
+    end
+    assert_match "HTTP 503", error.message
+  end
+
+  test "invalid JSON response fails clearly" do
+    stub_request(:post, RPC_URL).to_return(status: 200, body: "not json")
+
+    error = assert_raises(AerodromeSlipstreamService::DecodeError) do
+      @service.owner_of(5016)
+    end
+    assert_match "not valid JSON", error.message
+  end
+
   test "missing config fails clearly" do
     without_env("BASE_RPC_URL", "AERODROME_SLIPSTREAM_POSITION_MANAGER", "AERODROME_SLIPSTREAM_FACTORY") do
       error = assert_raises(AerodromeSlipstreamService::ConfigError) do
@@ -108,6 +163,56 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
       end
       assert_match "BASE_RPC_URL", error.message
     end
+  end
+
+  test "missing position manager config fails clearly" do
+    without_env("AERODROME_SLIPSTREAM_POSITION_MANAGER") do
+      error = assert_raises(AerodromeSlipstreamService::ConfigError) do
+        AerodromeSlipstreamService.new(rpc_url: RPC_URL, factory_address: FACTORY)
+      end
+      assert_match "AERODROME_SLIPSTREAM_POSITION_MANAGER", error.message
+    end
+  end
+
+  test "missing factory config fails clearly" do
+    without_env("AERODROME_SLIPSTREAM_FACTORY") do
+      error = assert_raises(AerodromeSlipstreamService::ConfigError) do
+        AerodromeSlipstreamService.new(rpc_url: RPC_URL, position_manager_address: POSITION_MANAGER)
+      end
+      assert_match "AERODROME_SLIPSTREAM_FACTORY", error.message
+    end
+  end
+
+  test "explicit constructor args override env config" do
+    old_values = {
+      "BASE_RPC_URL" => ENV["BASE_RPC_URL"],
+      "AERODROME_SLIPSTREAM_POSITION_MANAGER" => ENV["AERODROME_SLIPSTREAM_POSITION_MANAGER"],
+      "AERODROME_SLIPSTREAM_FACTORY" => ENV["AERODROME_SLIPSTREAM_FACTORY"]
+    }
+    ENV["BASE_RPC_URL"] = "https://wrong.example.com/rpc"
+    ENV["AERODROME_SLIPSTREAM_POSITION_MANAGER"] = "0x0000000000000000000000000000000000000001"
+    ENV["AERODROME_SLIPSTREAM_FACTORY"] = "0x0000000000000000000000000000000000000002"
+    stub_rpc(result: "0x#{word(OWNER)}")
+    service = AerodromeSlipstreamService.new(
+      rpc_url: RPC_URL,
+      position_manager_address: POSITION_MANAGER,
+      factory_address: FACTORY
+    )
+
+    assert_equal OWNER, service.owner_of(5016)
+    assert_not_requested :post, "https://wrong.example.com/rpc"
+  ensure
+    old_values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+  end
+
+  test "int24 values outside range fail before RPC" do
+    error = assert_raises(AerodromeSlipstreamService::DecodeError) do
+      @service.pool_for(TOKEN0, TOKEN1, 2**23)
+    end
+    assert_match "int24", error.message
+    assert_not_requested :post, RPC_URL
   end
 
   test "fetch_position returns explicit partial data without amount math" do

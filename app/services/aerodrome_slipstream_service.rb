@@ -153,7 +153,7 @@ class AerodromeSlipstreamService
     data = SELECTORS.fetch(:get_pool) +
       address_word(token0_address) +
       address_word(token1_address) +
-      int_word(tick_spacing)
+      int24_word(tick_spacing)
     pool_address = decode_address(single_word_call(@factory_address, data))
     raise ZeroPoolError, "Aerodrome Slipstream factory returned zero pool address" if pool_address == ZERO_ADDRESS
 
@@ -209,7 +209,8 @@ class AerodromeSlipstreamService
     raise RpcError, "Aerodrome RPC error: #{parsed.dig("error", "message")}" if parsed["error"]
 
     result = parsed["result"]
-    raise DecodeError, "Aerodrome RPC response missing result" unless result.is_a?(String) && result.start_with?("0x")
+    raise DecodeError, "Aerodrome RPC response missing result" unless result.is_a?(String)
+    raise DecodeError, "Aerodrome RPC response result is not hex" unless result.match?(/\A0x[0-9a-fA-F]*\z/)
 
     result
   rescue JSON::ParserError => e
@@ -222,7 +223,12 @@ class AerodromeSlipstreamService
   end
 
   def call_words(to, data, expected_words:)
-    words = eth_call(to, data).delete_prefix("0x").scan(/.{64}/)
+    body = eth_call(to, data).delete_prefix("0x")
+    unless body.length == expected_words * 64
+      raise DecodeError, "Aerodrome RPC response expected #{expected_words} ABI word(s), got #{body.length / 64}"
+    end
+
+    words = body.scan(/.{64}/)
     unless words.size == expected_words && words.all? { |word| word.length == 64 }
       raise DecodeError, "Aerodrome RPC response expected #{expected_words} ABI word(s), got #{words.size}"
     end
@@ -238,6 +244,7 @@ class AerodromeSlipstreamService
 
   def decode_string(hex)
     body = hex.delete_prefix("0x")
+    raise DecodeError, "Aerodrome string response is malformed" unless body.match?(/\A[0-9a-fA-F]*\z/) && (body.length % 64).zero?
 
     if body.length == 64
       return [ body ].pack("H*").delete("\u0000")
@@ -279,6 +286,15 @@ class AerodromeSlipstreamService
     integer = Integer(value)
     encoded = integer.negative? ? (2**256) + integer : integer
     encoded.to_s(16).rjust(64, "0")
+  end
+
+  def int24_word(value)
+    integer = Integer(value)
+    unless integer.between?(-(2**23), (2**23) - 1)
+      raise DecodeError, "Expected int24 value, got #{value}"
+    end
+
+    int_word(integer)
   end
 
   def uint_from_word(word)
