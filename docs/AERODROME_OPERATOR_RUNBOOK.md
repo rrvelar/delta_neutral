@@ -11,6 +11,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Monitor-only sync stores verified computed token amounts in existing `Position` amount fields.
 - Monitor-only USD valuation preview is available only for pools with the configured USDC quote token; unsupported pairs keep USD prices nil.
 - Monitor-only hedge preview is available only for configured WETH/USDC positions and never executes orders.
+- The Rails UI displays Aerodrome positions as monitor-only, including safety labels and display-only hedge preview status.
 - `HedgeSyncJob` skips Aerodrome positions; Aerodrome exposure is not fed into hedge logic.
 
 ## Implemented
@@ -20,6 +21,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
 - Monitor-only USD valuation preview for configured-USDC pools.
 - Monitor-only hedge preview for configured WETH/USDC pools.
+- UI/dashboard visibility for Aerodrome monitor-only positions.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Mocked tests for dry-run and config verification.
@@ -121,6 +123,18 @@ The task de-duplicates repeated token ids and prints a note. Blank token ids are
    - `tokensOwed0` and `tokensOwed1`.
 
 If any value differs, stop and record the discrepancy in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
+
+## UI Display
+
+Aerodrome positions appear in the dashboard and position pages with:
+
+- `Aerodrome Slipstream` DEX label.
+- Base chain and token id when available.
+- Monitor-only, no-orders, hedge-disabled, and Hyperliquid-not-called safety labels.
+- Persisted amounts, USD prices, and estimated LP value when available.
+- Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
+
+The UI preview does not call RPC, does not call `HyperliquidService`, does not create `Hedge` records, and does not enable order execution. It is still NOT READY FOR LIVE HEDGE INTEGRATION.
 
 ## Confirm No DB Writes
 

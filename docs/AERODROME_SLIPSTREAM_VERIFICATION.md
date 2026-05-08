@@ -312,6 +312,13 @@ Safety rule: If USD valuation is uncertain, do not feed Aerodrome exposure into 
 - The preview reports `execution_enabled: false` and `hyperliquid_called: false`.
 - It does not instantiate `HyperliquidService`, place orders, create hedges, or mark positions hedge-ready.
 
+### UI Monitor-Only Display
+
+- Dashboard and position views display Aerodrome positions with `Aerodrome Slipstream`, Base chain, token id, pool address, persisted amounts, supported USD prices, and estimated LP value.
+- Aerodrome views show explicit `MONITOR ONLY`, `NO ORDERS`, `HEDGE DISABLED`, `HYPERLIQUID NOT CALLED`, and `NOT LIVE HEDGE-READY` labels.
+- UI hedge preview is display-only. It uses persisted amounts/prices and configured WETH/USDC identity when available, does not call RPC or Hyperliquid, and shows an unavailable reason when data is incomplete.
+- Aerodrome position pages do not show a create-hedge button.
+
 ## 13. Normalized Position Data Shape
 
 Proposed internal read-only structure, not implemented yet:

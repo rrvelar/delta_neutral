@@ -230,6 +230,12 @@ Hedge preview is implemented only for monitor-only positions where amount math i
 
 This is not execution. The dry-run reports `execution_enabled: false` and `hyperliquid_called: false`, and it does not instantiate `HyperliquidService`. `AERODROME_HEDGE_ENABLED` remains default-off and unused for live execution in this phase.
 
+## UI Visibility
+
+The Rails dashboard and position pages display Aerodrome positions as monitor-only. They show persisted amounts, supported USD valuation, safety labels, and a display-only hedge preview when configured WETH/USDC data is available. If price, amount, or configured token identity is missing, the UI shows `Hedge preview unavailable` instead of guessing.
+
+The UI does not call RPC, does not call `HyperliquidService`, does not create orders, and does not make Aerodrome positions live hedge-ready.
+
 These fields remain partial or unresolved:
 
 - USD valuation for non-USDC pools.

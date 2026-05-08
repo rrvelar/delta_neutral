@@ -50,27 +50,68 @@ class AerodromeHedgePreview
     weth_price = weth_index.zero? ? position_data.token0_price_usd : position_data.token1_price_usd
     return unsupported("WETH price is unavailable") if weth_price.nil?
 
+    supported_result(
+      weth_amount: weth_amount,
+      usdc_amount: usdc_amount,
+      weth_price: BigDecimal(weth_price.to_s),
+      total_value_usd: position_data.total_value_usd
+    )
+  rescue AerodromeSlipstreamMath::Error => e
+    unsupported(e.message)
+  end
+
+  def preview_fields(token0_address:, token1_address:, amount0_decimal:, amount1_decimal:, token0_price_usd:, token1_price_usd:, total_value_usd:, amount_verified:, valuation_supported:)
+    return unsupported("AERODROME_WETH_ADDRESS is not configured") if @weth_address.nil?
+    return unsupported("amount math is not verified") unless amount_verified
+    return unsupported("USD valuation is unsupported") unless valuation_supported
+
+    token0_address = normalize_address_or_nil(token0_address)
+    token1_address = normalize_address_or_nil(token1_address)
+    return unsupported("token address is invalid") if token0_address.nil? || token1_address.nil?
+
+    weth_index =
+      if token0_address == @weth_address
+        0
+      elsif token1_address == @weth_address
+        1
+      end
+    return unsupported("position does not include configured WETH token") if weth_index.nil?
+
+    weth_amount = weth_index.zero? ? BigDecimal(amount0_decimal.to_s) : BigDecimal(amount1_decimal.to_s)
+    usdc_amount = weth_index.zero? ? BigDecimal(amount1_decimal.to_s) : BigDecimal(amount0_decimal.to_s)
+    weth_price = weth_index.zero? ? token0_price_usd : token1_price_usd
+    return unsupported("WETH price is unavailable") if weth_price.nil?
+
+    supported_result(
+      weth_amount: weth_amount,
+      usdc_amount: usdc_amount,
+      weth_price: BigDecimal(weth_price.to_s),
+      total_value_usd: total_value_usd
+    )
+  rescue ArgumentError
+    unsupported("amount or price is invalid")
+  end
+
+  private
+
+  def supported_result(weth_amount:, usdc_amount:, weth_price:, total_value_usd:)
     Result.new(
       supported: true,
       reason: nil,
       hedge_asset: "ETH",
       hedge_side: "short",
       suggested_short_amount: weth_amount,
-      suggested_short_notional_usd: weth_amount * BigDecimal(weth_price.to_s),
+      suggested_short_notional_usd: weth_amount * weth_price,
       lp_weth_amount: weth_amount,
       lp_usdc_amount: usdc_amount,
-      lp_total_value_usd: position_data.total_value_usd,
-      weth_price_usd: BigDecimal(weth_price.to_s),
+      lp_total_value_usd: total_value_usd,
+      weth_price_usd: weth_price,
       source: SOURCE,
       execution_enabled: false,
       hyperliquid_called: false,
       verification_status: "preview_only"
     )
-  rescue AerodromeSlipstreamMath::Error => e
-    unsupported(e.message)
   end
-
-  private
 
   def token_decimal_amount(position_data, token_index)
     if token_index.zero?

@@ -9,7 +9,9 @@
       <% end %>
     </h1>
     <p class="text-gray-400 mt-1 flex items-center gap-2">
-      <%= @position.dex.name.capitalize %> &middot;
+      <%= dex_display_name(@position) %> &middot;
+      <%= chain_display_name(@position) %> &middot;
+      Token ID <%= @position.external_id %> &middot;
       <span id="copy-address" class="cursor-pointer hover:text-white transition inline-flex items-center gap-1" title="<%= @position.pool_address %>" onclick="navigator.clipboard.writeText('<%= @position.pool_address %>'); var icon=this.querySelector('.copy-icon'); icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M4.5 12.75l6 6 9-13.5\' />'; icon.classList.add('text-green-400'); setTimeout(function(){ icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75\' />'; icon.classList.remove('text-green-400'); }, 1500)">
         <%= @position.pool_address.to_s[0..5] %>&hellip;<%= @position.pool_address.to_s[-4..] %>
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 copy-icon">
@@ -20,7 +22,9 @@
   </div>
   <div class="flex items-center space-x-3">
     <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-    <% if @position.hedge %>
+    <% if aerodrome_position?(@position) %>
+      <span class="bg-yellow-900/40 text-yellow-300 border border-yellow-800 px-4 py-2 rounded-lg text-sm font-medium">Monitor-only</span>
+    <% elsif @position.hedge %>
       <%= link_to "View Hedge", hedge_path(@position.hedge), class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
     <% else %>
       <%= link_to "Create Hedge", new_hedge_path(position_id: @position.id), class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
@@ -28,10 +32,53 @@
   </div>
 </div>
 
+<% if aerodrome_position?(@position) %>
+  <% hedge_preview = aerodrome_hedge_preview_for(@position) %>
+  <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
+    <div class="flex flex-wrap gap-2 mb-4">
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">MONITOR ONLY</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NO ORDERS</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HEDGE DISABLED</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HYPERLIQUID NOT CALLED</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NOT LIVE HEDGE-READY</span>
+    </div>
+    <p class="text-yellow-100 font-medium">Aerodrome Slipstream monitor-only position on <%= chain_display_name(@position) %>.</p>
+    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false. This page does not place trades, create orders, approve tokens, or call Hyperliquid.</p>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
+        <p class="text-gray-400 text-xs uppercase tracking-wide">Position Details</p>
+        <dl class="mt-3 space-y-2 text-sm">
+          <div class="flex justify-between gap-4"><dt class="text-gray-500">DEX</dt><dd class="text-white"><%= dex_display_name(@position) %></dd></div>
+          <div class="flex justify-between gap-4"><dt class="text-gray-500">Chain</dt><dd class="text-white"><%= chain_display_name(@position) %></dd></div>
+          <div class="flex justify-between gap-4"><dt class="text-gray-500">Token ID</dt><dd class="text-white"><%= @position.external_id %></dd></div>
+          <div class="flex justify-between gap-4"><dt class="text-gray-500">Pool</dt><dd class="text-white text-right break-all"><%= @position.pool_address %></dd></div>
+        </dl>
+      </div>
+      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
+        <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge Preview</p>
+        <% if hedge_preview&.supported %>
+          <div class="mt-3 space-y-2 text-sm">
+            <p class="text-yellow-300 font-medium">PREVIEW ONLY</p>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested side</span><span class="text-white"><%= hedge_preview.hedge_side %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested asset</span><span class="text-white"><%= hedge_preview.hedge_asset %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested amount</span><span class="text-white"><%= number_with_precision(hedge_preview.suggested_short_amount, precision: 6) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested notional</span><span class="text-white"><%= format_usd(hedge_preview.suggested_short_notional_usd) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution</span><span class="text-yellow-300">disabled</span></div>
+          </div>
+        <% else %>
+          <p class="mt-3 text-gray-300 font-medium">Hedge preview unavailable</p>
+          <p class="text-gray-500 text-sm mt-1"><%= hedge_preview&.reason || "preview data is unavailable" %></p>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>
+
 <% pool_unrealized = @position.entry_value_usd ? @position.total_value_usd - @position.entry_value_usd : nil %>
 <% latest_snap = @pnl_snapshots.first %>
-<% hedge_unrealized = latest_snap&.hedge_unrealized.to_d %>
-<% hedge_realized = latest_snap&.hedge_realized.to_d %>
+<% hedge_unrealized = (latest_snap&.hedge_unrealized || 0).to_d %>
+<% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
 <% total_unrealized = pool_unrealized ? pool_unrealized + hedge_unrealized : hedge_unrealized %>
 <% total_fees = latest_snap&.total_fees_usd || 0 %>
 <% total_pnl = total_unrealized + hedge_realized + total_fees %>
@@ -39,13 +86,13 @@
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset0 %></p>
-    <p class="text-xl font-bold text-white"><%= format_usd(@position.asset0_amount * (@position.asset0_price_usd || 0)) %></p>
-    <p class="text-gray-500 text-sm"><%= number_with_precision(@position.asset0_amount, precision: 6) %> &middot; <%= format_usd(@position.asset0_price_usd) %>/unit</p>
+    <p class="text-xl font-bold text-white"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %></p>
+    <p class="text-gray-500 text-sm"><%= amount_display(@position.asset0_amount, precision: 6) %> &middot; <%= price_display(@position.asset0_price_usd) %></p>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset1 %></p>
-    <p class="text-xl font-bold text-white"><%= format_usd(@position.asset1_amount * (@position.asset1_price_usd || 0)) %></p>
-    <p class="text-gray-500 text-sm"><%= number_with_precision(@position.asset1_amount, precision: 2) %> &middot; <%= format_usd(@position.asset1_price_usd) %>/unit</p>
+    <p class="text-xl font-bold text-white"><%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
+    <p class="text-gray-500 text-sm"><%= amount_display(@position.asset1_amount, precision: 2) %> &middot; <%= price_display(@position.asset1_price_usd) %></p>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Total Pooled Value</p>
@@ -53,7 +100,7 @@
     <% if @position.entry_value_usd %>
       <p class="text-gray-500 text-sm">Entry: <%= format_usd(@position.entry_value_usd) %></p>
     <% else %>
-      <p class="text-gray-500 text-sm"><%= format_usd(@position.asset0_amount * (@position.asset0_price_usd || 0)) %> &middot; <%= format_usd(@position.asset1_amount * (@position.asset1_price_usd || 0)) %></p>
+      <p class="text-gray-500 text-sm"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %> &middot; <%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
     <% end %>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">

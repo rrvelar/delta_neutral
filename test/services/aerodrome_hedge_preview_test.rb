@@ -33,6 +33,26 @@ class AerodromeHedgePreviewTest < ActiveSupport::TestCase
     assert_equal BigDecimal("2000"), result.weth_price_usd
   end
 
+  test "explicit decimal fields return supported preview for UI display" do
+    result = preview.preview_fields(
+      token0_address: WETH,
+      token1_address: USDC,
+      amount0_decimal: BigDecimal("1.25"),
+      amount1_decimal: BigDecimal("500"),
+      token0_price_usd: BigDecimal("2000"),
+      token1_price_usd: BigDecimal("1"),
+      total_value_usd: BigDecimal("3000"),
+      amount_verified: true,
+      valuation_supported: true
+    )
+
+    assert result.supported
+    assert_equal BigDecimal("1.25"), result.suggested_short_amount
+    assert_equal BigDecimal("2500"), result.suggested_short_notional_usd
+    assert_equal false, result.execution_enabled
+    assert_equal false, result.hyperliquid_called
+  end
+
   test "non WETH pair is unsupported" do
     result = preview.preview(weth_usdc_position.with(token0_address: AERO, token1_address: USDC))
 

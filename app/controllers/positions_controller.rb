@@ -9,7 +9,7 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def index
-    @positions = Current.user.positions.active.includes(:dex, :hedge)
+    @positions = Current.user.positions.active.includes(:dex, :hedge, wallet: :network)
   end
 
   # GET /positions/:id
@@ -19,7 +19,7 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def show
-    @position = Current.user.positions.find(params[:id])
+    @position = Current.user.positions.includes(:dex, wallet: :network).find(params[:id])
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
   end

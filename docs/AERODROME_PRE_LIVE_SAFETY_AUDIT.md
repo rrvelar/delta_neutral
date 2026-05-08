@@ -17,6 +17,7 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Amount0/amount1 implemented | PASS | Verified amount math is implemented for read-only service, dry-run, and monitor-only sync. |
 | USDC-pool valuation preview | PASS | Supported only when one token matches configured `AERODROME_USDC_ADDRESS`; unsupported pairs keep prices nil. |
 | WETH/USDC hedge preview | PASS | Preview-only calculation; `execution_enabled=false`, no orders, no Hyperliquid calls. |
+| UI monitor-only display | PASS | Dashboard/position views label Aerodrome as monitor-only and show no order execution controls. |
 | USD valuation for non-USDC pairs | UNKNOWN | No trusted external USD valuation source is implemented. |
 | Advanced fees deferred | UNKNOWN | Only raw owed-token fields are safe first reads. |
 | Staking/gauge discovery unresolved | UNKNOWN | User-provided token ids remain the conservative starting point. |
