@@ -319,13 +319,13 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position&.destroy
   end
 
-  test "processes complete Aerodrome hedge through existing rebalance path when flag is true" do
+  test "processes only Aerodrome WETH side through existing rebalance path when flag is true" do
     position = aerodrome_position
     hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
     mock_service = build_mock_service(positions: [])
 
     with_env("AERODROME_HEDGE_ENABLED" => "true") do
-      assert_difference "ShortRebalance.count", 2 do
+      assert_difference "ShortRebalance.count", 1 do
         HyperliquidService.stub(:new, mock_service) do
           HedgeSyncJob.perform_now(hedge.id)
         end
@@ -333,8 +333,44 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
 
     rebalances = hedge.short_rebalances.order(:id)
-    assert_equal [ "WETH", "USDC" ], rebalances.pluck(:asset)
-    assert_equal [ ShortRebalance::STATUS_SUCCESS, ShortRebalance::STATUS_SUCCESS ], rebalances.pluck(:status)
+    assert_equal [ "WETH" ], rebalances.pluck(:asset)
+    assert_equal [ ShortRebalance::STATUS_SUCCESS ], rebalances.pluck(:status)
+    assert_empty hedge.short_rebalances.where(asset: "USDC")
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "processes Aerodrome ETH symbol as ETH hedge side when flag is true" do
+    position = aerodrome_position(asset0: "ETH")
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    mock_service = build_mock_service(positions: [])
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true") do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal [ "ETH" ], hedge.short_rebalances.order(:id).pluck(:asset)
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "skips unsupported Aerodrome assets before HyperliquidService when flag is true" do
+    position = aerodrome_position(asset0: "AERO", asset1: "USDC")
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
   ensure
     hedge&.destroy
     position&.destroy

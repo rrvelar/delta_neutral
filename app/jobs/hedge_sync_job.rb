@@ -49,6 +49,16 @@ class HedgeSyncJob < ApplicationJob
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
           next
         end
+
+        hedge_assets = aerodrome_hedge_assets(hedge)
+        if hedge_assets.empty?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — no supported Aerodrome ETH/WETH hedge asset")
+          next
+        end
+
+        hyperliquid ||= HyperliquidService.new
+        sync_aerodrome_hedge(hedge, hedge_assets, hyperliquid)
+        next
       end
 
       hyperliquid ||= HyperliquidService.new
@@ -78,6 +88,23 @@ class HedgeSyncJob < ApplicationJob
     Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} position #{position.id} is active, checking assets" }
     check_and_rebalance(hedge, position.asset0, position.asset0_amount, 0, hyperliquid)
     check_and_rebalance(hedge, position.asset1, position.asset1_amount, 1, hyperliquid)
+  end
+
+  # Checks and rebalances only the supported ETH/WETH side for Aerodrome.
+  #
+  # Aerodrome WETH/USDC support is intentionally narrower than the existing
+  # Uniswap hedge loop. USDC and other Aerodrome assets are never passed into
+  # order logic.
+  #
+  # @param hedge [Hedge] the hedge to evaluate
+  # @param hedge_assets [Array<Hash>] supported Aerodrome assets
+  # @param hyperliquid [HyperliquidService] configured Hyperliquid client
+  # @return [void]
+  def sync_aerodrome_hedge(hedge, hedge_assets, hyperliquid)
+    Rails.logger.debug { "[HedgeSyncJob] syncing Aerodrome hedge #{hedge.id} with ETH/WETH-only asset filter" }
+    hedge_assets.each do |asset|
+      check_and_rebalance(hedge, asset.fetch(:symbol), asset.fetch(:amount), asset.fetch(:index), hyperliquid)
+    end
   end
 
   # Rebalances the short for a single asset if needed.
@@ -315,5 +342,23 @@ class HedgeSyncJob < ApplicationJob
     errors << "hedge missing" unless hedge.persisted?
 
     errors
+  end
+
+  def aerodrome_hedge_assets(hedge)
+    position = hedge.position
+    [
+      { index: 0, symbol: position.asset0, amount: position.asset0_amount },
+      { index: 1, symbol: position.asset1, amount: position.asset1_amount }
+    ].select do |asset|
+      supported = aerodrome_supported_hedge_symbol?(asset.fetch(:symbol))
+      unless supported
+        Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} #{asset.fetch(:symbol)} — Aerodrome supports ETH/WETH hedge side only")
+      end
+      supported
+    end
+  end
+
+  def aerodrome_supported_hedge_symbol?(symbol)
+    %w[ETH WETH].include?(symbol.to_s.upcase)
   end
 end
