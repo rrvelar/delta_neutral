@@ -4,6 +4,69 @@ Date prepared: 2026-05-08
 
 This document is a practical checklist for implementing Aerodrome Slipstream support on Base. It is verification/documentation only. It does not implement application code, does not change business logic, does not change `HyperliquidService`, and does not enable live trading.
 
+## Verified Facts As Of 2026-05-08
+
+Status legend: **VERIFIED** means checked from a trusted source in this session. **CANDIDATE** means a trusted source lists the value, but implementation should keep it configurable or verify against a concrete position before relying on it. **UNRESOLVED** means do not implement from this fact. **DEFERRED** means intentionally out of scope for the read-only migration.
+
+### Sources Checked
+
+| Source | Check | Result |
+| --- | --- | --- |
+| Official Aerodrome docs: `https://aerodrome.finance/docs` | `curl -I` | **VERIFIED** reachable, HTTP 200. |
+| Official Aerodrome docs repo: `https://raw.githubusercontent.com/aerodrome-finance/docs/main/content/liquidity.mdx` | `curl` + `rg` for concentrated pool/tick spacing sections | **VERIFIED** docs describe concentrated pools and tick spacing. |
+| Official Slipstream repo: `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/README.md` | `curl` + `rg` for deployments | **VERIFIED** deployment table lists three Base Slipstream deployments. |
+| Official Slipstream interfaces: `INonfungiblePositionManager.sol`, `ICLFactory.sol`, `ICLPoolState.sol`, `IPeripheryImmutableState.sol` | `curl` raw GitHub files | **VERIFIED** method signatures and return fields listed below. |
+| Public Base RPC: `https://base-rpc.publicnode.com` | JSON-RPC `eth_chainId`, `eth_getCode`, `eth_call` | **VERIFIED** live read-only checks listed below. No private RPC or keys used. |
+| BaseScan contract pages linked from Slipstream README | URLs recorded from official repo links | **CANDIDATE** pages are the official repo-linked `#code` pages; automated proof of BaseScan source verification was not completed in this pass. |
+
+### Verified And Candidate Facts
+
+| Fact | Status | Source URL / command | Result |
+| --- | --- | --- | --- |
+| Base mainnet chain id. | **VERIFIED** | Public Base RPC `eth_chainId` against `https://base-rpc.publicnode.com`. | Returned `0x2105`, decimal `8453`. |
+| Aerodrome docs availability. | **VERIFIED** | `curl -I https://aerodrome.finance/docs`. | HTTP 200. |
+| Aerodrome concentrated pools use tick spacing. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/docs/main/content/liquidity.mdx`. | Docs describe concentrated pools, tick ranges, and tick spacing examples including 1, 50, 200, and 2000. |
+| Current latest Slipstream deployment group in official repo. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/README.md`. | README marks "Gauges V3 Deployment" as current latest; it also says existing gauges are still in use. |
+| Gauges V3 NonfungiblePositionManager on Base. | **CANDIDATE** | Official Slipstream README + live `eth_getCode`. | `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53`; live code exists; `factory()` returns the Gauges V3 factory below. Keep configurable because older managers may contain positions. |
+| Gauges V3 PoolFactory on Base. | **CANDIDATE** | Official Slipstream README + live `eth_getCode` + manager `factory()`. | `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef`; live code exists; selected manager returns this factory. Keep configurable. |
+| Initial deployment manager/factory. | **CANDIDATE** | Official Slipstream README + live `eth_getCode`. | Manager `0x827922686190790b37229fd06084350E74485b72`, factory `0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A`; live code exists. Position coverage unresolved. |
+| Gauge Caps deployment manager/factory. | **CANDIDATE** | Official Slipstream README + live `eth_getCode`. | Manager `0xa990C6a764b73BF43cee5Bb40339c3322FB9D55F`, factory `0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a`; live code exists. Position coverage unresolved. |
+| `positions(tokenId)` uses `tickSpacing`, not Uniswap V3 `fee`. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/periphery/interfaces/INonfungiblePositionManager.sol`; live `eth_call` on sample token. | Interface and live return decode include `tickSpacing`; no `fee` field in `positions(tokenId)`. |
+| Exact `positions(tokenId)` return fields. | **VERIFIED** | Same interface URL + live `positions(uint256)` call. | 12 words: `nonce`, `operator`, `token0`, `token1`, `tickSpacing`, `tickLower`, `tickUpper`, `liquidity`, `feeGrowthInside0LastX128`, `feeGrowthInside1LastX128`, `tokensOwed0`, `tokensOwed1`. |
+| Factory pool resolution signature. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/core/interfaces/ICLFactory.sol`; live sample `getPool`. | `getPool(address tokenA,address tokenB,int24 tickSpacing)` returns `address pool`; interface says token order may be either order and returns address zero if missing. |
+| Pool `slot0` return fields. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/core/interfaces/pool/ICLPoolState.sol`; live sample `slot0`. | 6 words: `sqrtPriceX96`, `tick`, `observationIndex`, `observationCardinality`, `observationCardinalityNext`, `unlocked`. |
+| ERC721Enumerable support appears available on Gauges V3 manager. | **VERIFIED FOR SAMPLE MANAGER ONLY** | Live `supportsInterface(0x780e9d63)`, `tokenByIndex(0)`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner,0)`. | Calls returned successfully on `0xe1f8...`. Discovery still must account for staked/escrowed positions and older managers. |
+| WETH9 address exposed by Gauges V3 manager. | **VERIFIED** | Live `WETH9()` on `0xe1f8...`; interface source `IPeripheryImmutableState.sol`. | Returned `0x4200000000000000000000000000000000000006`. Native ETH vs WETH app behavior remains **UNRESOLVED**. |
+
+### Live RPC Checks Performed
+
+| RPC URL | Method | Target | Token id | Result summary |
+| --- | --- | --- | --- | --- |
+| `https://base-rpc.publicnode.com` | `eth_chainId` | N/A | N/A | Returned `0x2105` (`8453`). |
+| `https://base-rpc.publicnode.com` | `eth_getCode` | All three official manager candidates and all three official factory candidates | N/A | Non-empty code for all six candidate addresses. |
+| `https://base-rpc.publicnode.com` | `eth_call supportsInterface(bytes4)` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | N/A | ERC721, ERC721Enumerable, and ERC721Metadata returned true. |
+| `https://base-rpc.publicnode.com` | `eth_call factory()` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | N/A | Returned `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef`. |
+| `https://base-rpc.publicnode.com` | `eth_call WETH9()` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | N/A | Returned `0x4200000000000000000000000000000000000006`. |
+| `https://base-rpc.publicnode.com` | `eth_call tokenByIndex(0)` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | N/A | Returned sample token id `5016`. |
+| `https://base-rpc.publicnode.com` | `eth_call ownerOf(uint256)` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | `5016` | Returned owner `0x23cb5f48fa3f4502232f3442637f90e8e3355701`. |
+| `https://base-rpc.publicnode.com` | `eth_call positions(uint256)` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | `5016` | Returned 12 ABI words matching the official interface; sample had `token0=0x22af33fe49fd1fa80c7149773dde5890d3c76f3b`, `token1=0x4200000000000000000000000000000000000006`, `tickSpacing=200`, `tickLower=-151400`, `tickUpper=-147400`. |
+| `https://base-rpc.publicnode.com` | `eth_call balanceOf(address)` and `tokenOfOwnerByIndex(address,uint256)` | Gauges V3 manager `0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53` | Owner of token `5016` | `balanceOf(owner)` returned `2`; `tokenOfOwnerByIndex(owner,0)` returned token id `1315`. |
+| `https://base-rpc.publicnode.com` | `eth_call getPool(address,address,int24)` | Gauges V3 factory `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef` | Tokens from token `5016` | Returned pool `0x90757bd1595ca6e6a011e900e7a22d1a991856a5`. |
+| `https://base-rpc.publicnode.com` | `eth_call slot0()` | Pool `0x90757bd1595ca6e6a011e900e7a22d1a991856a5` | N/A | Returned 6 ABI words matching the official interface; sample tick decoded to `-155876`. |
+| `https://base-rpc.publicnode.com` | `eth_call decimals()`, `symbol()`, `name()` | Sample `token0` and `token1` from token `5016` | N/A | `decimals()` returned `18` for both sample tokens; `symbol()` and `name()` returned non-empty data. Do not generalize decimals. |
+
+### Unresolved Or Deferred Facts
+
+| Fact | Status | Fail-safe recommendation |
+| --- | --- | --- |
+| Whether one manager/factory pair covers all relevant user positions. | **UNRESOLVED** | Keep manager/factory configurable; consider multiple deployments. |
+| Whether BaseScan source/ABI pages can be programmatically verified without an API key. | **UNRESOLVED** | Treat official README + live RPC as candidate/operational verification; still perform manual BaseScan source/ABI review before implementation. |
+| Whether wallet NFT enumeration is sufficient for staked or escrowed positions. | **UNRESOLVED** | Start with user-provided token ids or mark staked/gauge discovery out of scope. |
+| Exact amount0/amount1 math and rounding. | **UNRESOLVED** | Defer implementation until formulas are verified against source and real UI/BaseScan values. |
+| Advanced uncollected fee calculation beyond `tokensOwed0`/`tokensOwed1`. | **DEFERRED** | Initial read-only scope should show only verified owed-token fields or mark fees partial. |
+| USD pricing and hedge exposure readiness. | **UNRESOLVED** | Exclude Aerodrome positions from `HedgeSyncJob` until USD valuation/exposure is verified. |
+| Native ETH vs WETH display/identity behavior. | **UNRESOLVED** | Store/read token addresses exactly as returned; do not collapse WETH to ETH without explicit verified mapping. |
+
 ## 1. Scope
 
 The migration only replaces the LP position source:
