@@ -39,8 +39,16 @@ class HedgeSyncJob < ApplicationJob
 
     hedges.includes(position: :dex).find_each do |hedge|
       if aerodrome_position?(hedge.position)
-        Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome positions are monitor-only")
-        next
+        unless aerodrome_hedge_enabled?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
+          next
+        end
+
+        readiness_errors = aerodrome_readiness_errors(hedge)
+        if readiness_errors.any?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
+          next
+        end
       end
 
       hyperliquid ||= HyperliquidService.new
@@ -287,5 +295,25 @@ class HedgeSyncJob < ApplicationJob
 
   def aerodrome_position?(position)
     position.dex.name == "aerodrome_slipstream"
+  end
+
+  def aerodrome_hedge_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false"))
+  end
+
+  def aerodrome_readiness_errors(hedge)
+    position = hedge.position
+    errors = []
+
+    errors << "position inactive" unless position.active?
+    errors << "asset0 missing" if position.asset0.blank?
+    errors << "asset1 missing" if position.asset1.blank?
+    errors << "asset0 amount missing" if position.asset0_amount.nil?
+    errors << "asset1 amount missing" if position.asset1_amount.nil?
+    errors << "asset0 price missing" if position.asset0_price_usd.nil?
+    errors << "asset1 price missing" if position.asset1_price_usd.nil?
+    errors << "hedge missing" unless hedge.persisted?
+
+    errors
   end
 end

@@ -13,7 +13,8 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Config verification no DB writes | PASS | `aerodrome:verify_config` validates config and optional read-only RPC only. |
 | Config verification no Hyperliquid | PASS | No Hyperliquid calls are used. |
 | Monitor-only sync disabled by default | PASS | `AERODROME_READ_ONLY_ENABLED=false` is the documented default. |
-| HedgeSyncJob skips Aerodrome positions | PASS | Aerodrome positions are monitor-only and skipped. |
+| HedgeSyncJob skips Aerodrome by default | PASS | `AERODROME_HEDGE_ENABLED=false` or missing skips Aerodrome before `HyperliquidService` construction. |
+| Aerodrome hedge-loop flag | PASS | `AERODROME_HEDGE_ENABLED=true` can only feed complete Aerodrome position data into the existing `HedgeSyncJob` path; no new Hyperliquid execution path is added. |
 | Amount0/amount1 implemented | PASS | Verified amount math is implemented for read-only service, dry-run, and monitor-only sync. |
 | USDC-pool valuation preview | PASS | Supported only when one token matches configured `AERODROME_USDC_ADDRESS`; unsupported pairs keep prices nil. |
 | WETH/USDC hedge preview | PASS | Preview-only calculation; `execution_enabled=false`, no orders, no Hyperliquid calls. |
@@ -39,5 +40,7 @@ NOT READY FOR LIVE HEDGE INTEGRATION.
 READY ONLY FOR READ-ONLY MANUAL DRY-RUN AND MONITOR-ONLY TESTING.
 
 Manual hedge proposals are not execution approval. Proposal review/rejection only updates local status and timestamps and does not place orders. Safety limits are local proposal checks only. Missing limits are warnings. Blocked proposals must not be used for execution and cannot be marked reviewed. Stale proposals must be regenerated before any manual review. `AERODROME_HEDGE_ENABLED` remains false/default-off.
+
+Aerodrome hedge-loop processing is feature-flagged and disabled by default. If an operator sets `AERODROME_HEDGE_ENABLED=true`, `HedgeSyncJob` reuses the existing HyperliquidService-backed hedge loop unchanged and requires complete persisted position data before any Hyperliquid client is constructed. This is still not recommended for live use until separate testnet/manual verification and a pre-live checklist pass.
 
 Do not enable Aerodrome hedge execution until amount math, USD valuation, hedge preview/proposal behavior, proposal history/staleness handling, proposal safety-limit operations, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation, hedge previews, safety checks, and manual proposals do not make Aerodrome positions hedge-ready.

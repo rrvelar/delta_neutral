@@ -254,7 +254,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position2&.destroy
   end
 
-  test "skips Aerodrome monitor-only positions without calling HyperliquidService" do
+  test "skips Aerodrome monitor-only positions without calling HyperliquidService when flag is false" do
     position = Position.create!(
       user: users(:one),
       dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
@@ -275,11 +275,66 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     )
     hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
 
-    HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
-      assert_no_difference "ShortRebalance.count" do
-        HedgeSyncJob.perform_now(hedge.id)
+    with_env("AERODROME_HEDGE_ENABLED" => "false") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
       end
     end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "treats missing Aerodrome hedge flag as false" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => nil) do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "skips Aerodrome hedge when flag is true but amount or price data is missing" do
+    position = aerodrome_position(asset0_amount: nil, asset1_price_usd: nil)
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "processes complete Aerodrome hedge through existing rebalance path when flag is true" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    mock_service = build_mock_service(positions: [])
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true") do
+      assert_difference "ShortRebalance.count", 2 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalances = hedge.short_rebalances.order(:id)
+    assert_equal [ "WETH", "USDC" ], rebalances.pluck(:asset)
+    assert_equal [ ShortRebalance::STATUS_SUCCESS, ShortRebalance::STATUS_SUCCESS ], rebalances.pluck(:status)
   ensure
     hedge&.destroy
     position&.destroy
@@ -330,5 +385,36 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
   ensure
     proposal&.destroy
     position&.destroy
+  end
+
+  private
+
+  def aerodrome_position(overrides = {})
+    Position.create!({
+      user: users(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      wallet: Wallet.find_or_create_by!(
+        user: users(:one),
+        network: networks(:base),
+        address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+      ),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("1.25"),
+      asset1_amount: BigDecimal("500"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
+      external_id: "315985",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      active: true
+    }.merge(overrides))
+  end
+
+  def with_env(values)
+    old_values = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    old_values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 end
