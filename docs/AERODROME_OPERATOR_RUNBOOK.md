@@ -133,6 +133,7 @@ Aerodrome positions appear in the dashboard and position pages with:
 - Monitor-only, no-orders, hedge-disabled, and Hyperliquid-not-called safety labels.
 - Persisted amounts, USD prices, and estimated LP value when available.
 - Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
+- The Aerodrome position refresh action is labeled `Refresh Read-only Data` and states that it updates on-chain LP data only, with no orders, no Hyperliquid, and no hedge execution.
 
 The UI preview does not call RPC, does not call `HyperliquidService`, does not create `Hedge` records, and does not enable order execution. It is still NOT READY FOR LIVE HEDGE INTEGRATION.
 

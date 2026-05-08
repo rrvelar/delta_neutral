@@ -53,13 +53,33 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "span", text: "NOT LIVE HEDGE-READY"
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID 315985", response.body
+    assert_match "Refresh Read-only Data", response.body
+    assert_match "Updates on-chain LP data only", response.body
+    assert_match "No Hyperliquid", response.body
+    assert_match "No hedge execution", response.body
     assert_match "PREVIEW ONLY", response.body
     assert_match "short", response.body
     assert_match "ETH", response.body
     assert_match "1.250000", response.body
     assert_match "$2,500.00", response.body
     assert_match "AERODROME_HEDGE_ENABLED must remain false", response.body
+    assert_no_match "Sync Now", response.body
     assert_no_match "Create Hedge", response.body
+    assert_no_match "Rebalance", response.body
+    assert_no_match "Execute", response.body
+    assert_no_match "Trade", response.body
+    assert_no_match "Approve", response.body
+  end
+
+  test "show keeps Uniswap sync and hedge actions unchanged" do
+    position = positions(:eth_usdc)
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Sync Now", response.body
+    assert_match "View Hedge", response.body
+    assert_no_match "Refresh Read-only Data", response.body
   end
 
   test "show displays unavailable hedge preview when Aerodrome price data is missing" do
