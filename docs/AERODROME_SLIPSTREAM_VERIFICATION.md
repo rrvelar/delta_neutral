@@ -360,6 +360,13 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because amount math, fee strategy, and USD valuation remain unverified.
 - `HedgeSyncJob` skips Aerodrome positions. Aerodrome exposure is not eligible for hedge execution, and `HyperliquidService` remains untouched.
 
+### Manual Dry-Run Tooling
+
+- `bin/rails aerodrome:dry_run TOKEN_IDS=...` provides manual Aerodrome Slipstream verification for explicit token ids.
+- The dry-run is read-only: it performs no database writes, runs no jobs, and does not call `HyperliquidService`.
+- It reports partial amount math and `hedge_enabled: false`; dry-run success does not make Aerodrome positions hedge-ready.
+- See `docs/AERODROME_DRY_RUN.md` for command examples and comparison steps against Aerodrome UI/BaseScan.
+
 ## 15. Configuration Plan
 
 Proposed env vars for a later implementation task:
