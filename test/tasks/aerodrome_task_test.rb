@@ -84,6 +84,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "NO DB WRITES", out
         assert_match "NO HYPERLIQUID", out
         assert_match "NO HEDGES", out
+        assert_match "HEDGE PREVIEW ONLY", out
+        assert_match "NO ORDERS", out
+        assert_match "EXECUTION DISABLED", out
         assert_match "AMOUNT MATH VERIFIED", out
         assert_no_match(/AMOUNT MATH DEFERRED/, out)
         assert_match "verification_status: verified_math", out
@@ -91,6 +94,10 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "token1_price_usd:", out
         assert_match "total_value_usd:", out
         assert_match "valuation_status: supported", out
+        assert_match "hedge_preview_supported: true", out
+        assert_match "hedge_asset: \"ETH\"", out
+        assert_match "execution_enabled: false", out
+        assert_match "hyperliquid_called: false", out
       end
     end
   end
@@ -113,7 +120,21 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         total_value_usd: nil,
         valuation_status: "unsupported",
         valuation_source: nil,
-        valuation_reason: "amount math unavailable"
+        valuation_reason: "amount math unavailable",
+        hedge_preview_supported: false,
+        hedge_preview_reason: "amount math is not verified",
+        hedge_asset: nil,
+        hedge_side: nil,
+        suggested_short_amount: nil,
+        suggested_short_notional_usd: nil,
+        lp_weth_amount: nil,
+        lp_usdc_amount: nil,
+        lp_total_value_usd: nil,
+        weth_price_usd: nil,
+        hedge_preview_source: nil,
+        hedge_preview_verification_status: "unsupported",
+        execution_enabled: false,
+        hyperliquid_called: false
       )
     ]
 
@@ -147,6 +168,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_equal "5016", result.fetch("token_id")
         assert_equal "supported", result.fetch("valuation_status")
         assert_equal "2000.0", result.fetch("token0_price_usd")
+        assert_equal true, result.fetch("hedge_preview_supported")
+        assert_equal false, result.fetch("execution_enabled")
+        assert_equal false, result.fetch("hyperliquid_called")
       end
     end
   end
@@ -330,6 +354,20 @@ class AerodromeTaskTest < ActiveSupport::TestCase
           valuation_status: "supported",
           valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
           valuation_reason: nil,
+          hedge_preview_supported: true,
+          hedge_preview_reason: nil,
+          hedge_asset: "ETH",
+          hedge_side: "short",
+          suggested_short_amount: "1.290590456994170212",
+          suggested_short_notional_usd: "2581.180913988340424",
+          lp_weth_amount: "1.290590456994170212",
+          lp_usdc_amount: "0.000000004594633482",
+          lp_total_value_usd: "7081.180913988340424",
+          weth_price_usd: "2000.0",
+          hedge_preview_source: AerodromeHedgePreview::SOURCE,
+          hedge_preview_verification_status: "preview_only",
+          execution_enabled: false,
+          hyperliquid_called: false,
           hedge_enabled: false,
           database_write: false,
           error_class: nil,

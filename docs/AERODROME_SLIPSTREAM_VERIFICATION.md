@@ -304,6 +304,14 @@ Implementation status:
 
 Safety rule: If USD valuation is uncertain, do not feed Aerodrome exposure into `HedgeSyncJob`.
 
+### Monitor-Only Hedge Preview
+
+- `AerodromeHedgePreview` computes a preview-only 1x ETH short amount for supported configured WETH/USDC positions.
+- `suggested_short_amount` equals the current WETH amount in the LP. `suggested_short_notional_usd` equals the suggested amount multiplied by the WETH USD preview price.
+- Preview support requires verified amount math, supported USDC valuation, and configured `AERODROME_WETH_ADDRESS`.
+- The preview reports `execution_enabled: false` and `hyperliquid_called: false`.
+- It does not instantiate `HyperliquidService`, place orders, create hedges, or mark positions hedge-ready.
+
 ## 13. Normalized Position Data Shape
 
 Proposed internal read-only structure, not implemented yet:
@@ -339,6 +347,14 @@ Proposed internal read-only structure, not implemented yet:
   valuation_status: "supported_or_unsupported",
   valuation_source: "SOURCE_OR_NIL",
   valuation_reason: "REASON_OR_NIL",
+  hedge_preview_supported: false,
+  hedge_preview_reason: "REASON_OR_NIL",
+  hedge_asset: "ETH_OR_NIL",
+  hedge_side: "short_OR_NIL",
+  suggested_short_amount: "0",
+  suggested_short_notional_usd: "0",
+  execution_enabled: false,
+  hyperliquid_called: false,
   tokens_owed0_raw: "0",
   tokens_owed1_raw: "0",
   last_synced_at: "TIMESTAMP",
@@ -395,6 +411,7 @@ Proposed env vars for a later implementation task:
 - `AERODROME_SLIPSTREAM_FACTORY`.
 - `AERODROME_SLIPSTREAM_TOKEN_IDS`, optional comma-separated token ids for early read-only monitoring.
 - `AERODROME_USDC_ADDRESS`, optional configured USDC quote token address for monitor-only valuation preview.
+- `AERODROME_WETH_ADDRESS`, optional configured WETH token address for monitor-only hedge preview.
 - `AERODROME_READ_ONLY_ENABLED=false`.
 - `AERODROME_HEDGE_ENABLED=false`, reserved for later.
 
@@ -533,6 +550,7 @@ Ready only for documentation and planning. The project can become READY FOR READ
 - `amount0`/`amount1` liquidity math is implemented for read-only service and dry-run reports.
 - Monitor-only sync persists verified computed token amounts into existing `Position` amount fields.
 - Monitor-only sync persists USD prices only for supported configured-USDC pools. Unsupported pairs keep prices nil, no Aerodrome PnL snapshots are created, and Aerodrome positions remain skipped by `HedgeSyncJob`.
+- Dry-run hedge preview exists for supported configured WETH/USDC positions only. It is not persisted, does not call Hyperliquid, and does not enable trading.
 - Advanced fee math beyond `tokensOwed0` and `tokensOwed1` remains deferred.
 - `HyperliquidService` is untouched.
 - No live hedge execution path was changed or enabled.

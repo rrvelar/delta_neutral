@@ -10,6 +10,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Aerodrome monitor-only sync is gated by `AERODROME_READ_ONLY_ENABLED=true` and explicit token ids.
 - Monitor-only sync stores verified computed token amounts in existing `Position` amount fields.
 - Monitor-only USD valuation preview is available only for pools with the configured USDC quote token; unsupported pairs keep USD prices nil.
+- Monitor-only hedge preview is available only for configured WETH/USDC positions and never executes orders.
 - `HedgeSyncJob` skips Aerodrome positions; Aerodrome exposure is not fed into hedge logic.
 
 ## Implemented
@@ -18,6 +19,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Read-only amount0/amount1 math using verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
 - Monitor-only USD valuation preview for configured-USDC pools.
+- Monitor-only hedge preview for configured WETH/USDC pools.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Mocked tests for dry-run and config verification.
@@ -27,6 +29,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 
 - Live trading.
 - Aerodrome hedge execution.
+- Hyperliquid hedge preview execution.
 - USD valuation for non-USDC pools.
 - Advanced uncollected fee calculations.
 - Staking/gauge/escrow discovery.
@@ -51,6 +54,7 @@ AERODROME_SLIPSTREAM_POSITION_MANAGER=POSITION_MANAGER_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_FACTORY=FACTORY_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_TOKEN_IDS=TOKEN_ID_PLACEHOLDER
 AERODROME_USDC_ADDRESS=BASE_USDC_ADDRESS_PLACEHOLDER
+AERODROME_WETH_ADDRESS=BASE_WETH_ADDRESS_PLACEHOLDER
 AERODROME_READ_ONLY_ENABLED=false
 AERODROME_HEDGE_ENABLED=false
 ```
@@ -113,6 +117,7 @@ The task de-duplicates repeated token ids and prints a note. Blank token ids are
    - liquidity;
    - computed `amount0_raw` and `amount1_raw`;
    - supported USDC-pool `token0_price_usd`, `token1_price_usd`, and `total_value_usd`;
+   - WETH/USDC hedge preview `suggested_short_amount` and `suggested_short_notional_usd`;
    - `tokensOwed0` and `tokensOwed1`.
 
 If any value differs, stop and record the discrepancy in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
@@ -130,6 +135,7 @@ Counts should be unchanged.
 ## Confirm Hyperliquid Was Not Touched
 
 - Dry-run and config verification do not instantiate `HyperliquidService`.
+- Hedge preview also does not instantiate `HyperliquidService`; it computes only a local theoretical short amount.
 - They do not require `HYPERLIQUID_PRIVATE_KEY` or `HYPERLIQUID_WALLET_ADDRESS`.
 - Inspect recent logs for `HyperliquidService`, `open_short`, `close_short`, `set_leverage`, `transfer_to_subaccount`, and `withdraw_from_subaccount`; none should be associated with Aerodrome dry-run commands.
 
@@ -156,6 +162,7 @@ Do not proceed beyond dry-run if:
 - dry-run returns an error for the token id.
 - owner, pool, token, tick, or liquidity values disagree with Aerodrome UI/BaseScan.
 - USD valuation for an unsupported pair or fee behavior is still needed for the next step.
+- hedge preview differs from the operator's manual WETH amount/notional check.
 
 ## Future Hedge Integration Checklist
 
@@ -163,7 +170,9 @@ Do not proceed beyond dry-run if:
 - [x] Amount0/amount1 math implemented from trusted Aerodrome Slipstream sources.
 - [ ] Amount0/amount1 math compared against Aerodrome UI/BaseScan for real positions.
 - [x] USDC-pool valuation preview implemented for monitor-only use.
+- [x] WETH/USDC hedge preview implemented for monitor-only use.
 - [ ] USDC-pool valuation compared against Aerodrome UI/BaseScan for real positions.
+- [ ] WETH/USDC hedge preview compared manually for real positions.
 - [ ] Non-USDC USD valuation source verified.
 - [ ] Advanced fee strategy decided and tested.
 - [ ] Staked/gauge position behavior verified or explicitly excluded.

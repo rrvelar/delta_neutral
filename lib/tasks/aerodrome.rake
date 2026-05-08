@@ -21,6 +21,9 @@ namespace :aerodrome do
       puts "NO DB WRITES"
       puts "NO HYPERLIQUID"
       puts "NO HEDGES"
+      puts "HEDGE PREVIEW ONLY"
+      puts "NO ORDERS"
+      puts "EXECUTION DISABLED"
       puts(report.fetch(:amount_math_deferred) ? "AMOUNT MATH DEFERRED" : "AMOUNT MATH VERIFIED")
       report.fetch(:notes).each { |note| puts "Note: #{note}" }
       puts
@@ -54,6 +57,20 @@ namespace :aerodrome do
           puts "  valuation_status: #{result.fetch(:valuation_status)}"
           puts "  valuation_source: #{result.fetch(:valuation_source).inspect}"
           puts "  valuation_reason: #{result.fetch(:valuation_reason).inspect}"
+          puts "  hedge_preview_supported: #{result.fetch(:hedge_preview_supported)}"
+          puts "  hedge_preview_reason: #{result.fetch(:hedge_preview_reason).inspect}"
+          puts "  hedge_asset: #{result.fetch(:hedge_asset).inspect}"
+          puts "  hedge_side: #{result.fetch(:hedge_side).inspect}"
+          puts "  suggested_short_amount: #{result.fetch(:suggested_short_amount).inspect}"
+          puts "  suggested_short_notional_usd: #{result.fetch(:suggested_short_notional_usd).inspect}"
+          puts "  lp_weth_amount: #{result.fetch(:lp_weth_amount).inspect}"
+          puts "  lp_usdc_amount: #{result.fetch(:lp_usdc_amount).inspect}"
+          puts "  lp_total_value_usd: #{result.fetch(:lp_total_value_usd).inspect}"
+          puts "  weth_price_usd: #{result.fetch(:weth_price_usd).inspect}"
+          puts "  hedge_preview_source: #{result.fetch(:hedge_preview_source).inspect}"
+          puts "  hedge_preview_verification_status: #{result.fetch(:hedge_preview_verification_status)}"
+          puts "  execution_enabled: #{result.fetch(:execution_enabled)}"
+          puts "  hyperliquid_called: #{result.fetch(:hyperliquid_called)}"
           puts "  database_write: #{result.fetch(:database_write)}"
           puts "  hedge_enabled: #{result.fetch(:hedge_enabled)}"
         end

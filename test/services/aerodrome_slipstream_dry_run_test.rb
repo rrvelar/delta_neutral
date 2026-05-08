@@ -5,7 +5,9 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     service = Minitest::Mock.new
     service.expect(:fetch_position, position_data("5016"), [ "5016" ])
 
-    report = AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report
+    report = with_env("AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006") do
+      AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report
+    end
 
     service.verify
     result = report.fetch(:results).first
@@ -20,9 +22,9 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_equal false, result.fetch(:database_write)
     assert_equal false, result.fetch(:hedge_enabled)
     assert_equal 1_290_590_456_994_170_212, result.fetch(:amount0_raw)
-    assert_equal 4_594_633_482, result.fetch(:amount1_raw)
+    assert_equal 4_500_000_000, result.fetch(:amount1_raw)
     assert_equal "1.290590456994170212", result.fetch(:amount0_decimal)
-    assert_equal "0.000000004594633482", result.fetch(:amount1_decimal)
+    assert_equal "4500.0", result.fetch(:amount1_decimal)
     assert_equal AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE, result.fetch(:math_source)
     assert_equal "verified_math", result.fetch(:verification_status)
     assert_equal "2000.0", result.fetch(:token0_price_usd)
@@ -31,6 +33,13 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_equal "supported", result.fetch(:valuation_status)
     assert_equal AerodromeSlipstreamValuation::VALUATION_SOURCE, result.fetch(:valuation_source)
     assert_nil result.fetch(:valuation_reason)
+    assert_equal true, result.fetch(:hedge_preview_supported)
+    assert_equal "ETH", result.fetch(:hedge_asset)
+    assert_equal "short", result.fetch(:hedge_side)
+    assert_equal "1.290590456994170212", result.fetch(:suggested_short_amount)
+    assert_equal "2581.180913988340424", result.fetch(:suggested_short_notional_usd)
+    assert_equal false, result.fetch(:execution_enabled)
+    assert_equal false, result.fetch(:hyperliquid_called)
     assert_nil result.fetch(:error_class)
   end
 
@@ -43,7 +52,9 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       ok_position
     end
 
-    report = AerodromeSlipstreamDryRun.new(token_ids: [ "bad", "5016" ], slipstream_service: service).report
+    report = with_env("AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006") do
+      AerodromeSlipstreamDryRun.new(token_ids: [ "bad", "5016" ], slipstream_service: service).report
+    end
     error_result, ok_result = report.fetch(:results)
 
     assert_equal "error", error_result.fetch(:status)
@@ -57,11 +68,13 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     service = Minitest::Mock.new
     service.expect(:fetch_position, position_data("5016"), [ "5016" ])
 
-    result = AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report.fetch(:results).first
+    result = with_env("AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006") do
+      AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report.fetch(:results).first
+    end
 
     service.verify
     assert_equal 1_290_590_456_994_170_212, result.fetch(:amount0_raw)
-    assert_equal 4_594_633_482, result.fetch(:amount1_raw)
+    assert_equal 4_500_000_000, result.fetch(:amount1_raw)
     assert_nil result.fetch(:partial_data_reason)
     assert_equal "ok", result.fetch(:status)
   end
@@ -192,12 +205,12 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
       factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
-      token0_address: "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
-      token1_address: "0x4200000000000000000000000000000000000006",
+      token0_address: "0x4200000000000000000000000000000000000006",
+      token1_address: "0x0000000000000000000000000000000000000001",
       token0_decimals: 18,
-      token1_decimals: 18,
-      token0_symbol: "AERO",
-      token1_symbol: "WETH",
+      token1_decimals: 6,
+      token0_symbol: "WETH",
+      token1_symbol: "USDC",
       tick_spacing: 200,
       tick_lower: -151400,
       tick_upper: -147400,
@@ -207,7 +220,7 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       tokens_owed0_raw: 7,
       tokens_owed1_raw: 11,
       amount0_raw: 1_290_590_456_994_170_212,
-      amount1_raw: 4_594_633_482,
+      amount1_raw: 4_500_000_000,
       partial_data_reason: nil,
       verification_status: "verified_math",
       token0_price_usd: BigDecimal("2000"),
@@ -217,5 +230,17 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
       valuation_reason: nil
     )
+  end
+
+  def with_env(values)
+    old_values = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    old_values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 end

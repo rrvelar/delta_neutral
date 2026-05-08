@@ -10,6 +10,7 @@ The Aerodrome dry-run tooling performs a read-only check of explicit Aerodrome S
 - Computes `amount0_raw` and `amount1_raw` with the verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Prints decimal display amounts when token decimals are available.
 - Shows monitor-only USD valuation preview for pools that include the configured USDC quote token.
+- Shows monitor-only hedge preview for configured WETH/USDC positions.
 - Handles individual token errors and continues building the report.
 
 ## What It Does Not Do
@@ -20,6 +21,7 @@ The Aerodrome dry-run tooling performs a read-only check of explicit Aerodrome S
 - Does not call `HyperliquidService`.
 - Does not sign transactions or require private keys.
 - Does not place orders, approve tokens, transfer NFTs, swap, collect fees, or hedge.
+- Does not execute the hedge preview.
 - Does not make Aerodrome positions hedge-ready.
 
 ## Safety Guarantees
@@ -43,12 +45,18 @@ Every result includes:
 - `verification_status`
 - `token0_price_usd`, `token1_price_usd`, and `total_value_usd` when valuation is supported
 - `valuation_status`, `valuation_source`, and `valuation_reason`
+- `hedge_preview_supported`, `hedge_preview_reason`, `hedge_asset`, `hedge_side`, `suggested_short_amount`, and `suggested_short_notional_usd`
+- `execution_enabled: false`
+- `hyperliquid_called: false`
 
 Human output also repeats:
 
 - `NO DB WRITES`
 - `NO HYPERLIQUID`
 - `NO HEDGES`
+- `HEDGE PREVIEW ONLY`
+- `NO ORDERS`
+- `EXECUTION DISABLED`
 - `AMOUNT MATH DEFERRED` only when amount math is actually partial; otherwise `AMOUNT MATH VERIFIED`.
 
 ## Required Env Vars
@@ -60,11 +68,14 @@ BASE_RPC_URL=BASE_RPC_URL_PLACEHOLDER
 AERODROME_SLIPSTREAM_POSITION_MANAGER=POSITION_MANAGER_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_FACTORY=FACTORY_ADDRESS_PLACEHOLDER
 AERODROME_USDC_ADDRESS=BASE_USDC_ADDRESS_PLACEHOLDER
+AERODROME_WETH_ADDRESS=BASE_WETH_ADDRESS_PLACEHOLDER
 ```
 
 No private keys are required. Do not add private keys for this task.
 
 `AERODROME_USDC_ADDRESS` is optional for raw position reads. Without it, USD valuation preview is marked unsupported and price fields remain nil. Do not hardcode this value from memory; verify it from a trusted source before using it locally.
+
+`AERODROME_WETH_ADDRESS` is optional for raw position reads. Without it, hedge preview is marked unsupported. Do not hardcode this value from memory; verify it from a trusted source before using it locally.
 
 ## Verify Config
 
@@ -174,7 +185,8 @@ For each token id:
 2. Open the configured position manager and token id on BaseScan.
 3. Compare `owner_address`, `token0_address`, `token1_address`, `tick_spacing`, `tick_lower`, `tick_upper`, `liquidity`, `pool_address`, `current_tick`, `amount0_raw`, `amount1_raw`, `tokens_owed0_raw`, and `tokens_owed1_raw`.
 4. For supported USDC pools, compare `token0_price_usd`, `token1_price_usd`, and `total_value_usd` against Aerodrome UI/BaseScan or another trusted operator-approved reference.
-5. Record the RPC URL host, block context if available from the RPC provider, and any differences in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
+5. For supported WETH/USDC pools, compare `lp_weth_amount`, `suggested_short_amount`, `weth_price_usd`, and `suggested_short_notional_usd`.
+6. Record the RPC URL host, block context if available from the RPC provider, and any differences in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
 
 ## Confirm No DB Writes
 
@@ -212,12 +224,18 @@ USD valuation preview is implemented only for pools where one token address matc
 
 Unsupported pairs keep price fields nil and report `valuation_status: unsupported`. The code does not guess prices or infer USDC by symbol alone.
 
+## Hedge Preview
+
+Hedge preview is implemented only for monitor-only positions where amount math is verified, USD valuation is supported, and one token address matches configured `AERODROME_WETH_ADDRESS`. For WETH/USDC, the preview sets `suggested_short_amount` equal to the current WETH amount in the LP for a 1x delta-neutral review. `suggested_short_notional_usd` is `suggested_short_amount * weth_price_usd`.
+
+This is not execution. The dry-run reports `execution_enabled: false` and `hyperliquid_called: false`, and it does not instantiate `HyperliquidService`. `AERODROME_HEDGE_ENABLED` remains default-off and unused for live execution in this phase.
+
 These fields remain partial or unresolved:
 
 - USD valuation for non-USDC pools.
 - Advanced uncollected fee calculations beyond `tokensOwed0` and `tokensOwed1`.
 - Staking/gauge discovery.
-- Hedge readiness.
+- Hedge readiness and any live order execution.
 
 Manual comparison against Aerodrome UI/BaseScan is still required before using the data operationally. Hedge integration remains disabled because USD pricing, fee strategy, and monitor-only behavior are not fully verified.
 
