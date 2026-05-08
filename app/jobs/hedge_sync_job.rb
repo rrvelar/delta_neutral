@@ -44,6 +44,11 @@ class HedgeSyncJob < ApplicationJob
           next
         end
 
+        unless hyperliquid_testnet_enabled?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge rehearsal requires HYPERLIQUID_TESTNET=true")
+          next
+        end
+
         readiness_errors = aerodrome_readiness_errors(hedge)
         if readiness_errors.any?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
@@ -326,6 +331,10 @@ class HedgeSyncJob < ApplicationJob
 
   def aerodrome_hedge_enabled?
     ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false"))
+  end
+
+  def hyperliquid_testnet_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV["HYPERLIQUID_TESTNET"]) == true
   end
 
   def aerodrome_readiness_errors(hedge)

@@ -6,7 +6,7 @@ This document is a practical checklist for implementing Aerodrome Slipstream sup
 
 Manual hedge proposals added after the read-only preview work are local records only. They suggest a manual short ETH amount/notional from persisted Aerodrome WETH/USDC monitor-only position data and retain proposal history/status and local safety-limit results, but they do not call Hyperliquid, do not place orders, do not create executable `Hedge` records, and do not change `AERODROME_HEDGE_ENABLED` from false/default-off. Proposal review/rejection is not execution. Missing safety limits are warnings. Blocked proposals must not be used for execution. Stale proposals must be regenerated before any manual review. Aerodrome remains NOT READY FOR LIVE HEDGE INTEGRATION.
 
-Aerodrome hedge-loop processing is controlled by `AERODROME_HEDGE_ENABLED=false` by default. When unset or false, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When true, only complete active Aerodrome positions with explicit hedge records and persisted asset/amount/price data may enter the existing `HedgeSyncJob` rebalance path. The Aerodrome gate supports only the ETH/WETH side; USDC and unsupported symbols are skipped before `check_and_rebalance` and must never create hedge orders. `HyperliquidService` is reused unchanged; no new Aerodrome-specific execution path exists. Operators must complete testnet/manual verification before enabling and a separate pre-live checklist before any live use.
+Aerodrome hedge-loop processing is controlled by `AERODROME_HEDGE_ENABLED=false` by default. When unset or false, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When true, Aerodrome still requires `HYPERLIQUID_TESTNET=true`; missing or false skips before `HyperliquidService` construction. This is a testnet-only rehearsal path. Production live must keep `AERODROME_HEDGE_ENABLED=false` until a separate future checklist and code change add an explicit live approval gate. With both rehearsal flags enabled, only complete active Aerodrome positions with explicit hedge records and persisted asset/amount/price data may enter the existing `HedgeSyncJob` rebalance path. The Aerodrome gate supports only the ETH/WETH side; USDC and unsupported symbols are skipped before `check_and_rebalance` and must never create hedge orders. `HyperliquidService` is reused unchanged; no new Aerodrome-specific execution path exists.
 
 ## Verified Facts As Of 2026-05-08
 
@@ -68,7 +68,7 @@ Status legend: **VERIFIED** means checked from a trusted source in this session.
 | Whether wallet NFT enumeration is sufficient for staked or escrowed positions. | **UNRESOLVED** | Start with user-provided token ids or mark staked/gauge discovery out of scope. |
 | Exact amount0/amount1 math and rounding. | **VERIFIED FOR READ-ONLY IMPLEMENTATION** | Implemented from Aerodrome Slipstream `TickMath`, `LiquidityAmounts`, `FixedPoint96`, and `FullMath` sources using integer floor division. Still requires manual comparison against Aerodrome UI/BaseScan for real positions before hedge use. |
 | Advanced uncollected fee calculation beyond `tokensOwed0`/`tokensOwed1`. | **DEFERRED** | Initial read-only scope should show only verified owed-token fields or mark fees partial. |
-| USD pricing and hedge exposure readiness. | **PARTIAL** | Keep `AERODROME_HEDGE_ENABLED=false` by default. If explicitly enabled, only complete persisted ETH/WETH-side exposure may enter the existing `HedgeSyncJob` path. USDC is never hedged. |
+| USD pricing and hedge exposure readiness. | **PARTIAL** | Keep `AERODROME_HEDGE_ENABLED=false` by default. If explicitly enabled, `HYPERLIQUID_TESTNET=true` is still required. Only complete persisted ETH/WETH-side exposure may enter the existing `HedgeSyncJob` path. USDC is never hedged. |
 | Native ETH vs WETH display/identity behavior. | **UNRESOLVED** | Store/read token addresses exactly as returned; do not collapse WETH to ETH without explicit verified mapping. |
 
 ## 1. Scope
@@ -78,7 +78,7 @@ The migration only replaces the LP position source:
 - From: Uniswap V3 concentrated liquidity positions.
 - To: Aerodrome Slipstream concentrated liquidity positions on Base.
 
-Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not be enabled by default. Aerodrome support remains monitor-only unless `AERODROME_HEDGE_ENABLED=true` is explicitly set after read-only sync has been verified.
+Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not be enabled by default. Aerodrome support remains monitor-only unless `AERODROME_HEDGE_ENABLED=true` and `HYPERLIQUID_TESTNET=true` are explicitly set for testnet rehearsal after read-only sync has been verified. Production live mode requires a separate future checklist and code change.
 
 The manual hedge proposal workflow is part of the read-only/manual review phase. It may create/read/update `AerodromeHedgeProposal` rows and display local proposal history/stale/safety status, but it must not create `Hedge` rows, must not call `HyperliquidService`, and must not submit approvals, transfers, swaps, NFT transfers, or transactions.
 
@@ -387,7 +387,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` may discover positions only in read-only mode.
 - `PositionSyncJob` may refresh read-only position data.
 - `HedgeSyncJob` must ignore Aerodrome positions while `AERODROME_HEDGE_ENABLED=false` or unset.
-- `HedgeSyncJob` may process Aerodrome positions only when `AERODROME_HEDGE_ENABLED=true`, the position is active, an explicit hedge exists, and both assets, amounts, and USD prices are present.
+- `HedgeSyncJob` may process Aerodrome positions only for testnet rehearsal when `AERODROME_HEDGE_ENABLED=true`, `HYPERLIQUID_TESTNET=true`, the position is active, an explicit hedge exists, and both assets, amounts, and USD prices are present.
 - Aerodrome hedge processing supports only `ETH`/`WETH` symbols mapped to Hyperliquid ETH exposure. `USDC` and all unsupported symbols must be skipped and never passed to `check_and_rebalance`.
 - `HyperliquidService` must remain unchanged.
 - `UniswapService` must remain functional.
@@ -408,7 +408,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` and `PositionSyncJob` persist computed Aerodrome token amounts into existing `positions.asset0_amount` and `positions.asset1_amount` fields only when amount math is verified. Partial/deferred amount data leaves amounts nil and logs a clear monitor-only warning.
 - Aerodrome USD prices are persisted only for supported configured-USDC pools with verified amount math. Unsupported pairs keep prices nil. Tick data, liquidity, manager, and factory metadata remain unstored in the current schema.
 - `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because fee strategy, USD valuation, and real-position UI/BaseScan comparisons remain incomplete.
-- `HedgeSyncJob` skips Aerodrome positions by default. Aerodrome exposure is only eligible for the existing hedge loop when `AERODROME_HEDGE_ENABLED=true` and local readiness checks pass, and only the ETH/WETH side may be hedged. The USDC side is skipped. `HyperliquidService` remains untouched.
+- `HedgeSyncJob` skips Aerodrome positions by default. Aerodrome exposure is only eligible for the existing hedge loop when `AERODROME_HEDGE_ENABLED=true`, `HYPERLIQUID_TESTNET=true`, and local readiness checks pass, and only the ETH/WETH side may be hedged. The USDC side is skipped. `HyperliquidService` remains untouched.
 
 ### Manual Dry-Run Tooling
 
@@ -433,6 +433,7 @@ Proposed env vars for a later implementation task:
 - `AERODROME_WETH_ADDRESS`, optional configured WETH token address for monitor-only hedge preview.
 - `AERODROME_READ_ONLY_ENABLED=false`.
 - `AERODROME_HEDGE_ENABLED=false`, default-off gate for controlled Aerodrome entry into the existing hedge loop.
+- `AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true`, reserved safety marker for testnet-only Aerodrome hedge rehearsal.
 
 Rules:
 

@@ -14,7 +14,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Manual hedge proposals are local database records only. They can suggest a short ETH amount/notional for an Aerodrome WETH/USDC monitor-only position, retain local history/status, and show local safety-limit results, but they do not create `Hedge` records, do not call Hyperliquid, and do not place orders.
 - The Rails UI displays Aerodrome positions as monitor-only, including safety labels and display-only hedge preview status.
 - `HedgeSyncJob` skips Aerodrome positions while `AERODROME_HEDGE_ENABLED=false`, which is the default.
-- If `AERODROME_HEDGE_ENABLED=true`, Aerodrome positions may enter the existing `HedgeSyncJob` path only when an explicit `Hedge` exists and persisted asset/amount/price data is complete. The Aerodrome hedge gate supports only the ETH/WETH side; USDC and all other symbols are skipped and never hedged. This reuses `HyperliquidService` unchanged and adds no new execution path.
+- If `AERODROME_HEDGE_ENABLED=true`, Aerodrome positions may enter the existing `HedgeSyncJob` path only for testnet rehearsal when `HYPERLIQUID_TESTNET=true`, an explicit `Hedge` exists, and persisted asset/amount/price data is complete. The Aerodrome hedge gate supports only the ETH/WETH side; USDC and all other symbols are skipped and never hedged. This reuses `HyperliquidService` unchanged and adds no new execution path.
 
 ## Implemented
 
@@ -72,6 +72,7 @@ AERODROME_MAX_LP_VALUE_USD=
 AERODROME_MAX_PROPOSAL_STALE_PERCENT=0.5
 AERODROME_READ_ONLY_ENABLED=false
 AERODROME_HEDGE_ENABLED=false
+AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true
 ```
 
 No private keys are required for Aerodrome dry-run or config verification.
@@ -157,7 +158,9 @@ Aerodrome positions appear in the dashboard and position pages with:
 
 The UI preview, manual proposal system, and safety-limit checks do not call RPC, do not call `HyperliquidService`, do not create `Hedge` records, and do not enable order execution. Manual proposals are local records only. They are still NOT READY FOR LIVE HEDGE INTEGRATION, and `AERODROME_HEDGE_ENABLED` remains false/default-off.
 
-When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When the flag is true, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
+When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When the flag is true, `HedgeSyncJob` still requires `HYPERLIQUID_TESTNET=true`; otherwise Aerodrome is skipped before `HyperliquidService` construction. This makes the current Aerodrome hedge path testnet-only rehearsal. Production live must keep `AERODROME_HEDGE_ENABLED=false` until a separate future checklist and code change add an explicit live approval gate.
+
+With both rehearsal flags enabled, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
 
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 
@@ -181,7 +184,8 @@ Counts should be unchanged.
 - Proposal history/stale status display does not instantiate `HyperliquidService`; it compares local proposal rows with local persisted position values.
 - Proposal safety-limit checks do not instantiate `HyperliquidService`; they compare local proposal values with optional local env limits.
 - Aerodrome hedges do not instantiate `HyperliquidService` while `AERODROME_HEDGE_ENABLED=false` or when local readiness checks fail.
-- If `AERODROME_HEDGE_ENABLED=true` and readiness checks pass, Aerodrome uses the existing `HedgeSyncJob` and `HyperliquidService` code path for ETH/WETH only; no Aerodrome-specific execution path exists, and the USDC side is never hedged.
+- Aerodrome hedges do not instantiate `HyperliquidService` when `HYPERLIQUID_TESTNET` is missing or false, even if `AERODROME_HEDGE_ENABLED=true`.
+- If `AERODROME_HEDGE_ENABLED=true`, `HYPERLIQUID_TESTNET=true`, and readiness checks pass, Aerodrome uses the existing `HedgeSyncJob` and `HyperliquidService` code path for ETH/WETH only; no Aerodrome-specific execution path exists, and the USDC side is never hedged.
 - They do not require `HYPERLIQUID_PRIVATE_KEY` or `HYPERLIQUID_WALLET_ADDRESS`.
 - Inspect recent logs for `HyperliquidService`, `open_short`, `close_short`, `set_leverage`, `transfer_to_subaccount`, and `withdraw_from_subaccount`; none should be associated with Aerodrome dry-run commands.
 
