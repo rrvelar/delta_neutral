@@ -216,4 +216,108 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_in_delta 0.0005, snapshot.collected_fees0.to_f, 0.00001
     assert_in_delta 50.0, snapshot.collected_fees1.to_f, 0.01
   end
+
+  test "Aerodrome position sync is skipped when read-only mode is disabled" do
+    position = aerodrome_position
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "false") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, -> { raise "Aerodrome service should not be called" }) do
+          assert_no_difference "PnlSnapshot.count" do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+  end
+
+  test "Aerodrome read-only position sync refreshes metadata without Hyperliquid or snapshots" do
+    position = aerodrome_position
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          assert_no_difference "PnlSnapshot.count" do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+
+    service.verify
+    position.reload
+    assert_equal "AERO", position.asset0
+    assert_equal "WETH", position.asset1
+    assert_nil position.asset0_amount
+    assert_nil position.asset1_amount
+    assert_nil position.asset0_price_usd
+    assert_nil position.asset1_price_usd
+    assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
+  end
+
+  private
+
+  def aerodrome_position
+    Position.find_or_create_by!(
+      user: users(:one),
+      wallet: base_wallet,
+      dex: aerodrome_dex,
+      external_id: "5016"
+    ) do |position|
+      position.asset0 = "OLD0"
+      position.asset1 = "OLD1"
+      position.pool_address = "0xoldpool"
+      position.active = true
+    end
+  end
+
+  def base_wallet
+    Wallet.find_or_create_by!(user: users(:one), network: networks(:base), address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701")
+  end
+
+  def aerodrome_dex
+    Dex.find_or_create_by!(name: "aerodrome_slipstream")
+  end
+
+  def aerodrome_position_data(wallet)
+    AerodromeSlipstreamService::PositionData.new(
+      token_id: "5016",
+      owner_address: wallet.address,
+      position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
+      factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      token0_address: "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      token1_address: "0x4200000000000000000000000000000000000006",
+      token0_decimals: 18,
+      token1_decimals: 18,
+      token0_symbol: "AERO",
+      token1_symbol: "WETH",
+      tick_spacing: 200,
+      tick_lower: -151400,
+      tick_upper: -147400,
+      liquidity: 123,
+      sqrt_price_x96: 456,
+      current_tick: -155876,
+      tokens_owed0_raw: 7,
+      tokens_owed1_raw: 11,
+      amount0_raw: nil,
+      amount1_raw: nil,
+      partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,
+      verification_status: "partial"
+    )
+  end
+
+  def with_env(values)
+    old_values = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    old_values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+  end
 end

@@ -33,11 +33,17 @@ class HedgeSyncJob < ApplicationJob
   def perform(hedge_id = nil)
     Rails.logger.debug { "[HedgeSyncJob] starting — hedge_id=#{hedge_id || 'all active'}" }
     hedges = hedge_id ? Hedge.where(id: hedge_id) : Hedge.active
-    hyperliquid = HyperliquidService.new
+    hyperliquid = nil
 
     Rails.logger.debug { "[HedgeSyncJob] found #{hedges.count} hedge(s) to sync" }
 
-    hedges.includes(:position).find_each do |hedge|
+    hedges.includes(position: :dex).find_each do |hedge|
+      if aerodrome_position?(hedge.position)
+        Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome positions are monitor-only")
+        next
+      end
+
+      hyperliquid ||= HyperliquidService.new
       sync_hedge(hedge, hyperliquid)
     rescue => e
       Rails.logger.error("HedgeSyncJob failed for hedge #{hedge.id}: #{e.message}")
@@ -277,5 +283,9 @@ class HedgeSyncJob < ApplicationJob
   rescue => e
     Rails.logger.warn("Failed to fetch realized PnL from fills for #{asset}: #{e.message}")
     BigDecimal("0")
+  end
+
+  def aerodrome_position?(position)
+    position.dex.name == "aerodrome_slipstream"
   end
 end

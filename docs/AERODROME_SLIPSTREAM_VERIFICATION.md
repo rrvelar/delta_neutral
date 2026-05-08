@@ -352,6 +352,14 @@ This structure is read-only and must not contain private keys, approvals, transa
 - Aerodrome service construction remains read-only and is not connected to `WalletSyncJob`, `PositionSyncJob`, `HedgeSyncJob`, or hedge exposure.
 - `HyperliquidService` is untouched by this scaffold.
 
+### Read-Only Sync Preparation
+
+- `WalletSyncJob` can register Aerodrome Slipstream monitor-only positions only when `AERODROME_READ_ONLY_ENABLED=true` and explicit `AERODROME_SLIPSTREAM_TOKEN_IDS` are configured.
+- Initial discovery is user-provided token ids only; wallet enumeration, staking/gauge discovery, and multi-manager discovery remain unresolved.
+- `PositionSyncJob` refreshes only existing-schema metadata for Aerodrome positions: token symbols, pool address, active state, and source dex. Amounts, USD prices, tick data, liquidity, manager, and factory metadata remain partial because the current schema cannot store them safely.
+- `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because amount math, fee strategy, and USD valuation remain unverified.
+- `HedgeSyncJob` skips Aerodrome positions. Aerodrome exposure is not eligible for hedge execution, and `HyperliquidService` remains untouched.
+
 ## 15. Configuration Plan
 
 Proposed env vars for a later implementation task:
@@ -360,6 +368,7 @@ Proposed env vars for a later implementation task:
 - `BASE_RPC_URL`.
 - `AERODROME_SLIPSTREAM_POSITION_MANAGER`.
 - `AERODROME_SLIPSTREAM_FACTORY`.
+- `AERODROME_SLIPSTREAM_TOKEN_IDS`, optional comma-separated token ids for early read-only monitoring.
 - `AERODROME_READ_ONLY_ENABLED=false`.
 - `AERODROME_HEDGE_ENABLED=false`, reserved for later.
 

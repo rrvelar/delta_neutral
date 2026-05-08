@@ -28,6 +28,7 @@ class WalletSyncJob < ApplicationJob
 
     wallets.find_each do |wallet|
       sync_wallet(wallet, uniswap, uniswap_dex)
+      sync_aerodrome_wallet(wallet) if aerodrome_read_only_enabled?
     rescue => e
       Rails.logger.error("WalletSyncJob failed for wallet #{wallet.id}: #{e.message}")
     end
@@ -53,7 +54,7 @@ class WalletSyncJob < ApplicationJob
     external_ids = subgraph_positions.map { |p| p[:external_id] }
 
     # Mark positions not in subgraph as inactive
-    wallet.positions.active.where.not(external_id: external_ids).update_all(active: false)
+    wallet.positions.active.where(dex: uniswap_dex).where.not(external_id: external_ids).update_all(active: false)
 
     subgraph_positions.each do |pos_data|
       position = wallet.positions.find_or_initialize_by(external_id: pos_data[:external_id])
@@ -73,5 +74,56 @@ class WalletSyncJob < ApplicationJob
     end
 
     Rails.logger.debug { "[WalletSyncJob] wallet #{wallet.id} sync complete" }
+  end
+
+  def sync_aerodrome_wallet(wallet)
+    unless wallet.network.name == "base"
+      Rails.logger.debug { "[WalletSyncJob] skipping Aerodrome read-only sync for non-Base wallet #{wallet.id}" }
+      return
+    end
+
+    token_ids = aerodrome_token_ids
+    if token_ids.empty?
+      Rails.logger.debug { "[WalletSyncJob] Aerodrome read-only sync enabled with no token ids configured" }
+      return
+    end
+
+    aerodrome = AerodromeSlipstreamService.new
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    active_external_ids = []
+
+    token_ids.each do |token_id|
+      position_data = aerodrome.fetch_position(token_id)
+      unless position_data.owner_address.casecmp?(wallet.address)
+        Rails.logger.debug { "[WalletSyncJob] Aerodrome token #{token_id} is not owned by wallet #{wallet.id}" }
+        next
+      end
+
+      active_external_ids << position_data.token_id
+      position = wallet.positions.where(dex: aerodrome_dex).find_or_initialize_by(external_id: position_data.token_id)
+      position.assign_attributes(
+        user: wallet.user,
+        dex: aerodrome_dex,
+        asset0: position_data.token0_symbol,
+        asset1: position_data.token1_symbol,
+        asset0_amount: nil,
+        asset1_amount: nil,
+        asset0_price_usd: nil,
+        asset1_price_usd: nil,
+        pool_address: position_data.pool_address,
+        active: true
+      )
+      position.save!
+    end
+
+    wallet.positions.active.where(dex: aerodrome_dex).where.not(external_id: active_external_ids).update_all(active: false)
+  end
+
+  def aerodrome_read_only_enabled?
+    ENV["AERODROME_READ_ONLY_ENABLED"].to_s.downcase == "true"
+  end
+
+  def aerodrome_token_ids
+    ENV["AERODROME_SLIPSTREAM_TOKEN_IDS"].to_s.split(",").map(&:strip).compact_blank
   end
 end

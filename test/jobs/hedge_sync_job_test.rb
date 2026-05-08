@@ -253,4 +253,33 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     hedge2&.destroy
     position2&.destroy
   end
+
+  test "skips Aerodrome monitor-only positions without calling HyperliquidService" do
+    position = Position.create!(
+      user: users(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      wallet: Wallet.find_or_create_by!(
+        user: users(:one),
+        network: networks(:base),
+        address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+      ),
+      asset0: "AERO",
+      asset1: "WETH",
+      asset0_amount: nil,
+      asset1_amount: nil,
+      external_id: "5016",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      active: true
+    )
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+      assert_no_difference "ShortRebalance.count" do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
 end
