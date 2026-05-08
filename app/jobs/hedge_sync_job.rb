@@ -34,10 +34,11 @@ class HedgeSyncJob < ApplicationJob
     Rails.logger.debug { "[HedgeSyncJob] starting — hedge_id=#{hedge_id || 'all active'}" }
     hedges = hedge_id ? Hedge.where(id: hedge_id) : Hedge.active
     aerodrome_hedges = hedges.joins(position: :dex).where(dexes: { name: "aerodrome_slipstream" })
-    aerodrome_count = aerodrome_hedges.count
-    Rails.logger.debug { "[HedgeSyncJob] skipping #{aerodrome_count} Aerodrome hedge(s); hedge execution is disabled" } if aerodrome_count.positive?
+    syncable_aerodrome_ids = syncable_aerodrome_hedge_ids(aerodrome_hedges)
+    non_aerodrome_ids = hedges.joins(position: :dex).where.not(dexes: { name: "aerodrome_slipstream" }).pluck(:id)
+    syncable_ids = non_aerodrome_ids + syncable_aerodrome_ids
 
-    hedges = hedges.joins(position: :dex).where.not(dexes: { name: "aerodrome_slipstream" })
+    hedges = Hedge.where(id: syncable_ids)
 
     Rails.logger.debug { "[HedgeSyncJob] found #{hedges.count} hedge(s) to sync" }
     return if hedges.none?
@@ -69,8 +70,80 @@ class HedgeSyncJob < ApplicationJob
     end
 
     Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} position #{position.id} is active, checking assets" }
+    if aerodrome_position?(position)
+      check_and_rebalance_aerodrome(hedge, position, hyperliquid)
+      return
+    end
+
     check_and_rebalance(hedge, position.asset0, position.asset0_amount, 0, hyperliquid)
     check_and_rebalance(hedge, position.asset1, position.asset1_amount, 1, hyperliquid)
+  end
+
+  def syncable_aerodrome_hedge_ids(aerodrome_hedges)
+    return [] if aerodrome_hedges.none?
+
+    unless aerodrome_hedge_enabled?
+      Rails.logger.debug { "[HedgeSyncJob] skipping #{aerodrome_hedges.count} Aerodrome hedge(s); AERODROME_HEDGE_ENABLED is disabled" }
+      return []
+    end
+
+    unless hyperliquid_testnet?
+      Rails.logger.warn("HedgeSyncJob: skipping Aerodrome hedge(s) because HYPERLIQUID_TESTNET must be true")
+      return []
+    end
+
+    aerodrome_hedges.includes(:position).filter_map do |hedge|
+      reason = aerodrome_readiness_failure(hedge)
+      if reason
+        Rails.logger.warn("HedgeSyncJob: skipping Aerodrome hedge #{hedge.id} — #{reason}")
+        nil
+      else
+        hedge.id
+      end
+    end
+  end
+
+  def aerodrome_readiness_failure(hedge)
+    return "hedge is not persisted" unless hedge.persisted?
+
+    position = hedge.position
+    return "position #{position.id} is inactive" unless position.active?
+    return "position symbols are incomplete" if position.asset0.blank? || position.asset1.blank?
+    return "position amounts are incomplete" if position.asset0_amount.nil? || position.asset1_amount.nil?
+    return "position USD prices are incomplete" if position.asset0_price_usd.nil? || position.asset1_price_usd.nil?
+    return "no supported ETH/WETH side" unless aerodrome_supported_asset?(position.asset0) || aerodrome_supported_asset?(position.asset1)
+
+    nil
+  end
+
+  def check_and_rebalance_aerodrome(hedge, position, hyperliquid)
+    [
+      [ position.asset0, position.asset0_amount, 0 ],
+      [ position.asset1, position.asset1_amount, 1 ]
+    ].each do |asset, amount, asset_index|
+      unless aerodrome_supported_asset?(asset)
+        Rails.logger.debug { "[HedgeSyncJob] skipping Aerodrome #{asset} side for hedge #{hedge.id}; only ETH/WETH is supported" }
+        next
+      end
+
+      check_and_rebalance(hedge, asset, amount, asset_index, hyperliquid)
+    end
+  end
+
+  def aerodrome_position?(position)
+    position.dex.name == "aerodrome_slipstream"
+  end
+
+  def aerodrome_supported_asset?(asset)
+    %w[ETH WETH].include?(asset.to_s.upcase)
+  end
+
+  def aerodrome_hedge_enabled?
+    ENV["AERODROME_HEDGE_ENABLED"].to_s.downcase == "true"
+  end
+
+  def hyperliquid_testnet?
+    ENV["HYPERLIQUID_TESTNET"].to_s.downcase == "true"
   end
 
   # Rebalances the short for a single asset if needed.
