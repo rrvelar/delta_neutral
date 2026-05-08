@@ -164,8 +164,8 @@ class PositionSyncJob < ApplicationJob
       asset1: position_data.token1_symbol,
       asset0_amount: aerodrome_decimal_amount(position_data.amount0_raw, position_data.token0_decimals, :asset0_amount),
       asset1_amount: aerodrome_decimal_amount(position_data.amount1_raw, position_data.token1_decimals, :asset1_amount),
-      asset0_price_usd: nil,
-      asset1_price_usd: nil,
+      asset0_price_usd: aerodrome_price(position_data, :token0_price_usd),
+      asset1_price_usd: aerodrome_price(position_data, :token1_price_usd),
       pool_address: position_data.pool_address,
       active: true
     )
@@ -192,6 +192,14 @@ class PositionSyncJob < ApplicationJob
 
     amount
   rescue AerodromeSlipstreamMath::Error
+    nil
+  end
+
+  def aerodrome_price(position_data, price_field)
+    return nil unless position_data.valuation_status == "supported"
+
+    BigDecimal(position_data.public_send(price_field).to_s)
+  rescue ArgumentError
     nil
   end
 end

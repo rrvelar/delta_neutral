@@ -252,9 +252,28 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_equal "USDC", position.asset1
     assert_equal BigDecimal("0.5"), position.asset0_amount
     assert_equal BigDecimal("1200.0"), position.asset1_amount
+    assert_equal BigDecimal("2000.0"), position.asset0_price_usd
+    assert_equal BigDecimal("1.0"), position.asset1_price_usd
+    assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
+  end
+
+  test "PositionSyncJob unsupported Aerodrome valuation leaves prices nil" do
+    position = aerodrome_position
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, unsupported_valuation_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      AerodromeSlipstreamService.stub(:new, service) do
+        assert_no_difference "PnlSnapshot.count" do
+          PositionSyncJob.perform_now(position.id)
+        end
+      end
+    end
+
+    service.verify
+    position.reload
     assert_nil position.asset0_price_usd
     assert_nil position.asset1_price_usd
-    assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
   end
 
   test "PositionSyncJob skips Aerodrome refresh on owner mismatch" do
@@ -323,7 +342,24 @@ class PositionSyncJobTest < ActiveSupport::TestCase
       tokens_owed1_raw: 11,
       amount0_raw: 500_000_000_000_000_000,
       amount1_raw: 1_200_000_000,
-      verification_status: AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE
+      verification_status: AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE,
+      token0_price_usd: BigDecimal("2000.0"),
+      token1_price_usd: BigDecimal("1.0"),
+      total_value_usd: BigDecimal("2200.0"),
+      valuation_status: "supported",
+      valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
+      valuation_reason: nil
+    )
+  end
+
+  def unsupported_valuation_position_data(wallet)
+    aerodrome_position_data(wallet).with(
+      token0_price_usd: nil,
+      token1_price_usd: nil,
+      total_value_usd: nil,
+      valuation_status: "unsupported",
+      valuation_source: nil,
+      valuation_reason: "pool does not include configured USDC quote token"
     )
   end
 

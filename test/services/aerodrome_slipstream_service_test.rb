@@ -257,6 +257,39 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     assert_equal 1_652_885_551_720_891_062_632_623, position.amount0_raw
     assert_equal 0, position.amount1_raw
     assert_equal AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE, position.verification_status
+    assert_equal "unsupported", position.valuation_status
+    assert_nil position.token0_price_usd
+    assert_nil position.token1_price_usd
+    assert_nil position.total_value_usd
+    assert position.valuation_reason.present?
+  end
+
+  test "fetch_position includes supported USDC valuation fields" do
+    old_usdc = ENV["AERODROME_USDC_ADDRESS"]
+    ENV["AERODROME_USDC_ADDRESS"] = TOKEN1
+    stub_rpc_results(
+      "0x#{word(OWNER)}",
+      "0x#{position_words(token0_address: TOKEN0, token1_address: TOKEN1, tick_lower: -201000, tick_upper: -197700, liquidity: 998_471_580_054_153).join}",
+      "0x#{word(POOL)}",
+      "0x#{slot0_words(sqrt_price_x96: 3_543_191_142_285_914_205_922_034, tick: -198995).join}",
+      "0x#{uint_word(18)}",
+      encoded_string("WETH"),
+      encoded_string("Wrapped Ether"),
+      "0x#{uint_word(6)}",
+      encoded_string("USDC"),
+      encoded_string("USD Coin")
+    )
+
+    position = @service.fetch_position(315985)
+
+    assert_equal "supported", position.valuation_status
+    assert_in_delta 2000, position.token0_price_usd.to_f, 0.000001
+    assert_equal BigDecimal("1"), position.token1_price_usd
+    assert_instance_of BigDecimal, position.total_value_usd
+    assert_equal AerodromeSlipstreamValuation::VALUATION_SOURCE, position.valuation_source
+    assert_nil position.valuation_reason
+  ensure
+    old_usdc.nil? ? ENV.delete("AERODROME_USDC_ADDRESS") : ENV["AERODROME_USDC_ADDRESS"] = old_usdc
   end
 
   test "fetch_position fails clearly on malformed math input" do

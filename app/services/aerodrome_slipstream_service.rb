@@ -43,7 +43,13 @@ class AerodromeSlipstreamService
     :tokens_owed1_raw,
     :amount0_raw,
     :amount1_raw,
-    :verification_status
+    :verification_status,
+    :token0_price_usd,
+    :token1_price_usd,
+    :total_value_usd,
+    :valuation_status,
+    :valuation_source,
+    :valuation_reason
   )
 
   TokenData = Data.define(:address, :decimals, :symbol, :name)
@@ -94,6 +100,15 @@ class AerodromeSlipstreamService
       tick_upper: raw_position.tick_upper,
       liquidity: raw_position.liquidity
     )
+    valuation = AerodromeSlipstreamValuation.new.preview(
+      token0_address: raw_position.token0_address,
+      token1_address: raw_position.token1_address,
+      token0_decimals: token0.decimals,
+      token1_decimals: token1.decimals,
+      sqrt_price_x96: pool_data.sqrt_price_x96,
+      amount0_raw: amount0_raw,
+      amount1_raw: amount1_raw
+    )
 
     PositionData.new(
       token_id: token_id.to_s,
@@ -117,7 +132,13 @@ class AerodromeSlipstreamService
       tokens_owed1_raw: raw_position.tokens_owed1_raw,
       amount0_raw: amount0_raw,
       amount1_raw: amount1_raw,
-      verification_status: VERIFIED_AMOUNT_MATH_SOURCE
+      verification_status: VERIFIED_AMOUNT_MATH_SOURCE,
+      token0_price_usd: valuation.token0_price_usd,
+      token1_price_usd: valuation.token1_price_usd,
+      total_value_usd: valuation.total_value_usd,
+      valuation_status: valuation.supported ? "supported" : "unsupported",
+      valuation_source: valuation.valuation_source,
+      valuation_reason: valuation.reason
     )
   end
 
