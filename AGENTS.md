@@ -66,6 +66,20 @@ end
 
 USDC transfers: Before opening a short on a subaccount, `HedgeSyncJob` calculates the required margin (`target_short × mark_price / leverage × 1.2` buffer), checks the subaccount balance, and transfers only the difference from main. When closing to zero on a subaccount, all USDC is withdrawn back to main and the account column is cleared. The same cleanup happens when a hedge is destroyed via `HedgesController#destroy`.
 
+### Aerodrome Slipstream Migration Rules
+
+The Aerodrome Slipstream migration is read-only first. Do not change live hedge execution, do not enable live trading changes, and do not modify `HyperliquidService` unless a later explicit task says otherwise.
+
+**Verification before implementation:** Aerodrome contract addresses, ABI methods, method return fields, tick math, and pool resolution logic must not be implemented from memory. Every Aerodrome-specific fact must be verified from current sources before implementation: official Aerodrome docs, verified BaseScan contract pages, Aerodrome/Velodrome GitHub contract interfaces, and live Base RPC `eth_call` checks where applicable. Document verification in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` with the exact source URL, contract address, method signature, return fields, date checked, and why the source is trusted.
+
+**Configuration and uncertainty:** Prefer environment variables for Aerodrome contract addresses unless a value is verified and documented. If a fact cannot be verified, do not guess and do not hardcode it; keep it configurable, fail safely with a clear error, and document the uncertainty.
+
+**Secrets:** No private keys, wallet secrets, API secrets, or `.env` values may be printed, copied, committed, or included in docs.
+
+**Safety gates:** Aerodrome hedge execution must be disabled by default. Read-only monitoring must work before any hedge integration is attempted. Any PR touching Aerodrome must include a verification checklist, mocked-RPC test coverage, and an explicit statement that real RPC is not used by tests.
+
+**Testing:** Tests must use mocked RPC responses and must not call real RPC. `bin/rake` must pass before any Aerodrome task is considered complete.
+
 ### Controllers
 
 All controllers require authentication (via Rails 8 generated `Authentication` concern):
