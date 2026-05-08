@@ -483,6 +483,15 @@ Current status: NOT READY FOR IMPLEMENTATION for full Aerodrome support because 
 
 Ready only for documentation and planning. The project can become READY FOR READ-ONLY SERVICE SCAFFOLD after selected manager/factory interfaces are verified against BaseScan and live RPC. It becomes READY FOR READ-ONLY SYNC only after mocked tests and at least one live position comparison against Aerodrome UI/BaseScan. It is NOT READY FOR HEDGE INTEGRATION until read-only data is verified and Aerodrome hedge execution is explicitly enabled by a later default-off feature flag.
 
+## Implemented Scaffold Notes
+
+- `AerodromeSlipstreamService` is a read-only RPC scaffold only.
+- Tests use mocked JSON-RPC responses and do not call real RPC.
+- `amount0`/`amount1` liquidity math remains deferred; scaffold returns partial position data with an explicit reason.
+- Advanced fee math beyond `tokensOwed0` and `tokensOwed1` remains deferred.
+- `HyperliquidService` is untouched.
+- Jobs are not connected to Aerodrome yet; no live hedge execution path was changed or enabled.
+
 ## Unresolved Facts That Must Be Closed
 
 - Which Slipstream manager deployments must be scanned for user positions.
