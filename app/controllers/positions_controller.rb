@@ -25,6 +25,10 @@ class PositionsController < ApplicationController
     if @position.dex.name == "aerodrome_slipstream"
       @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
+      safety = AerodromeHedgeProposalSafety.new
+      @aerodrome_proposal_safety_results = @aerodrome_hedge_proposals.to_h do |proposal|
+        [ proposal.id, safety.evaluate(proposal, current_position: @position) ]
+      end
     end
   end
 

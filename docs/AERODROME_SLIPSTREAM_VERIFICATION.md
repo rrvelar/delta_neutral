@@ -4,7 +4,7 @@ Date prepared: 2026-05-08
 
 This document is a practical checklist for implementing Aerodrome Slipstream support on Base. It is verification/documentation only. It does not implement application code, does not change business logic, does not change `HyperliquidService`, and does not enable live trading.
 
-Manual hedge proposals added after the read-only preview work are local records only. They suggest a manual short ETH amount/notional from persisted Aerodrome WETH/USDC monitor-only position data and retain proposal history/status, but they do not call Hyperliquid, do not place orders, do not create executable `Hedge` records, and do not change `AERODROME_HEDGE_ENABLED` from false/default-off. Proposal review/rejection is not execution. Stale proposals must be regenerated before any manual review. Aerodrome remains NOT READY FOR LIVE HEDGE INTEGRATION.
+Manual hedge proposals added after the read-only preview work are local records only. They suggest a manual short ETH amount/notional from persisted Aerodrome WETH/USDC monitor-only position data and retain proposal history/status and local safety-limit results, but they do not call Hyperliquid, do not place orders, do not create executable `Hedge` records, and do not change `AERODROME_HEDGE_ENABLED` from false/default-off. Proposal review/rejection is not execution. Missing safety limits are warnings. Blocked proposals must not be used for execution. Stale proposals must be regenerated before any manual review. Aerodrome remains NOT READY FOR LIVE HEDGE INTEGRATION.
 
 ## Verified Facts As Of 2026-05-08
 
@@ -78,9 +78,11 @@ The migration only replaces the LP position source:
 
 Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not change in this phase. Aerodrome support must be read-only first. Aerodrome hedge usage must remain disabled until explicitly enabled by a later feature flag after read-only sync has been verified.
 
-The manual hedge proposal workflow is part of the read-only/manual review phase. It may create/read/update `AerodromeHedgeProposal` rows and display local proposal history/stale status, but it must not create `Hedge` rows, must not call `HyperliquidService`, and must not submit approvals, transfers, swaps, NFT transfers, or transactions.
+The manual hedge proposal workflow is part of the read-only/manual review phase. It may create/read/update `AerodromeHedgeProposal` rows and display local proposal history/stale/safety status, but it must not create `Hedge` rows, must not call `HyperliquidService`, and must not submit approvals, transfers, swaps, NFT transfers, or transactions.
 
 Proposal stale status is computed from local persisted values only. A proposal is stale when current WETH amount or notional differs materially from the proposal, when the position is inactive, or when the proposal is rejected/expired. Stale status is informational and does not trigger automated execution.
+
+Proposal safety limits are local checks only. They compare proposal values to optional env vars for max short ETH, max short notional USD, max LP value USD, and max stale percent. Missing limits produce warnings rather than failures. Exceeded limits mark proposals `BLOCKED` for manual review, but do not trigger any transaction or external API call.
 
 ## 2. Trusted Sources
 

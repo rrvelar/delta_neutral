@@ -9,6 +9,12 @@ class AerodromeHedgeProposalsController < ApplicationController
 
   def mark_reviewed
     proposal = find_proposal
+    safety = AerodromeHedgeProposalSafety.new.evaluate(proposal)
+    if safety.blocked
+      redirect_to position_path(proposal.position), alert: "Blocked manual hedge proposals cannot be marked reviewed. No orders were placed."
+      return
+    end
+
     proposal.mark_reviewed!
 
     redirect_to position_path(proposal.position), notice: "Manual hedge proposal marked reviewed. No orders were placed."

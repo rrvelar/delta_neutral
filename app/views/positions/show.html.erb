@@ -88,9 +88,11 @@
         <% if @latest_aerodrome_hedge_proposal %>
           <% proposal = @latest_aerodrome_hedge_proposal %>
           <% stale_reasons = proposal.stale_reasons(@position) %>
+          <% safety = @aerodrome_proposal_safety_results.fetch(proposal.id) %>
           <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
             <div class="flex justify-between gap-4"><span class="text-gray-500">Proposal ID</span><span class="text-white"><%= proposal.id %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Status</span><span class="text-white"><%= proposal.status %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Safety status</span><span class="<%= safety.blocked ? 'text-red-300' : (safety.warnings.any? ? 'text-yellow-300' : 'text-green-300') %>"><%= safety.status %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Freshness</span><span class="<%= stale_reasons.any? ? 'text-red-300' : 'text-green-300' %>"><%= proposal.freshness_label(@position) %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Stale reason</span><span class="text-white text-right"><%= stale_reasons.any? ? stale_reasons.join(", ") : "None" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested action</span><span class="text-white"><%= proposal.hedge_side %> <%= proposal.hedge_asset %></span></div>
@@ -103,10 +105,51 @@
             <div class="flex justify-between gap-4"><span class="text-gray-500">Generated</span><span class="text-white"><%= proposal.generated_at.strftime("%m/%d/%Y %H:%M") %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Source</span><span class="text-white text-right"><%= proposal.source %></span></div>
           </div>
+          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            <div class="<%= safety.blocked ? 'bg-red-950/30 border-red-800' : 'bg-gray-900/50 border-gray-800' %> border rounded-lg p-3">
+              <p class="text-gray-400 text-xs uppercase tracking-wide">Checked Limits</p>
+              <dl class="mt-2 space-y-1">
+                <% safety.checked_limits.each do |key, limit| %>
+                  <div class="flex justify-between gap-4">
+                    <dt class="text-gray-500"><%= key.to_s.humanize %></dt>
+                    <dd class="text-white text-right">
+                      actual <%= limit[:actual]&.to_s("F") || "unavailable" %> /
+                      limit <%= limit[:configured] ? (limit[:limit]&.to_s("F") || "invalid") : "not configured" %>
+                      (<%= limit[:status] %>)
+                    </dd>
+                  </div>
+                <% end %>
+              </dl>
+            </div>
+            <div class="<%= safety.blocked ? 'bg-red-950/30 border-red-800' : 'bg-gray-900/50 border-gray-800' %> border rounded-lg p-3">
+              <p class="text-gray-400 text-xs uppercase tracking-wide">Failures / Warnings</p>
+              <% if safety.failures.any? %>
+                <ul class="mt-2 list-disc list-inside text-red-200 space-y-1">
+                  <% safety.failures.each do |failure| %>
+                    <li><%= failure %></li>
+                  <% end %>
+                </ul>
+              <% end %>
+              <% if safety.warnings.any? %>
+                <ul class="mt-2 list-disc list-inside text-yellow-200 space-y-1">
+                  <% safety.warnings.each do |warning| %>
+                    <li><%= warning %></li>
+                  <% end %>
+                </ul>
+              <% end %>
+              <% if safety.failures.empty? && safety.warnings.empty? %>
+                <p class="mt-2 text-green-300">All configured proposal safety limits passed.</p>
+              <% end %>
+            </div>
+          </div>
           <p class="text-yellow-200/80 text-sm mt-4">Local record only. Review does not place orders, call Hyperliquid, or create a live hedge.</p>
           <div class="flex flex-wrap gap-3 mt-4">
             <% if proposal.status == "draft" %>
-              <%= button_to "Mark Reviewed", mark_reviewed_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-200 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+              <% if safety.blocked %>
+                <span class="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium bg-red-950/70 text-red-200 border border-red-800">Blocked proposals cannot be marked reviewed</span>
+              <% else %>
+                <%= button_to "Mark Reviewed", mark_reviewed_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-200 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+              <% end %>
               <%= button_to "Reject", reject_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-red-950/70 hover:bg-red-950 text-red-200 border border-red-800 px-3 py-2 rounded-lg text-sm font-medium transition" %>
             <% end %>
           </div>
@@ -124,8 +167,8 @@
               <tr class="border-b border-gray-800">
                 <th class="text-left text-gray-500 font-medium py-2 pr-3">ID</th>
                 <th class="text-left text-gray-500 font-medium py-2 pr-3">Status</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Freshness</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Reason</th>
+                <th class="text-left text-gray-500 font-medium py-2 pr-3">Safety</th>
+                <th class="text-left text-gray-500 font-medium py-2 pr-3">Failures / Warnings</th>
                 <th class="text-left text-gray-500 font-medium py-2 pr-3">Asset</th>
                 <th class="text-left text-gray-500 font-medium py-2 pr-3">Side</th>
                 <th class="text-right text-gray-500 font-medium py-2 pr-3">Amount</th>
@@ -139,11 +182,12 @@
             <tbody>
               <% @aerodrome_hedge_proposals.each do |proposal| %>
                 <% stale_reasons = proposal.stale_reasons(@position) %>
-                <tr class="border-b border-gray-900">
+                <% safety = @aerodrome_proposal_safety_results.fetch(proposal.id) %>
+                <tr class="border-b border-gray-900 <%= safety.blocked ? 'bg-red-950/20' : '' %>">
                   <td class="py-2 pr-3 text-white"><%= proposal.id %></td>
                   <td class="py-2 pr-3 text-white"><%= proposal.status %></td>
-                  <td class="py-2 pr-3 <%= stale_reasons.any? ? 'text-red-300' : 'text-green-300' %>"><%= proposal.freshness_label(@position) %></td>
-                  <td class="py-2 pr-3 text-gray-300"><%= stale_reasons.any? ? stale_reasons.join(", ") : "None" %></td>
+                  <td class="py-2 pr-3 <%= safety.blocked ? 'text-red-300' : (safety.warnings.any? ? 'text-yellow-300' : 'text-green-300') %>"><%= safety.status %></td>
+                  <td class="py-2 pr-3 text-gray-300"><%= (safety.failures + safety.warnings).presence&.join(", ") || "None" %></td>
                   <td class="py-2 pr-3 text-white"><%= proposal.hedge_asset %></td>
                   <td class="py-2 pr-3 text-white"><%= proposal.hedge_side %></td>
                   <td class="py-2 pr-3 text-right text-white"><%= number_with_precision(proposal.suggested_short_amount, precision: 6) %></td>
