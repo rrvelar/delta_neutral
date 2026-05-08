@@ -19,14 +19,21 @@ class PositionSyncJob < ApplicationJob
   def perform(position_id = nil)
     Rails.logger.debug { "[PositionSyncJob] starting — position_id=#{position_id || 'all active'}" }
     positions = position_id ? Position.where(id: position_id) : Position.active
-    uniswap = UniswapService.new
-    hyperliquid = HyperliquidService.new
+    uniswap = nil
+    hyperliquid = nil
 
     Rails.logger.debug { "[PositionSyncJob] found #{positions.count} position(s) to sync" }
 
-    positions.includes(:hedge, wallet: :network).find_each do |position|
+    positions.includes(:dex, :hedge, wallet: :network).find_each do |position|
+      if aerodrome_position?(position)
+        sync_aerodrome_position(position)
+        next
+      end
+
       network_name = position.wallet.network.name
       ethereum = EthereumService.new(network: network_name)
+      uniswap ||= UniswapService.new
+      hyperliquid ||= HyperliquidService.new
       sync_position(position, uniswap, hyperliquid, ethereum)
     rescue => e
       Rails.logger.error("PositionSyncJob failed for position #{position.id}: #{e.message}")
@@ -138,5 +145,53 @@ class PositionSyncJob < ApplicationJob
       uncollected_fees1: uncollected[:uncollected_fees1]
     )
     Rails.logger.debug { "[PositionSyncJob] position #{position.id} PnlSnapshot created" }
+  end
+
+  def sync_aerodrome_position(position)
+    unless aerodrome_read_only_enabled?
+      Rails.logger.debug { "[PositionSyncJob] skipping Aerodrome position #{position.id} because read-only sync is disabled" }
+      return
+    end
+
+    position_data = AerodromeSlipstreamService.new.fetch_position(position.external_id)
+    unless position_data.owner_address.casecmp?(position.wallet.address)
+      Rails.logger.warn("PositionSyncJob: skipping Aerodrome position #{position.id} — owner no longer matches wallet")
+      return
+    end
+
+    position.update!(
+      asset0: position_data.token0_symbol,
+      asset1: position_data.token1_symbol,
+      asset0_amount: aerodrome_decimal_amount(position_data.amount0_raw, position_data.token0_decimals, :asset0_amount),
+      asset1_amount: aerodrome_decimal_amount(position_data.amount1_raw, position_data.token1_decimals, :asset1_amount),
+      asset0_price_usd: nil,
+      asset1_price_usd: nil,
+      pool_address: position_data.pool_address,
+      active: true
+    )
+    Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome read-only position #{position.id}; hedge integration remains disabled" }
+  end
+
+  def aerodrome_position?(position)
+    position.dex.name == "aerodrome_slipstream"
+  end
+
+  def aerodrome_read_only_enabled?
+    ENV["AERODROME_READ_ONLY_ENABLED"].to_s.downcase == "true"
+  end
+
+  def aerodrome_decimal_amount(raw_amount, decimals, column_name)
+    return nil unless raw_amount && decimals
+
+    column = Position.columns_hash.fetch(column_name.to_s)
+    return nil if decimals > column.scale
+
+    amount = AerodromeSlipstreamMath.decimal_amount(raw_amount, decimals)
+    integer_digits = amount.abs.to_i.to_s.length
+    return nil if integer_digits > column.precision - column.scale
+
+    amount
+  rescue AerodromeSlipstreamMath::Error
+    nil
   end
 end

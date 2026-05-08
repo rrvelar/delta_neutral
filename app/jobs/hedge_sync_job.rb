@@ -33,9 +33,16 @@ class HedgeSyncJob < ApplicationJob
   def perform(hedge_id = nil)
     Rails.logger.debug { "[HedgeSyncJob] starting — hedge_id=#{hedge_id || 'all active'}" }
     hedges = hedge_id ? Hedge.where(id: hedge_id) : Hedge.active
-    hyperliquid = HyperliquidService.new
+    aerodrome_hedges = hedges.joins(position: :dex).where(dexes: { name: "aerodrome_slipstream" })
+    aerodrome_count = aerodrome_hedges.count
+    Rails.logger.debug { "[HedgeSyncJob] skipping #{aerodrome_count} Aerodrome hedge(s); hedge execution is disabled" } if aerodrome_count.positive?
+
+    hedges = hedges.joins(position: :dex).where.not(dexes: { name: "aerodrome_slipstream" })
 
     Rails.logger.debug { "[HedgeSyncJob] found #{hedges.count} hedge(s) to sync" }
+    return if hedges.none?
+
+    hyperliquid = HyperliquidService.new
 
     hedges.includes(:position).find_each do |hedge|
       sync_hedge(hedge, hyperliquid)

@@ -79,6 +79,16 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "skips Aerodrome hedge by default before HyperliquidService construction" do
+    hedge = aerodrome_hedge
+
+    HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+      assert_no_difference "ShortRebalance.count" do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+  end
+
   test "creates rebalance records with realized PnL from fills" do
     hedge = hedges(:eth_hedge)
 
@@ -252,5 +262,28 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position3&.destroy
     hedge2&.destroy
     position2&.destroy
+  end
+
+  private
+
+  def aerodrome_hedge
+    wallet = Wallet.find_or_create_by!(
+      user: users(:one),
+      network: networks(:base),
+      address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+    )
+    position = Position.create!(
+      user: wallet.user,
+      wallet: wallet,
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "0.5",
+      asset1_amount: "1200.0",
+      external_id: "5016",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      active: true
+    )
+    Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
   end
 end
