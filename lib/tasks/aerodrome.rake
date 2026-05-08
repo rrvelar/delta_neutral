@@ -21,7 +21,7 @@ namespace :aerodrome do
       puts "NO DB WRITES"
       puts "NO HYPERLIQUID"
       puts "NO HEDGES"
-      puts "AMOUNT MATH DEFERRED"
+      puts(report.fetch(:amount_math_deferred) ? "AMOUNT MATH DEFERRED" : "AMOUNT MATH VERIFIED")
       report.fetch(:notes).each { |note| puts "Note: #{note}" }
       puts
 

@@ -84,7 +84,39 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "NO DB WRITES", out
         assert_match "NO HYPERLIQUID", out
         assert_match "NO HEDGES", out
+        assert_match "AMOUNT MATH VERIFIED", out
+        assert_no_match(/AMOUNT MATH DEFERRED/, out)
+        assert_match "verification_status: verified_math", out
+      end
+    end
+  end
+
+  test "dry run task human output warns when amount math is deferred" do
+    report = ok_report("5016")
+    report[:amount_math_deferred] = true
+    report[:results] = [
+      report.fetch(:results).first.merge(
+        status: "partial",
+        amount0_raw: nil,
+        amount1_raw: nil,
+        amount0_decimal: nil,
+        amount1_decimal: nil,
+        math_source: nil,
+        verification_status: "partial",
+        partial_data_reason: "amount0/amount1 math deferred"
+      )
+    ]
+
+    with_env("TOKEN_IDS" => "5016", "FORMAT" => nil) do
+      AerodromeSlipstreamDryRun.stub(:new, ->(token_ids:) {
+        assert_equal [ "5016" ], token_ids
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:dry_run"].invoke }
+
         assert_match "AMOUNT MATH DEFERRED", out
+        assert_no_match(/AMOUNT MATH VERIFIED/, out)
+        assert_match "Token 5016: partial", out
       end
     end
   end
