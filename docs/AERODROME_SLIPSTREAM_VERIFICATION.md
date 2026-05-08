@@ -345,10 +345,18 @@ This structure is read-only and must not contain private keys, approvals, transa
 - Existing tests must continue passing.
 - No models, controllers, jobs, or services should be changed as part of this verification document.
 
+### DEX Source Selection Scaffold
+
+- `DexPositionSourceFactory` provides a small source-selection layer for LP position services.
+- The default source remains `uniswap_v3`; Aerodrome Slipstream is selected only with an explicit `aerodrome_slipstream` source.
+- Aerodrome service construction remains read-only and is not connected to `WalletSyncJob`, `PositionSyncJob`, `HedgeSyncJob`, or hedge exposure.
+- `HyperliquidService` is untouched by this scaffold.
+
 ## 15. Configuration Plan
 
 Proposed env vars for a later implementation task:
 
+- `DEX_POSITION_SOURCE=uniswap_v3`.
 - `BASE_RPC_URL`.
 - `AERODROME_SLIPSTREAM_POSITION_MANAGER`.
 - `AERODROME_SLIPSTREAM_FACTORY`.
