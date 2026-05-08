@@ -284,4 +284,51 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     hedge&.destroy
     position&.destroy
   end
+
+  test "does not process Aerodrome hedge proposals" do
+    position = Position.create!(
+      user: users(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      wallet: Wallet.find_or_create_by!(
+        user: users(:one),
+        network: networks(:base),
+        address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+      ),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("1.25"),
+      asset1_amount: BigDecimal("500"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
+      external_id: "315985",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      active: true
+    )
+    proposal = position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+    Hedge.update_all(active: false)
+
+    HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+      assert_no_difference "ShortRebalance.count" do
+        assert_no_difference "Hedge.count" do
+          HedgeSyncJob.perform_now
+        end
+      end
+    end
+
+    assert_equal "draft", proposal.reload.status
+    assert_equal false, proposal.execution_enabled
+    assert_equal false, proposal.hyperliquid_called
+  ensure
+    proposal&.destroy
+    position&.destroy
+  end
 end

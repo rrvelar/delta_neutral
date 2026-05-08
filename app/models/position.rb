@@ -10,6 +10,7 @@ class Position < ApplicationRecord
 
   has_one :hedge, dependent: :destroy
   has_many :pnl_snapshots, dependent: :destroy
+  has_many :aerodrome_hedge_proposals, dependent: :destroy
 
   # @!scope class
   # @!method active

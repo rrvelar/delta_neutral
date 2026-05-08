@@ -10,7 +10,29 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_02_21_210000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_08_000000) do
+  create_table "aerodrome_hedge_proposals", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.boolean "execution_enabled", default: false, null: false
+    t.datetime "generated_at", null: false
+    t.string "hedge_asset", null: false
+    t.string "hedge_side", null: false
+    t.boolean "hyperliquid_called", default: false, null: false
+    t.decimal "lp_total_value_usd", precision: 20, scale: 8, null: false
+    t.text "notes"
+    t.integer "position_id", null: false
+    t.datetime "reviewed_at"
+    t.string "source", null: false
+    t.string "status", default: "draft", null: false
+    t.decimal "suggested_short_amount", precision: 30, scale: 18, null: false
+    t.decimal "suggested_short_notional_usd", precision: 20, scale: 8, null: false
+    t.datetime "updated_at", null: false
+    t.decimal "weth_price_usd", precision: 20, scale: 8, null: false
+    t.index ["generated_at"], name: "index_aerodrome_hedge_proposals_on_generated_at"
+    t.index ["position_id", "status"], name: "index_aerodrome_hedge_proposals_on_position_id_and_status"
+    t.index ["position_id"], name: "index_aerodrome_hedge_proposals_on_position_id"
+  end
+
   create_table "dexes", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "name", null: false
@@ -132,6 +154,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_02_21_210000) do
     t.index ["user_id"], name: "index_wallets_on_user_id"
   end
 
+  add_foreign_key "aerodrome_hedge_proposals", "positions"
   add_foreign_key "hedges", "positions"
   add_foreign_key "pnl_snapshots", "positions"
   add_foreign_key "positions", "dexes"

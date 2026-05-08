@@ -10,6 +10,12 @@ Rails.application.routes.draw do
 
   resources :positions, only: [ :index, :show ] do
     post :sync_now, on: :member
+    resources :aerodrome_hedge_proposals, only: [ :create ]
+  end
+
+  resources :aerodrome_hedge_proposals, only: [] do
+    post :mark_reviewed, on: :member
+    post :reject, on: :member
   end
 
   resource :settings, only: [ :edit, :update ]

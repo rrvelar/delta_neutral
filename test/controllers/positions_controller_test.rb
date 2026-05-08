@@ -54,8 +54,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID 315985", response.body
     assert_match "Refresh Read-only Data", response.body
+    assert_match "Generate Manual Hedge Proposal", response.body
+    assert_match "Manual proposal only", response.body
+    assert_match "No orders", response.body
     assert_match "Updates on-chain LP data only", response.body
     assert_match "No Hyperliquid", response.body
+    assert_match "Execution disabled", response.body
     assert_match "No hedge execution", response.body
     assert_match "PREVIEW ONLY", response.body
     assert_match "short", response.body
@@ -69,6 +73,104 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
     assert_no_match "Approve", response.body
+  end
+
+  test "show displays latest manual proposal as local manual-only record" do
+    position = create_aerodrome_position
+    position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Manual Hedge Proposal", response.body
+    assert_match "Local record only", response.body
+    assert_match "Review does not place orders", response.body
+    assert_match "disabled / manual review only", response.body
+    assert_match "not called", response.body
+    assert_match "Mark Reviewed", response.body
+    assert_match "Reject", response.body
+    assert_no_match "Execute", response.body
+    assert_no_match "Trade", response.body
+  end
+
+  test "creates manual proposal without Hyperliquid RPC trading or real hedge" do
+    position = create_aerodrome_position
+
+    with_env(
+      "AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006",
+      "AERODROME_USDC_ADDRESS" => "0x0000000000000000000000000000000000000001"
+    ) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, ->(*) { raise "RPC service should not be called" }) do
+          assert_difference "AerodromeHedgeProposal.count", 1 do
+            assert_no_difference "Hedge.count" do
+              post position_aerodrome_hedge_proposals_path(position)
+            end
+          end
+        end
+      end
+    end
+
+    proposal = position.aerodrome_hedge_proposals.first
+    assert_redirected_to position_path(position)
+    assert_equal "draft", proposal.status
+    assert_equal false, proposal.execution_enabled
+    assert_equal false, proposal.hyperliquid_called
+  end
+
+  test "mark reviewed works without execution" do
+    proposal = create_aerodrome_position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      post mark_reviewed_aerodrome_hedge_proposal_path(proposal)
+    end
+
+    assert_redirected_to position_path(proposal.position)
+    assert_equal "reviewed", proposal.reload.status
+    assert_not_nil proposal.reviewed_at
+    assert_equal false, proposal.execution_enabled
+    assert_equal false, proposal.hyperliquid_called
+  end
+
+  test "reject works without execution" do
+    proposal = create_aerodrome_position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      post reject_aerodrome_hedge_proposal_path(proposal)
+    end
+
+    assert_redirected_to position_path(proposal.position)
+    assert_equal "rejected", proposal.reload.status
+    assert_not_nil proposal.reviewed_at
+    assert_equal false, proposal.execution_enabled
+    assert_equal false, proposal.hyperliquid_called
   end
 
   test "show keeps Uniswap sync and hedge actions unchanged" do

@@ -4,6 +4,8 @@ Date prepared: 2026-05-08
 
 This document is a practical checklist for implementing Aerodrome Slipstream support on Base. It is verification/documentation only. It does not implement application code, does not change business logic, does not change `HyperliquidService`, and does not enable live trading.
 
+Manual hedge proposals added after the read-only preview work are local records only. They suggest a manual short ETH amount/notional from persisted Aerodrome WETH/USDC monitor-only position data, but they do not call Hyperliquid, do not place orders, do not create executable `Hedge` records, and do not change `AERODROME_HEDGE_ENABLED` from false/default-off. Proposal review is not execution. Aerodrome remains NOT READY FOR LIVE HEDGE INTEGRATION.
+
 ## Verified Facts As Of 2026-05-08
 
 Status legend: **VERIFIED** means checked from a trusted source in this session. **CANDIDATE** means a trusted source lists the value, but implementation should keep it configurable or verify against a concrete position before relying on it. **UNRESOLVED** means do not implement from this fact. **DEFERRED** means intentionally out of scope for the read-only migration.
@@ -75,6 +77,8 @@ The migration only replaces the LP position source:
 - To: Aerodrome Slipstream concentrated liquidity positions on Base.
 
 Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not change in this phase. Aerodrome support must be read-only first. Aerodrome hedge usage must remain disabled until explicitly enabled by a later feature flag after read-only sync has been verified.
+
+The manual hedge proposal workflow is part of the read-only/manual review phase. It may create/read/update `AerodromeHedgeProposal` rows, but it must not create `Hedge` rows, must not call `HyperliquidService`, and must not submit approvals, transfers, swaps, NFT transfers, or transactions.
 
 ## 2. Trusted Sources
 

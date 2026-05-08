@@ -22,6 +22,7 @@ class PositionsController < ApplicationController
     @position = Current.user.positions.includes(:dex, wallet: :network).find(params[:id])
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
+    @latest_aerodrome_hedge_proposal = @position.aerodrome_hedge_proposals.latest_first.first if @position.dex.name == "aerodrome_slipstream"
   end
 
   # POST /positions/:id/sync_now

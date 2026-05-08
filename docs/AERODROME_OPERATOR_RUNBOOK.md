@@ -11,6 +11,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Monitor-only sync stores verified computed token amounts in existing `Position` amount fields.
 - Monitor-only USD valuation preview is available only for pools with the configured USDC quote token; unsupported pairs keep USD prices nil.
 - Monitor-only hedge preview is available only for configured WETH/USDC positions and never executes orders.
+- Manual hedge proposals are local database records only. They can suggest a short ETH amount/notional for an Aerodrome WETH/USDC monitor-only position, but they do not create `Hedge` records, do not call Hyperliquid, and do not place orders.
 - The Rails UI displays Aerodrome positions as monitor-only, including safety labels and display-only hedge preview status.
 - `HedgeSyncJob` skips Aerodrome positions; Aerodrome exposure is not fed into hedge logic.
 
@@ -21,6 +22,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
 - Monitor-only USD valuation preview for configured-USDC pools.
 - Monitor-only hedge preview for configured WETH/USDC pools.
+- Manual, non-executing hedge proposal records for configured WETH/USDC monitor-only positions.
 - UI/dashboard visibility for Aerodrome monitor-only positions.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
@@ -32,6 +34,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Live trading.
 - Aerodrome hedge execution.
 - Hyperliquid hedge preview execution.
+- Proposal execution. Proposal review is only a local status change and is not order approval.
 - USD valuation for non-USDC pools.
 - Advanced uncollected fee calculations.
 - Staking/gauge/escrow discovery.
@@ -133,9 +136,12 @@ Aerodrome positions appear in the dashboard and position pages with:
 - Monitor-only, no-orders, hedge-disabled, and Hyperliquid-not-called safety labels.
 - Persisted amounts, USD prices, and estimated LP value when available.
 - Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
+- Latest manual hedge proposal when present, including suggested side, asset, amount, notional, and status.
+- A `Generate Manual Hedge Proposal` action that creates or updates a local draft record only. The action is labeled manual proposal only, no orders, no Hyperliquid, and execution disabled.
+- `Mark Reviewed` and `Reject` proposal actions. These only update local proposal status; review is not execution.
 - The Aerodrome position refresh action is labeled `Refresh Read-only Data` and states that it updates on-chain LP data only, with no orders, no Hyperliquid, and no hedge execution.
 
-The UI preview does not call RPC, does not call `HyperliquidService`, does not create `Hedge` records, and does not enable order execution. It is still NOT READY FOR LIVE HEDGE INTEGRATION.
+The UI preview and manual proposal system do not call RPC, do not call `HyperliquidService`, do not create `Hedge` records, and do not enable order execution. Manual proposals are local records only. They are still NOT READY FOR LIVE HEDGE INTEGRATION, and `AERODROME_HEDGE_ENABLED` remains false/default-off.
 
 ## Confirm No DB Writes
 
@@ -151,6 +157,7 @@ Counts should be unchanged.
 
 - Dry-run and config verification do not instantiate `HyperliquidService`.
 - Hedge preview also does not instantiate `HyperliquidService`; it computes only a local theoretical short amount.
+- Manual hedge proposal generation and review do not instantiate `HyperliquidService`; they create/read/update local proposal records only.
 - They do not require `HYPERLIQUID_PRIVATE_KEY` or `HYPERLIQUID_WALLET_ADDRESS`.
 - Inspect recent logs for `HyperliquidService`, `open_short`, `close_short`, `set_leverage`, `transfer_to_subaccount`, and `withdraw_from_subaccount`; none should be associated with Aerodrome dry-run commands.
 
@@ -186,6 +193,7 @@ Do not proceed beyond dry-run if:
 - [ ] Amount0/amount1 math compared against Aerodrome UI/BaseScan for real positions.
 - [x] USDC-pool valuation preview implemented for monitor-only use.
 - [x] WETH/USDC hedge preview implemented for monitor-only use.
+- [x] Manual local-only WETH/USDC hedge proposals implemented without execution.
 - [ ] USDC-pool valuation compared against Aerodrome UI/BaseScan for real positions.
 - [ ] WETH/USDC hedge preview compared manually for real positions.
 - [ ] Non-USDC USD valuation source verified.
@@ -193,6 +201,7 @@ Do not proceed beyond dry-run if:
 - [ ] Staked/gauge position behavior verified or explicitly excluded.
 - [ ] Manager/factory deployment strategy approved.
 - [ ] Aerodrome positions remain disabled for hedging by default.
+- [ ] Manual proposal workflow reviewed operationally; review remains non-executing.
 - [ ] Mocked tests cover all RPC paths.
 - [ ] Manual dry-run matches Aerodrome UI/BaseScan for real positions.
 - [ ] `bin/rake` passes.

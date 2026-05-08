@@ -26,6 +26,10 @@
         <%= button_to "Refresh Read-only Data", sync_now_position_path(@position), method: :post, title: "Updates on-chain LP data only. No orders, no Hyperliquid, no hedge execution.", class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
         <p class="text-gray-500 text-xs mt-2">Updates on-chain LP data only &middot; No orders &middot; No Hyperliquid &middot; No hedge execution</p>
       </div>
+      <div class="text-right">
+        <%= button_to "Generate Manual Hedge Proposal", position_aerodrome_hedge_proposals_path(@position), method: :post, title: "Manual proposal only. No orders. No Hyperliquid. Execution disabled.", class: "bg-yellow-900/60 hover:bg-yellow-900 text-yellow-100 border border-yellow-700 px-4 py-2 rounded-lg text-sm font-medium transition" %>
+        <p class="text-gray-500 text-xs mt-2">Manual proposal only &middot; No orders &middot; No Hyperliquid &middot; Execution disabled</p>
+      </div>
       <span class="bg-yellow-900/40 text-yellow-300 border border-yellow-800 px-4 py-2 rounded-lg text-sm font-medium">Monitor-only</span>
     <% elsif @position.hedge %>
       <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
@@ -74,6 +78,34 @@
         <% else %>
           <p class="mt-3 text-gray-300 font-medium">Hedge preview unavailable</p>
           <p class="text-gray-500 text-sm mt-1"><%= hedge_preview&.reason || "preview data is unavailable" %></p>
+        <% end %>
+      </div>
+      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
+        <p class="text-gray-400 text-xs uppercase tracking-wide">Manual Hedge Proposal</p>
+        <% if @latest_aerodrome_hedge_proposal %>
+          <% proposal = @latest_aerodrome_hedge_proposal %>
+          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Status</span><span class="text-white"><%= proposal.status %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested action</span><span class="text-white"><%= proposal.hedge_side %> <%= proposal.hedge_asset %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested amount</span><span class="text-white"><%= number_with_precision(proposal.suggested_short_amount, precision: 6) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested notional</span><span class="text-white"><%= format_usd(proposal.suggested_short_notional_usd) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">WETH price</span><span class="text-white"><%= format_usd(proposal.weth_price_usd) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">LP value</span><span class="text-white"><%= format_usd(proposal.lp_total_value_usd) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution</span><span class="text-yellow-300"><%= proposal.execution_enabled? ? "enabled" : "disabled / manual review only" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Hyperliquid</span><span class="text-yellow-300"><%= proposal.hyperliquid_called? ? "called" : "not called" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Generated</span><span class="text-white"><%= proposal.generated_at.strftime("%m/%d/%Y %H:%M") %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Source</span><span class="text-white text-right"><%= proposal.source %></span></div>
+          </div>
+          <p class="text-yellow-200/80 text-sm mt-4">Local record only. Review does not place orders, call Hyperliquid, or create a live hedge.</p>
+          <div class="flex flex-wrap gap-3 mt-4">
+            <% if proposal.status == "draft" %>
+              <%= button_to "Mark Reviewed", mark_reviewed_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-200 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+              <%= button_to "Reject", reject_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-red-950/70 hover:bg-red-950 text-red-200 border border-red-800 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+            <% end %>
+          </div>
+        <% else %>
+          <p class="mt-3 text-gray-300 font-medium">No manual hedge proposal generated.</p>
+          <p class="text-gray-500 text-sm mt-1">Generate a local proposal for manual review only. Execution remains disabled.</p>
         <% end %>
       </div>
     </div>
