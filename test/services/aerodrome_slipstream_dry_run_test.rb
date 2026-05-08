@@ -1,7 +1,7 @@
 require "test_helper"
 
 class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
-  test "returns structured partial report for mocked position" do
+  test "returns structured verified math report for mocked position" do
     service = Minitest::Mock.new
     service.expect(:fetch_position, position_data("5016"), [ "5016" ])
 
@@ -13,11 +13,18 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_equal false, report.fetch(:database_write)
     assert_equal false, report.fetch(:hedge_enabled)
     assert_equal "5016", result.fetch(:token_id)
-    assert_equal "partial", result.fetch(:status)
+    assert_equal false, report.fetch(:amount_math_deferred)
+    assert_equal "ok", result.fetch(:status)
     assert_equal "0x23cb5f48fa3f4502232f3442637f90e8e3355701", result.fetch(:owner_address)
     assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", result.fetch(:pool_address)
     assert_equal false, result.fetch(:database_write)
     assert_equal false, result.fetch(:hedge_enabled)
+    assert_equal 1_290_590_456_994_170_212, result.fetch(:amount0_raw)
+    assert_equal 4_594_633_482, result.fetch(:amount1_raw)
+    assert_equal "1.290590456994170212", result.fetch(:amount0_decimal)
+    assert_equal "0.000000004594633482", result.fetch(:amount1_decimal)
+    assert_equal AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE, result.fetch(:math_source)
+    assert_equal "verified_math", result.fetch(:verification_status)
     assert_nil result.fetch(:error_class)
   end
 
@@ -36,21 +43,21 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_equal "error", error_result.fetch(:status)
     assert_equal "AerodromeSlipstreamService::RpcError", error_result.fetch(:error_class)
     assert_match "RPC failed", error_result.fetch(:error_message)
-    assert_equal "partial", ok_result.fetch(:status)
+    assert_equal "ok", ok_result.fetch(:status)
     assert_equal "5016", ok_result.fetch(:token_id)
   end
 
-  test "marks amount fields as deferred partial data" do
+  test "marks computed amount fields as verified math" do
     service = Minitest::Mock.new
     service.expect(:fetch_position, position_data("5016"), [ "5016" ])
 
     result = AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report.fetch(:results).first
 
     service.verify
-    assert_nil result.fetch(:amount0_raw)
-    assert_nil result.fetch(:amount1_raw)
-    assert_equal AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED, result.fetch(:partial_data_reason)
-    assert_equal "partial", result.fetch(:status)
+    assert_equal 1_290_590_456_994_170_212, result.fetch(:amount0_raw)
+    assert_equal 4_594_633_482, result.fetch(:amount1_raw)
+    assert_nil result.fetch(:partial_data_reason)
+    assert_equal "ok", result.fetch(:status)
   end
 
   test "does not call HyperliquidService" do
@@ -58,7 +65,7 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     service.expect(:fetch_position, position_data("5016"), [ "5016" ])
 
     HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
-      assert_equal "partial", AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report.fetch(:results).first.fetch(:status)
+      assert_equal "ok", AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report.fetch(:results).first.fetch(:status)
     end
 
     service.verify
@@ -193,10 +200,10 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       current_tick: -155876,
       tokens_owed0_raw: 7,
       tokens_owed1_raw: 11,
-      amount0_raw: nil,
-      amount1_raw: nil,
-      partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,
-      verification_status: "partial"
+      amount0_raw: 1_290_590_456_994_170_212,
+      amount1_raw: 4_594_633_482,
+      partial_data_reason: nil,
+      verification_status: "verified_math"
     )
   end
 end

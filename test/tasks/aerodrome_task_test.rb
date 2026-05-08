@@ -34,7 +34,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
 
         assert_equal [ "999" ], captured_token_ids
         assert_match AerodromeSlipstreamDryRun::SAFETY_BANNER, out
-        assert_match "Token 999: partial", out
+        assert_match "Token 999: ok", out
       end
     end
   end
@@ -127,7 +127,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         end
 
         assert_match "Token bad: error", out
-        assert_match "Token 5016: partial", out
+        assert_match "Token 5016: ok", out
       end
     end
   end
@@ -247,13 +247,13 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       safety_banner: AerodromeSlipstreamDryRun::SAFETY_BANNER,
       database_write: false,
       hedge_enabled: false,
-      amount_math_deferred: true,
+      amount_math_deferred: false,
       notes: [],
       token_count: 1,
       results: [
         {
           token_id: token_id,
-          status: "partial",
+          status: "ok",
           owner_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
           position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
           factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
@@ -272,9 +272,13 @@ class AerodromeTaskTest < ActiveSupport::TestCase
           current_tick: -155876,
           tokens_owed0_raw: 7,
           tokens_owed1_raw: 11,
-          amount0_raw: nil,
-          amount1_raw: nil,
-          partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,
+          amount0_raw: 1_290_590_456_994_170_212,
+          amount1_raw: 4_594_633_482,
+          amount0_decimal: "1.290590456994170212",
+          amount1_decimal: "0.000000004594633482",
+          math_source: AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE,
+          verification_status: "verified_math",
+          partial_data_reason: nil,
           hedge_enabled: false,
           database_write: false,
           error_class: nil,

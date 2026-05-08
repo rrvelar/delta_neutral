@@ -62,7 +62,7 @@ Status legend: **VERIFIED** means checked from a trusted source in this session.
 | Whether one manager/factory pair covers all relevant user positions. | **UNRESOLVED** | Keep manager/factory configurable; consider multiple deployments. |
 | Whether BaseScan source/ABI pages can be programmatically verified without an API key. | **UNRESOLVED** | Treat official README + live RPC as candidate/operational verification; still perform manual BaseScan source/ABI review before implementation. |
 | Whether wallet NFT enumeration is sufficient for staked or escrowed positions. | **UNRESOLVED** | Start with user-provided token ids or mark staked/gauge discovery out of scope. |
-| Exact amount0/amount1 math and rounding. | **UNRESOLVED** | Defer implementation until formulas are verified against source and real UI/BaseScan values. |
+| Exact amount0/amount1 math and rounding. | **VERIFIED FOR READ-ONLY IMPLEMENTATION** | Implemented from Aerodrome Slipstream `TickMath`, `LiquidityAmounts`, `FixedPoint96`, and `FullMath` sources using integer floor division. Still requires manual comparison against Aerodrome UI/BaseScan for real positions before hedge use. |
 | Advanced uncollected fee calculation beyond `tokensOwed0`/`tokensOwed1`. | **DEFERRED** | Initial read-only scope should show only verified owed-token fields or mark fees partial. |
 | USD pricing and hedge exposure readiness. | **UNRESOLVED** | Exclude Aerodrome positions from `HedgeSyncJob` until USD valuation/exposure is verified. |
 | Native ETH vs WETH display/identity behavior. | **UNRESOLVED** | Store/read token addresses exactly as returned; do not collapse WETH to ETH without explicit verified mapping. |
@@ -244,7 +244,7 @@ Amount calculations must account for:
 - Rounding strategy.
 - Avoiding float precision loss.
 
-Instruction: Do not implement `amount0`/`amount1` calculations until the formula is verified from trusted sources and covered by tests.
+Implementation status: `amount0`/`amount1` calculations are implemented for read-only service and dry-run output using Aerodrome Slipstream source formulas. Raw amount math uses integer arithmetic and Solidity-style floor division. Manual comparison against Aerodrome UI/BaseScan is still required before any operational use.
 
 Required tests:
 
@@ -260,8 +260,8 @@ Unresolved facts:
 
 | Fact | Status | Notes |
 | --- | --- | --- |
-| Exact amount0/amount1 formula to use for Slipstream positions. | UNRESOLVED | Must be verified from Aerodrome/Velodrome source or a trusted math library, then cross-checked against a real position. |
-| Whether any Slipstream-specific rounding differs from Uniswap V3 math. | UNRESOLVED | Do not assume identical math. |
+| Exact amount0/amount1 formula to use for Slipstream positions. | VERIFIED FOR READ-ONLY IMPLEMENTATION | Source: Aerodrome Slipstream `contracts/periphery/libraries/LiquidityAmounts.sol`, `contracts/core/libraries/TickMath.sol`, `contracts/core/libraries/FixedPoint96.sol`, and `contracts/core/libraries/FullMath.sol`. |
+| Whether any Slipstream-specific rounding differs from Uniswap V3 math. | VERIFIED FOR IMPLEMENTED PATH | Aerodrome Slipstream source uses integer floor division in `getAmount0ForLiquidity`, `getAmount1ForLiquidity`, and `getAmountsForLiquidity`; Ruby implementation mirrors that. |
 
 ## 11. Fees Verification
 
@@ -357,14 +357,14 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` can register Aerodrome Slipstream monitor-only positions only when `AERODROME_READ_ONLY_ENABLED=true` and explicit `AERODROME_SLIPSTREAM_TOKEN_IDS` are configured.
 - Initial discovery is user-provided token ids only; wallet enumeration, staking/gauge discovery, and multi-manager discovery remain unresolved.
 - `PositionSyncJob` refreshes only existing-schema metadata for Aerodrome positions: token symbols, pool address, active state, and source dex. Amounts, USD prices, tick data, liquidity, manager, and factory metadata remain partial because the current schema cannot store them safely.
-- `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because amount math, fee strategy, and USD valuation remain unverified.
+- `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because fee strategy, USD valuation, and real-position UI/BaseScan comparisons remain incomplete.
 - `HedgeSyncJob` skips Aerodrome positions. Aerodrome exposure is not eligible for hedge execution, and `HyperliquidService` remains untouched.
 
 ### Manual Dry-Run Tooling
 
 - `bin/rails aerodrome:dry_run TOKEN_IDS=...` provides manual Aerodrome Slipstream verification for explicit token ids.
 - The dry-run is read-only: it performs no database writes, runs no jobs, and does not call `HyperliquidService`.
-- It reports partial amount math and `hedge_enabled: false`; dry-run success does not make Aerodrome positions hedge-ready.
+- It reports computed `amount0_raw`/`amount1_raw`, math source, and `hedge_enabled: false`; dry-run success does not make Aerodrome positions hedge-ready.
 - `bin/rails aerodrome:verify_config` validates read-only Aerodrome config and only performs RPC checks when `CHECK_RPC=true`.
 - Dry-run hardening covers duplicate token ids, blank token ids, stable JSON output, and explicit no-DB/no-Hyperliquid/no-hedge safety output.
 - See `docs/AERODROME_DRY_RUN.md`, `docs/AERODROME_OPERATOR_RUNBOOK.md`, `docs/AERODROME_PRE_LIVE_SAFETY_AUDIT.md`, and `docs/AERODROME_ROLLBACK.md`.
@@ -495,7 +495,7 @@ Compare one known position against Aerodrome UI/BaseScan:
 - [ ] Pool `getPool` signature verified.
 - [ ] `slot0` return structure verified.
 - [ ] Token decimals verified.
-- [ ] `amount0`/`amount1` math verified.
+- [x] `amount0`/`amount1` math verified for read-only implementation.
 - [ ] Fee strategy decided.
 - [ ] Discovery strategy decided.
 - [ ] Read-only service design approved.
@@ -506,7 +506,7 @@ Compare one known position against Aerodrome UI/BaseScan:
 
 ## 19. Current Recommendation
 
-Current status: NOT READY FOR IMPLEMENTATION for full Aerodrome support because key contract details remain unresolved for real positions, discovery, pricing, amount math, and staked/gauge behavior.
+Current status: READY FOR READ-ONLY AMOUNT-MATH DRY-RUN for explicit token ids, but NOT READY FOR LIVE HEDGE INTEGRATION because pricing, advanced fees, discovery, and staked/gauge behavior remain unresolved.
 
 Ready only for documentation and planning. The project can become READY FOR READ-ONLY SERVICE SCAFFOLD after selected manager/factory interfaces are verified against BaseScan and live RPC. It becomes READY FOR READ-ONLY SYNC only after mocked tests and at least one live position comparison against Aerodrome UI/BaseScan. It is NOT READY FOR HEDGE INTEGRATION until read-only data is verified and Aerodrome hedge execution is explicitly enabled by a later default-off feature flag.
 
@@ -514,7 +514,7 @@ Ready only for documentation and planning. The project can become READY FOR READ
 
 - `AerodromeSlipstreamService` is a read-only RPC scaffold only.
 - Tests use mocked JSON-RPC responses and do not call real RPC.
-- `amount0`/`amount1` liquidity math remains deferred; scaffold returns partial position data with an explicit reason.
+- `amount0`/`amount1` liquidity math is implemented for read-only service and dry-run reports.
 - Advanced fee math beyond `tokensOwed0` and `tokensOwed1` remains deferred.
 - `HyperliquidService` is untouched.
 - Jobs are not connected to Aerodrome yet; no live hedge execution path was changed or enabled.
@@ -525,7 +525,7 @@ Ready only for documentation and planning. The project can become READY FOR READ
 - Whether the Gauges V3 manager/factory should be the default for new positions.
 - Whether ERC721Enumerable is safe enough for wallet discovery in production.
 - How to discover staked/gauge/escrowed positions.
-- Exact amount0/amount1 math and rounding for Slipstream positions.
+- Manual comparison of computed amount0/amount1 values against Aerodrome UI/BaseScan for real positions.
 - Fee strategy beyond `tokensOwed0` and `tokensOwed1`.
 - USD pricing source and stale-price handling.
 - WETH/native ETH display and token identity behavior.

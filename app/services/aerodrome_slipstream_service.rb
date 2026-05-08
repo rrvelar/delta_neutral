@@ -19,6 +19,7 @@ class AerodromeSlipstreamService
 
   ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
   PARTIAL_AMOUNT_MATH_DEFERRED = "amount0/amount1 liquidity math deferred pending verified Slipstream formula"
+  VERIFIED_AMOUNT_MATH_SOURCE = "Aerodrome Slipstream TickMath + LiquidityAmounts"
 
   PositionData = Data.define(
     :token_id,
@@ -88,6 +89,12 @@ class AerodromeSlipstreamService
     pool_data = pool_data(pool)
     token0 = token_data(raw_position.token0_address)
     token1 = token_data(raw_position.token1_address)
+    amount0_raw, amount1_raw = AerodromeSlipstreamMath.amounts_for_liquidity(
+      sqrt_price_x96: pool_data.sqrt_price_x96,
+      tick_lower: raw_position.tick_lower,
+      tick_upper: raw_position.tick_upper,
+      liquidity: raw_position.liquidity
+    )
 
     PositionData.new(
       token_id: token_id.to_s,
@@ -109,10 +116,10 @@ class AerodromeSlipstreamService
       current_tick: pool_data.current_tick,
       tokens_owed0_raw: raw_position.tokens_owed0_raw,
       tokens_owed1_raw: raw_position.tokens_owed1_raw,
-      amount0_raw: nil,
-      amount1_raw: nil,
-      partial_data_reason: PARTIAL_AMOUNT_MATH_DEFERRED,
-      verification_status: "partial"
+      amount0_raw: amount0_raw,
+      amount1_raw: amount1_raw,
+      partial_data_reason: nil,
+      verification_status: "verified_math"
     )
   end
 

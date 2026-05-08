@@ -13,6 +13,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 ## Implemented
 
 - Read-only Aerodrome position fetches for explicit token ids.
+- Read-only amount0/amount1 math using verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Mocked tests for dry-run and config verification.
@@ -22,7 +23,6 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 
 - Live trading.
 - Aerodrome hedge execution.
-- Amount0/amount1 liquidity math.
 - USD valuation.
 - Advanced uncollected fee calculations.
 - Staking/gauge/escrow discovery.
@@ -106,6 +106,7 @@ The task de-duplicates repeated token ids and prints a note. Blank token ids are
    - tick lower and upper;
    - current tick from pool `slot0`;
    - liquidity;
+   - computed `amount0_raw` and `amount1_raw`;
    - `tokensOwed0` and `tokensOwed1`.
 
 If any value differs, stop and record the discrepancy in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
@@ -148,12 +149,13 @@ Do not proceed beyond dry-run if:
 - manager or factory `eth_getCode` returns `0x`.
 - dry-run returns an error for the token id.
 - owner, pool, token, tick, or liquidity values disagree with Aerodrome UI/BaseScan.
-- amount math, USD valuation, or fee behavior is still needed for the next step.
+- USD valuation or fee behavior is still needed for the next step.
 
 ## Future Hedge Integration Checklist
 
 - [ ] Hyperliquid remains untouched until a later explicit task.
-- [ ] Amount0/amount1 math verified from trusted sources.
+- [x] Amount0/amount1 math implemented from trusted Aerodrome Slipstream sources.
+- [ ] Amount0/amount1 math compared against Aerodrome UI/BaseScan for real positions.
 - [ ] USD valuation source verified.
 - [ ] Advanced fee strategy decided and tested.
 - [ ] Staked/gauge position behavior verified or explicitly excluded.

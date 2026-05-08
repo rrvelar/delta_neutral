@@ -215,7 +215,7 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     assert_not_requested :post, RPC_URL
   end
 
-  test "fetch_position returns explicit partial data without amount math" do
+  test "fetch_position returns computed amount math" do
     stub_rpc_results(
       "0x#{word(OWNER)}",
       "0x#{position_words.join}",
@@ -235,10 +235,30 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     assert_equal OWNER, position.owner_address
     assert_equal FACTORY, position.factory_address
     assert_equal POOL, position.pool_address
-    assert_nil position.amount0_raw
-    assert_nil position.amount1_raw
-    assert_equal "partial", position.verification_status
-    assert_equal AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED, position.partial_data_reason
+    assert_equal 1_652_885_551_720_891_062_632_623, position.amount0_raw
+    assert_equal 0, position.amount1_raw
+    assert_equal "verified_math", position.verification_status
+    assert_nil position.partial_data_reason
+  end
+
+  test "fetch_position fails clearly on malformed math input" do
+    stub_rpc_results(
+      "0x#{word(OWNER)}",
+      "0x#{position_words.join}",
+      "0x#{word(POOL)}",
+      "0x#{slot0_words(sqrt_price_x96: 1).join}",
+      "0x#{uint_word(18)}",
+      encoded_string("AERO"),
+      encoded_string("Aerodrome"),
+      "0x#{uint_word(18)}",
+      encoded_string("WETH"),
+      encoded_string("Wrapped Ether")
+    )
+
+    error = assert_raises(AerodromeSlipstreamMath::Error) do
+      @service.fetch_position(5016)
+    end
+    assert_match "sqrt_price_x96", error.message
   end
 
   test "service does not require private keys or call HyperliquidService" do
@@ -298,9 +318,9 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     ]
   end
 
-  def slot0_words
+  def slot0_words(sqrt_price_x96: 32_678_154_748_101_184_656_879_789)
     [
-      uint_word(32_678_154_748_101_184_656_879_789),
+      uint_word(sqrt_price_x96),
       int_word(-155876),
       uint_word(0),
       uint_word(1),

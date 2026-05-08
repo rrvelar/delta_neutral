@@ -39,14 +39,16 @@ class AerodromeSlipstreamDryRun
   end
 
   def report
+    results = @token_ids.map { |token_id| report_token(token_id) }
+
     {
       safety_banner: SAFETY_BANNER,
       database_write: false,
       hedge_enabled: false,
-      amount_math_deferred: true,
+      amount_math_deferred: results.any? { |result| result[:amount0_raw].nil? || result[:amount1_raw].nil? },
       token_count: @token_ids.size,
       notes: @notes,
-      results: @token_ids.map { |token_id| report_token(token_id) }
+      results: results
     }
   end
 
@@ -185,7 +187,11 @@ class AerodromeSlipstreamDryRun
       tokens_owed1_raw: data.tokens_owed1_raw,
       amount0_raw: data.amount0_raw,
       amount1_raw: data.amount1_raw,
+      amount0_decimal: decimal_string(data.amount0_raw, data.token0_decimals),
+      amount1_decimal: decimal_string(data.amount1_raw, data.token1_decimals),
       partial_data_reason: data.partial_data_reason,
+      math_source: data.verification_status == "verified_math" ? AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE : nil,
+      verification_status: data.verification_status,
       hedge_enabled: false,
       database_write: false,
       error_class: nil,
@@ -227,11 +233,21 @@ class AerodromeSlipstreamDryRun
       tokens_owed1_raw: nil,
       amount0_raw: nil,
       amount1_raw: nil,
+      amount0_decimal: nil,
+      amount1_decimal: nil,
       partial_data_reason: nil,
+      math_source: nil,
+      verification_status: "error",
       hedge_enabled: false,
       database_write: false,
       error_class: error.class.name,
       error_message: error.message
     }
+  end
+
+  def decimal_string(raw_amount, decimals)
+    return nil if raw_amount.nil? || decimals.nil?
+
+    AerodromeSlipstreamMath.decimal_amount(raw_amount, decimals).to_s("F")
   end
 end

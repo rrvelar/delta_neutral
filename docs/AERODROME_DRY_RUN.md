@@ -7,7 +7,8 @@ The Aerodrome dry-run tooling performs a read-only check of explicit Aerodrome S
 - Reads explicit token ids from `TOKEN_IDS` or `AERODROME_SLIPSTREAM_TOKEN_IDS`.
 - Uses `AerodromeSlipstreamService` to call read-only JSON-RPC `eth_call` methods.
 - Prints owner, manager, factory, pool, token metadata, tick range, current tick, liquidity, and raw owed-token fields.
-- Returns `amount0_raw` and `amount1_raw` as partial/deferred because amount math is not implemented yet.
+- Computes `amount0_raw` and `amount1_raw` with the verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
+- Prints decimal display amounts when token decimals are available.
 - Handles individual token errors and continues building the report.
 
 ## What It Does Not Do
@@ -32,17 +33,20 @@ Every result includes:
 
 - `database_write: false`
 - `hedge_enabled: false`
-- `amount_math_deferred: true` at the report level
-- `amount0_raw: nil`
-- `amount1_raw: nil`
-- `partial_data_reason`
+- `amount_math_deferred: false` when every token has computed raw amounts
+- `amount0_raw`
+- `amount1_raw`
+- `amount0_decimal`
+- `amount1_decimal`
+- `math_source`
+- `verification_status`
 
 Human output also repeats:
 
 - `NO DB WRITES`
 - `NO HYPERLIQUID`
 - `NO HEDGES`
-- `AMOUNT MATH DEFERRED`
+- `AMOUNT MATH DEFERRED` only as a safety heading; check each token's `verification_status` and `partial_data_reason` for the actual math state.
 
 ## Required Env Vars
 
@@ -162,7 +166,7 @@ For each token id:
 
 1. Open the position in the Aerodrome UI.
 2. Open the configured position manager and token id on BaseScan.
-3. Compare `owner_address`, `token0_address`, `token1_address`, `tick_spacing`, `tick_lower`, `tick_upper`, `liquidity`, `pool_address`, `current_tick`, `tokens_owed0_raw`, and `tokens_owed1_raw`.
+3. Compare `owner_address`, `token0_address`, `token1_address`, `tick_spacing`, `tick_lower`, `tick_upper`, `liquidity`, `pool_address`, `current_tick`, `amount0_raw`, `amount1_raw`, `tokens_owed0_raw`, and `tokens_owed1_raw`.
 4. Record the RPC URL host, block context if available from the RPC provider, and any differences in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
 
 ## Confirm No DB Writes
@@ -184,18 +188,25 @@ The dry-run code path does not instantiate `HyperliquidService` and does not req
 
 You can also run without those variables in a local shell when only using the dry-run task.
 
-## Expected Partial Fields
+## Amount Math Status
 
-These fields are expected to be partial:
+Amount math is implemented for read-only dry-run output using:
 
-- `amount0_raw`
-- `amount1_raw`
-- normalized decimal amounts
-- USD valuation
-- advanced uncollected fee calculations beyond `tokensOwed0` and `tokensOwed1`
-- hedge readiness
+- Aerodrome Slipstream `contracts/core/libraries/TickMath.sol`.
+- Aerodrome Slipstream `contracts/periphery/libraries/LiquidityAmounts.sol`.
+- Aerodrome Slipstream `contracts/core/libraries/FixedPoint96.sol`.
+- Aerodrome Slipstream `contracts/core/libraries/FullMath.sol`.
 
-Amount math remains deferred because the exact Slipstream formula, rounding, and comparison against known Aerodrome UI/BaseScan values must be verified first. Hedge integration remains disabled because amount math, USD pricing, fee strategy, and monitor-only behavior are not fully verified.
+The Ruby implementation preserves Solidity-style integer floor division. Raw values do not use Float arithmetic.
+
+These fields remain partial or unresolved:
+
+- USD valuation.
+- Advanced uncollected fee calculations beyond `tokensOwed0` and `tokensOwed1`.
+- Staking/gauge discovery.
+- Hedge readiness.
+
+Manual comparison against Aerodrome UI/BaseScan is still required before using the data operationally. Hedge integration remains disabled because USD pricing, fee strategy, and monitor-only behavior are not fully verified.
 
 ## Rollback And Safety Notes
 
