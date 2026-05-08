@@ -17,7 +17,8 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Amount0/amount1 implemented | PASS | Verified amount math is implemented for read-only service, dry-run, and monitor-only sync. |
 | USDC-pool valuation preview | PASS | Supported only when one token matches configured `AERODROME_USDC_ADDRESS`; unsupported pairs keep prices nil. |
 | WETH/USDC hedge preview | PASS | Preview-only calculation; `execution_enabled=false`, no orders, no Hyperliquid calls. |
-| Manual hedge proposals | PASS | Local records only; create/review/reject actions do not call Hyperliquid, do not place orders, and do not create executable `Hedge` records. |
+| Manual hedge proposals | PASS | Local records only; create/review/reject/regenerate actions do not call Hyperliquid, do not place orders, and do not create executable `Hedge` records. |
+| Proposal history/status | PASS | Recent proposal history and current/stale status are display-only and computed from local proposal and position records. |
 | UI monitor-only display | PASS | Dashboard/position views label Aerodrome as monitor-only and show no order execution controls. |
 | USD valuation for non-USDC pairs | UNKNOWN | No trusted external USD valuation source is implemented. |
 | Advanced fees deferred | UNKNOWN | Only raw owed-token fields are safe first reads. |
@@ -36,6 +37,6 @@ NOT READY FOR LIVE HEDGE INTEGRATION.
 
 READY ONLY FOR READ-ONLY MANUAL DRY-RUN AND MONITOR-ONLY TESTING.
 
-Manual hedge proposals are not execution approval. Proposal review only updates local status and does not place orders. `AERODROME_HEDGE_ENABLED` remains false/default-off.
+Manual hedge proposals are not execution approval. Proposal review/rejection only updates local status and timestamps and does not place orders. Stale proposals must be regenerated before any manual review. `AERODROME_HEDGE_ENABLED` remains false/default-off.
 
-Do not enable Aerodrome hedge execution until amount math, USD valuation, hedge preview/proposal behavior, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation, hedge previews, and manual proposals do not make Aerodrome positions hedge-ready.
+Do not enable Aerodrome hedge execution until amount math, USD valuation, hedge preview/proposal behavior, proposal history/staleness handling, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation, hedge previews, and manual proposals do not make Aerodrome positions hedge-ready.

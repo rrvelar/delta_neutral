@@ -1,13 +1,10 @@
 class AerodromeHedgeProposalsController < ApplicationController
   def create
-    position = find_position
-    result = AerodromeHedgeProposalBuilder.new.call(position)
+    build_proposal
+  end
 
-    if result.created
-      redirect_to position_path(position), notice: "Manual hedge proposal generated. Execution remains disabled."
-    else
-      redirect_to position_path(position), alert: "Manual hedge proposal unavailable: #{result.reason}"
-    end
+  def regenerate
+    build_proposal
   end
 
   def mark_reviewed
@@ -25,6 +22,17 @@ class AerodromeHedgeProposalsController < ApplicationController
   end
 
   private
+
+  def build_proposal
+    position = find_position
+    result = AerodromeHedgeProposalBuilder.new.call(position)
+
+    if result.created
+      redirect_to position_path(position), notice: "Manual hedge proposal generated. Execution remains disabled."
+    else
+      redirect_to position_path(position), alert: "Manual hedge proposal unavailable: #{result.reason}"
+    end
+  end
 
   def find_position
     Current.user.positions.includes(:dex).find(params[:position_id])

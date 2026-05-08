@@ -92,12 +92,58 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Manual Hedge Proposal", response.body
+    assert_match "Manual Proposal History", response.body
+    assert_match "Manual proposal only", response.body
+    assert_match "No orders", response.body
+    assert_match "No Hyperliquid", response.body
+    assert_match "Execution disabled", response.body
+    assert_match "Not a live hedge", response.body
     assert_match "Local record only", response.body
     assert_match "Review does not place orders", response.body
+    assert_match "Current", response.body
+    assert_match "None", response.body
     assert_match "disabled / manual review only", response.body
     assert_match "not called", response.body
     assert_match "Mark Reviewed", response.body
     assert_match "Reject", response.body
+    assert_no_match "Execute", response.body
+    assert_no_match "Trade", response.body
+  end
+
+  test "show displays proposal history table for Aerodrome position" do
+    position = create_aerodrome_position
+    older = position.aerodrome_hedge_proposals.create!(
+      status: "rejected",
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.0"),
+      suggested_short_notional_usd: BigDecimal("2000"),
+      lp_total_value_usd: BigDecimal("2500"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: 1.hour.ago,
+      reviewed_at: 30.minutes.ago
+    )
+    latest = position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Manual Proposal History", response.body
+    assert_match latest.id.to_s, response.body
+    assert_match older.id.to_s, response.body
+    assert_match "proposal rejected/expired", response.body
+    assert_match "disabled", response.body
+    assert_match "not called", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
   end
@@ -127,6 +173,75 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, proposal.hyperliquid_called
   end
 
+  test "regenerate updates latest draft proposal without Hyperliquid RPC trading or real hedge" do
+    position = create_aerodrome_position
+    proposal = position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: 1.hour.ago
+    )
+    position.update!(asset0_amount: BigDecimal("1.5"))
+
+    with_env(
+      "AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006",
+      "AERODROME_USDC_ADDRESS" => "0x0000000000000000000000000000000000000001"
+    ) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, ->(*) { raise "RPC service should not be called" }) do
+          assert_no_difference "AerodromeHedgeProposal.count" do
+            assert_no_difference "Hedge.count" do
+              post regenerate_position_aerodrome_hedge_proposals_path(position)
+            end
+          end
+        end
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    assert_equal BigDecimal("1.5"), proposal.reload.suggested_short_amount
+    assert_equal BigDecimal("3000"), proposal.suggested_short_notional_usd
+    assert_equal false, proposal.execution_enabled
+    assert_equal false, proposal.hyperliquid_called
+  end
+
+  test "regenerate creates a new draft after reviewed proposal without execution" do
+    position = create_aerodrome_position
+    position.aerodrome_hedge_proposals.create!(
+      status: "reviewed",
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2500"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: 1.hour.ago,
+      reviewed_at: 30.minutes.ago
+    )
+
+    with_env(
+      "AERODROME_WETH_ADDRESS" => "0x4200000000000000000000000000000000000006",
+      "AERODROME_USDC_ADDRESS" => "0x0000000000000000000000000000000000000001"
+    ) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, ->(*) { raise "RPC service should not be called" }) do
+          assert_difference "AerodromeHedgeProposal.draft.count", 1 do
+            assert_no_difference "Hedge.count" do
+              post regenerate_position_aerodrome_hedge_proposals_path(position)
+            end
+          end
+        end
+      end
+    end
+
+    assert_redirected_to position_path(position)
+  end
+
   test "mark reviewed works without execution" do
     proposal = create_aerodrome_position.aerodrome_hedge_proposals.create!(
       hedge_asset: "ETH",
@@ -140,7 +255,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     )
 
     HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
-      post mark_reviewed_aerodrome_hedge_proposal_path(proposal)
+      assert_no_difference "Hedge.count" do
+        post mark_reviewed_aerodrome_hedge_proposal_path(proposal)
+      end
     end
 
     assert_redirected_to position_path(proposal.position)
@@ -163,7 +280,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     )
 
     HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
-      post reject_aerodrome_hedge_proposal_path(proposal)
+      assert_no_difference "Hedge.count" do
+        post reject_aerodrome_hedge_proposal_path(proposal)
+      end
     end
 
     assert_redirected_to position_path(proposal.position)
@@ -182,6 +301,50 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Sync Now", response.body
     assert_match "View Hedge", response.body
     assert_no_match "Refresh Read-only Data", response.body
+    assert_no_match "Manual Hedge Proposal", response.body
+    assert_no_match "Manual Proposal History", response.body
+    assert_no_match "Generate Manual Hedge Proposal", response.body
+    assert_no_match "Regenerate Manual Hedge Proposal", response.body
+  end
+
+  test "show displays stale amount reason for changed proposal values" do
+    position = create_aerodrome_position
+    position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.0"),
+      suggested_short_notional_usd: BigDecimal("2000"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Stale", response.body
+    assert_match "amount changed", response.body
+  end
+
+  test "show displays stale notional reason for changed proposal values" do
+    position = create_aerodrome_position
+    position.aerodrome_hedge_proposals.create!(
+      hedge_asset: "ETH",
+      hedge_side: "short",
+      suggested_short_amount: BigDecimal("1.25"),
+      suggested_short_notional_usd: BigDecimal("2400"),
+      lp_total_value_usd: BigDecimal("3000"),
+      weth_price_usd: BigDecimal("2000"),
+      source: AerodromeHedgePreview::SOURCE,
+      generated_at: Time.current
+    )
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Stale", response.body
+    assert_match "notional changed", response.body
   end
 
   test "show displays unavailable hedge preview when Aerodrome price data is missing" do
