@@ -32,9 +32,17 @@ Every result includes:
 
 - `database_write: false`
 - `hedge_enabled: false`
+- `amount_math_deferred: true` at the report level
 - `amount0_raw: nil`
 - `amount1_raw: nil`
 - `partial_data_reason`
+
+Human output also repeats:
+
+- `NO DB WRITES`
+- `NO HYPERLIQUID`
+- `NO HEDGES`
+- `AMOUNT MATH DEFERRED`
 
 ## Required Env Vars
 
@@ -47,6 +55,34 @@ AERODROME_SLIPSTREAM_FACTORY=FACTORY_ADDRESS_PLACEHOLDER
 ```
 
 No private keys are required. Do not add private keys for this task.
+
+## Verify Config
+
+Static validation only. This checks required values and address format without RPC:
+
+```bash
+bin/rails aerodrome:verify_config
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails aerodrome:verify_config
+```
+
+Read-only RPC checks:
+
+```bash
+CHECK_RPC=true bin/rails aerodrome:verify_config
+```
+
+With `CHECK_RPC=true`, the task calls only:
+
+- `eth_chainId`
+- `eth_getCode` for the configured position manager
+- `eth_getCode` for the configured factory
+
+It does not call `eth_sendTransaction`, `eth_sendRawTransaction`, jobs, or Hyperliquid.
 
 ## Run With Token IDs
 
@@ -68,6 +104,8 @@ Multiple token ids are comma-separated:
 bin/rails aerodrome:dry_run TOKEN_IDS=5016,12345
 ```
 
+Blank token ids are rejected if no valid token id remains. Duplicate token ids are de-duplicated and reported as notes.
+
 ## JSON Output
 
 Use JSON for saving or diffing reports:
@@ -75,6 +113,48 @@ Use JSON for saving or diffing reports:
 ```bash
 FORMAT=json bin/rails aerodrome:dry_run TOKEN_IDS=5016
 ```
+
+JSON output is intended for saving and diffing. It includes the same safety fields as human-readable output.
+
+## Common Errors
+
+Missing token ids:
+
+```text
+Aerodrome dry-run requires explicit token ids.
+```
+
+Missing config:
+
+```text
+Missing BASE_RPC_URL
+Missing AERODROME_SLIPSTREAM_POSITION_MANAGER
+Missing AERODROME_SLIPSTREAM_FACTORY
+```
+
+Invalid address:
+
+```text
+Invalid AERODROME_SLIPSTREAM_POSITION_MANAGER address
+Invalid AERODROME_SLIPSTREAM_FACTORY address
+```
+
+Wrong RPC chain:
+
+```text
+BASE_RPC_URL returned chain id ... expected 0x2105
+```
+
+Treat these as verification blockers.
+
+## Troubleshooting
+
+- Run `bin/rails aerodrome:verify_config` before dry-run.
+- Run `CHECK_RPC=true bin/rails aerodrome:verify_config` if static config passes.
+- Confirm placeholders were replaced locally, not in committed docs.
+- Confirm token ids are comma-separated and not blank.
+- Confirm the configured position manager corresponds to the token id being checked.
+- Confirm the configured factory is paired with that manager.
 
 ## Compare Against Aerodrome UI And BaseScan
 
@@ -124,3 +204,4 @@ Amount math remains deferred because the exact Slipstream formula, rounding, and
 - Do not copy secrets into docs or command output.
 - Do not use private RPC URLs in shared logs.
 - Dry-run failures should be treated as verification blockers, not as reasons to guess contract behavior.
+- See `docs/AERODROME_ROLLBACK.md` for rollback details.

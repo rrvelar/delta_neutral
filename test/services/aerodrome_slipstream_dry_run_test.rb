@@ -75,6 +75,25 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     service.verify
   end
 
+  test "does not write Hedge records" do
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, position_data("5016"), [ "5016" ])
+
+    assert_no_difference "Hedge.count" do
+      AerodromeSlipstreamDryRun.new(token_ids: [ "5016" ], slipstream_service: service).report
+    end
+
+    service.verify
+  end
+
+  test "normalizes duplicate and blank token ids" do
+    normalized = AerodromeSlipstreamDryRun.normalize_token_ids([ " 5016 ", "", "5016", "999, 999" ])
+
+    assert_equal [ "5016", "999" ], normalized.fetch(:token_ids)
+    assert_includes normalized.fetch(:notes), "Duplicate token id 5016 ignored"
+    assert_includes normalized.fetch(:notes), "Duplicate token id 999 ignored"
+  end
+
   test "missing config error is shown safely in result" do
     service_class = Class.new do
       def initialize(**)
@@ -89,6 +108,66 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_match "BASE_RPC_URL", result.fetch(:error_message)
     assert_equal false, result.fetch(:database_write)
     assert_equal false, result.fetch(:hedge_enabled)
+  end
+
+  test "verify config without CHECK_RPC does not call RPC" do
+    report = AerodromeSlipstreamDryRun::ConfigVerification.new(
+      rpc_url: "https://base.example/rpc",
+      position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
+      factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
+      check_rpc: false
+    ).report
+
+    assert_equal "ok", report.fetch(:status)
+    assert_equal false, report.fetch(:check_rpc)
+    assert_empty report.fetch(:rpc_checks)
+    assert_not_requested :post, "https://base.example/rpc"
+  end
+
+  test "verify config with CHECK_RPC uses mocked read-only RPC only" do
+    stub_request(:post, "https://base.example/rpc")
+      .to_return(
+        { status: 200, body: { jsonrpc: "2.0", id: 1, result: "0x2105" }.to_json, headers: { "Content-Type" => "application/json" } },
+        { status: 200, body: { jsonrpc: "2.0", id: 1, result: "0x60016001" }.to_json, headers: { "Content-Type" => "application/json" } },
+        { status: 200, body: { jsonrpc: "2.0", id: 1, result: "0x60026002" }.to_json, headers: { "Content-Type" => "application/json" } }
+      )
+
+    report = AerodromeSlipstreamDryRun::ConfigVerification.new(
+      rpc_url: "https://base.example/rpc",
+      position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
+      factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
+      check_rpc: true
+    ).report
+
+    assert_equal "ok", report.fetch(:status)
+    assert_equal [ "eth_chainId", "eth_getCode", "eth_getCode" ], report.fetch(:rpc_checks).map { |check| check.fetch(:method) }
+    assert_requested :post, "https://base.example/rpc", times: 3
+  end
+
+  test "verify config invalid manager address fails safely" do
+    report = AerodromeSlipstreamDryRun::ConfigVerification.new(
+      rpc_url: "https://base.example/rpc",
+      position_manager_address: "bad",
+      factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
+      check_rpc: true
+    ).report
+
+    assert_equal "error", report.fetch(:status)
+    assert_includes report.fetch(:errors), "Invalid AERODROME_SLIPSTREAM_POSITION_MANAGER address"
+    assert_empty report.fetch(:rpc_checks)
+    assert_not_requested :post, "https://base.example/rpc"
+  end
+
+  test "verify config missing base rpc fails safely" do
+    report = AerodromeSlipstreamDryRun::ConfigVerification.new(
+      rpc_url: nil,
+      position_manager_address: "0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53",
+      factory_address: "0xf8f2eb4940cfe7d13603dddd87f123820fc061ef",
+      check_rpc: false
+    ).report
+
+    assert_equal "error", report.fetch(:status)
+    assert_includes report.fetch(:errors), "Missing BASE_RPC_URL"
   end
 
   private

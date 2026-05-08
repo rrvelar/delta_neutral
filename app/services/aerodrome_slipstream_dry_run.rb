@@ -1,9 +1,24 @@
+require "net/http"
+
 # Read-only operational report for manually checking Aerodrome Slipstream NFTs.
 #
 # This command object does not write to the database, does not run jobs, does
 # not require private keys, and does not call Hyperliquid.
 class AerodromeSlipstreamDryRun
   SAFETY_BANNER = "READ-ONLY DRY RUN — no DB writes, no trades, no hedges."
+  BASE_CHAIN_ID_HEX = "0x2105"
+  EVM_ADDRESS_PATTERN = /\A0x[0-9a-fA-F]{40}\z/
+
+  def self.normalize_token_ids(raw_token_ids)
+    token_ids = Array(raw_token_ids).flat_map { |value| value.to_s.split(",") }.map(&:strip).compact_blank
+    unique_token_ids = token_ids.uniq
+    duplicate_token_ids = token_ids.tally.select { |_token_id, count| count > 1 }.keys
+
+    {
+      token_ids: unique_token_ids,
+      notes: duplicate_token_ids.map { |token_id| "Duplicate token id #{token_id} ignored" }
+    }
+  end
 
   def initialize(
     token_ids:,
@@ -13,7 +28,9 @@ class AerodromeSlipstreamDryRun
     slipstream_service: nil,
     slipstream_service_class: AerodromeSlipstreamService
   )
-    @token_ids = Array(token_ids).map(&:to_s).map(&:strip).compact_blank
+    normalized = self.class.normalize_token_ids(token_ids)
+    @token_ids = normalized.fetch(:token_ids)
+    @notes = normalized.fetch(:notes)
     @rpc_url = rpc_url
     @position_manager_address = position_manager_address
     @factory_address = factory_address
@@ -26,9 +43,119 @@ class AerodromeSlipstreamDryRun
       safety_banner: SAFETY_BANNER,
       database_write: false,
       hedge_enabled: false,
+      amount_math_deferred: true,
       token_count: @token_ids.size,
+      notes: @notes,
       results: @token_ids.map { |token_id| report_token(token_id) }
     }
+  end
+
+  class ConfigVerification
+    def initialize(
+      rpc_url: ENV["BASE_RPC_URL"],
+      position_manager_address: ENV["AERODROME_SLIPSTREAM_POSITION_MANAGER"],
+      factory_address: ENV["AERODROME_SLIPSTREAM_FACTORY"],
+      check_rpc: false
+    )
+      @rpc_url = rpc_url
+      @position_manager_address = position_manager_address
+      @factory_address = factory_address
+      @check_rpc = check_rpc
+    end
+
+    def report
+      errors = static_errors
+      rpc_checks = []
+      rpc_checks = run_rpc_checks(errors) if @check_rpc && errors.empty?
+
+      {
+        safety_banner: SAFETY_BANNER,
+        status: errors.empty? ? "ok" : "error",
+        database_write: false,
+        hedge_enabled: false,
+        check_rpc: @check_rpc,
+        config: {
+          base_rpc_url_present: @rpc_url.present?,
+          position_manager_address: @position_manager_address,
+          factory_address: @factory_address
+        },
+        rpc_checks: rpc_checks,
+        errors: errors
+      }
+    end
+
+    private
+
+    def static_errors
+      [].tap do |errors|
+        errors << "Missing BASE_RPC_URL" if @rpc_url.blank?
+        errors << "Missing AERODROME_SLIPSTREAM_POSITION_MANAGER" if @position_manager_address.blank?
+        errors << "Missing AERODROME_SLIPSTREAM_FACTORY" if @factory_address.blank?
+        if @position_manager_address.present? && !@position_manager_address.match?(EVM_ADDRESS_PATTERN)
+          errors << "Invalid AERODROME_SLIPSTREAM_POSITION_MANAGER address"
+        end
+        if @factory_address.present? && !@factory_address.match?(EVM_ADDRESS_PATTERN)
+          errors << "Invalid AERODROME_SLIPSTREAM_FACTORY address"
+        end
+      end
+    end
+
+    def run_rpc_checks(errors)
+      [
+        rpc_check("eth_chainId", nil, errors) do
+          result = rpc_request("eth_chainId", [])
+          errors << "BASE_RPC_URL returned chain id #{result}, expected #{BASE_CHAIN_ID_HEX}" unless result.to_s.downcase == BASE_CHAIN_ID_HEX
+          result
+        end,
+        rpc_check("eth_getCode", @position_manager_address, errors) do
+          result = rpc_request("eth_getCode", [ @position_manager_address, "latest" ])
+          errors << "Position manager has no code on configured RPC" if blank_code?(result)
+          summarize_code(result)
+        end,
+        rpc_check("eth_getCode", @factory_address, errors) do
+          result = rpc_request("eth_getCode", [ @factory_address, "latest" ])
+          errors << "Factory has no code on configured RPC" if blank_code?(result)
+          summarize_code(result)
+        end
+      ]
+    end
+
+    def rpc_check(method, target, errors)
+      { method: method, target: target, status: "ok", result: yield }
+    rescue => e
+      errors << "#{method} failed for #{target || 'BASE_RPC_URL'}: #{e.message}"
+      { method: method, target: target, status: "error", error_class: e.class.name, error_message: e.message }.tap do
+        # Keep the message non-secret: no request body or env values are included.
+      end
+    end
+
+    def rpc_request(method, params)
+      uri = URI(@rpc_url)
+      response = Net::HTTP.post(
+        uri,
+        { jsonrpc: "2.0", method: method, params: params, id: 1 }.to_json,
+        "Content-Type" => "application/json"
+      )
+      raise "Aerodrome config RPC request failed: HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
+
+      parsed = JSON.parse(response.body)
+      raise "Aerodrome config RPC error: #{parsed.dig("error", "message")}" if parsed["error"]
+      raise "Aerodrome config RPC response missing result" unless parsed.key?("result")
+
+      parsed.fetch("result")
+    rescue JSON::ParserError => e
+      raise "Aerodrome config RPC response is not valid JSON: #{e.message}"
+    end
+
+    def blank_code?(result)
+      result.blank? || result == "0x"
+    end
+
+    def summarize_code(result)
+      return result if blank_code?(result)
+
+      "#{result.bytesize} bytes returned"
+    end
   end
 
   private
