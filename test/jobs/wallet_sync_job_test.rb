@@ -62,7 +62,7 @@ class WalletSyncJobTest < ActiveSupport::TestCase
     end
   end
 
-  test "Aerodrome read-only with token ids creates monitor-only position from mocked service" do
+  test "Aerodrome read-only with token ids stores monitor-only position amounts from mocked service" do
     wallet = base_wallet
     aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
 
@@ -85,11 +85,36 @@ class WalletSyncJobTest < ActiveSupport::TestCase
     position = wallet.positions.find_by!(dex: aerodrome_dex, external_id: "5016")
     assert_equal "AERO", position.asset0
     assert_equal "WETH", position.asset1
+    assert_equal BigDecimal("1.25"), position.asset0_amount
+    assert_equal BigDecimal("0.5"), position.asset1_amount
+    assert_nil position.asset0_price_usd
+    assert_nil position.asset1_price_usd
+    assert position.active?
+  end
+
+  test "Aerodrome read-only wallet sync leaves amounts nil when amount math is partial" do
+    wallet = base_wallet
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+
+    stub_uniswap_positions(wallet.address, [])
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, partial_aerodrome_position_data(wallet), [ "5016" ])
+
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "5016"
+    ) do
+      AerodromeSlipstreamService.stub(:new, service) do
+        WalletSyncJob.perform_now(wallet.id)
+      end
+    end
+
+    service.verify
+    position = wallet.positions.find_by!(dex: aerodrome_dex, external_id: "5016")
     assert_nil position.asset0_amount
     assert_nil position.asset1_amount
     assert_nil position.asset0_price_usd
     assert_nil position.asset1_price_usd
-    assert position.active?
   end
 
   test "Aerodrome missing config fails safely only when read-only is enabled" do
@@ -160,6 +185,15 @@ class WalletSyncJobTest < ActiveSupport::TestCase
       current_tick: -155876,
       tokens_owed0_raw: 7,
       tokens_owed1_raw: 11,
+      amount0_raw: 1_250_000_000_000_000_000,
+      amount1_raw: 500_000_000_000_000_000,
+      partial_data_reason: nil,
+      verification_status: "verified_math"
+    )
+  end
+
+  def partial_aerodrome_position_data(wallet)
+    aerodrome_position_data(wallet).with(
       amount0_raw: nil,
       amount1_raw: nil,
       partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,

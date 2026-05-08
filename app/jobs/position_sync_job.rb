@@ -159,17 +159,18 @@ class PositionSyncJob < ApplicationJob
       return
     end
 
+    amount_attributes = aerodrome_amount_attributes(position_data, position.id)
     position.update!(
       asset0: position_data.token0_symbol,
       asset1: position_data.token1_symbol,
-      asset0_amount: nil,
-      asset1_amount: nil,
+      asset0_amount: amount_attributes.fetch(:asset0_amount),
+      asset1_amount: amount_attributes.fetch(:asset1_amount),
       asset0_price_usd: nil,
       asset1_price_usd: nil,
       pool_address: position_data.pool_address,
       active: true
     )
-    Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; amount and pricing remain partial" }
+    Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; USD pricing remains unresolved" }
   end
 
   def aerodrome_position?(position)
@@ -178,5 +179,39 @@ class PositionSyncJob < ApplicationJob
 
   def aerodrome_read_only_enabled?
     ENV["AERODROME_READ_ONLY_ENABLED"].to_s.downcase == "true"
+  end
+
+  def aerodrome_amount_attributes(position_data, position_id)
+    unless position_data.verification_status == "verified_math" && position_data.amount0_raw && position_data.amount1_raw
+      Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} amount math is partial; leaving amounts nil")
+      return { asset0_amount: nil, asset1_amount: nil }
+    end
+
+    {
+      asset0_amount: storable_aerodrome_amount(position_data, :amount0_raw, :token0_decimals, :asset0_amount, position_id),
+      asset1_amount: storable_aerodrome_amount(position_data, :amount1_raw, :token1_decimals, :asset1_amount, position_id)
+    }
+  end
+
+  def storable_aerodrome_amount(position_data, raw_field, decimals_field, column_name, position_id)
+    raw_amount = position_data.public_send(raw_field)
+    decimals = AerodromeSlipstreamMath.uint!(position_data.public_send(decimals_field), decimals_field.to_s)
+    column = Position.columns_hash.fetch(column_name.to_s)
+    if decimals > column.scale
+      Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} decimals exceed schema scale; leaving amount nil")
+      return nil
+    end
+
+    amount = AerodromeSlipstreamMath.decimal_amount(raw_amount, decimals)
+    integer_digits = amount.abs.to_i.to_s.length
+    if integer_digits > column.precision - column.scale
+      Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} exceeds schema precision; leaving amount nil")
+      return nil
+    end
+
+    amount
+  rescue AerodromeSlipstreamMath::Error => e
+    Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} amount conversion failed: #{e.message}")
+    nil
   end
 end

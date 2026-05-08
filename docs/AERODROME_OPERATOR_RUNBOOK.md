@@ -8,12 +8,14 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - `AerodromeSlipstreamService` is a read-only JSON-RPC client for selected Aerodrome Slipstream position manager and factory addresses.
 - `AerodromeSlipstreamDryRun` wraps the service for manual token-id verification without database writes.
 - Aerodrome monitor-only sync is gated by `AERODROME_READ_ONLY_ENABLED=true` and explicit token ids.
+- Monitor-only sync stores verified computed token amounts in existing `Position` amount fields; USD prices remain nil.
 - `HedgeSyncJob` skips Aerodrome positions; Aerodrome exposure is not fed into hedge logic.
 
 ## Implemented
 
 - Read-only Aerodrome position fetches for explicit token ids.
 - Read-only amount0/amount1 math using verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
+- Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Mocked tests for dry-run and config verification.

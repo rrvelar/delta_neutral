@@ -231,7 +231,7 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     end
   end
 
-  test "Aerodrome read-only position sync refreshes metadata without Hyperliquid or snapshots" do
+  test "Aerodrome read-only position sync refreshes metadata and amounts without Hyperliquid or snapshots" do
     position = aerodrome_position
     service = Minitest::Mock.new
     service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
@@ -250,11 +250,34 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     position.reload
     assert_equal "AERO", position.asset0
     assert_equal "WETH", position.asset1
+    assert_equal BigDecimal("1.25"), position.asset0_amount
+    assert_equal BigDecimal("0.5"), position.asset1_amount
+    assert_nil position.asset0_price_usd
+    assert_nil position.asset1_price_usd
+    assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
+  end
+
+  test "Aerodrome read-only position sync leaves amounts nil when amount math is partial" do
+    position = aerodrome_position
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, partial_aerodrome_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          assert_no_difference "PnlSnapshot.count" do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+
+    service.verify
+    position.reload
     assert_nil position.asset0_amount
     assert_nil position.asset1_amount
     assert_nil position.asset0_price_usd
     assert_nil position.asset1_price_usd
-    assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
   end
 
   private
@@ -302,6 +325,15 @@ class PositionSyncJobTest < ActiveSupport::TestCase
       current_tick: -155876,
       tokens_owed0_raw: 7,
       tokens_owed1_raw: 11,
+      amount0_raw: 1_250_000_000_000_000_000,
+      amount1_raw: 500_000_000_000_000_000,
+      partial_data_reason: nil,
+      verification_status: "verified_math"
+    )
+  end
+
+  def partial_aerodrome_position_data(wallet)
+    aerodrome_position_data(wallet).with(
       amount0_raw: nil,
       amount1_raw: nil,
       partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,

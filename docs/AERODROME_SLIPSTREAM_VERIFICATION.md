@@ -356,7 +356,8 @@ This structure is read-only and must not contain private keys, approvals, transa
 
 - `WalletSyncJob` can register Aerodrome Slipstream monitor-only positions only when `AERODROME_READ_ONLY_ENABLED=true` and explicit `AERODROME_SLIPSTREAM_TOKEN_IDS` are configured.
 - Initial discovery is user-provided token ids only; wallet enumeration, staking/gauge discovery, and multi-manager discovery remain unresolved.
-- `PositionSyncJob` refreshes only existing-schema metadata for Aerodrome positions: token symbols, pool address, active state, and source dex. Amounts, USD prices, tick data, liquidity, manager, and factory metadata remain partial because the current schema cannot store them safely.
+- `WalletSyncJob` and `PositionSyncJob` persist computed Aerodrome token amounts into existing `positions.asset0_amount` and `positions.asset1_amount` fields only when amount math is verified. Partial/deferred amount data leaves amounts nil and logs a clear monitor-only warning.
+- Aerodrome USD prices remain unresolved and are kept nil. Tick data, liquidity, manager, and factory metadata remain unstored in the current schema.
 - `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because fee strategy, USD valuation, and real-position UI/BaseScan comparisons remain incomplete.
 - `HedgeSyncJob` skips Aerodrome positions. Aerodrome exposure is not eligible for hedge execution, and `HyperliquidService` remains untouched.
 
@@ -515,9 +516,10 @@ Ready only for documentation and planning. The project can become READY FOR READ
 - `AerodromeSlipstreamService` is a read-only RPC scaffold only.
 - Tests use mocked JSON-RPC responses and do not call real RPC.
 - `amount0`/`amount1` liquidity math is implemented for read-only service and dry-run reports.
+- Monitor-only sync persists verified computed token amounts into existing `Position` amount fields. USD prices remain nil, no Aerodrome PnL snapshots are created, and Aerodrome positions remain skipped by `HedgeSyncJob`.
 - Advanced fee math beyond `tokensOwed0` and `tokensOwed1` remains deferred.
 - `HyperliquidService` is untouched.
-- Jobs are not connected to Aerodrome yet; no live hedge execution path was changed or enabled.
+- No live hedge execution path was changed or enabled.
 
 ## Unresolved Facts That Must Be Closed
 
