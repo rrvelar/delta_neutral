@@ -8,7 +8,8 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - `AerodromeSlipstreamService` is a read-only JSON-RPC client for selected Aerodrome Slipstream position manager and factory addresses.
 - `AerodromeSlipstreamDryRun` wraps the service for manual token-id verification without database writes.
 - Aerodrome monitor-only sync is gated by `AERODROME_READ_ONLY_ENABLED=true` and explicit token ids.
-- Monitor-only sync stores verified computed token amounts in existing `Position` amount fields; USD prices remain nil.
+- Monitor-only sync stores verified computed token amounts in existing `Position` amount fields.
+- Monitor-only USD valuation preview is available only for pools with the configured USDC quote token; unsupported pairs keep USD prices nil.
 - `HedgeSyncJob` skips Aerodrome positions; Aerodrome exposure is not fed into hedge logic.
 
 ## Implemented
@@ -16,6 +17,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Read-only Aerodrome position fetches for explicit token ids.
 - Read-only amount0/amount1 math using verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
+- Monitor-only USD valuation preview for configured-USDC pools.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Mocked tests for dry-run and config verification.
@@ -25,7 +27,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 
 - Live trading.
 - Aerodrome hedge execution.
-- USD valuation.
+- USD valuation for non-USDC pools.
 - Advanced uncollected fee calculations.
 - Staking/gauge/escrow discovery.
 - Multi-manager automatic discovery.
@@ -48,6 +50,7 @@ BASE_RPC_URL=BASE_RPC_URL_PLACEHOLDER
 AERODROME_SLIPSTREAM_POSITION_MANAGER=POSITION_MANAGER_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_FACTORY=FACTORY_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_TOKEN_IDS=TOKEN_ID_PLACEHOLDER
+AERODROME_USDC_ADDRESS=BASE_USDC_ADDRESS_PLACEHOLDER
 AERODROME_READ_ONLY_ENABLED=false
 AERODROME_HEDGE_ENABLED=false
 ```
@@ -109,6 +112,7 @@ The task de-duplicates repeated token ids and prints a note. Blank token ids are
    - current tick from pool `slot0`;
    - liquidity;
    - computed `amount0_raw` and `amount1_raw`;
+   - supported USDC-pool `token0_price_usd`, `token1_price_usd`, and `total_value_usd`;
    - `tokensOwed0` and `tokensOwed1`.
 
 If any value differs, stop and record the discrepancy in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
@@ -151,14 +155,16 @@ Do not proceed beyond dry-run if:
 - manager or factory `eth_getCode` returns `0x`.
 - dry-run returns an error for the token id.
 - owner, pool, token, tick, or liquidity values disagree with Aerodrome UI/BaseScan.
-- USD valuation or fee behavior is still needed for the next step.
+- USD valuation for an unsupported pair or fee behavior is still needed for the next step.
 
 ## Future Hedge Integration Checklist
 
 - [ ] Hyperliquid remains untouched until a later explicit task.
 - [x] Amount0/amount1 math implemented from trusted Aerodrome Slipstream sources.
 - [ ] Amount0/amount1 math compared against Aerodrome UI/BaseScan for real positions.
-- [ ] USD valuation source verified.
+- [x] USDC-pool valuation preview implemented for monitor-only use.
+- [ ] USDC-pool valuation compared against Aerodrome UI/BaseScan for real positions.
+- [ ] Non-USDC USD valuation source verified.
 - [ ] Advanced fee strategy decided and tested.
 - [ ] Staked/gauge position behavior verified or explicitly excluded.
 - [ ] Manager/factory deployment strategy approved.

@@ -25,6 +25,12 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
     assert_equal "0.000000004594633482", result.fetch(:amount1_decimal)
     assert_equal AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE, result.fetch(:math_source)
     assert_equal "verified_math", result.fetch(:verification_status)
+    assert_equal "2000.0", result.fetch(:token0_price_usd)
+    assert_equal "1.0", result.fetch(:token1_price_usd)
+    assert_equal "7081.180913988340424", result.fetch(:total_value_usd)
+    assert_equal "supported", result.fetch(:valuation_status)
+    assert_equal AerodromeSlipstreamValuation::VALUATION_SOURCE, result.fetch(:valuation_source)
+    assert_nil result.fetch(:valuation_reason)
     assert_nil result.fetch(:error_class)
   end
 
@@ -203,7 +209,13 @@ class AerodromeSlipstreamDryRunTest < ActiveSupport::TestCase
       amount0_raw: 1_290_590_456_994_170_212,
       amount1_raw: 4_594_633_482,
       partial_data_reason: nil,
-      verification_status: "verified_math"
+      verification_status: "verified_math",
+      token0_price_usd: BigDecimal("2000"),
+      token1_price_usd: BigDecimal("1"),
+      total_value_usd: BigDecimal("7081.180913988340424"),
+      valuation_status: "supported",
+      valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
+      valuation_reason: nil
     )
   end
 end

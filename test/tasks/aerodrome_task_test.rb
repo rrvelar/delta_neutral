@@ -87,6 +87,10 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "AMOUNT MATH VERIFIED", out
         assert_no_match(/AMOUNT MATH DEFERRED/, out)
         assert_match "verification_status: verified_math", out
+        assert_match "token0_price_usd:", out
+        assert_match "token1_price_usd:", out
+        assert_match "total_value_usd:", out
+        assert_match "valuation_status: supported", out
       end
     end
   end
@@ -103,7 +107,13 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         amount1_decimal: nil,
         math_source: nil,
         verification_status: "partial",
-        partial_data_reason: "amount0/amount1 math deferred"
+        partial_data_reason: "amount0/amount1 math deferred",
+        token0_price_usd: nil,
+        token1_price_usd: nil,
+        total_value_usd: nil,
+        valuation_status: "unsupported",
+        valuation_source: nil,
+        valuation_reason: "amount math unavailable"
       )
     ]
 
@@ -133,7 +143,10 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         parsed = JSON.parse(out)
 
         assert_equal AerodromeSlipstreamDryRun::SAFETY_BANNER, parsed.fetch("safety_banner")
-        assert_equal "5016", parsed.fetch("results").first.fetch("token_id")
+        result = parsed.fetch("results").first
+        assert_equal "5016", result.fetch("token_id")
+        assert_equal "supported", result.fetch("valuation_status")
+        assert_equal "2000.0", result.fetch("token0_price_usd")
       end
     end
   end
@@ -311,6 +324,12 @@ class AerodromeTaskTest < ActiveSupport::TestCase
           math_source: AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE,
           verification_status: "verified_math",
           partial_data_reason: nil,
+          token0_price_usd: "2000.0",
+          token1_price_usd: "1.0",
+          total_value_usd: "7081.180913988340424",
+          valuation_status: "supported",
+          valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
+          valuation_reason: nil,
           hedge_enabled: false,
           database_write: false,
           error_class: nil,

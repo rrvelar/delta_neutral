@@ -44,7 +44,13 @@ class AerodromeSlipstreamService
     :amount0_raw,
     :amount1_raw,
     :partial_data_reason,
-    :verification_status
+    :verification_status,
+    :token0_price_usd,
+    :token1_price_usd,
+    :total_value_usd,
+    :valuation_status,
+    :valuation_source,
+    :valuation_reason
   )
 
   TokenData = Data.define(:address, :decimals, :symbol, :name)
@@ -76,10 +82,11 @@ class AerodromeSlipstreamService
     name: selector("name()")
   }.freeze
 
-  def initialize(rpc_url: nil, position_manager_address: nil, factory_address: nil)
+  def initialize(rpc_url: nil, position_manager_address: nil, factory_address: nil, quote_token_address: ENV["AERODROME_USDC_ADDRESS"].presence)
     @rpc_url = presence_or_env(rpc_url, "BASE_RPC_URL")
     @position_manager_address = normalize_address(presence_or_env(position_manager_address, "AERODROME_SLIPSTREAM_POSITION_MANAGER"))
     @factory_address = normalize_address(presence_or_env(factory_address, "AERODROME_SLIPSTREAM_FACTORY"))
+    @quote_token_address = quote_token_address
   end
 
   def fetch_position(token_id)
@@ -94,6 +101,15 @@ class AerodromeSlipstreamService
       tick_lower: raw_position.tick_lower,
       tick_upper: raw_position.tick_upper,
       liquidity: raw_position.liquidity
+    )
+    valuation = AerodromeSlipstreamValuation.new(quote_token_address: @quote_token_address).preview(
+      token0_address: raw_position.token0_address,
+      token1_address: raw_position.token1_address,
+      token0_decimals: token0.decimals,
+      token1_decimals: token1.decimals,
+      sqrt_price_x96: pool_data.sqrt_price_x96,
+      amount0_raw: amount0_raw,
+      amount1_raw: amount1_raw
     )
 
     PositionData.new(
@@ -119,7 +135,13 @@ class AerodromeSlipstreamService
       amount0_raw: amount0_raw,
       amount1_raw: amount1_raw,
       partial_data_reason: nil,
-      verification_status: "verified_math"
+      verification_status: "verified_math",
+      token0_price_usd: valuation.token0_price_usd,
+      token1_price_usd: valuation.token1_price_usd,
+      total_value_usd: valuation.total_value_usd,
+      valuation_status: valuation.supported ? "supported" : "unsupported",
+      valuation_source: valuation.valuation_source,
+      valuation_reason: valuation.reason
     )
   end
 

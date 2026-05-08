@@ -294,6 +294,14 @@ Aerodrome verification required:
 - Whether an external USD pricing source is required.
 - Stale-price detection and behavior.
 
+Implementation status:
+
+- A monitor-only USD valuation preview is implemented for pools where one token address matches configured `AERODROME_USDC_ADDRESS`.
+- The preview uses Aerodrome Slipstream pool `slot0.sqrtPriceX96`, token decimals, and the configured USDC quote token. It assumes the configured USDC token is worth 1 USD for preview only.
+- Unsupported pairs leave `asset0_price_usd` and `asset1_price_usd` nil and set valuation status to unsupported.
+- The implementation does not infer USDC by symbol and does not hardcode a Base USDC address.
+- Source checked for formula: `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/core/libraries/TickMath.sol` and `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/core/interfaces/pool/ICLPoolState.sol` on 2026-05-08.
+
 Safety rule: If USD valuation is uncertain, do not feed Aerodrome exposure into `HedgeSyncJob`.
 
 ## 13. Normalized Position Data Shape
@@ -325,6 +333,12 @@ Proposed internal read-only structure, not implemented yet:
   amount1_raw: "0",
   amount0_decimal: "0",
   amount1_decimal: "0",
+  token0_price_usd: "0",
+  token1_price_usd: "0",
+  total_value_usd: "0",
+  valuation_status: "supported_or_unsupported",
+  valuation_source: "SOURCE_OR_NIL",
+  valuation_reason: "REASON_OR_NIL",
   tokens_owed0_raw: "0",
   tokens_owed1_raw: "0",
   last_synced_at: "TIMESTAMP",
@@ -357,7 +371,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` can register Aerodrome Slipstream monitor-only positions only when `AERODROME_READ_ONLY_ENABLED=true` and explicit `AERODROME_SLIPSTREAM_TOKEN_IDS` are configured.
 - Initial discovery is user-provided token ids only; wallet enumeration, staking/gauge discovery, and multi-manager discovery remain unresolved.
 - `WalletSyncJob` and `PositionSyncJob` persist computed Aerodrome token amounts into existing `positions.asset0_amount` and `positions.asset1_amount` fields only when amount math is verified. Partial/deferred amount data leaves amounts nil and logs a clear monitor-only warning.
-- Aerodrome USD prices remain unresolved and are kept nil. Tick data, liquidity, manager, and factory metadata remain unstored in the current schema.
+- Aerodrome USD prices are persisted only for supported configured-USDC pools with verified amount math. Unsupported pairs keep prices nil. Tick data, liquidity, manager, and factory metadata remain unstored in the current schema.
 - `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because fee strategy, USD valuation, and real-position UI/BaseScan comparisons remain incomplete.
 - `HedgeSyncJob` skips Aerodrome positions. Aerodrome exposure is not eligible for hedge execution, and `HyperliquidService` remains untouched.
 
@@ -380,6 +394,7 @@ Proposed env vars for a later implementation task:
 - `AERODROME_SLIPSTREAM_POSITION_MANAGER`.
 - `AERODROME_SLIPSTREAM_FACTORY`.
 - `AERODROME_SLIPSTREAM_TOKEN_IDS`, optional comma-separated token ids for early read-only monitoring.
+- `AERODROME_USDC_ADDRESS`, optional configured USDC quote token address for monitor-only valuation preview.
 - `AERODROME_READ_ONLY_ENABLED=false`.
 - `AERODROME_HEDGE_ENABLED=false`, reserved for later.
 
@@ -516,7 +531,8 @@ Ready only for documentation and planning. The project can become READY FOR READ
 - `AerodromeSlipstreamService` is a read-only RPC scaffold only.
 - Tests use mocked JSON-RPC responses and do not call real RPC.
 - `amount0`/`amount1` liquidity math is implemented for read-only service and dry-run reports.
-- Monitor-only sync persists verified computed token amounts into existing `Position` amount fields. USD prices remain nil, no Aerodrome PnL snapshots are created, and Aerodrome positions remain skipped by `HedgeSyncJob`.
+- Monitor-only sync persists verified computed token amounts into existing `Position` amount fields.
+- Monitor-only sync persists USD prices only for supported configured-USDC pools. Unsupported pairs keep prices nil, no Aerodrome PnL snapshots are created, and Aerodrome positions remain skipped by `HedgeSyncJob`.
 - Advanced fee math beyond `tokensOwed0` and `tokensOwed1` remains deferred.
 - `HyperliquidService` is untouched.
 - No live hedge execution path was changed or enabled.

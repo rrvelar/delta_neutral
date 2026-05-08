@@ -160,17 +160,18 @@ class PositionSyncJob < ApplicationJob
     end
 
     amount_attributes = aerodrome_amount_attributes(position_data, position.id)
+    price_attributes = aerodrome_price_attributes(position_data, position.id)
     position.update!(
       asset0: position_data.token0_symbol,
       asset1: position_data.token1_symbol,
       asset0_amount: amount_attributes.fetch(:asset0_amount),
       asset1_amount: amount_attributes.fetch(:asset1_amount),
-      asset0_price_usd: nil,
-      asset1_price_usd: nil,
+      asset0_price_usd: price_attributes.fetch(:asset0_price_usd),
+      asset1_price_usd: price_attributes.fetch(:asset1_price_usd),
       pool_address: position_data.pool_address,
       active: true
     )
-    Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; USD pricing remains unresolved" }
+    Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; hedge integration remains disabled" }
   end
 
   def aerodrome_position?(position)
@@ -212,6 +213,35 @@ class PositionSyncJob < ApplicationJob
     amount
   rescue AerodromeSlipstreamMath::Error => e
     Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} amount conversion failed: #{e.message}")
+    nil
+  end
+
+  def aerodrome_price_attributes(position_data, position_id)
+    unless position_data.valuation_status == "supported" && position_data.token0_price_usd && position_data.token1_price_usd
+      Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} valuation unsupported; leaving USD prices nil")
+      return { asset0_price_usd: nil, asset1_price_usd: nil }
+    end
+
+    {
+      asset0_price_usd: storable_aerodrome_price(position_data, :token0_price_usd, :asset0_price_usd, position_id),
+      asset1_price_usd: storable_aerodrome_price(position_data, :token1_price_usd, :asset1_price_usd, position_id)
+    }
+  end
+
+  def storable_aerodrome_price(position_data, price_field, column_name, position_id)
+    price = BigDecimal(position_data.public_send(price_field).to_s)
+    return nil if price.negative?
+
+    column = Position.columns_hash.fetch(column_name.to_s)
+    integer_digits = price.abs.to_i.to_s.length
+    if integer_digits > column.precision - column.scale
+      Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} exceeds schema precision; leaving price nil")
+      return nil
+    end
+
+    price
+  rescue ArgumentError
+    Rails.logger.warn("PositionSyncJob: Aerodrome position #{position_id} #{column_name} price conversion failed")
     nil
   end
 end

@@ -48,6 +48,12 @@ namespace :aerodrome do
           puts "  math_source: #{result.fetch(:math_source).inspect}"
           puts "  verification_status: #{result.fetch(:verification_status)}"
           puts "  partial_data_reason: #{result.fetch(:partial_data_reason)}"
+          puts "  token0_price_usd: #{result.fetch(:token0_price_usd).inspect}"
+          puts "  token1_price_usd: #{result.fetch(:token1_price_usd).inspect}"
+          puts "  total_value_usd: #{result.fetch(:total_value_usd).inspect}"
+          puts "  valuation_status: #{result.fetch(:valuation_status)}"
+          puts "  valuation_source: #{result.fetch(:valuation_source).inspect}"
+          puts "  valuation_reason: #{result.fetch(:valuation_reason).inspect}"
           puts "  database_write: #{result.fetch(:database_write)}"
           puts "  hedge_enabled: #{result.fetch(:hedge_enabled)}"
         end

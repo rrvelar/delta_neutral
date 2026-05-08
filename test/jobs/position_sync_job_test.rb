@@ -252,8 +252,8 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_equal "WETH", position.asset1
     assert_equal BigDecimal("1.25"), position.asset0_amount
     assert_equal BigDecimal("0.5"), position.asset1_amount
-    assert_nil position.asset0_price_usd
-    assert_nil position.asset1_price_usd
+    assert_equal BigDecimal("2000"), position.asset0_price_usd
+    assert_equal BigDecimal("1"), position.asset1_price_usd
     assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
   end
 
@@ -276,6 +276,29 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     position.reload
     assert_nil position.asset0_amount
     assert_nil position.asset1_amount
+    assert_nil position.asset0_price_usd
+    assert_nil position.asset1_price_usd
+  end
+
+  test "Aerodrome read-only position sync leaves prices nil when valuation is unsupported" do
+    position = aerodrome_position
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, unsupported_valuation_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          assert_no_difference "PnlSnapshot.count" do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+
+    service.verify
+    position.reload
+    assert_equal BigDecimal("1.25"), position.asset0_amount
+    assert_equal BigDecimal("0.5"), position.asset1_amount
     assert_nil position.asset0_price_usd
     assert_nil position.asset1_price_usd
   end
@@ -328,7 +351,13 @@ class PositionSyncJobTest < ActiveSupport::TestCase
       amount0_raw: 1_250_000_000_000_000_000,
       amount1_raw: 500_000_000_000_000_000,
       partial_data_reason: nil,
-      verification_status: "verified_math"
+      verification_status: "verified_math",
+      token0_price_usd: BigDecimal("2000"),
+      token1_price_usd: BigDecimal("1"),
+      total_value_usd: BigDecimal("2500"),
+      valuation_status: "supported",
+      valuation_source: AerodromeSlipstreamValuation::VALUATION_SOURCE,
+      valuation_reason: nil
     )
   end
 
@@ -337,7 +366,24 @@ class PositionSyncJobTest < ActiveSupport::TestCase
       amount0_raw: nil,
       amount1_raw: nil,
       partial_data_reason: AerodromeSlipstreamService::PARTIAL_AMOUNT_MATH_DEFERRED,
-      verification_status: "partial"
+      verification_status: "partial",
+      token0_price_usd: nil,
+      token1_price_usd: nil,
+      total_value_usd: nil,
+      valuation_status: "unsupported",
+      valuation_source: nil,
+      valuation_reason: "amount math unavailable"
+    )
+  end
+
+  def unsupported_valuation_position_data(wallet)
+    aerodrome_position_data(wallet).with(
+      token0_price_usd: nil,
+      token1_price_usd: nil,
+      total_value_usd: nil,
+      valuation_status: "unsupported",
+      valuation_source: nil,
+      valuation_reason: "pool does not include configured USDC quote token"
     )
   end
 

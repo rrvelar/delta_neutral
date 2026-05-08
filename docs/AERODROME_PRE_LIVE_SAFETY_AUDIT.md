@@ -14,8 +14,9 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Config verification no Hyperliquid | PASS | No Hyperliquid calls are used. |
 | Monitor-only sync disabled by default | PASS | `AERODROME_READ_ONLY_ENABLED=false` is the documented default. |
 | HedgeSyncJob skips Aerodrome positions | PASS | Aerodrome positions are monitor-only and skipped. |
-| Amount0/amount1 deferred | PASS | Amount fields are intentionally nil/partial. |
-| USD valuation unresolved | UNKNOWN | No trusted Aerodrome USD valuation source is implemented. |
+| Amount0/amount1 implemented | PASS | Verified amount math is implemented for read-only service, dry-run, and monitor-only sync. |
+| USDC-pool valuation preview | PASS | Supported only when one token matches configured `AERODROME_USDC_ADDRESS`; unsupported pairs keep prices nil. |
+| USD valuation for non-USDC pairs | UNKNOWN | No trusted external USD valuation source is implemented. |
 | Advanced fees deferred | UNKNOWN | Only raw owed-token fields are safe first reads. |
 | Staking/gauge discovery unresolved | UNKNOWN | User-provided token ids remain the conservative starting point. |
 | Manager/factory multi-deployment risk | UNKNOWN | Multiple deployments exist; config remains explicit. |
@@ -32,4 +33,4 @@ NOT READY FOR LIVE HEDGE INTEGRATION.
 
 READY ONLY FOR READ-ONLY MANUAL DRY-RUN AND MONITOR-ONLY TESTING.
 
-Do not enable Aerodrome hedge execution until amount math, USD valuation, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested.
+Do not enable Aerodrome hedge execution until amount math, USD valuation, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation preview does not make Aerodrome positions hedge-ready.

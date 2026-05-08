@@ -192,6 +192,12 @@ class AerodromeSlipstreamDryRun
       partial_data_reason: data.partial_data_reason,
       math_source: data.verification_status == "verified_math" ? AerodromeSlipstreamService::VERIFIED_AMOUNT_MATH_SOURCE : nil,
       verification_status: data.verification_status,
+      token0_price_usd: decimal_display(data.token0_price_usd),
+      token1_price_usd: decimal_display(data.token1_price_usd),
+      total_value_usd: decimal_display(data.total_value_usd),
+      valuation_status: data.valuation_status,
+      valuation_source: data.valuation_source,
+      valuation_reason: data.valuation_reason,
       hedge_enabled: false,
       database_write: false,
       error_class: nil,
@@ -238,6 +244,12 @@ class AerodromeSlipstreamDryRun
       partial_data_reason: nil,
       math_source: nil,
       verification_status: "error",
+      token0_price_usd: nil,
+      token1_price_usd: nil,
+      total_value_usd: nil,
+      valuation_status: "error",
+      valuation_source: nil,
+      valuation_reason: nil,
       hedge_enabled: false,
       database_write: false,
       error_class: error.class.name,
@@ -249,5 +261,9 @@ class AerodromeSlipstreamDryRun
     return nil if raw_amount.nil? || decimals.nil?
 
     AerodromeSlipstreamMath.decimal_amount(raw_amount, decimals).to_s("F")
+  end
+
+  def decimal_display(value)
+    value&.to_s("F")
   end
 end

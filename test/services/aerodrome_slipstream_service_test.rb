@@ -7,13 +7,16 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
   OWNER = "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
   TOKEN0 = "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b"
   TOKEN1 = "0x4200000000000000000000000000000000000006"
+  USDC = "0x0000000000000000000000000000000000000001"
   POOL = "0x90757bd1595ca6e6a011e900e7a22d1a991856a5"
+  WETH_USDC_2000_SQRT_PRICE_X96 = 3_543_191_142_285_914_205_922_034
 
   setup do
     @service = AerodromeSlipstreamService.new(
       rpc_url: RPC_URL,
       position_manager_address: POSITION_MANAGER,
-      factory_address: FACTORY
+      factory_address: FACTORY,
+      quote_token_address: nil
     )
   end
 
@@ -239,6 +242,37 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     assert_equal 0, position.amount1_raw
     assert_equal "verified_math", position.verification_status
     assert_nil position.partial_data_reason
+    assert_equal "unsupported", position.valuation_status
+    assert_nil position.token0_price_usd
+  end
+
+  test "fetch_position includes supported USDC valuation fields" do
+    service = AerodromeSlipstreamService.new(
+      rpc_url: RPC_URL,
+      position_manager_address: POSITION_MANAGER,
+      factory_address: FACTORY,
+      quote_token_address: USDC
+    )
+    stub_rpc_results(
+      "0x#{word(OWNER)}",
+      "0x#{position_words(token0_address: TOKEN1, token1_address: USDC, tick_lower: -201000, tick_upper: -197700, liquidity: 998_471_580_054_153).join}",
+      "0x#{word(POOL)}",
+      "0x#{slot0_words(sqrt_price_x96: WETH_USDC_2000_SQRT_PRICE_X96, tick: -198995).join}",
+      "0x#{uint_word(18)}",
+      encoded_string("WETH"),
+      encoded_string("Wrapped Ether"),
+      "0x#{uint_word(6)}",
+      encoded_string("USDC"),
+      encoded_string("USD Coin")
+    )
+
+    position = service.fetch_position(315985)
+
+    assert_equal "supported", position.valuation_status
+    assert_in_delta 2000, position.token0_price_usd.to_f, 0.000001
+    assert_equal BigDecimal("1"), position.token1_price_usd
+    assert_instance_of BigDecimal, position.total_value_usd
+    assert_equal AerodromeSlipstreamValuation::VALUATION_SOURCE, position.valuation_source
   end
 
   test "fetch_position fails clearly on malformed math input" do
@@ -301,16 +335,16 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     )
   end
 
-  def position_words
+  def position_words(token0_address: TOKEN0, token1_address: TOKEN1, tick_lower: -151400, tick_upper: -147400, liquidity: 4_704_282_665_496_512_241_742)
     [
       uint_word(0),
       word(AerodromeSlipstreamService::ZERO_ADDRESS),
-      word(TOKEN0),
-      word(TOKEN1),
+      word(token0_address),
+      word(token1_address),
       int_word(200),
-      int_word(-151400),
-      int_word(-147400),
-      uint_word(4_704_282_665_496_512_241_742),
+      int_word(tick_lower),
+      int_word(tick_upper),
+      uint_word(liquidity),
       uint_word(0),
       uint_word(0),
       uint_word(7),
@@ -318,10 +352,10 @@ class AerodromeSlipstreamServiceTest < ActiveSupport::TestCase
     ]
   end
 
-  def slot0_words(sqrt_price_x96: 32_678_154_748_101_184_656_879_789)
+  def slot0_words(sqrt_price_x96: 32_678_154_748_101_184_656_879_789, tick: -155876)
     [
       uint_word(sqrt_price_x96),
-      int_word(-155876),
+      int_word(tick),
       uint_word(0),
       uint_word(1),
       uint_word(1),

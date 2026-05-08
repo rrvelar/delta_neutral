@@ -267,6 +267,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       asset1: "WETH",
       asset0_amount: BigDecimal("1.25"),
       asset1_amount: BigDecimal("0.5"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
       external_id: "5016",
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
       active: true

@@ -9,6 +9,7 @@ The Aerodrome dry-run tooling performs a read-only check of explicit Aerodrome S
 - Prints owner, manager, factory, pool, token metadata, tick range, current tick, liquidity, and raw owed-token fields.
 - Computes `amount0_raw` and `amount1_raw` with the verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Prints decimal display amounts when token decimals are available.
+- Shows monitor-only USD valuation preview for pools that include the configured USDC quote token.
 - Handles individual token errors and continues building the report.
 
 ## What It Does Not Do
@@ -40,13 +41,15 @@ Every result includes:
 - `amount1_decimal`
 - `math_source`
 - `verification_status`
+- `token0_price_usd`, `token1_price_usd`, and `total_value_usd` when valuation is supported
+- `valuation_status`, `valuation_source`, and `valuation_reason`
 
 Human output also repeats:
 
 - `NO DB WRITES`
 - `NO HYPERLIQUID`
 - `NO HEDGES`
-- `AMOUNT MATH DEFERRED` only as a safety heading; check each token's `verification_status` and `partial_data_reason` for the actual math state.
+- `AMOUNT MATH DEFERRED` only when amount math is actually partial; otherwise `AMOUNT MATH VERIFIED`.
 
 ## Required Env Vars
 
@@ -56,9 +59,12 @@ Use read-only configuration only:
 BASE_RPC_URL=BASE_RPC_URL_PLACEHOLDER
 AERODROME_SLIPSTREAM_POSITION_MANAGER=POSITION_MANAGER_ADDRESS_PLACEHOLDER
 AERODROME_SLIPSTREAM_FACTORY=FACTORY_ADDRESS_PLACEHOLDER
+AERODROME_USDC_ADDRESS=BASE_USDC_ADDRESS_PLACEHOLDER
 ```
 
 No private keys are required. Do not add private keys for this task.
+
+`AERODROME_USDC_ADDRESS` is optional for raw position reads. Without it, USD valuation preview is marked unsupported and price fields remain nil. Do not hardcode this value from memory; verify it from a trusted source before using it locally.
 
 ## Verify Config
 
@@ -167,7 +173,8 @@ For each token id:
 1. Open the position in the Aerodrome UI.
 2. Open the configured position manager and token id on BaseScan.
 3. Compare `owner_address`, `token0_address`, `token1_address`, `tick_spacing`, `tick_lower`, `tick_upper`, `liquidity`, `pool_address`, `current_tick`, `amount0_raw`, `amount1_raw`, `tokens_owed0_raw`, and `tokens_owed1_raw`.
-4. Record the RPC URL host, block context if available from the RPC provider, and any differences in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
+4. For supported USDC pools, compare `token0_price_usd`, `token1_price_usd`, and `total_value_usd` against Aerodrome UI/BaseScan or another trusted operator-approved reference.
+5. Record the RPC URL host, block context if available from the RPC provider, and any differences in `docs/AERODROME_SLIPSTREAM_VERIFICATION.md` or a follow-up verification log.
 
 ## Confirm No DB Writes
 
@@ -199,9 +206,15 @@ Amount math is implemented for read-only dry-run output using:
 
 The Ruby implementation preserves Solidity-style integer floor division. Raw values do not use Float arithmetic.
 
+## USD Valuation Preview
+
+USD valuation preview is implemented only for pools where one token address matches the configured `AERODROME_USDC_ADDRESS`. It uses pool `slot0.sqrtPriceX96`, token decimals, and the configured USDC quote token to compute relative price and assumes USDC is worth 1 USD for preview purposes. This is monitor-only and must still be compared manually against Aerodrome UI/BaseScan before operational use.
+
+Unsupported pairs keep price fields nil and report `valuation_status: unsupported`. The code does not guess prices or infer USDC by symbol alone.
+
 These fields remain partial or unresolved:
 
-- USD valuation.
+- USD valuation for non-USDC pools.
 - Advanced uncollected fee calculations beyond `tokensOwed0` and `tokensOwed1`.
 - Staking/gauge discovery.
 - Hedge readiness.
