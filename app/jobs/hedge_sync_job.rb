@@ -149,8 +149,9 @@ class HedgeSyncJob < ApplicationJob
     current_short = current_position ? current_position[:size].abs : BigDecimal("0")
     decimals = hyperliquid.sz_decimals(hl_asset)
     target_short = (pool_amount * hedge.target).floor(decimals)
+    delta = target_short - current_short
 
-    Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: current_short=#{current_short}, target_short=#{target_short}" }
+    Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: current_short=#{current_short}, target_short=#{target_short}, delta=#{delta}" }
 
     if target_short == current_short
       Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: rounded target equals current short; skipping order" }
@@ -173,25 +174,22 @@ class HedgeSyncJob < ApplicationJob
 
     Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: REBALANCE NEEDED" }
     realized_pnl = BigDecimal("0")
-    close_submitted = false
 
     begin
-      # Close existing short and get realized PnL from fills
-      if current_short > 0
-        Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: closing existing short (size=#{current_short})" }
+      if delta.negative?
+        reduce_size = delta.abs
+        Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: reducing short by delta (size=#{reduce_size})" }
         before_close = Time.current
-        close_result = hyperliquid.close_short(asset: hl_asset, size: current_short, vault_address: vault_address)
+        close_result = hyperliquid.close_short(asset: hl_asset, size: reduce_size, vault_address: vault_address)
         if close_result.nil?
-          raise HyperliquidService::OrderError, "Close short for #{hl_asset} returned nil despite current_short=#{current_short}"
+          raise HyperliquidService::OrderError, "Close short for #{hl_asset} returned nil despite reduce_size=#{reduce_size}"
         end
 
-        close_submitted = true
         realized_pnl = fetch_realized_pnl(hyperliquid, hl_asset, before_close, address: account_address)
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: realized_pnl=#{realized_pnl}" }
       end
 
-      # Open new short at target size (not needed when target or pool amt is 0)
-      if target_short > 0
+      if delta.positive?
         # Ensure subaccount has sufficient margin before opening
         ensure_subaccount_margin(hyperliquid, account_address, hl_asset, target_short, hedge) if account_address
 
@@ -200,9 +198,9 @@ class HedgeSyncJob < ApplicationJob
         is_cross = setting&.hyperliquid_cross_margin.nil? ? true : setting.hyperliquid_cross_margin
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: setting leverage=#{leverage}, is_cross=#{is_cross}" }
         hyperliquid.set_leverage(asset: hl_asset, leverage: leverage, is_cross: is_cross, vault_address: vault_address)
-        Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: opening new short (size=#{target_short})" }
-        hyperliquid.open_short(asset: hl_asset, size: target_short, vault_address: vault_address)
-      else
+        Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: increasing short by delta (size=#{delta})" }
+        hyperliquid.open_short(asset: hl_asset, size: delta, vault_address: vault_address)
+      elsif target_short.zero?
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: target is zero, skipping open" }
 
         # Withdraw USDC back to main when closing to zero on a subaccount
@@ -226,7 +224,7 @@ class HedgeSyncJob < ApplicationJob
 
       HedgeRebalanceMailer.rebalance_notification(rebalance).deliver_later
     rescue => e
-      actual_short = reconciled_short_size(hyperliquid, hl_asset, account_address, fallback: close_submitted ? BigDecimal("0") : current_short)
+      actual_short = reconciled_short_size(hyperliquid, hl_asset, account_address, fallback: current_short)
       reconciled = ambiguous_order_error?(e) && reconciled_to_target?(hedge, target_short, actual_short)
       status = reconciled ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
       message = if reconciled

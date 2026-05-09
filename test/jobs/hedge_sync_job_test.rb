@@ -112,7 +112,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     ]
 
     mock_service = build_mock_service(
-      positions: [ { coin: "ETH", szi: "-0.3" } ],
+      positions: [ { coin: "ETH", szi: "-1.0" } ],
       fills: close_fills
     )
 
@@ -130,7 +130,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     hedge = hedges(:eth_hedge)
 
     mock_service = build_mock_service(
-      positions: [ { coin: "ETH", szi: "-0.3" } ],
+      positions: [ { coin: "ETH", szi: "-1.0" } ],
       fills_error: Hyperliquid::NetworkError.new("connection refused")
     )
 
@@ -192,8 +192,73 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
     assert_equal BigDecimal("0.0116"), rebalance.old_short_size
     assert_equal BigDecimal("0.0117"), rebalance.new_short_size
-    assert_equal 2, market_order_calls.size
+    assert_equal 1, market_order_calls.size
+    assert_equal false, market_order_calls.first[:is_buy]
+    assert_equal BigDecimal("0.0001"), market_order_calls.first[:size]
     assert_equal 1, update_leverage_calls.size
+  end
+
+  test "current zero to target opens target size only" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+    market_order_calls = []
+
+    mock_service = build_mock_service(
+      positions: [],
+      market_order_calls: market_order_calls
+    )
+
+    assert_difference "ShortRebalance.count", 1 do
+      HyperliquidService.stub(:new, mock_service) do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+
+    assert_equal 1, market_order_calls.size
+    assert_equal false, market_order_calls.first[:is_buy]
+    assert_equal BigDecimal("0.5"), market_order_calls.first[:size]
+  end
+
+  test "larger target increases short by delta only" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+    market_order_calls = []
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.25" } ],
+      market_order_calls: market_order_calls
+    )
+
+    assert_difference "ShortRebalance.count", 1 do
+      HyperliquidService.stub(:new, mock_service) do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+
+    assert_equal 1, market_order_calls.size
+    assert_equal false, market_order_calls.first[:is_buy]
+    assert_equal BigDecimal("0.25"), market_order_calls.first[:size]
+  end
+
+  test "smaller target reduces short by delta only" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+    market_order_calls = []
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.75" } ],
+      market_order_calls: market_order_calls
+    )
+
+    assert_difference "ShortRebalance.count", 1 do
+      HyperliquidService.stub(:new, mock_service) do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+
+    assert_equal 1, market_order_calls.size
+    assert_equal true, market_order_calls.first[:is_buy]
+    assert_equal BigDecimal("0.25"), market_order_calls.first[:size]
   end
 
   test "closes over-hedged short and notifies when pool amount is zero" do
@@ -248,6 +313,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_not_nil close_order
     assert_equal "ETH", close_order[:coin]
     assert_equal BigDecimal("0.5"), close_order[:size]
+    assert_equal [ close_order ], market_order_calls
   end
 
   test "close short returning nil records failed rebalance instead of success" do

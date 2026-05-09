@@ -194,6 +194,8 @@ The first Aerodrome testnet hedge rehearsal confirmed that the WETH/ETH open pat
 
 The explicit close retest encountered `SSL_read: unexpected eof while reading`; the ETH short remained open and the app correctly recorded failure. Network ambiguity can happen after either open or close orders, including cases where the order executes but the client receives an SSL/read exception. `HedgeSyncJob` now reconciles ambiguous order errors by fetching actual Hyperliquid position state and recording the actual final short size. If the actual size is within tolerance of the intended target, the rebalance is recorded as success with a reconciliation message; otherwise it is recorded as failed. Explicit API rejections, such as minimum-order failures, remain failed. Live remains blocked until open and close reconciliation retests pass on testnet.
 
+The 10h testnet soak also showed unnecessary order churn. Same-size rounded target rebalances are skipped, and non-zero rebalances now use delta-only sizing: increasing a short opens only the additional size, decreasing a short closes only the excess size, and full close is reserved for `target_short == 0`. This reduces fees, slippage, and order/API risk. Live remains disabled.
+
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 
 Proposal safety limits are display/local-review gates only. If a limit env var is blank, that limit is shown as not configured and produces a warning. If a configured limit is exceeded, the proposal is shown as `BLOCKED`, and the UI prevents marking it reviewed.

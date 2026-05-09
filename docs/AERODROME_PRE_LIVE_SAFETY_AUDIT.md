@@ -25,6 +25,7 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Aerodrome USDC hedge exclusion | PASS | The Aerodrome gate skips USDC and unsupported symbols before `check_and_rebalance`, so the stablecoin side is never hedged. |
 | Aerodrome testnet open rehearsal | PASS | A tiny WETH/ETH-side testnet short opened successfully; this is not live approval. |
 | Aerodrome same-size rebalance skip | PASS | 10h testnet soak found successful WETH rows where rounded `old_short_size == new_short_size`; rounded same-size targets now skip order submission and `ShortRebalance` creation. |
+| Aerodrome delta-only rebalance | PASS | 10h testnet soak showed full close/open churn; rebalances now adjust only the delta between current and target short sizes. |
 | Aerodrome testnet close-path rehearsal | BLOCKED PENDING RETEST | The close path exposed a false-success bug, then an SSL ambiguity during explicit close. `HedgeSyncJob` now reconciles ambiguous open/close errors by fetching actual Hyperliquid position state before recording success or failure. Live remains blocked until open and close reconciliation retests pass on testnet. |
 | Amount0/amount1 implemented | PASS | Verified amount math is implemented for read-only service, dry-run, and monitor-only sync. |
 | USDC-pool valuation preview | PASS | Supported only when one token matches configured `AERODROME_USDC_ADDRESS`; unsupported pairs keep prices nil. |
@@ -61,6 +62,8 @@ Testnet rehearsal found that the open path can submit a tiny WETH/ETH short, but
 The explicit close retest then encountered `SSL_read: unexpected eof while reading`; the short remained open and the app correctly recorded failure. Similar SSL ambiguity can occur after open orders, where the order may execute even if the client receives a network exception. `HedgeSyncJob` now reconciles ambiguous post-order errors by fetching actual Hyperliquid position state and comparing the actual short size with the intended target before writing the final `ShortRebalance` status. Explicit API rejections remain failures. Live remains blocked until both open and close reconciliation retests pass on testnet.
 
 A 10h Hyperliquid testnet soak found same-size WETH rebalance churn after Hyperliquid size rounding, such as `0.0116 -> 0.0116`. `HedgeSyncJob` now skips when the rounded `target_short` equals `current_short`, before any close/open/leverage calls or `ShortRebalance` creation. This reduces unnecessary fees, slippage, and API/order risk. Live remains disabled.
+
+The same soak also showed unnecessary full close/open churn when only a size adjustment was needed. `HedgeSyncJob` now uses delta-only rebalancing: increases open only the additional short size, decreases close only the excess short size, and full close is reserved for `target_short == 0`. This reduces fees, slippage, and order/API risk. Live remains disabled.
 
 `bin/rails aerodrome:pre_live_check` and `FORMAT=json bin/rails aerodrome:pre_live_check` provide a read-only readiness report across environment safety, `AERODROME_LIVE_APPROVED` state, local DB readiness, configured risk limits, rehearsal `ShortRebalance` evidence, and optional Hyperliquid readback. Passing this check is not permission for live trading. Live remains disabled by default and requires a separate future approval/change and first-live procedure.
 
