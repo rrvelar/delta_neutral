@@ -796,6 +796,104 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position&.destroy
   end
 
+  test "Aerodrome tiny delta below minimum notional skips without order or rebalance" do
+    position = aerodrome_position(asset0_amount: BigDecimal("1.008"))
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.0001", active: true)
+    market_order_calls = []
+    update_leverage_calls = []
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_order_calls: market_order_calls,
+      update_leverage_calls: update_leverage_calls
+    )
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "true", "AERODROME_MIN_ORDER_NOTIONAL_USD" => nil) do
+      assert_no_difference "ShortRebalance.count" do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_empty market_order_calls
+    assert_empty update_leverage_calls
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome tiny delta below minimum notional does not increment failed streak" do
+    position = aerodrome_position(asset0_amount: BigDecimal("1.008"))
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.0001", active: true)
+    create_rebalance!(hedge, status: ShortRebalance::STATUS_FAILED)
+    create_rebalance!(hedge, status: ShortRebalance::STATUS_FAILED)
+    mock_service = build_mock_service(positions: [ { coin: "ETH", szi: "-0.5" } ])
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "true", "AERODROME_MIN_ORDER_NOTIONAL_USD" => "10") do
+      assert_no_difference "hedge.short_rebalances.count" do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal 2, hedge.short_rebalances.where(status: ShortRebalance::STATUS_FAILED).count
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome invalid minimum notional skips safely without order or rebalance" do
+    position = aerodrome_position(asset0_amount: BigDecimal("1.02"))
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.0001", active: true)
+    market_order_calls = []
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_order_calls: market_order_calls
+    )
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "true", "AERODROME_MIN_ORDER_NOTIONAL_USD" => "not-a-number") do
+      assert_no_difference "ShortRebalance.count" do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_empty market_order_calls
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome close to zero bypasses failed rebalance circuit breaker" do
+    position = aerodrome_position(asset0_amount: BigDecimal("0"))
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    3.times { create_rebalance!(hedge, status: ShortRebalance::STATUS_FAILED) }
+    market_order_calls = []
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_order_calls: market_order_calls
+    )
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "true") do
+      assert_difference "hedge.short_rebalances.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    close_order = market_order_calls.find { |args| args[:is_buy] == true }
+    assert_not_nil close_order
+    assert_equal BigDecimal("0.5"), close_order[:size]
+    assert_equal ShortRebalance::STATUS_SUCCESS, hedge.short_rebalances.order(:id).last.status
+    assert_equal BigDecimal("0"), hedge.short_rebalances.order(:id).last.new_short_size
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
   test "skips Aerodrome hedge when flag is true but Hyperliquid testnet is false" do
     position = aerodrome_position
     hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
@@ -1024,6 +1122,17 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
       active: true
     }.merge(overrides))
+  end
+
+  def create_rebalance!(hedge, attributes = {})
+    hedge.short_rebalances.create!({
+      asset: "WETH",
+      old_short_size: BigDecimal("0.5"),
+      new_short_size: BigDecimal("0.51"),
+      realized_pnl: BigDecimal("0"),
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: Time.current
+    }.merge(attributes))
   end
 
   def with_env(values)

@@ -196,6 +196,8 @@ The explicit close retest encountered `SSL_read: unexpected eof while reading`; 
 
 The 10h testnet soak also showed unnecessary order churn. Same-size rounded target rebalances are skipped, and non-zero rebalances now use delta-only sizing: increasing a short opens only the additional size, decreasing a short closes only the excess size, and full close is reserved for `target_short == 0`. This reduces fees, slippage, and order/API risk. Live remains disabled.
 
+A 1h delta-only soak showed most target changes produced tiny deltas below Hyperliquid's minimum order notional, which created failed rows and tripped the circuit breaker. Aerodrome non-close deltas below `AERODROME_MIN_ORDER_NOTIONAL_USD` now skip without order submission or failed `ShortRebalance` rows. Missing `AERODROME_MIN_ORDER_NOTIONAL_USD` defaults to 10. Close-to-zero bypasses the failed-rebalance circuit breaker so final cleanup closes are still attempted and reconciled truthfully. Live remains disabled.
+
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 
 Proposal safety limits are display/local-review gates only. If a limit env var is blank, that limit is shown as not configured and produces a warning. If a configured limit is exceeded, the proposal is shown as `BLOCKED`, and the UI prevents marking it reviewed.

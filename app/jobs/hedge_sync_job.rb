@@ -119,7 +119,7 @@ class HedgeSyncJob < ApplicationJob
   def sync_aerodrome_hedge(hedge, hedge_assets, hyperliquid)
     Rails.logger.debug { "[HedgeSyncJob] syncing Aerodrome hedge #{hedge.id} with ETH/WETH-only asset filter" }
     hedge_assets.each do |asset|
-      check_and_rebalance(hedge, asset.fetch(:symbol), asset.fetch(:amount), asset.fetch(:index), hyperliquid)
+      check_and_rebalance(hedge, asset.fetch(:symbol), asset.fetch(:amount), asset.fetch(:index), hyperliquid, asset_price_usd: asset.fetch(:price))
     end
   end
 
@@ -139,7 +139,7 @@ class HedgeSyncJob < ApplicationJob
   # @param asset_index [Integer] 0 or 1 — which asset in the pair
   # @param hyperliquid [HyperliquidService] configured Hyperliquid client
   # @return [void]
-  def check_and_rebalance(hedge, asset, pool_amount, asset_index, hyperliquid)
+  def check_and_rebalance(hedge, asset, pool_amount, asset_index, hyperliquid, asset_price_usd: nil)
     hl_asset = HyperliquidService.normalize_symbol(asset)
     account_address = resolve_account(hedge, hl_asset, asset_index, hyperliquid)
     vault_address = account_address # nil for main, subaccount address otherwise
@@ -163,11 +163,16 @@ class HedgeSyncJob < ApplicationJob
       return
     end
 
+    if below_aerodrome_min_delta_notional?(delta, target_short, asset_price_usd)
+      Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} #{asset} — delta below minimum order notional")
+      return
+    end
+
     # Skip if the last 3 rebalances for this asset all failed — avoids
     # polluting history with repeated identical failures (e.g. below $10 min).
     # The streak resets naturally when conditions change enough for one to succeed.
     recent = hedge.short_rebalances.where(asset: asset).where(rebalanced_at: 24.hours.ago..).order(rebalanced_at: :desc).limit(3)
-    if recent.size == 3 && recent.all? { |r| r.status == ShortRebalance::STATUS_FAILED }
+    if !target_short.zero? && recent.size == 3 && recent.all? { |r| r.status == ShortRebalance::STATUS_FAILED }
       Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: skipping — last 3 rebalances all failed" }
       return
     end
@@ -266,6 +271,23 @@ class HedgeSyncJob < ApplicationJob
 
   def ambiguous_order_error?(error)
     !error.is_a?(HyperliquidService::OrderError) || error.message.include?("returned nil")
+  end
+
+  def below_aerodrome_min_delta_notional?(delta, target_short, asset_price_usd)
+    return false unless asset_price_usd
+    return false if target_short.zero?
+
+    min_notional = aerodrome_min_order_notional_usd
+    return true unless min_notional
+
+    (delta.abs * asset_price_usd) < min_notional
+  end
+
+  def aerodrome_min_order_notional_usd
+    raw = ENV.fetch("AERODROME_MIN_ORDER_NOTIONAL_USD", "10").presence || "10"
+    BigDecimal(raw)
+  rescue ArgumentError
+    nil
   end
 
   # Resolves which HL account (main or subaccount) to use for this hedge+asset.
