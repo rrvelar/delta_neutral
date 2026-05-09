@@ -15,7 +15,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
                          market_close_result: { "status" => "ok" }, market_close_error: nil,
                          market_order_result: { "status" => "ok" }, market_order_error: nil,
                          positions_after_close_error: nil, positions_after_open_error: nil,
-                         market_order_calls: nil)
+                         market_order_calls: nil, update_leverage_calls: nil)
     user_states = {}
 
     # Main account state
@@ -69,7 +69,10 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
         market_order_result
       end
     end
-    mock_exchange.define_singleton_method(:update_leverage) { |**_| { "status" => "ok" } }
+    mock_exchange.define_singleton_method(:update_leverage) do |**args|
+      update_leverage_calls&.push(args)
+      { "status" => "ok" }
+    end
     mock_exchange.define_singleton_method(:create_sub_account) { |**_| { "subAccountUser" => "0xnewsub" } }
     mock_exchange.define_singleton_method(:sub_account_transfer) { |**_| { "status" => "ok" } }
 
@@ -139,6 +142,58 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
     weth_rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
     assert_equal BigDecimal("0"), weth_rebalance.realized_pnl
+  end
+
+  test "skips order when rounded target equals current short despite raw tolerance deviation" do
+    hedge = hedges(:eth_hedge)
+    hedge.update!(tolerance: "0.0001")
+    hedge.position.update!(asset0_amount: BigDecimal("0.023219"), asset1_amount: BigDecimal("0"))
+    market_order_calls = []
+    update_leverage_calls = []
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.0116" } ],
+      market_order_calls: market_order_calls,
+      update_leverage_calls: update_leverage_calls
+    )
+
+    assert hedge.needs_rebalance?(hedge.position.asset0_amount, BigDecimal("0.0116"))
+    assert_no_emails do
+      assert_no_difference "ShortRebalance.count" do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_empty market_order_calls
+    assert_empty update_leverage_calls
+  end
+
+  test "rebalances when rounded target differs from current short" do
+    hedge = hedges(:eth_hedge)
+    hedge.update!(tolerance: "0.0001")
+    hedge.position.update!(asset0_amount: BigDecimal("0.0234"), asset1_amount: BigDecimal("0"))
+    market_order_calls = []
+    update_leverage_calls = []
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.0116" } ],
+      market_order_calls: market_order_calls,
+      update_leverage_calls: update_leverage_calls
+    )
+
+    assert_difference "ShortRebalance.count", 1 do
+      HyperliquidService.stub(:new, mock_service) do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal BigDecimal("0.0116"), rebalance.old_short_size
+    assert_equal BigDecimal("0.0117"), rebalance.new_short_size
+    assert_equal 2, market_order_calls.size
+    assert_equal 1, update_leverage_calls.size
   end
 
   test "closes over-hedged short and notifies when pool amount is zero" do

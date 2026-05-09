@@ -152,6 +152,11 @@ class HedgeSyncJob < ApplicationJob
 
     Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: current_short=#{current_short}, target_short=#{target_short}" }
 
+    if target_short == current_short
+      Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: rounded target equals current short; skipping order" }
+      return
+    end
+
     unless hedge.needs_rebalance?(pool_amount, current_short)
       Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: within tolerance, no rebalance needed" }
       return
