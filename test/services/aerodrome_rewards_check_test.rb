@@ -88,6 +88,46 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "configured on-chain AERO USDC pool price produces claimable AERO USD" do
+    position = create_aerodrome_position
+    reward_data = AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
+      account_address: position.wallet.address,
+      token_id: position.external_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 77,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 12_500_000_000_000_000_000,
+      claimable_aero: BigDecimal("12.5"),
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
+    service = reward_service_stub(position, reward_data)
+    stub_aero_price_rpc
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "BASE_RPC_URL" => "https://base.example.com/rpc",
+      "AERODROME_AERO_TOKEN_ADDRESS" => "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "AERODROME_USDC_ADDRESS" => "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "AERODROME_AERO_USD_VALUATION_ENABLED" => "true",
+      "AERODROME_AERO_USDC_POOL_ADDRESS" => "0xbe00ff35af70e8415d0eb605a286d8a45466a4c1"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service).report
+
+      assert_equal "PASS", report.fetch(:status)
+      assert_equal "1.0", report.fetch(:aero_usd_price)
+      assert_equal "aerodrome_pool", report.fetch(:aero_usd_price_source)
+      assert_equal "12.5", report.fetch(:claimable_aero_usd)
+    end
+  end
+
   test "env depositor override is used when position wallet is gauge" do
     gauge = "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28"
     depositor = "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6"
@@ -224,6 +264,29 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
         reward_data
       end
     end
+  end
+
+  def stub_aero_price_rpc
+    sqrt_price_x96 = AerodromeSlipstreamMath::Q96 * 1_000_000
+    stub_request(:post, "https://base.example.com/rpc").to_return(
+      { status: 200, body: rpc_result(word("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")) },
+      { status: 200, body: rpc_result(word("0x940181a94a35a4569e4529a3cdfb74e38fd98631")) },
+      { status: 200, body: rpc_result(uint_word(6)) },
+      { status: 200, body: rpc_result(uint_word(18)) },
+      { status: 200, body: rpc_result("#{uint_word(sqrt_price_x96)}#{uint_word(0)}#{uint_word(0)}#{uint_word(100)}#{uint_word(100)}#{uint_word(1)}") }
+    )
+  end
+
+  def rpc_result(data)
+    { jsonrpc: "2.0", id: 1, result: "0x#{data}" }.to_json
+  end
+
+  def word(address)
+    address.downcase.delete_prefix("0x").rjust(64, "0")
+  end
+
+  def uint_word(value)
+    Integer(value).to_s(16).rjust(64, "0")
   end
 
   def create_aerodrome_position(wallet_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701")

@@ -202,7 +202,17 @@ JSON output:
 FORMAT=json bin/rails aerodrome:rewards_check
 ```
 
-This task discovers the configured Aerodrome position, attempts read-only `Voter.gauges(pool)` gauge discovery when `AERODROME_VOTER_ADDRESS` is configured, and attempts read-only CL gauge reward reads for a depositor address plus token id. For staked Slipstream NFTs, the stored/owner wallet can be the gauge. Set `AERODROME_REWARDS_DEPOSITOR_ADDRESS` to the real staking wallet to read earned rewards in that case. When the override is blank, the check falls back to `position.wallet.address`. It reports `position_wallet_address`, compatibility `wallet_address`, `depositor_address`, `depositor_source`, and `gauge_address`; the gauge address must never be used as the depositor fallback. `not_staked` means the token id was not found for that depositor in the discovered CL gauge. It performs no DB writes, sends no transactions, claims nothing, and does not use private keys. AERO rewards are discovery-only. AERO USD valuation is read-only and requires a configured verified source: either `AERODROME_AERO_USD_MANUAL_PRICE` or enabled on-chain valuation with `AERODROME_AERO_USDC_POOL_ADDRESS`. Unclaimed rewards are displayed as estimates only.
+This task discovers the configured Aerodrome position, attempts read-only `Voter.gauges(pool)` gauge discovery when `AERODROME_VOTER_ADDRESS` is configured, and attempts read-only CL gauge reward reads for a depositor address plus token id. For staked Slipstream NFTs, the stored/owner wallet can be the gauge. Set `AERODROME_REWARDS_DEPOSITOR_ADDRESS` to the real staking wallet to read earned rewards in that case. When the override is blank, the check falls back to `position.wallet.address`. It reports `position_wallet_address`, compatibility `wallet_address`, `depositor_address`, `depositor_source`, and `gauge_address`; the gauge address must never be used as the depositor fallback. `not_staked` means the token id was not found for that depositor in the discovered CL gauge. It performs no DB writes, sends no transactions, claims nothing, and does not use private keys. AERO rewards are discovery-only. AERO USD valuation is read-only and requires a configured verified source: either `AERODROME_AERO_USD_MANUAL_PRICE` or enabled on-chain valuation with `AERODROME_AERO_USDC_POOL_ADDRESS`. The verified Base AERO/USDC Slipstream CL pool for this read path is `0xbe00ff35af70e8415d0eb605a286d8a45466a4c1` with token0 USDC `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` and token1 AERO `0x940181a94a35a4569e4529a3cdfb74e38fd98631`. Unclaimed rewards are displayed as estimates only.
+
+Recommended production reward valuation configuration:
+
+```bash
+AERODROME_AERO_USD_VALUATION_ENABLED=true
+AERODROME_AERO_USDC_POOL_ADDRESS=0xbe00ff35af70e8415d0eb605a286d8a45466a4c1
+AERODROME_AERO_USD_MANUAL_PRICE=
+```
+
+If on-chain valuation is unavailable, leave `AERODROME_AERO_USD_VALUATION_ENABLED=false` and use `AERODROME_AERO_USD_MANUAL_PRICE` only as an explicit operator-provided fallback. Manual price values can go stale and remain estimates.
 
 ## Manual Verification For One Token ID
 
