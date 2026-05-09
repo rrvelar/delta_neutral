@@ -45,6 +45,14 @@
 
 <% if aerodrome_position?(@position) %>
   <% hedge_preview = aerodrome_hedge_preview_for(@position) %>
+  <% aerodrome_hedge = @position.hedge %>
+  <% weth_amount = @position.asset0.to_s.upcase == "WETH" || @position.asset0.to_s.upcase == "ETH" ? @position.asset0_amount : @position.asset1_amount %>
+  <% target_eth_short = aerodrome_hedge && weth_amount ? weth_amount * aerodrome_hedge.target : nil %>
+  <% aerodrome_hedge_enabled = ENV["AERODROME_HEDGE_ENABLED"].to_s.downcase == "true" %>
+  <% aerodrome_hedge_paused = ENV["AERODROME_HEDGE_PAUSED"].nil? ? true : ENV["AERODROME_HEDGE_PAUSED"].to_s.downcase == "true" %>
+  <% aerodrome_live_approved = ENV["AERODROME_LIVE_APPROVED"].to_s.downcase == "true" %>
+  <% hyperliquid_testnet = ENV["HYPERLIQUID_TESTNET"].to_s.downcase == "true" %>
+  <% aerodrome_pool_delta = @position.entry_value_usd ? @position.total_value_usd - @position.entry_value_usd : nil %>
   <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
     <div class="flex flex-wrap gap-2 mb-4">
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">MONITOR ONLY</span>
@@ -81,6 +89,66 @@
           <p class="mt-3 text-gray-300 font-medium">Hedge preview unavailable</p>
           <p class="text-gray-500 text-sm mt-1"><%= hedge_preview&.reason || "preview data is unavailable" %></p>
         <% end %>
+      </div>
+      <% if aerodrome_hedge %>
+        <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-gray-400 text-xs uppercase tracking-wide">Aerodrome Hedge Status</p>
+              <p class="text-yellow-200/80 text-xs mt-2">Read-only dashboard status &middot; No Hyperliquid readback &middot; No orders &middot; No execution</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <% unless aerodrome_hedge_enabled %>
+                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">disabled</span>
+              <% end %>
+              <% if aerodrome_hedge_paused %>
+                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">paused</span>
+              <% end %>
+              <% if hyperliquid_testnet %>
+                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-blue-950/60 text-blue-200 border border-blue-800">testnet</span>
+              <% end %>
+              <% unless aerodrome_live_approved %>
+                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-red-950/50 text-red-200 border border-red-800">live-blocked</span>
+              <% end %>
+            </div>
+          </div>
+          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Hedge configured</span><span class="text-white">yes</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Active</span><span class="text-white"><%= aerodrome_hedge.active? ? "yes" : "no" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Target percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.target * 100, precision: 2) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Tolerance percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.tolerance * 100, precision: 2) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Target ETH short</span><span class="text-white"><%= target_eth_short ? number_with_precision(target_eth_short, precision: 6) : "Unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Actual ETH short</span><span class="text-yellow-300">readback disabled / not queried</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_ENABLED</span><span class="text-white"><%= aerodrome_hedge_enabled %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_PAUSED</span><span class="text-white"><%= aerodrome_hedge_paused %><%= " (default)" if ENV["AERODROME_HEDGE_PAUSED"].nil? %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_LIVE_APPROVED</span><span class="text-white"><%= aerodrome_live_approved %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">HYPERLIQUID_TESTNET</span><span class="text-white"><%= hyperliquid_testnet %></span></div>
+          </div>
+          <div class="mt-4 border-t border-gray-800 pt-4">
+            <p class="text-gray-400 text-xs uppercase tracking-wide">Last WETH/ETH Rebalance</p>
+            <% if @latest_aerodrome_weth_rebalance %>
+              <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                <div class="flex justify-between gap-4"><span class="text-gray-500">ID</span><span class="text-white"><%= @latest_aerodrome_weth_rebalance.id %></span></div>
+                <div class="flex justify-between gap-4"><span class="text-gray-500">Status</span><span class="<%= @latest_aerodrome_weth_rebalance.status == ShortRebalance::STATUS_SUCCESS ? 'text-green-300' : 'text-red-300' %>"><%= @latest_aerodrome_weth_rebalance.status %></span></div>
+                <div class="flex justify-between gap-4"><span class="text-gray-500">Old short size</span><span class="text-white"><%= number_with_precision(@latest_aerodrome_weth_rebalance.old_short_size, precision: 6) %></span></div>
+                <div class="flex justify-between gap-4"><span class="text-gray-500">New short size</span><span class="text-white"><%= number_with_precision(@latest_aerodrome_weth_rebalance.new_short_size, precision: 6) %></span></div>
+                <div class="flex justify-between gap-4"><span class="text-gray-500">Rebalanced at</span><span class="text-white"><%= @latest_aerodrome_weth_rebalance.rebalanced_at.strftime("%m/%d/%Y %H:%M") %></span></div>
+                <div class="flex justify-between gap-4"><span class="text-gray-500">Message</span><span class="text-white text-right"><%= @latest_aerodrome_weth_rebalance.message.presence || "-" %></span></div>
+              </div>
+            <% else %>
+              <p class="mt-3 text-gray-500 text-sm">No WETH/ETH rebalance history.</p>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
+        <p class="text-gray-400 text-xs uppercase tracking-wide">PnL Baseline</p>
+        <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Entry value</span><span class="text-white"><%= @position.entry_value_usd ? format_usd(@position.entry_value_usd) : "Unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Current pooled value</span><span class="text-white"><%= format_usd(@position.total_value_usd) %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Pool delta from entry</span><span class="<%= (aerodrome_pool_delta || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= aerodrome_pool_delta ? format_usd(aerodrome_pool_delta) : "Unavailable" %></span></div>
+        </div>
+        <p class="text-gray-500 text-xs mt-3">PnL baseline starts from first Aerodrome snapshot unless manually set.</p>
       </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
         <p class="text-gray-400 text-xs uppercase tracking-wide">Latest Manual Hedge Proposal</p>
@@ -285,6 +353,9 @@
 <% end %>
 
 <h2 class="text-xl font-semibold text-white mb-4">LP Fees</h2>
+<% if aerodrome_position?(@position) %>
+  <p class="text-gray-500 text-sm mb-4">Aerodrome fee read not implemented yet.</p>
+<% end %>
 <div class="grid grid-cols-3 gap-4">
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Collected</p>

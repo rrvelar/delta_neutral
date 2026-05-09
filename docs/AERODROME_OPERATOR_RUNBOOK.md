@@ -217,6 +217,8 @@ Aerodrome positions appear in the dashboard and position pages with:
 - Monitor-only, no-orders, hedge-disabled, and Hyperliquid-not-called safety labels.
 - Persisted amounts, USD prices, and estimated LP value when available.
 - Read-only PnL snapshots when both Aerodrome amounts and USD prices are available. The snapshot pool PnL uses `asset0_amount * asset0_price_usd + asset1_amount * asset1_price_usd - entry_value_usd`; if `entry_value_usd` is missing, the first compatible Aerodrome snapshot sets it as the baseline. Hedge PnL and fees remain zero for Aerodrome snapshots in this task.
+- A read-only Aerodrome hedge status card when an explicit `Hedge` record exists. It shows target/tolerance, target ETH short, execution gate env state, mode labels, and the latest WETH/ETH rebalance from local history only. Actual ETH short readback is disabled by default and is not queried from Hyperliquid on the dashboard.
+- A read-only PnL baseline card showing `entry_value_usd`, current pooled value, and pool delta from entry. Dashboard PnL baseline starts from `entry_value_usd`, which may be set by the first Aerodrome snapshot unless manually set earlier.
 - Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
 - Latest manual hedge proposal when present, including suggested side, asset, amount, notional, status, execution flags, Hyperliquid-called flag, and computed current/stale status.
 - Compact recent proposal history for the position, including proposal id, status, hedge asset/side, suggested amount/notional, generated/reviewed timestamps, `execution_enabled`, and `hyperliquid_called`.
@@ -228,6 +230,8 @@ Aerodrome positions appear in the dashboard and position pages with:
 - The Aerodrome position refresh action is labeled `Refresh Read-only Data` and states that it updates on-chain LP data only, with no orders, no Hyperliquid, and no hedge execution.
 
 The UI preview, manual proposal system, and safety-limit checks do not call RPC, do not call `HyperliquidService`, do not create `Hedge` records, and do not enable order execution. Manual proposals are local records only. They are still NOT READY FOR LIVE HEDGE INTEGRATION, and `AERODROME_HEDGE_ENABLED` remains false/default-off.
+
+Aerodrome LP fee read is not implemented yet. The dashboard keeps Aerodrome LP fees at zero and labels them as a future task.
 
 When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. Testnet rehearsal requires `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, and `HYPERLIQUID_TESTNET=true`. Hyperliquid mainnet Aerodrome hedge processing skips before `HyperliquidService` unless `AERODROME_LIVE_APPROVED=true`; missing `AERODROME_LIVE_APPROVED` behaves false. `AERODROME_LIVE_APPROVED=true` is not enough by itself: `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, all readiness/risk gates, and WETH/ETH-only filtering are still required. Production live must keep `AERODROME_HEDGE_ENABLED=false` and `AERODROME_HEDGE_PAUSED=true` until a separate future first-live procedure is approved.
 

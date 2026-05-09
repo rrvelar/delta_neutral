@@ -86,6 +86,69 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Approve", response.body
   end
 
+  test "show displays read-only Aerodrome hedge status and pnl baseline" do
+    position = create_aerodrome_position
+    position.update!(entry_value_usd: BigDecimal("2500"))
+    hedge = Hedge.create!(position: position, target: BigDecimal("0.5"), tolerance: BigDecimal("0.05"), active: true)
+    rebalance = hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: BigDecimal("0.4"),
+      new_short_size: BigDecimal("0.625"),
+      realized_pnl: BigDecimal("0"),
+      status: ShortRebalance::STATUS_SUCCESS,
+      message: "testnet rebalance complete",
+      rebalanced_at: Time.zone.local(2026, 5, 9, 12, 0, 0)
+    )
+
+    with_env(
+      "AERODROME_HEDGE_ENABLED" => "false",
+      "AERODROME_HEDGE_PAUSED" => "true",
+      "AERODROME_LIVE_APPROVED" => "false",
+      "HYPERLIQUID_TESTNET" => "true"
+    ) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "Aerodrome Hedge Status", response.body
+    assert_match "Hedge configured", response.body
+    assert_match "yes", response.body
+    assert_match "Target percent", response.body
+    assert_match "50.00%", response.body
+    assert_match "Tolerance percent", response.body
+    assert_match "5.00%", response.body
+    assert_match "Target ETH short", response.body
+    assert_match "0.625000", response.body
+    assert_match "readback disabled / not queried", response.body
+    assert_match "disabled", response.body
+    assert_match "paused", response.body
+    assert_match "testnet", response.body
+    assert_match "live-blocked", response.body
+    assert_match "AERODROME_HEDGE_ENABLED", response.body
+    assert_match "AERODROME_HEDGE_PAUSED", response.body
+    assert_match "AERODROME_LIVE_APPROVED", response.body
+    assert_match "HYPERLIQUID_TESTNET", response.body
+    assert_match "Last WETH/ETH Rebalance", response.body
+    assert_match rebalance.id.to_s, response.body
+    assert_match "0.400000", response.body
+    assert_match "success", response.body
+    assert_match "testnet rebalance complete", response.body
+    assert_match "PnL Baseline", response.body
+    assert_match "Entry value", response.body
+    assert_match "$2,500.00", response.body
+    assert_match "Current pooled value", response.body
+    assert_match "$3,000.00", response.body
+    assert_match "Pool delta from entry", response.body
+    assert_match "$500.00", response.body
+    assert_match "PnL baseline starts from first Aerodrome snapshot unless manually set.", response.body
+    assert_match "Aerodrome fee read not implemented yet.", response.body
+    assert_no_match "Hedge: None", response.body
+    assert_no_match "Execute", response.body
+    assert_no_match "Trade", response.body
+  end
+
   test "show displays latest manual proposal as local manual-only record" do
     position = create_aerodrome_position
     position.aerodrome_hedge_proposals.create!(
@@ -428,6 +491,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Manual Proposal History", response.body
     assert_no_match "Generate Manual Hedge Proposal", response.body
     assert_no_match "Regenerate Manual Hedge Proposal", response.body
+    assert_no_match "Aerodrome Hedge Status", response.body
+    assert_no_match "PnL baseline starts from first Aerodrome snapshot", response.body
   end
 
   test "show displays stale amount reason for changed proposal values" do

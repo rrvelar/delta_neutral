@@ -19,10 +19,11 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def show
-    @position = Current.user.positions.includes(:dex, wallet: :network).find(params[:id])
+    @position = Current.user.positions.includes(:dex, :hedge, wallet: :network).find(params[:id])
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
     if @position.dex.name == "aerodrome_slipstream"
+      @latest_aerodrome_weth_rebalance = @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first
       @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
       safety = AerodromeHedgeProposalSafety.new
