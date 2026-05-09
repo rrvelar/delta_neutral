@@ -147,7 +147,7 @@ Verified facts:
 | Slipstream CL gauges expose a staked-position check. | Same `ICLGauge.sol` source. | `stakedContains(address account,uint256 tokenId)` | 2026-05-09 | If false, report not staked/not eligible rather than faking rewards. |
 | Reward claiming is not read-only. | Same `ICLGauge.sol` source. | Claim/write methods are separate from `earned`. | 2026-05-09 | Current task must not claim, approve, transfer, or send transactions. |
 
-Implementation decision: add `AERODROME_VOTER_ADDRESS`, `AERODROME_AERO_TOKEN_ADDRESS`, and `AERODROME_REWARDS_ENABLED=false` as env examples only. Rewards discovery uses mocked tests and read-only `eth_call` paths. AERO rewards are shown as discovery-only and are not included in Total PnL. AERO USD valuation is unresolved and deferred.
+Implementation decision: add `AERODROME_VOTER_ADDRESS`, `AERODROME_AERO_TOKEN_ADDRESS`, and `AERODROME_REWARDS_ENABLED=false` as env examples only. Rewards discovery uses mocked tests and read-only `eth_call` paths. AERO rewards are shown as discovery-only. AERO USD valuation is read-only and requires a configured verified source: `AERODROME_AERO_USD_MANUAL_PRICE` or enabled on-chain AERO/USDC pool valuation using verified Slipstream `token0()`, `token1()`, `slot0()`, and ERC20 `decimals()` reads. Dashboard PnL shows excluding-rewards and including-unclaimed-rewards-estimate totals separately; unclaimed rewards are not realized until claimed/sold.
 
 Implementation decision: keep `AERODROME_SLIPSTREAM_POSITION_MANAGER` and `AERODROME_SLIPSTREAM_FACTORY` env-configurable. If multiple deployments are supported, use env-configurable comma-separated address lists or a structured config, not hardcoded constants.
 

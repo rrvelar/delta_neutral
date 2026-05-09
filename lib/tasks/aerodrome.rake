@@ -261,6 +261,8 @@ namespace :aerodrome do
       puts "gauge address: #{report.fetch(:gauge_address).inspect}"
       puts "staked: #{report.fetch(:staked).inspect}"
       puts "claimable AERO: #{report.fetch(:claimable_aero).inspect}"
+      puts "AERO USD price: #{report.fetch(:aero_usd_price).inspect}"
+      puts "AERO USD price source: #{report.fetch(:aero_usd_price_source)}"
       puts "claimable AERO USD: #{report.fetch(:claimable_aero_usd).inspect}"
 
       puts "Blockers:"

@@ -161,7 +161,9 @@
           </div>
           <div class="flex justify-between gap-4"><span class="text-gray-500">Staked</span><span class="text-white"><%= rewards_report[:staked].nil? ? "unknown" : rewards_report[:staked] %></span></div>
           <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO</span><span class="text-white"><%= rewards_report[:claimable_aero].present? ? number_with_precision(BigDecimal(rewards_report[:claimable_aero].to_s), precision: 6) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD value</span><span class="text-white">unavailable</span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD price</span><span class="text-white"><%= rewards_report[:aero_usd_price].present? ? format_usd(BigDecimal(rewards_report[:aero_usd_price].to_s), precision: 6) : "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD price source</span><span class="text-white"><%= rewards_report[:aero_usd_price_source].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO USD</span><span class="text-white"><%= rewards_report[:claimable_aero_usd].present? ? format_usd(BigDecimal(rewards_report[:claimable_aero_usd].to_s)) : "unavailable" %></span></div>
           <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor address</span><span class="text-white text-right break-all"><%= rewards_report[:depositor_address].presence || "unavailable" %></span></div>
           <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor source</span><span class="text-white"><%= rewards_report[:depositor_source].presence || "unavailable" %></span></div>
           <div class="flex justify-between gap-4"><span class="text-gray-500">Gauge address</span><span class="text-white text-right break-all"><%= rewards_report[:gauge_address].presence || "unavailable" %></span></div>
@@ -170,7 +172,7 @@
         <% if rewards_report[:warnings].present? %>
           <p class="text-yellow-200 text-xs mt-3"><%= rewards_report[:warnings].join("; ") %></p>
         <% end %>
-        <p class="text-gray-500 text-xs mt-3">AERO USD valuation is a separate future task.</p>
+        <p class="text-gray-500 text-xs mt-3">Unclaimed rewards are an estimate and are not realized until claimed/sold. Claiming is not implemented.</p>
       </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
         <p class="text-gray-400 text-xs uppercase tracking-wide">Latest Manual Hedge Proposal</p>
@@ -305,6 +307,9 @@
 <% total_unrealized = pool_unrealized ? pool_unrealized + hedge_unrealized : hedge_unrealized %>
 <% total_fees = latest_snap&.total_fees_usd || 0 %>
 <% total_pnl = total_unrealized + hedge_realized + total_fees %>
+<% rewards_pnl = @aerodrome_rewards_report&.fetch(:claimable_aero_usd, nil).presence %>
+<% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
+<% total_pnl_with_rewards = rewards_pnl ? total_pnl + rewards_pnl : nil %>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
@@ -370,6 +375,25 @@
     </p>
   </div>
 </div>
+<% if aerodrome_position?(@position) %>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Excluding AERO Rewards</p>
+      <p class="text-2xl font-bold mt-2 <%= total_pnl >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_pnl) %></p>
+      <p class="text-gray-500 text-sm mt-1">Pool, hedge, and LP fees only. AERO rewards excluded.</p>
+    </div>
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Including Unclaimed AERO Rewards Estimate</p>
+      <% if total_pnl_with_rewards %>
+        <p class="text-2xl font-bold mt-2 <%= total_pnl_with_rewards >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_pnl_with_rewards) %></p>
+        <p class="text-gray-500 text-sm mt-1">Includes unclaimed AERO rewards estimate. Unclaimed rewards are not realized until claimed/sold.</p>
+      <% else %>
+        <p class="text-2xl font-bold mt-2 text-gray-500">Unavailable</p>
+        <p class="text-gray-500 text-sm mt-1">AERO USD unavailable. Rewards are read-only; claiming is not implemented.</p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
 <% if latest_snap %>
   <p class="text-gray-600 text-xs mb-8">As of <%= latest_snap.captured_at.strftime("%m/%d/%Y %H:%M") %></p>
 <% end %>

@@ -59,6 +59,8 @@ class PositionsController < ApplicationController
         depositor_source: nil,
         gauge_address: nil,
         token_id: @position.external_id,
+        aero_usd_price: nil,
+        aero_usd_price_source: "unavailable",
         warnings: [ "AERODROME_REWARDS_ENABLED is not true" ]
       }
     end
@@ -75,6 +77,8 @@ class PositionsController < ApplicationController
       depositor_source: nil,
       gauge_address: nil,
       token_id: @position.external_id,
+      aero_usd_price: nil,
+      aero_usd_price_source: "unavailable",
       warnings: [ e.message ]
     }
   end

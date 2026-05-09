@@ -39,7 +39,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5", "AERODROME_REWARDS_ENABLED" => "true") do
       report = AerodromeRewardsCheck.new(rewards_service: service).report
 
-      assert_equal "PASS", report.fetch(:status)
+      assert_equal "WARN", report.fetch(:status)
       assert_equal "detected", report.fetch(:gauge_status)
       assert_equal position.wallet.address, report.fetch(:position_wallet_address)
       assert_equal position.wallet.address, report.fetch(:wallet_address)
@@ -49,7 +49,42 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       assert_equal true, report.fetch(:staked)
       assert_equal "12.5", report.fetch(:claimable_aero)
       assert_equal 12_500_000_000_000_000_000, report.fetch(:claimable_aero_raw)
+      assert_equal "unavailable", report.fetch(:aero_usd_price_source)
       assert_nil report.fetch(:claimable_aero_usd)
+    end
+  end
+
+  test "manual AERO USD price produces claimable AERO USD" do
+    position = create_aerodrome_position
+    reward_data = AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
+      account_address: position.wallet.address,
+      token_id: position.external_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 77,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 12_500_000_000_000_000_000,
+      claimable_aero: BigDecimal("12.5"),
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
+    service = reward_service_stub(position, reward_data)
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.75"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service).report
+
+      assert_equal "0.75", report.fetch(:aero_usd_price)
+      assert_equal "manual", report.fetch(:aero_usd_price_source)
+      assert_equal "9.375", report.fetch(:claimable_aero_usd)
     end
   end
 
@@ -96,7 +131,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     ) do
       report = AerodromeRewardsCheck.new(rewards_service: service).report
 
-      assert_equal "PASS", report.fetch(:status)
+      assert_equal "WARN", report.fetch(:status)
       assert_equal gauge, report.fetch(:position_wallet_address)
       assert_equal gauge, report.fetch(:wallet_address)
       assert_equal gauge, report.fetch(:gauge_address)

@@ -163,10 +163,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "AERO Rewards", response.body
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "Claimable AERO", response.body
-    assert_match "USD value", response.body
+    assert_match "Claimable AERO USD", response.body
     assert_match "not configured", response.body
     assert_match "unavailable", response.body
-    assert_match "AERO USD valuation is a separate future task.", response.body
+    assert_match "AERO USD price source", response.body
     assert_match "$500.00", response.body
     assert_no_match "Claim rewards", response.body
     assert_no_match "Execute", response.body
@@ -182,7 +182,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       token_id: position.external_id,
       staked: true,
       claimable_aero: "14.14",
-      claimable_aero_usd: nil,
+      aero_usd_price: "0.5",
+      aero_usd_price_source: "manual",
+      claimable_aero_usd: "7.07",
       depositor_address: "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6",
       depositor_source: "env",
       gauge_address: "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28",
@@ -204,13 +206,18 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "detected", response.body
     assert_match "true", response.body
     assert_match "14.140000", response.body
+    assert_match "$0.500000", response.body
+    assert_match "manual", response.body
+    assert_match "$7.07", response.body
     assert_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
     assert_match "env", response.body
     assert_match "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28", response.body
-    assert_match "unavailable", response.body
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "$500.00", response.body
-    assert_no_match "$514.14", response.body
+    assert_match "Total PnL Excluding AERO Rewards", response.body
+    assert_match "Total PnL Including Unclaimed AERO Rewards Estimate", response.body
+    assert_match "$507.07", response.body
+    assert_match "Unclaimed rewards are not realized until claimed/sold", response.body
     assert_no_match "Claim rewards", response.body
   end
 

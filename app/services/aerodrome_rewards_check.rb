@@ -2,8 +2,9 @@ class AerodromeRewardsCheck
   BANNER = "AERODROME REWARDS CHECK — READ ONLY"
   DEX_NAME = "aerodrome_slipstream"
 
-  def initialize(rewards_service: nil)
+  def initialize(rewards_service: nil, price_service: nil)
     @rewards_service = rewards_service
+    @price_service = price_service
     @blockers = []
     @warnings = []
     @checks = []
@@ -13,7 +14,10 @@ class AerodromeRewardsCheck
     position = active_aerodrome_position
     context = position_context(position)
     reward_data = position ? read_rewards(position) : nil
+    price_data = reward_data ? read_aero_usd_price : unavailable_price
     merge_reward_messages(reward_data)
+    @warnings.concat(price_data.warnings)
+    claimable_aero_usd = claimable_aero_usd(reward_data, price_data)
 
     {
       safety_banner: BANNER,
@@ -39,7 +43,9 @@ class AerodromeRewardsCheck
       reward_rate_raw: reward_data&.reward_rate_raw,
       claimable_aero: decimal_string(reward_data&.claimable_aero),
       claimable_aero_raw: reward_data&.claimable_aero_raw,
-      claimable_aero_usd: nil,
+      aero_usd_price: decimal_string(price_data.price),
+      aero_usd_price_source: price_data.source,
+      claimable_aero_usd: decimal_string(claimable_aero_usd),
       checks: @checks,
       blockers: @blockers,
       warnings: @warnings,
@@ -127,6 +133,26 @@ class AerodromeRewardsCheck
     @rewards_service ||= AerodromeRewardsService.new(
       aero_token_address: ENV["AERODROME_AERO_TOKEN_ADDRESS"].presence
     )
+  end
+
+  def price_service
+    @price_service ||= AerodromeAeroUsdPrice.new
+  end
+
+  def read_aero_usd_price
+    price_service.price
+  rescue AerodromeAeroUsdPrice::Error => e
+    AerodromeAeroUsdPrice::Result.new(price: nil, source: "unavailable", warnings: [ e.message ])
+  end
+
+  def unavailable_price
+    AerodromeAeroUsdPrice::Result.new(price: nil, source: "unavailable", warnings: [])
+  end
+
+  def claimable_aero_usd(reward_data, price_data)
+    return nil unless reward_data&.claimable_aero && price_data.price
+
+    reward_data.claimable_aero * price_data.price
   end
 
   def rewards_enabled?

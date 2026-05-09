@@ -290,6 +290,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       assert_match "depositor/wallet address used: \"0x23cb5f48fa3f4502232f3442637f90e8e3355701\"", out
       assert_match "depositor source: position_wallet", out
       assert_match "claimable AERO: \"12.5\"", out
+      assert_match "AERO USD price: \"0.75\"", out
+      assert_match "AERO USD price source: manual", out
+      assert_match "claimable AERO USD: \"9.375\"", out
     end
   end
 
@@ -314,6 +317,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         refute_equal parsed.fetch("gauge_address"), parsed.fetch("depositor_address")
         assert_equal true, parsed.fetch("staked")
         assert_equal "12.5", parsed.fetch("claimable_aero")
+        assert_equal "0.75", parsed.fetch("aero_usd_price")
+        assert_equal "manual", parsed.fetch("aero_usd_price_source")
+        assert_equal "9.375", parsed.fetch("claimable_aero_usd")
       end
     end
   end
@@ -638,7 +644,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       reward_rate_raw: 77,
       claimable_aero: "12.5",
       claimable_aero_raw: 12_500_000_000_000_000_000,
-      claimable_aero_usd: nil,
+      aero_usd_price: "0.75",
+      aero_usd_price_source: "manual",
+      claimable_aero_usd: "9.375",
       checks: [],
       blockers: [],
       warnings: [],
