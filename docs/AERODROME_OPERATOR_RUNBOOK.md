@@ -29,6 +29,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - UI/dashboard visibility for Aerodrome monitor-only positions.
 - Manual dry-run task: `bin/rails aerodrome:dry_run`.
 - Config verification task: `bin/rails aerodrome:verify_config`.
+- Read-only pre-live readiness task: `bin/rails aerodrome:pre_live_check`.
 - Mocked tests for dry-run and config verification.
 - Documentation for limitations, rollback, and pre-live audit.
 
@@ -117,6 +118,28 @@ FORMAT=json bin/rails aerodrome:dry_run TOKEN_IDS=5016
 
 The task de-duplicates repeated token ids and prints a note. Blank token ids are rejected because the task requires at least one explicit id.
 
+## Run Pre-Live Readiness Check
+
+Human-readable output:
+
+```bash
+bin/rails aerodrome:pre_live_check
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails aerodrome:pre_live_check
+```
+
+Optional read-only Hyperliquid readback:
+
+```bash
+CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check
+```
+
+The pre-live check is read-only. It performs no DB writes, places no orders, and does not call Hyperliquid execution methods such as `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. With `CHECK_HYPERLIQUID=true`, it only reads `get_position("ETH")` and reports the current ETH short state. Passing this check is not permission for live trading; live remains blocked by default and requires a separate future approval/change.
+
 ## Manual Verification For One Token ID
 
 1. Run `bin/rails aerodrome:verify_config`.
@@ -204,6 +227,7 @@ Counts should be unchanged.
   - `Aerodrome`
   - `aerodrome:dry_run`
   - `aerodrome:verify_config`
+  - `aerodrome:pre_live_check`
   - `HyperliquidService`
   - `HedgeSyncJob`
 
@@ -215,6 +239,7 @@ Do not proceed beyond dry-run if:
 
 - `bin/rake` fails.
 - `aerodrome:verify_config` fails.
+- `aerodrome:pre_live_check` is `BLOCKED`.
 - `CHECK_RPC=true` returns the wrong chain id.
 - manager or factory `eth_getCode` returns `0x`.
 - dry-run returns an error for the token id.

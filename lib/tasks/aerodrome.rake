@@ -123,4 +123,50 @@ namespace :aerodrome do
 
     exit(false) if report.fetch(:status) == "error"
   end
+
+  desc "Run a read-only Aerodrome pre-live readiness check"
+  task pre_live_check: :environment do
+    report = AerodromePreLiveCheck.new(
+      check_hyperliquid: ENV["CHECK_HYPERLIQUID"].to_s.downcase == "true"
+    ).report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "Overall status: #{report.fetch(:status)}"
+      puts
+
+      report.fetch(:checks).each do |section, checks|
+        puts section.to_s.tr("_", " ")
+        checks.each do |check|
+          value = check[:value] ? " (#{check[:value]})" : ""
+          puts "  #{check.fetch(:status).upcase}: #{check.fetch(:name)}#{value}"
+        end
+        puts
+      end
+
+      puts "Blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+
+      puts "Warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+
+      puts "Next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
 end

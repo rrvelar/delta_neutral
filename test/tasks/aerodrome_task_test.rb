@@ -6,6 +6,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rails.application.load_tasks unless Rake::Task.task_defined?("aerodrome:dry_run")
     Rake::Task["aerodrome:dry_run"].reenable
     Rake::Task["aerodrome:verify_config"].reenable
+    Rake::Task["aerodrome:pre_live_check"].reenable
   end
 
   test "dry run task fails clearly with no token ids" do
@@ -309,6 +310,61 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "pre live check task outputs read-only safety banner" do
+    report = pre_live_report(status: "WARN", warnings: [ "review warning" ])
+
+    with_env("FORMAT" => nil, "CHECK_HYPERLIQUID" => nil) do
+      AerodromePreLiveCheck.stub(:new, ->(check_hyperliquid:) {
+        assert_equal false, check_hyperliquid
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:pre_live_check"].invoke }
+
+        assert_match "PRE-LIVE READINESS CHECK", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "DB write: false", out
+        assert_match "Overall status: WARN", out
+        assert_match "Blockers:", out
+        assert_match "Warnings:", out
+        assert_match "Next steps:", out
+      end
+    end
+  end
+
+  test "pre live check task supports JSON output" do
+    report = pre_live_report(status: "PASS")
+
+    with_env("FORMAT" => "json", "CHECK_HYPERLIQUID" => "true") do
+      AerodromePreLiveCheck.stub(:new, ->(check_hyperliquid:) {
+        assert_equal true, check_hyperliquid
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:pre_live_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
+  test "pre live check task exits false when blocked" do
+    report = pre_live_report(status: "BLOCKED", blockers: [ "missing env" ])
+
+    with_env("FORMAT" => nil) do
+      AerodromePreLiveCheck.stub(:new, ->(check_hyperliquid:) {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        assert_raises(SystemExit) do
+          capture_io { Rake::Task["aerodrome:pre_live_check"].invoke }
+        end
+      end
+    end
+  end
+
   private
 
   def ok_report(token_id)
@@ -374,6 +430,26 @@ class AerodromeTaskTest < ActiveSupport::TestCase
           error_message: nil
         }
       ]
+    }
+  end
+
+  def pre_live_report(status:, blockers: [], warnings: [])
+    {
+      safety_banner: AerodromePreLiveCheck::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      checks: {
+        env: [ { name: "AERODROME_HEDGE_ENABLED is false", status: "pass" } ],
+        db: [],
+        risk_limits: [],
+        rehearsal_evidence: [],
+        hyperliquid_readback: []
+      },
+      blockers: blockers,
+      warnings: warnings,
+      next_steps: [ "Passing this check is not live approval." ]
     }
   end
 

@@ -12,6 +12,7 @@ This is not approval to go live. It is a conservative status snapshot for the cu
 | Dry-run no Hyperliquid | PASS | Dry-run does not instantiate or call `HyperliquidService`. |
 | Config verification no DB writes | PASS | `aerodrome:verify_config` validates config and optional read-only RPC only. |
 | Config verification no Hyperliquid | PASS | No Hyperliquid calls are used. |
+| Pre-live readiness check | PASS | `aerodrome:pre_live_check` is read-only, performs no DB writes, places no orders, and only uses optional mocked/read-only `get_position("ETH")` when `CHECK_HYPERLIQUID=true`. |
 | Monitor-only sync disabled by default | PASS | `AERODROME_READ_ONLY_ENABLED=false` is the documented default. |
 | HedgeSyncJob skips Aerodrome by default | PASS | `AERODROME_HEDGE_ENABLED=false` or missing skips Aerodrome before `HyperliquidService` construction. |
 | Aerodrome kill switch | PASS | `AERODROME_HEDGE_PAUSED` defaults to true when missing. Testnet rehearsal requires explicitly setting `AERODROME_HEDGE_PAUSED=false`. |
@@ -56,5 +57,7 @@ Aerodrome hedge execution is also paused by default through `AERODROME_HEDGE_PAU
 Testnet rehearsal found that the open path can submit a tiny WETH/ETH short, but the close path previously used SDK `market_close`, logged `No open position to close for ETH`, and still recorded a successful `ShortRebalance` with `new_short_size=0`. False successful close rebalances created before the close-path fix must not be trusted as evidence that a Hyperliquid short was closed. The close path now uses an explicit opposite market order with the known `current_short` size when `HedgeSyncJob` is closing to zero.
 
 The explicit close retest then encountered `SSL_read: unexpected eof while reading`; the short remained open and the app correctly recorded failure. Similar SSL ambiguity can occur after open orders, where the order may execute even if the client receives a network exception. `HedgeSyncJob` now reconciles ambiguous post-order errors by fetching actual Hyperliquid position state and comparing the actual short size with the intended target before writing the final `ShortRebalance` status. Explicit API rejections remain failures. Live remains blocked until both open and close reconciliation retests pass on testnet.
+
+`bin/rails aerodrome:pre_live_check` and `FORMAT=json bin/rails aerodrome:pre_live_check` provide a read-only readiness report across environment safety, local DB readiness, configured risk limits, rehearsal `ShortRebalance` evidence, and optional Hyperliquid readback. Passing this check is not permission for live trading. Live remains disabled by default and requires a separate future approval/change.
 
 Do not enable Aerodrome hedge execution until amount math, USD valuation, hedge preview/proposal behavior, proposal history/staleness handling, proposal safety-limit operations, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation, hedge previews, safety checks, and manual proposals do not make Aerodrome positions hedge-ready.
