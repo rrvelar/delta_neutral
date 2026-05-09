@@ -11,7 +11,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   private
 
-  def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {})
+  def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {},
+                         market_close_result: { "status" => "ok" }, market_close_error: nil)
     user_states = {}
 
     # Main account state
@@ -45,7 +46,11 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
 
     mock_exchange = Object.new
-    mock_exchange.define_singleton_method(:market_close) { |**_| { "status" => "ok" } }
+    mock_exchange.define_singleton_method(:market_close) do |**_|
+      raise market_close_error if market_close_error
+
+      market_close_result
+    end
     mock_exchange.define_singleton_method(:market_order) { |**_| { "status" => "ok" } }
     mock_exchange.define_singleton_method(:update_leverage) { |**_| { "status" => "ok" } }
     mock_exchange.define_singleton_method(:create_sub_account) { |**_| { "subAccountUser" => "0xnewsub" } }
@@ -151,6 +156,88 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
     hedge.reload
     assert hedge.active?, "hedge should remain active to manage sibling asset and handle re-entry"
+  end
+
+  test "close short returning nil records failed rebalance instead of success" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_close_result: nil
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.old_short_size
+    assert_equal BigDecimal("0.5"), rebalance.new_short_size
+    assert_match "returned nil", rebalance.message
+  end
+
+  test "close short raising records failed rebalance instead of success" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_close_error: HyperliquidService::OrderError.new("close rejected")
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.old_short_size
+    assert_equal BigDecimal("0.5"), rebalance.new_short_size
+    assert_match "close rejected", rebalance.message
+  end
+
+  test "close short rejected response records failed rebalance instead of success" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    rejected_close = {
+      "status" => "ok",
+      "response" => {
+        "data" => {
+          "statuses" => [
+            { "error" => "No open position found for ETH" }
+          ]
+        }
+      }
+    }
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_close_result: rejected_close
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.old_short_size
+    assert_equal BigDecimal("0.5"), rebalance.new_short_size
+    assert_match "No open position found", rebalance.message
   end
 
   test "allocates subaccount when main account is in use for same asset" do

@@ -141,6 +141,42 @@ class HyperliquidServiceTest < ActiveSupport::TestCase
     assert_nil result
   end
 
+  test "close_short raises order error when response contains rejection" do
+    rejected_response = {
+      "status" => "ok",
+      "response" => {
+        "data" => {
+          "statuses" => [
+            { "error" => "No open position found for ETH" }
+          ]
+        }
+      }
+    }
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_close) { |**_| rejected_response }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.close_short(asset: "ETH")
+    end
+    assert_match "No open position found", error.message
+  end
+
+  test "close_short raises order error when response status is err" do
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_close) { |**_| { "status" => "err", "response" => "rejected" } }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.close_short(asset: "ETH")
+    end
+    assert_match "rejected", error.message
+  end
+
   test "close_short re-raises non-position ArgumentErrors" do
     mock_exchange = Object.new
     mock_exchange.define_singleton_method(:market_close) { |**_| raise ArgumentError, "Unknown asset: FOO" }

@@ -168,13 +168,19 @@ class HedgeSyncJob < ApplicationJob
 
     Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: REBALANCE NEEDED" }
     realized_pnl = BigDecimal("0")
+    close_submitted = false
 
     begin
       # Close existing short and get realized PnL from fills
       if current_short > 0
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: closing existing short (size=#{current_short})" }
         before_close = Time.current
-        hyperliquid.close_short(asset: hl_asset, vault_address: vault_address)
+        close_result = hyperliquid.close_short(asset: hl_asset, vault_address: vault_address)
+        if close_result.nil?
+          raise HyperliquidService::OrderError, "Close short for #{hl_asset} returned nil despite current_short=#{current_short}"
+        end
+
+        close_submitted = true
         realized_pnl = fetch_realized_pnl(hyperliquid, hl_asset, before_close, address: account_address)
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: realized_pnl=#{realized_pnl}" }
       end
@@ -216,7 +222,7 @@ class HedgeSyncJob < ApplicationJob
       HedgeRebalanceMailer.rebalance_notification(rebalance).deliver_later
     rescue => e
       # Close succeeded but open failed — short is now 0; if close also failed, size unchanged
-      new_short_size = current_short > 0 && defined?(before_close) ? BigDecimal("0") : current_short
+      new_short_size = close_submitted ? BigDecimal("0") : current_short
 
       rebalance = hedge.short_rebalances.create!(
         asset: asset,
@@ -224,7 +230,7 @@ class HedgeSyncJob < ApplicationJob
         new_short_size: new_short_size,
         realized_pnl: realized_pnl,
         status: ShortRebalance::STATUS_FAILED,
-        message: "Attempted to open short of #{target_short} #{hl_asset}: #{e.message}",
+        message: "Attempted rebalance to #{target_short} #{hl_asset}: #{e.message}",
         rebalanced_at: Time.current
       )
       Rails.logger.error("[HedgeSyncJob] hedge #{hedge.id} #{asset}: rebalance failed — ShortRebalance ##{rebalance.id}: #{e.message}")

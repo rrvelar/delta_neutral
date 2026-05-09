@@ -73,6 +73,13 @@ class HyperliquidService
     opts[:vault_address] = vault_address if vault_address
     result = sdk.exchange.market_close(**opts)
     Rails.logger.debug { "[HyperliquidService] close_short result: #{result.inspect.truncate(200)}" }
+    return nil if result.nil?
+
+    if result.is_a?(Hash) && result["status"] == "err"
+      raise OrderError, (result["response"] || result["error"] || result.inspect).to_s
+    end
+
+    validate_order_response!(result)
     result
   rescue ArgumentError => e
     # market_close raises ArgumentError if no open position exists
