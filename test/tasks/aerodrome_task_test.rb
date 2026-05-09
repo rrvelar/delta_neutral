@@ -9,6 +9,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:pre_live_check"].reenable
     Rake::Task["aerodrome:testnet_emergency_close"].reenable
     Rake::Task["aerodrome:live_preflight_check"].reenable
+    Rake::Task["aerodrome:rewards_check"].reenable
   end
 
   test "dry run task fails clearly with no token ids" do
@@ -270,6 +271,41 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       assert_equal true, parsed.fetch("check_rpc")
       assert_equal [ "eth_chainId", "eth_getCode", "eth_getCode" ], parsed.fetch("rpc_checks").map { |check| check.fetch("method") }
       assert_requested :post, "https://base.example/rpc", times: 3
+    end
+  end
+
+  test "rewards check task outputs read-only safety banner" do
+    report = rewards_report
+
+    AerodromeRewardsCheck.stub(:new, -> {
+      Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+    }) do
+      out, = capture_io { Rake::Task["aerodrome:rewards_check"].invoke }
+
+      assert_match "AERODROME REWARDS CHECK — READ ONLY", out
+      assert_match "NO CLAIMS", out
+      assert_match "NO TRANSACTIONS", out
+      assert_match "DB write: false", out
+      assert_match "claimable AERO: \"12.5\"", out
+    end
+  end
+
+  test "rewards check task supports JSON output" do
+    report = rewards_report
+
+    with_env("FORMAT" => "json") do
+      AerodromeRewardsCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:rewards_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("transactions_enabled")
+        assert_equal false, parsed.fetch("claims_enabled")
+        assert_equal "12.5", parsed.fetch("claimable_aero")
+      end
     end
   end
 
@@ -565,6 +601,33 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: blockers,
       warnings: warnings,
       next_steps: [ "PASS is not permission to live trade." ]
+    }
+  end
+
+  def rewards_report
+    {
+      safety_banner: AerodromeRewardsCheck::BANNER,
+      status: "PASS",
+      database_write: false,
+      transactions_enabled: false,
+      claims_enabled: false,
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      token_id: "315985",
+      wallet_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "1.25",
+      asset1_amount: "500",
+      current_pooled_value_usd: "3000",
+      gauge_status: "detected",
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      claimable_aero: "12.5",
+      claimable_aero_raw: 12_500_000_000_000_000_000,
+      claimable_aero_usd: nil,
+      checks: [],
+      blockers: [],
+      warnings: [],
+      next_steps: [ "Rewards are read-only discovery only." ]
     }
   end
 

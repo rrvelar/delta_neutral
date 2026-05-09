@@ -22,6 +22,9 @@ Status legend: **VERIFIED** means checked from a trusted source in this session.
 | Official Aerodrome docs repo: `https://raw.githubusercontent.com/aerodrome-finance/docs/main/content/liquidity.mdx` | `curl` + `rg` for concentrated pool/tick spacing sections | **VERIFIED** docs describe concentrated pools and tick spacing. |
 | Official Slipstream repo: `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/README.md` | `curl` + `rg` for deployments | **VERIFIED** deployment table lists three Base Slipstream deployments. |
 | Official Slipstream interfaces: `INonfungiblePositionManager.sol`, `ICLFactory.sol`, `ICLPoolState.sol`, `IPeripheryImmutableState.sol` | `curl` raw GitHub files | **VERIFIED** method signatures and return fields listed below. |
+| Official Slipstream CL gauge interface: `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/gauge/interfaces/ICLGauge.sol` | Web/GitHub source review | **VERIFIED** CL rewards are read with `earned(address account,uint256 tokenId)`, gauge staking can be checked with `stakedContains(address,uint256)`, and reward claiming is a separate write method that remains out of scope. |
+| Official Aerodrome/Velodrome voter interface: `https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IVoter.sol` | Web/GitHub source review | **VERIFIED** `Voter.gauges(address pool)` is the read-only pool-to-gauge discovery method. |
+| BaseScan Voter candidate: `https://basescan.org/address/0x16613524e02ad97edfeF371bc883f2f5d6c480a5#code` | Web/BaseScan page review | **CANDIDATE** verified contract address candidate for Aerodrome Voter on Base; keep `AERODROME_VOTER_ADDRESS` configurable and do not hardcode. |
 | Public Base RPC: `https://base-rpc.publicnode.com` | JSON-RPC `eth_chainId`, `eth_getCode`, `eth_call` | **VERIFIED** live read-only checks listed below. No private RPC or keys used. |
 | BaseScan contract pages linked from Slipstream README | URLs recorded from official repo links | **CANDIDATE** pages are the official repo-linked `#code` pages; automated proof of BaseScan source verification was not completed in this pass. |
 
@@ -43,6 +46,9 @@ Status legend: **VERIFIED** means checked from a trusted source in this session.
 | Pool `slot0` return fields. | **VERIFIED** | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/core/interfaces/pool/ICLPoolState.sol`; live sample `slot0`. | 6 words: `sqrtPriceX96`, `tick`, `observationIndex`, `observationCardinality`, `observationCardinalityNext`, `unlocked`. |
 | ERC721Enumerable support appears available on Gauges V3 manager. | **VERIFIED FOR SAMPLE MANAGER ONLY** | Live `supportsInterface(0x780e9d63)`, `tokenByIndex(0)`, `balanceOf(owner)`, `tokenOfOwnerByIndex(owner,0)`. | Calls returned successfully on `0xe1f8...`. Discovery still must account for staked/escrowed positions and older managers. |
 | WETH9 address exposed by Gauges V3 manager. | **VERIFIED** | Live `WETH9()` on `0xe1f8...`; interface source `IPeripheryImmutableState.sol`. | Returned `0x4200000000000000000000000000000000000006`. Native ETH vs WETH app behavior remains **UNRESOLVED**. |
+| Slipstream CL rewards are staked NFT/account based. | **VERIFIED** | Official Slipstream `ICLGauge.sol`. | CL gauge exposes `earned(address account,uint256 tokenId)` and `stakedContains(address,uint256)`, so rewards discovery must be defensive for wallet/account plus token id and must not assume unstaked wallet-owned NFTs are reward eligible. |
+| Pool-to-gauge discovery is Voter based. | **VERIFIED** | Official `IVoter.sol`. | Voter exposes `gauges(address pool)`. Implementation keeps `AERODROME_VOTER_ADDRESS` configurable and treats zero gauge as not discoverable. |
+| Reward claiming is a transaction and out of scope. | **VERIFIED** | Official Slipstream `ICLGauge.sol`. | Gauge exposes claim/write methods separately from read methods; current implementation only uses `eth_call` for discovery and `earned`. |
 
 ### Live RPC Checks Performed
 
@@ -128,6 +134,20 @@ These addresses must be verified before coding. The official Slipstream reposito
 | NonfungiblePositionManager, Gauge Caps deployment candidate | `0xa990C6a764b73BF43cee5Bb40339c3322FB9D55F` | `https://github.com/aerodrome-finance/slipstream` | 2026-05-08 | Official repo deployment table listed for later verification. | UNRESOLVED | Candidate only until BaseScan and live RPC checks are run. |
 | Factory, Gauge Caps deployment candidate | `0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a` | `https://github.com/aerodrome-finance/slipstream` | 2026-05-08 | Official repo deployment table listed for later verification. | UNRESOLVED | Candidate only until BaseScan and live RPC checks are run. |
 | Voter/gauge/staking contracts | TBD | TBD | Pending | Only needed if staked/gauge positions are brought into scope. | DO NOT USE YET | Out of scope for read-only owner-wallet token-id support until staking behavior is verified. |
+| Voter for CL gauge discovery | `AERODROME_VOTER_ADDRESS` | `https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IVoter.sol`; candidate BaseScan page `https://basescan.org/address/0x16613524e02ad97edfeF371bc883f2f5d6c480a5#code` | 2026-05-09 | Official interface review plus candidate verified contract page. | CANDIDATE; CONFIG ONLY | Used only for read-only `gauges(pool)` discovery when explicitly configured. Do not hardcode until final address is manually verified for the target deployment. |
+
+## 4.1 AERO Rewards Discovery Verification
+
+Verified facts:
+
+| Fact | Source URL | Method signature | Date checked | Result |
+| --- | --- | --- | --- | --- |
+| Voter can discover a gauge for a pool. | `https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IVoter.sol` | `gauges(address pool)` | 2026-05-09 | Read-only discovery can call `Voter.gauges(pool)` and treat the zero address as not discoverable. |
+| Slipstream CL gauges expose staked-position reward reads. | `https://raw.githubusercontent.com/aerodrome-finance/slipstream/main/contracts/gauge/interfaces/ICLGauge.sol` | `earned(address account,uint256 tokenId)` | 2026-05-09 | Claimable reward is tied to account plus CL position token id, so discovery must use wallet/account and token id together. |
+| Slipstream CL gauges expose a staked-position check. | Same `ICLGauge.sol` source. | `stakedContains(address account,uint256 tokenId)` | 2026-05-09 | If false, report not staked/not eligible rather than faking rewards. |
+| Reward claiming is not read-only. | Same `ICLGauge.sol` source. | Claim/write methods are separate from `earned`. | 2026-05-09 | Current task must not claim, approve, transfer, or send transactions. |
+
+Implementation decision: add `AERODROME_VOTER_ADDRESS`, `AERODROME_AERO_TOKEN_ADDRESS`, and `AERODROME_REWARDS_ENABLED=false` as env examples only. Rewards discovery uses mocked tests and read-only `eth_call` paths. AERO rewards are shown as discovery-only and are not included in Total PnL. AERO USD valuation is unresolved and deferred.
 
 Implementation decision: keep `AERODROME_SLIPSTREAM_POSITION_MANAGER` and `AERODROME_SLIPSTREAM_FACTORY` env-configurable. If multiple deployments are supported, use env-configurable comma-separated address lists or a structured config, not hardcoded constants.
 

@@ -239,4 +239,44 @@ namespace :aerodrome do
 
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
+
+  desc "Run a read-only Aerodrome AERO rewards discovery check"
+  task rewards_check: :environment do
+    report = AerodromeRewardsCheck.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "NO CLAIMS"
+      puts "NO TRANSACTIONS"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "Overall status: #{report.fetch(:status)}"
+      puts "pool: #{report.fetch(:pool_address).inspect}"
+      puts "token id: #{report.fetch(:token_id).inspect}"
+      puts "gauge status: #{report.fetch(:gauge_status)}"
+      puts "gauge address: #{report.fetch(:gauge_address).inspect}"
+      puts "claimable AERO: #{report.fetch(:claimable_aero).inspect}"
+      puts "claimable AERO USD: #{report.fetch(:claimable_aero_usd).inspect}"
+
+      puts "Blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+
+      puts "Warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+
+      puts "Next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
 end

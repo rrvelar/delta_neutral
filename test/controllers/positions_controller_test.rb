@@ -149,6 +149,30 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Trade", response.body
   end
 
+  test "show renders read-only AERO rewards section without adding rewards to total pnl" do
+    position = create_aerodrome_position
+    position.update!(entry_value_usd: BigDecimal("2500"))
+
+    with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5") do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "AERO Rewards", response.body
+    assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
+    assert_match "Claimable AERO", response.body
+    assert_match "USD value", response.body
+    assert_match "unavailable", response.body
+    assert_match "bin/rails aerodrome:rewards_check", response.body
+    assert_match "AERO USD valuation is a separate future task.", response.body
+    assert_match "$500.00", response.body
+    assert_no_match "Claim rewards", response.body
+    assert_no_match "Execute", response.body
+    assert_no_match "Trade", response.body
+  end
+
   test "show displays latest manual proposal as local manual-only record" do
     position = create_aerodrome_position
     position.aerodrome_hedge_proposals.create!(
