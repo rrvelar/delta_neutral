@@ -8,6 +8,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:verify_config"].reenable
     Rake::Task["aerodrome:pre_live_check"].reenable
     Rake::Task["aerodrome:testnet_emergency_close"].reenable
+    Rake::Task["aerodrome:live_preflight_check"].reenable
   end
 
   test "dry run task fails clearly with no token ids" do
@@ -403,6 +404,47 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "live preflight check task outputs read-only safety banner" do
+    report = live_preflight_report(status: "WARN", warnings: [ "review warning" ])
+
+    with_env("FORMAT" => nil, "CHECK_HYPERLIQUID" => nil) do
+      AerodromeLivePreflightCheck.stub(:new, ->(check_hyperliquid:) {
+        assert_equal false, check_hyperliquid
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_preflight_check"].invoke }
+
+        assert_match "AERODROME LIVE PREFLIGHT", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "DB write: false", out
+        assert_match "Overall status: WARN", out
+        assert_match "Blockers:", out
+        assert_match "Warnings:", out
+        assert_match "Next steps:", out
+      end
+    end
+  end
+
+  test "live preflight check task supports JSON output" do
+    report = live_preflight_report(status: "PASS")
+
+    with_env("FORMAT" => "json", "CHECK_HYPERLIQUID" => "true") do
+      AerodromeLivePreflightCheck.stub(:new, ->(check_hyperliquid:) {
+        assert_equal true, check_hyperliquid
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_preflight_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
   private
 
   def ok_report(token_id)
@@ -503,6 +545,26 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       errors: [],
       database_write: false,
       touched_asset: "ETH"
+    }
+  end
+
+  def live_preflight_report(status:, blockers: [], warnings: [])
+    {
+      safety_banner: AerodromeLivePreflightCheck::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      checks: {
+        env: [ { name: "HYPERLIQUID_TESTNET is false", status: "pass" } ],
+        db: [],
+        risk: [],
+        testnet_evidence: [],
+        hyperliquid_readback: []
+      },
+      blockers: blockers,
+      warnings: warnings,
+      next_steps: [ "PASS is not permission to live trade." ]
     }
   end
 

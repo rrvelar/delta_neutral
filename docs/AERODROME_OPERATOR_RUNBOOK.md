@@ -161,7 +161,30 @@ FORMAT=json bin/rails aerodrome:testnet_emergency_close
 
 The emergency close task refuses to run unless `HYPERLIQUID_TESTNET=true` and `AERODROME_LIVE_APPROVED=false`. It retries explicit ETH close/readback after transient Hyperliquid testnet API/DNS failures and never touches USDC. Live close/emergency procedures must be separate future work; live remains disabled.
 
+## Run Live Preflight Check
+
+The first-live preflight is read-only and is not permission to trade:
+
+```bash
+bin/rails aerodrome:live_preflight_check
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails aerodrome:live_preflight_check
+```
+
+Optional read-only Hyperliquid mainnet readback:
+
+```bash
+CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check
+```
+
+The live preflight expects mainnet-mode configuration while trading remains disabled: `HYPERLIQUID_TESTNET=false`, `AERODROME_LIVE_APPROVED=false`, `AERODROME_HEDGE_ENABLED=false`, and `AERODROME_HEDGE_PAUSED=true`. It performs no DB writes, places no orders, and does not call `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. PASS is not live approval. The first live micro-run requires a separate manual procedure, and a separate live emergency close procedure must be ready before first live. Live remains disabled by default.
+
 ## Manual Verification For One Token ID
+
 
 1. Run `bin/rails aerodrome:verify_config`.
 2. Run `CHECK_RPC=true bin/rails aerodrome:verify_config`.

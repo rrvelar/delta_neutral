@@ -391,6 +391,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `HedgeSyncJob` must ignore Aerodrome positions while `AERODROME_HEDGE_ENABLED=false` or unset.
 - `HedgeSyncJob` may process Aerodrome positions for testnet rehearsal only when `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, `HYPERLIQUID_TESTNET=true`, the position is active, an explicit hedge exists, and both assets, amounts, and USD prices are present.
 - Hyperliquid mainnet Aerodrome hedge processing is additionally blocked unless `AERODROME_LIVE_APPROVED=true`. This flag is not sufficient by itself; `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, all readiness/risk gates, and WETH/ETH-only filtering are still required. Pre-live PASS is not live approval, and the first live run must be a separate future procedure.
+- `bin/rails aerodrome:live_preflight_check` is a read-only first-live preflight only. It expects mainnet-mode env while live remains disabled/paused, performs no DB writes or orders, and PASS is not permission to live trade.
 - Aerodrome hedge processing supports only `ETH`/`WETH` symbols mapped to Hyperliquid ETH exposure. `USDC` and all unsupported symbols must be skipped and never passed to `check_and_rebalance`.
 - `HyperliquidService` must remain unchanged.
 - `UniswapService` must remain functional.
@@ -419,6 +420,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - The dry-run is read-only: it performs no database writes, runs no jobs, and does not call `HyperliquidService`.
 - It reports computed `amount0_raw`/`amount1_raw`, math source, and `hedge_enabled: false`; dry-run success does not make Aerodrome positions hedge-ready.
 - `bin/rails aerodrome:verify_config` validates read-only Aerodrome config and only performs RPC checks when `CHECK_RPC=true`.
+- `bin/rails aerodrome:live_preflight_check` validates first-live readiness read-only; optional `CHECK_HYPERLIQUID=true` is readback only and must not call execution methods.
 - Dry-run hardening covers duplicate token ids, blank token ids, stable JSON output, and explicit no-DB/no-Hyperliquid/no-hedge safety output.
 - See `docs/AERODROME_DRY_RUN.md`, `docs/AERODROME_OPERATOR_RUNBOOK.md`, `docs/AERODROME_PRE_LIVE_SAFETY_AUDIT.md`, and `docs/AERODROME_ROLLBACK.md`.
 - These tools are still not hedge-ready and do not approve live Aerodrome hedge integration.
