@@ -117,17 +117,44 @@ class HyperliquidServiceTest < ActiveSupport::TestCase
     assert_equal "0xsub1", called_with[:vault_address]
   end
 
-  test "close_short with size passes size through" do
+  test "close_short with size uses explicit buy market order" do
     called_with = nil
     mock_exchange = Object.new
-    mock_exchange.define_singleton_method(:market_close) { |**args| called_with = args; { "status" => "ok" } }
+    mock_exchange.define_singleton_method(:market_order) { |**args| called_with = args; { "status" => "ok" } }
     mock_sdk = Object.new
     mock_sdk.define_singleton_method(:exchange) { mock_exchange }
     @service.instance_variable_set(:@sdk, mock_sdk)
 
     @service.close_short(asset: "ETH", size: 0.3)
     assert_equal "ETH", called_with[:coin]
-    assert_equal 0.3, called_with[:size]
+    assert_equal true, called_with[:is_buy]
+    assert_equal BigDecimal("0.3"), called_with[:size]
+    assert_nil called_with[:vault_address]
+  end
+
+  test "close_short with size passes vault_address to explicit buy market order" do
+    called_with = nil
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**args| called_with = args; { "status" => "ok" } }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    @service.close_short(asset: "ETH", size: 0.3, vault_address: "0xsub1")
+    assert_equal "0xsub1", called_with[:vault_address]
+  end
+
+  test "close_short with size does not silently return nil" do
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| nil }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.close_short(asset: "ETH", size: 0.3)
+    end
+    assert_match "returned nil", error.message
   end
 
   test "close_short handles no open position gracefully" do
@@ -153,26 +180,26 @@ class HyperliquidServiceTest < ActiveSupport::TestCase
       }
     }
     mock_exchange = Object.new
-    mock_exchange.define_singleton_method(:market_close) { |**_| rejected_response }
+    mock_exchange.define_singleton_method(:market_order) { |**_| rejected_response }
     mock_sdk = Object.new
     mock_sdk.define_singleton_method(:exchange) { mock_exchange }
     @service.instance_variable_set(:@sdk, mock_sdk)
 
     error = assert_raises(HyperliquidService::OrderError) do
-      @service.close_short(asset: "ETH")
+      @service.close_short(asset: "ETH", size: 0.3)
     end
     assert_match "No open position found", error.message
   end
 
   test "close_short raises order error when response status is err" do
     mock_exchange = Object.new
-    mock_exchange.define_singleton_method(:market_close) { |**_| { "status" => "err", "response" => "rejected" } }
+    mock_exchange.define_singleton_method(:market_order) { |**_| { "status" => "err", "response" => "rejected" } }
     mock_sdk = Object.new
     mock_sdk.define_singleton_method(:exchange) { mock_exchange }
     @service.instance_variable_set(:@sdk, mock_sdk)
 
     error = assert_raises(HyperliquidService::OrderError) do
-      @service.close_short(asset: "ETH")
+      @service.close_short(asset: "ETH", size: 0.3)
     end
     assert_match "rejected", error.message
   end

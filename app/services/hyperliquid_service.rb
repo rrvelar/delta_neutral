@@ -69,17 +69,27 @@ class HyperliquidService
   # @return [Hash, nil] the SDK response, or +nil+ if no position was open
   def close_short(asset:, size: nil, vault_address: nil)
     Rails.logger.debug { "[HyperliquidService] close_short: asset=#{asset}, size=#{size || 'full'}, vault_address=#{vault_address}" }
+    if size
+      close_size = BigDecimal(size.to_s)
+      raise ArgumentError, "close_short size must be positive" unless close_size.positive?
+
+      opts = { coin: asset, is_buy: true, size: close_size }
+      opts[:vault_address] = vault_address if vault_address
+      result = sdk.exchange.market_order(**opts)
+      Rails.logger.debug { "[HyperliquidService] close_short explicit market_order result: #{result.inspect.truncate(200)}" }
+      raise OrderError, "Close short for #{asset} returned nil" if result.nil?
+
+      validate_close_response!(result)
+      return result
+    end
+
     opts = { coin: asset, size: size }
     opts[:vault_address] = vault_address if vault_address
     result = sdk.exchange.market_close(**opts)
     Rails.logger.debug { "[HyperliquidService] close_short result: #{result.inspect.truncate(200)}" }
     return nil if result.nil?
 
-    if result.is_a?(Hash) && result["status"] == "err"
-      raise OrderError, (result["response"] || result["error"] || result.inspect).to_s
-    end
-
-    validate_order_response!(result)
+    validate_close_response!(result)
     result
   rescue ArgumentError => e
     # market_close raises ArgumentError if no open position exists
@@ -251,6 +261,14 @@ class HyperliquidService
     return if errors.empty?
 
     raise OrderError, errors.join("; ")
+  end
+
+  def validate_close_response!(result)
+    if result.is_a?(Hash) && result["status"] == "err"
+      raise OrderError, (result["response"] || result["error"] || result.inspect).to_s
+    end
+
+    validate_order_response!(result)
   end
 
   # Returns a memoized Hyperliquid SDK instance.

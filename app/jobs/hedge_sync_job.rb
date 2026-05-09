@@ -175,7 +175,7 @@ class HedgeSyncJob < ApplicationJob
       if current_short > 0
         Rails.logger.debug { "[HedgeSyncJob] hedge #{hedge.id} #{asset}: closing existing short (size=#{current_short})" }
         before_close = Time.current
-        close_result = hyperliquid.close_short(asset: hl_asset, vault_address: vault_address)
+        close_result = hyperliquid.close_short(asset: hl_asset, size: current_short, vault_address: vault_address)
         if close_result.nil?
           raise HyperliquidService::OrderError, "Close short for #{hl_asset} returned nil despite current_short=#{current_short}"
         end

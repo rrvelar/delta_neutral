@@ -12,7 +12,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
   private
 
   def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {},
-                         market_close_result: { "status" => "ok" }, market_close_error: nil)
+                         market_close_result: { "status" => "ok" }, market_close_error: nil,
+                         market_order_calls: nil)
     user_states = {}
 
     # Main account state
@@ -51,7 +52,16 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
       market_close_result
     end
-    mock_exchange.define_singleton_method(:market_order) { |**_| { "status" => "ok" } }
+    mock_exchange.define_singleton_method(:market_order) do |**args|
+      market_order_calls&.push(args)
+      if args[:is_buy]
+        raise market_close_error if market_close_error
+
+        market_close_result
+      else
+        { "status" => "ok" }
+      end
+    end
     mock_exchange.define_singleton_method(:update_leverage) { |**_| { "status" => "ok" } }
     mock_exchange.define_singleton_method(:create_sub_account) { |**_| { "subAccountUser" => "0xnewsub" } }
     mock_exchange.define_singleton_method(:sub_account_transfer) { |**_| { "status" => "ok" } }
@@ -156,6 +166,26 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
     hedge.reload
     assert hedge.active?, "hedge should remain active to manage sibling asset and handle re-entry"
+  end
+
+  test "target zero close path passes current short size to close_short" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    market_order_calls = []
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_order_calls: market_order_calls
+    )
+
+    HyperliquidService.stub(:new, mock_service) do
+      HedgeSyncJob.perform_now(hedge.id)
+    end
+
+    close_order = market_order_calls.find { |args| args[:is_buy] == true }
+    assert_not_nil close_order
+    assert_equal "ETH", close_order[:coin]
+    assert_equal BigDecimal("0.5"), close_order[:size]
   end
 
   test "close short returning nil records failed rebalance instead of success" do
