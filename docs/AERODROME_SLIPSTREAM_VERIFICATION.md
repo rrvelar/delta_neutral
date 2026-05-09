@@ -8,6 +8,8 @@ Manual hedge proposals added after the read-only preview work are local records 
 
 Aerodrome hedge-loop processing is controlled by `AERODROME_HEDGE_ENABLED=false` by default. When unset or false, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When true, Aerodrome still requires `HYPERLIQUID_TESTNET=true`; missing or false skips before `HyperliquidService` construction. This is a testnet-only rehearsal path. Production live must keep `AERODROME_HEDGE_ENABLED=false` until a separate future checklist and code change add an explicit live approval gate. With both rehearsal flags enabled, only complete active Aerodrome positions with explicit hedge records and persisted asset/amount/price data may enter the existing `HedgeSyncJob` rebalance path. The Aerodrome gate supports only the ETH/WETH side; USDC and unsupported symbols are skipped before `check_and_rebalance` and must never create hedge orders. `HyperliquidService` is reused unchanged; no new Aerodrome-specific execution path exists.
 
+Aerodrome hedge execution is additionally paused by default. `AERODROME_HEDGE_PAUSED` defaults to true when missing, so testnet rehearsal requires explicitly setting `AERODROME_HEDGE_PAUSED=false`. Optional pre-live limits can also block the Aerodrome path before the order path: `AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_MAX_LEVERAGE`. Live trading is still not approved; live use requires a separate future checklist/change.
+
 ## Verified Facts As Of 2026-05-08
 
 Status legend: **VERIFIED** means checked from a trusted source in this session. **CANDIDATE** means a trusted source lists the value, but implementation should keep it configurable or verify against a concrete position before relying on it. **UNRESOLVED** means do not implement from this fact. **DEFERRED** means intentionally out of scope for the read-only migration.
@@ -68,7 +70,7 @@ Status legend: **VERIFIED** means checked from a trusted source in this session.
 | Whether wallet NFT enumeration is sufficient for staked or escrowed positions. | **UNRESOLVED** | Start with user-provided token ids or mark staked/gauge discovery out of scope. |
 | Exact amount0/amount1 math and rounding. | **VERIFIED FOR READ-ONLY IMPLEMENTATION** | Implemented from Aerodrome Slipstream `TickMath`, `LiquidityAmounts`, `FixedPoint96`, and `FullMath` sources using integer floor division. Still requires manual comparison against Aerodrome UI/BaseScan for real positions before hedge use. |
 | Advanced uncollected fee calculation beyond `tokensOwed0`/`tokensOwed1`. | **DEFERRED** | Initial read-only scope should show only verified owed-token fields or mark fees partial. |
-| USD pricing and hedge exposure readiness. | **PARTIAL** | Keep `AERODROME_HEDGE_ENABLED=false` by default. If explicitly enabled, `HYPERLIQUID_TESTNET=true` is still required. Only complete persisted ETH/WETH-side exposure may enter the existing `HedgeSyncJob` path. USDC is never hedged. |
+| USD pricing and hedge exposure readiness. | **PARTIAL** | Keep `AERODROME_HEDGE_ENABLED=false` and `AERODROME_HEDGE_PAUSED=true` by default. If explicitly enabled and unpaused, `HYPERLIQUID_TESTNET=true` is still required. Optional max short/notional/leverage gates can block before the order path. Only complete persisted ETH/WETH-side exposure may enter the existing `HedgeSyncJob` path. USDC is never hedged. |
 | Native ETH vs WETH display/identity behavior. | **UNRESOLVED** | Store/read token addresses exactly as returned; do not collapse WETH to ETH without explicit verified mapping. |
 
 ## 1. Scope
@@ -78,7 +80,7 @@ The migration only replaces the LP position source:
 - From: Uniswap V3 concentrated liquidity positions.
 - To: Aerodrome Slipstream concentrated liquidity positions on Base.
 
-Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not be enabled by default. Aerodrome support remains monitor-only unless `AERODROME_HEDGE_ENABLED=true` and `HYPERLIQUID_TESTNET=true` are explicitly set for testnet rehearsal after read-only sync has been verified. Production live mode requires a separate future checklist and code change.
+Hyperliquid remains the perpetual venue. `HyperliquidService` must not be modified. Live hedge execution must not be enabled by default. Aerodrome support remains monitor-only unless `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, and `HYPERLIQUID_TESTNET=true` are explicitly set for testnet rehearsal after read-only sync has been verified. Production live mode requires a separate future checklist and code change.
 
 The manual hedge proposal workflow is part of the read-only/manual review phase. It may create/read/update `AerodromeHedgeProposal` rows and display local proposal history/stale/safety status, but it must not create `Hedge` rows, must not call `HyperliquidService`, and must not submit approvals, transfers, swaps, NFT transfers, or transactions.
 

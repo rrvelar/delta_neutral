@@ -68,10 +68,12 @@ AERODROME_USDC_ADDRESS=BASE_USDC_ADDRESS_PLACEHOLDER
 AERODROME_WETH_ADDRESS=BASE_WETH_ADDRESS_PLACEHOLDER
 AERODROME_MAX_SHORT_ETH=
 AERODROME_MAX_SHORT_NOTIONAL_USD=
+AERODROME_MAX_LEVERAGE=1
 AERODROME_MAX_LP_VALUE_USD=
 AERODROME_MAX_PROPOSAL_STALE_PERCENT=0.5
 AERODROME_READ_ONLY_ENABLED=false
 AERODROME_HEDGE_ENABLED=false
+AERODROME_HEDGE_PAUSED=true
 AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true
 ```
 
@@ -160,7 +162,9 @@ The UI preview, manual proposal system, and safety-limit checks do not call RPC,
 
 When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When the flag is true, `HedgeSyncJob` still requires `HYPERLIQUID_TESTNET=true`; otherwise Aerodrome is skipped before `HyperliquidService` construction. This makes the current Aerodrome hedge path testnet-only rehearsal. Production live must keep `AERODROME_HEDGE_ENABLED=false` until a separate future checklist and code change add an explicit live approval gate.
 
-With both rehearsal flags enabled, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
+`AERODROME_HEDGE_PAUSED` is a local kill switch and defaults to paused when missing. To run testnet rehearsal, an operator must explicitly set `AERODROME_HEDGE_PAUSED=false` in addition to `AERODROME_HEDGE_ENABLED=true` and `HYPERLIQUID_TESTNET=true`. Live trading is still not approved; live use requires a separate future checklist/change.
+
+With both rehearsal flags enabled and the kill switch unpaused, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Optional pre-live limits (`AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, `AERODROME_MAX_LEVERAGE`) block Aerodrome before the order path when exceeded; missing max limits are not enforced. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
 
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 

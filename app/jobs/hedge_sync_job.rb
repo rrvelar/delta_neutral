@@ -49,6 +49,11 @@ class HedgeSyncJob < ApplicationJob
           next
         end
 
+        if aerodrome_hedge_paused?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge paused by kill switch")
+          next
+        end
+
         readiness_errors = aerodrome_readiness_errors(hedge)
         if readiness_errors.any?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
@@ -58,6 +63,12 @@ class HedgeSyncJob < ApplicationJob
         hedge_assets = aerodrome_hedge_assets(hedge)
         if hedge_assets.empty?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — no supported Aerodrome ETH/WETH hedge asset")
+          next
+        end
+
+        safety_errors = aerodrome_safety_errors(hedge, hedge_assets)
+        if safety_errors.any?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge safety gate blocked: #{safety_errors.join(', ')}")
           next
         end
 
@@ -337,6 +348,10 @@ class HedgeSyncJob < ApplicationJob
     ActiveModel::Type::Boolean.new.cast(ENV["HYPERLIQUID_TESTNET"]) == true
   end
 
+  def aerodrome_hedge_paused?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
+  end
+
   def aerodrome_readiness_errors(hedge)
     position = hedge.position
     errors = []
@@ -356,8 +371,8 @@ class HedgeSyncJob < ApplicationJob
   def aerodrome_hedge_assets(hedge)
     position = hedge.position
     [
-      { index: 0, symbol: position.asset0, amount: position.asset0_amount },
-      { index: 1, symbol: position.asset1, amount: position.asset1_amount }
+      { index: 0, symbol: position.asset0, amount: position.asset0_amount, price: position.asset0_price_usd },
+      { index: 1, symbol: position.asset1, amount: position.asset1_amount, price: position.asset1_price_usd }
     ].select do |asset|
       supported = aerodrome_supported_hedge_symbol?(asset.fetch(:symbol))
       unless supported
@@ -369,5 +384,39 @@ class HedgeSyncJob < ApplicationJob
 
   def aerodrome_supported_hedge_symbol?(symbol)
     %w[ETH WETH].include?(symbol.to_s.upcase)
+  end
+
+  def aerodrome_safety_errors(hedge, hedge_assets)
+    hedge_assets.flat_map { |asset| aerodrome_asset_safety_errors(hedge, asset) }.compact
+  end
+
+  def aerodrome_asset_safety_errors(hedge, asset)
+    target_short = asset.fetch(:amount) * hedge.target
+    price = asset.fetch(:price)
+    target_notional = target_short * price
+    leverage = hedge.position.user.setting&.hyperliquid_leverage || 3
+
+    [
+      aerodrome_limit_error("AERODROME_MAX_SHORT_ETH", target_short, "target ETH short"),
+      aerodrome_limit_error("AERODROME_MAX_SHORT_NOTIONAL_USD", target_notional, "target ETH notional"),
+      aerodrome_limit_error("AERODROME_MAX_LEVERAGE", BigDecimal(leverage.to_s), "configured leverage")
+    ].compact
+  end
+
+  def aerodrome_limit_error(env_key, value, label)
+    limit = aerodrome_decimal_env(env_key)
+    return nil unless limit
+    return nil if value <= limit
+
+    "#{label} #{value.to_s('F')} exceeds #{env_key}=#{limit.to_s('F')}"
+  end
+
+  def aerodrome_decimal_env(env_key)
+    raw = ENV[env_key].presence
+    return nil unless raw
+
+    BigDecimal(raw)
+  rescue ArgumentError
+    BigDecimal("-1")
   end
 end
