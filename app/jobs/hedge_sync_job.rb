@@ -44,8 +44,8 @@ class HedgeSyncJob < ApplicationJob
           next
         end
 
-        unless hyperliquid_testnet_enabled?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge rehearsal requires HYPERLIQUID_TESTNET=true")
+        unless hyperliquid_testnet_enabled? || (hyperliquid_mainnet_enabled? && aerodrome_live_approved?)
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome live hedge requires AERODROME_LIVE_APPROVED=true")
           next
         end
 
@@ -378,6 +378,14 @@ class HedgeSyncJob < ApplicationJob
 
   def hyperliquid_testnet_enabled?
     ActiveModel::Type::Boolean.new.cast(ENV["HYPERLIQUID_TESTNET"]) == true
+  end
+
+  def hyperliquid_mainnet_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV["HYPERLIQUID_TESTNET"]) == false
+  end
+
+  def aerodrome_live_approved?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_LIVE_APPROVED", "false"))
   end
 
   def aerodrome_hedge_paused?

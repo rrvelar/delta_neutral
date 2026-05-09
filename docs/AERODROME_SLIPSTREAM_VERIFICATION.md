@@ -389,7 +389,8 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` may discover positions only in read-only mode.
 - `PositionSyncJob` may refresh read-only position data.
 - `HedgeSyncJob` must ignore Aerodrome positions while `AERODROME_HEDGE_ENABLED=false` or unset.
-- `HedgeSyncJob` may process Aerodrome positions only for testnet rehearsal when `AERODROME_HEDGE_ENABLED=true`, `HYPERLIQUID_TESTNET=true`, the position is active, an explicit hedge exists, and both assets, amounts, and USD prices are present.
+- `HedgeSyncJob` may process Aerodrome positions for testnet rehearsal only when `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, `HYPERLIQUID_TESTNET=true`, the position is active, an explicit hedge exists, and both assets, amounts, and USD prices are present.
+- Hyperliquid mainnet Aerodrome hedge processing is additionally blocked unless `AERODROME_LIVE_APPROVED=true`. This flag is not sufficient by itself; `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, all readiness/risk gates, and WETH/ETH-only filtering are still required. Pre-live PASS is not live approval, and the first live run must be a separate future procedure.
 - Aerodrome hedge processing supports only `ETH`/`WETH` symbols mapped to Hyperliquid ETH exposure. `USDC` and all unsupported symbols must be skipped and never passed to `check_and_rebalance`.
 - `HyperliquidService` must remain unchanged.
 - `UniswapService` must remain functional.
@@ -410,7 +411,7 @@ This structure is read-only and must not contain private keys, approvals, transa
 - `WalletSyncJob` and `PositionSyncJob` persist computed Aerodrome token amounts into existing `positions.asset0_amount` and `positions.asset1_amount` fields only when amount math is verified. Partial/deferred amount data leaves amounts nil and logs a clear monitor-only warning.
 - Aerodrome USD prices are persisted only for supported configured-USDC pools with verified amount math. Unsupported pairs keep prices nil. Tick data, liquidity, manager, and factory metadata remain unstored in the current schema.
 - `PositionSyncJob` does not create PnL snapshots for Aerodrome positions yet, because fee strategy, USD valuation, and real-position UI/BaseScan comparisons remain incomplete.
-- `HedgeSyncJob` skips Aerodrome positions by default. Aerodrome exposure is only eligible for the existing hedge loop when `AERODROME_HEDGE_ENABLED=true`, `HYPERLIQUID_TESTNET=true`, and local readiness checks pass, and only the ETH/WETH side may be hedged. The USDC side is skipped. `HyperliquidService` remains untouched.
+- `HedgeSyncJob` skips Aerodrome positions by default. Aerodrome exposure is only eligible for the existing hedge loop when `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, network/live-approval gates pass, and local readiness checks pass, and only the ETH/WETH side may be hedged. The USDC side is skipped. `HyperliquidService` remains untouched.
 
 ### Manual Dry-Run Tooling
 
@@ -435,6 +436,8 @@ Proposed env vars for a later implementation task:
 - `AERODROME_WETH_ADDRESS`, optional configured WETH token address for monitor-only hedge preview.
 - `AERODROME_READ_ONLY_ENABLED=false`.
 - `AERODROME_HEDGE_ENABLED=false`, default-off gate for controlled Aerodrome entry into the existing hedge loop.
+- `AERODROME_HEDGE_PAUSED=true`, default-on kill switch for Aerodrome hedge execution.
+- `AERODROME_LIVE_APPROVED=false`, default-off hard approval gate required before any Hyperliquid mainnet Aerodrome hedge path can proceed.
 - `AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true`, reserved safety marker for testnet-only Aerodrome hedge rehearsal.
 
 Rules:

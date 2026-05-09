@@ -75,6 +75,7 @@ AERODROME_MAX_PROPOSAL_STALE_PERCENT=0.5
 AERODROME_READ_ONLY_ENABLED=false
 AERODROME_HEDGE_ENABLED=false
 AERODROME_HEDGE_PAUSED=true
+AERODROME_LIVE_APPROVED=false
 AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true
 ```
 
@@ -138,7 +139,7 @@ Optional read-only Hyperliquid readback:
 CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check
 ```
 
-The pre-live check is read-only. It performs no DB writes, places no orders, and does not call Hyperliquid execution methods such as `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. With `CHECK_HYPERLIQUID=true`, it only reads `get_position("ETH")` and reports the current ETH short state. Passing this check is not permission for live trading; live remains blocked by default and requires a separate future approval/change.
+The pre-live check is read-only. It performs no DB writes, places no orders, and does not call Hyperliquid execution methods such as `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. With `CHECK_HYPERLIQUID=true`, it only reads `get_position("ETH")` and reports the current ETH short state. The report includes `AERODROME_LIVE_APPROVED` state. Passing this check is not permission for live trading; live remains blocked by default and requires a separate future approval/change.
 
 ## Manual Verification For One Token ID
 
@@ -183,9 +184,9 @@ Aerodrome positions appear in the dashboard and position pages with:
 
 The UI preview, manual proposal system, and safety-limit checks do not call RPC, do not call `HyperliquidService`, do not create `Hedge` records, and do not enable order execution. Manual proposals are local records only. They are still NOT READY FOR LIVE HEDGE INTEGRATION, and `AERODROME_HEDGE_ENABLED` remains false/default-off.
 
-When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. When the flag is true, `HedgeSyncJob` still requires `HYPERLIQUID_TESTNET=true`; otherwise Aerodrome is skipped before `HyperliquidService` construction. This makes the current Aerodrome hedge path testnet-only rehearsal. Production live must keep `AERODROME_HEDGE_ENABLED=false` until a separate future checklist and code change add an explicit live approval gate.
+When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. Testnet rehearsal requires `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, and `HYPERLIQUID_TESTNET=true`. Hyperliquid mainnet Aerodrome hedge processing skips before `HyperliquidService` unless `AERODROME_LIVE_APPROVED=true`; missing `AERODROME_LIVE_APPROVED` behaves false. `AERODROME_LIVE_APPROVED=true` is not enough by itself: `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, all readiness/risk gates, and WETH/ETH-only filtering are still required. Production live must keep `AERODROME_HEDGE_ENABLED=false` and `AERODROME_HEDGE_PAUSED=true` until a separate future first-live procedure is approved.
 
-`AERODROME_HEDGE_PAUSED` is a local kill switch and defaults to paused when missing. To run testnet rehearsal, an operator must explicitly set `AERODROME_HEDGE_PAUSED=false` in addition to `AERODROME_HEDGE_ENABLED=true` and `HYPERLIQUID_TESTNET=true`. Live trading is still not approved; live use requires a separate future checklist/change.
+`AERODROME_HEDGE_PAUSED` is a local kill switch and defaults to paused when missing. To run testnet rehearsal, an operator must explicitly set `AERODROME_HEDGE_PAUSED=false` in addition to `AERODROME_HEDGE_ENABLED=true` and `HYPERLIQUID_TESTNET=true`. Live trading is still not approved; live use requires `AERODROME_LIVE_APPROVED=true` plus a separate future checklist/change and first-live procedure.
 
 With both rehearsal flags enabled and the kill switch unpaused, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Optional pre-live limits (`AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, `AERODROME_MAX_LEVERAGE`) block Aerodrome before the order path when exceeded; missing max limits are not enforced. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
 

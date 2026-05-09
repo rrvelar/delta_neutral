@@ -39,7 +39,7 @@ class AerodromePreLiveCheck
     check_boolean(:env, "AERODROME_READ_ONLY_ENABLED", true, blocker: true)
     check_boolean(:env, "AERODROME_HEDGE_ENABLED", false, blocker: true)
     check_boolean(:env, "AERODROME_HEDGE_PAUSED", true, blocker: true)
-    check_boolean(:env, "HYPERLIQUID_TESTNET", true, blocker: true)
+    check_live_approval_state
 
     %w[
       AERODROME_MAX_LEVERAGE
@@ -198,6 +198,29 @@ class AerodromePreLiveCheck
   def check_boolean(section, key, expected, blocker:)
     actual = ActiveModel::Type::Boolean.new.cast(ENV[key])
     add_check(section, "#{key} is #{expected}", actual == expected, blocker: blocker, value: ENV[key].inspect)
+  end
+
+  def check_live_approval_state
+    testnet = ActiveModel::Type::Boolean.new.cast(ENV["HYPERLIQUID_TESTNET"])
+    live_approved = ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_LIVE_APPROVED", "false"))
+
+    add_check(:env, "AERODROME_LIVE_APPROVED status", true, value: live_approved.to_s)
+    if testnet == true
+      add_check(:env, "HYPERLIQUID_TESTNET is true", true, value: ENV["HYPERLIQUID_TESTNET"].inspect)
+    elsif testnet == false
+      add_check(
+        :env,
+        "Hyperliquid mainnet requires AERODROME_LIVE_APPROVED=true",
+        live_approved == true,
+        blocker: true,
+        value: "HYPERLIQUID_TESTNET=#{ENV['HYPERLIQUID_TESTNET'].inspect}, AERODROME_LIVE_APPROVED=#{live_approved}"
+      )
+      if live_approved
+        add_check(:env, "Live approval requires separate operator procedure", false, warning: true, value: "pre-live PASS is not execution permission")
+      end
+    else
+      add_check(:env, "HYPERLIQUID_TESTNET explicitly configured", false, blocker: true, value: ENV["HYPERLIQUID_TESTNET"].inspect)
+    end
   end
 
   def check_presence(section, key, blocker:)

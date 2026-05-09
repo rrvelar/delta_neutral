@@ -679,7 +679,76 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position = aerodrome_position
     hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
 
-    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "false") do
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "false") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "missing Aerodrome live approval blocks mainnet before HyperliquidService" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => nil) do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome live approval true on mainnet allows later gates" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    mock_service = build_mock_service(positions: [])
+    users(:one).setting.update!(hyperliquid_leverage: 1)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "true", "AERODROME_MAX_SHORT_ETH" => "1", "AERODROME_MAX_SHORT_NOTIONAL_USD" => "2000", "AERODROME_MAX_LEVERAGE" => "1") do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal [ "WETH" ], hedge.short_rebalances.order(:id).pluck(:asset)
+  ensure
+    users(:one).setting.update!(hyperliquid_leverage: 3)
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome hedge paused blocks mainnet even when live approved" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "true", "HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    hedge&.destroy
+    position&.destroy
+  end
+
+  test "Aerodrome hedge disabled blocks mainnet even when live approved" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "false", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "true") do
       HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
         assert_no_difference "ShortRebalance.count" do
           HedgeSyncJob.perform_now(hedge.id)

@@ -6,6 +6,7 @@ class AerodromePreLiveCheckTest < ActiveSupport::TestCase
       "AERODROME_READ_ONLY_ENABLED" => "true",
       "AERODROME_HEDGE_ENABLED" => "false",
       "AERODROME_HEDGE_PAUSED" => "true",
+      "AERODROME_LIVE_APPROVED" => "false",
       "HYPERLIQUID_TESTNET" => "true",
       "AERODROME_MAX_LEVERAGE" => "1",
       "AERODROME_MAX_SHORT_ETH" => "1",
@@ -128,6 +129,52 @@ class AerodromePreLiveCheckTest < ActiveSupport::TestCase
       assert_empty service.order_calls
       assert_equal "BLOCKED", report.fetch(:status)
       assert_includes report.fetch(:blockers), "No open ETH short while Aerodrome hedge disabled and paused: 0.1"
+    end
+  ensure
+    position&.destroy
+  end
+
+  test "pre live check reports live approval status" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    create_successful_rehearsal!(hedge)
+
+    with_env(@env.merge("AERODROME_LIVE_APPROVED" => "true")) do
+      checks = AerodromePreLiveCheck.new.report.dig(:checks, :env)
+      live_check = checks.find { |check| check.fetch(:name) == "AERODROME_LIVE_APPROVED status" }
+
+      assert_equal "pass", live_check.fetch(:status)
+      assert_equal "true", live_check.fetch(:value)
+    end
+  ensure
+    position&.destroy
+  end
+
+  test "pre live check blocks mainnet without live approval" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    create_successful_rehearsal!(hedge)
+
+    with_env(@env.merge("HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "false")) do
+      report = AerodromePreLiveCheck.new.report
+
+      assert_equal "BLOCKED", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "Hyperliquid mainnet requires AERODROME_LIVE_APPROVED=true: HYPERLIQUID_TESTNET=\"false\", AERODROME_LIVE_APPROVED=false"
+    end
+  ensure
+    position&.destroy
+  end
+
+  test "pre live check warns mainnet live approval is not execution permission" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "0.5", tolerance: "0.05", active: true)
+    create_successful_rehearsal!(hedge)
+
+    with_env(@env.merge("HYPERLIQUID_TESTNET" => "false", "AERODROME_LIVE_APPROVED" => "true")) do
+      report = AerodromePreLiveCheck.new.report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_includes report.fetch(:warnings), "Live approval requires separate operator procedure: pre-live PASS is not execution permission"
     end
   ensure
     position&.destroy
