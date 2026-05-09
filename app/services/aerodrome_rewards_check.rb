@@ -23,8 +23,10 @@ class AerodromeRewardsCheck
       claims_enabled: false,
       pool_address: context[:pool_address],
       token_id: context[:token_id],
-      wallet_address: context[:wallet_address],
-      depositor_address: context[:wallet_address],
+      position_wallet_address: context[:position_wallet_address],
+      wallet_address: context[:position_wallet_address],
+      depositor_address: selected_depositor_address(context),
+      depositor_source: selected_depositor_source,
       asset0: context[:asset0],
       asset1: context[:asset1],
       asset0_amount: decimal_string(context[:asset0_amount]),
@@ -65,7 +67,7 @@ class AerodromeRewardsCheck
     {
       pool_address: position.pool_address,
       token_id: position.external_id,
-      wallet_address: position.wallet.address,
+      position_wallet_address: position.wallet.address,
       asset0: position.asset0,
       asset1: position.asset1,
       asset0_amount: position.asset0_amount,
@@ -86,14 +88,22 @@ class AerodromeRewardsCheck
       return nil
     end
 
-    if position.wallet.address.blank?
-      @blockers << "Position #{position.id} wallet address is missing; refusing to query rewards with gauge or fallback address"
+    depositor = depositor_address_for(position)
+    if depositor.blank?
+      @blockers << "Position #{position.id} has no rewards depositor address; set AERODROME_REWARDS_DEPOSITOR_ADDRESS or configure a wallet address"
       return nil
     end
 
-    reward_data = rewards_service.reward_state(
+    gauge_address = rewards_service.gauge_for_pool(position.pool_address)
+    if same_address?(depositor, gauge_address)
+      @warnings << "selected depositor is the gauge; set AERODROME_REWARDS_DEPOSITOR_ADDRESS to the staking wallet"
+      return gauge_as_depositor_result(position, depositor, gauge_address)
+    end
+
+    reward_data = rewards_service.reward_state_with_gauge(
       pool_address: position.pool_address,
-      depositor_address: position.wallet.address,
+      gauge_address: gauge_address,
+      depositor_address: depositor,
       token_id: position.external_id
     )
     @checks << { name: "CL gauge reward read", status: reward_data.status, value: reward_data.gauge_address }
@@ -121,6 +131,42 @@ class AerodromeRewardsCheck
 
   def rewards_enabled?
     ENV["AERODROME_REWARDS_ENABLED"].to_s.downcase == "true"
+  end
+
+  def depositor_address_for(position)
+    ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || position.wallet.address
+  end
+
+  def selected_depositor_address(context)
+    ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || context[:position_wallet_address]
+  end
+
+  def selected_depositor_source
+    ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].present? ? "env" : "position_wallet"
+  end
+
+  def same_address?(left, right)
+    left.to_s.downcase == right.to_s.downcase
+  end
+
+  def gauge_as_depositor_result(position, depositor, gauge_address)
+    AerodromeRewardsService::RewardData.new(
+      status: "unavailable",
+      pool_address: position.pool_address,
+      gauge_address: gauge_address,
+      depositor_address: depositor,
+      account_address: depositor,
+      token_id: position.external_id,
+      staked: nil,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
+      reward_token_address: nil,
+      claimable_aero_raw: nil,
+      claimable_aero: nil,
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
   end
 
   def status

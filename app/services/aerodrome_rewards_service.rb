@@ -51,6 +51,18 @@ class AerodromeRewardsService
     normalized_pool = normalize_address(pool_address)
     normalized_depositor = normalize_address(depositor_address)
     gauge = gauge_for_pool(normalized_pool)
+    reward_state_with_gauge(
+      pool_address: normalized_pool,
+      gauge_address: gauge,
+      depositor_address: normalized_depositor,
+      token_id: token_id
+    )
+  end
+
+  def reward_state_with_gauge(pool_address:, gauge_address:, depositor_address:, token_id:)
+    normalized_pool = normalize_address(pool_address)
+    normalized_depositor = normalize_address(depositor_address)
+    gauge = normalize_address(gauge_address)
     return no_gauge(normalized_pool, normalized_depositor, token_id) if gauge == ZERO_ADDRESS
 
     reward_token = reward_token(gauge)

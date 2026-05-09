@@ -41,13 +41,95 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
       assert_equal "PASS", report.fetch(:status)
       assert_equal "detected", report.fetch(:gauge_status)
+      assert_equal position.wallet.address, report.fetch(:position_wallet_address)
       assert_equal position.wallet.address, report.fetch(:wallet_address)
       assert_equal position.wallet.address, report.fetch(:depositor_address)
+      assert_equal "position_wallet", report.fetch(:depositor_source)
       refute_equal report.fetch(:gauge_address), report.fetch(:depositor_address)
       assert_equal true, report.fetch(:staked)
       assert_equal "12.5", report.fetch(:claimable_aero)
       assert_equal 12_500_000_000_000_000_000, report.fetch(:claimable_aero_raw)
       assert_nil report.fetch(:claimable_aero_usd)
+    end
+  end
+
+  test "env depositor override is used when position wallet is gauge" do
+    gauge = "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28"
+    depositor = "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6"
+    position = create_aerodrome_position(wallet_address: gauge)
+    reward_data = AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: gauge,
+      depositor_address: depositor,
+      account_address: depositor,
+      token_id: position.external_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 77,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 12_500_000_000_000_000_000,
+      claimable_aero: BigDecimal("12.5"),
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) do |pool_address|
+      raise "unexpected pool" unless pool_address == position.pool_address
+
+      gauge
+    end
+    service.define_singleton_method(:reward_state_with_gauge) do |pool_address:, gauge_address:, depositor_address:, token_id:|
+      raise "unexpected pool" unless pool_address == position.pool_address
+      raise "unexpected gauge" unless gauge_address == gauge
+      raise "unexpected depositor" unless depositor_address == depositor
+      raise "unexpected token" unless token_id == position.external_id
+
+      reward_data
+    end
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_REWARDS_DEPOSITOR_ADDRESS" => depositor
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service).report
+
+      assert_equal "PASS", report.fetch(:status)
+      assert_equal gauge, report.fetch(:position_wallet_address)
+      assert_equal gauge, report.fetch(:wallet_address)
+      assert_equal gauge, report.fetch(:gauge_address)
+      assert_equal depositor, report.fetch(:depositor_address)
+      assert_equal "env", report.fetch(:depositor_source)
+      assert_equal true, report.fetch(:staked)
+      assert_equal "12.5", report.fetch(:claimable_aero)
+    end
+  end
+
+  test "fallback depositor equal to gauge warns and does not call earned path" do
+    gauge = "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28"
+    create_aerodrome_position(wallet_address: gauge)
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) { |_pool_address| gauge }
+    service.define_singleton_method(:reward_state_with_gauge) do |**_kwargs|
+      raise "earned path should not be called when selected depositor is gauge"
+    end
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_REWARDS_DEPOSITOR_ADDRESS" => nil
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service).report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_equal gauge, report.fetch(:position_wallet_address)
+      assert_equal gauge, report.fetch(:depositor_address)
+      assert_equal "position_wallet", report.fetch(:depositor_source)
+      assert_equal gauge, report.fetch(:gauge_address)
+      assert_nil report.fetch(:claimable_aero)
+      assert_includes report.fetch(:warnings), "selected depositor is the gauge; set AERODROME_REWARDS_DEPOSITOR_ADDRESS to the staking wallet"
     end
   end
 
@@ -93,8 +175,14 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
   def reward_service_stub(position, reward_data)
     Object.new.tap do |object|
-      object.define_singleton_method(:reward_state) do |pool_address:, depositor_address:, token_id:|
+      object.define_singleton_method(:gauge_for_pool) do |pool_address|
         raise "unexpected pool" unless pool_address == position.pool_address
+
+        reward_data.gauge_address || "0x1111111111111111111111111111111111111111"
+      end
+      object.define_singleton_method(:reward_state_with_gauge) do |pool_address:, gauge_address:, depositor_address:, token_id:|
+        raise "unexpected pool" unless pool_address == position.pool_address
+        raise "unexpected gauge" unless gauge_address == (reward_data.gauge_address || "0x1111111111111111111111111111111111111111")
         raise "unexpected depositor" unless depositor_address == position.wallet.address
         raise "unexpected token" unless token_id == position.external_id
 
@@ -103,10 +191,10 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     end
   end
 
-  def create_aerodrome_position
+  def create_aerodrome_position(wallet_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701")
     Position.create!(
       user: users(:one),
-      wallet: base_wallet,
+      wallet: base_wallet(wallet_address),
       dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
       asset0: "WETH",
       asset1: "USDC",
@@ -120,11 +208,11 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     )
   end
 
-  def base_wallet
+  def base_wallet(address = "0x23cb5f48fa3f4502232f3442637f90e8e3355701")
     Wallet.find_or_create_by!(
       user: users(:one),
       network: networks(:base),
-      address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+      address: address
     )
   end
 

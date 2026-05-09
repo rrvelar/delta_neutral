@@ -286,7 +286,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       assert_match "NO CLAIMS", out
       assert_match "NO TRANSACTIONS", out
       assert_match "DB write: false", out
+      assert_match "position wallet address: \"0x23cb5f48fa3f4502232f3442637f90e8e3355701\"", out
       assert_match "depositor/wallet address used: \"0x23cb5f48fa3f4502232f3442637f90e8e3355701\"", out
+      assert_match "depositor source: position_wallet", out
       assert_match "claimable AERO: \"12.5\"", out
     end
   end
@@ -305,8 +307,10 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_equal false, parsed.fetch("database_write")
         assert_equal false, parsed.fetch("transactions_enabled")
         assert_equal false, parsed.fetch("claims_enabled")
+        assert_equal "0x23cb5f48fa3f4502232f3442637f90e8e3355701", parsed.fetch("position_wallet_address")
         assert_equal "0x23cb5f48fa3f4502232f3442637f90e8e3355701", parsed.fetch("wallet_address")
         assert_equal "0x23cb5f48fa3f4502232f3442637f90e8e3355701", parsed.fetch("depositor_address")
+        assert_equal "position_wallet", parsed.fetch("depositor_source")
         refute_equal parsed.fetch("gauge_address"), parsed.fetch("depositor_address")
         assert_equal true, parsed.fetch("staked")
         assert_equal "12.5", parsed.fetch("claimable_aero")
@@ -618,8 +622,10 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       claims_enabled: false,
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
       token_id: "315985",
+      position_wallet_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
       wallet_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
       depositor_address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
+      depositor_source: "position_wallet",
       asset0: "WETH",
       asset1: "USDC",
       asset0_amount: "1.25",
