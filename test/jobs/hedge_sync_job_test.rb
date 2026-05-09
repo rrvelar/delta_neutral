@@ -13,6 +13,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {},
                          market_close_result: { "status" => "ok" }, market_close_error: nil,
+                         market_order_result: { "status" => "ok" }, market_order_error: nil,
+                         positions_after_close_error: nil, positions_after_open_error: nil,
                          market_order_calls: nil)
     user_states = {}
 
@@ -46,6 +48,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       mock_info.define_singleton_method(:user_fills_by_time) { |_addr, _start_time| fills }
     end
 
+    build_state = method(:build_user_state)
     mock_exchange = Object.new
     mock_exchange.define_singleton_method(:market_close) do |**_|
       raise market_close_error if market_close_error
@@ -55,11 +58,15 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     mock_exchange.define_singleton_method(:market_order) do |**args|
       market_order_calls&.push(args)
       if args[:is_buy]
+        user_states[nil] = build_state.call(positions_after_close_error) if market_close_error && positions_after_close_error
         raise market_close_error if market_close_error
 
         market_close_result
       else
-        { "status" => "ok" }
+        user_states[nil] = build_state.call(positions_after_open_error) if market_order_error && positions_after_open_error
+        raise market_order_error if market_order_error
+
+        market_order_result
       end
     end
     mock_exchange.define_singleton_method(:update_leverage) { |**_| { "status" => "ok" } }
@@ -234,6 +241,140 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_equal BigDecimal("0.5"), rebalance.old_short_size
     assert_equal BigDecimal("0.5"), rebalance.new_short_size
     assert_match "close rejected", rebalance.message
+  end
+
+  test "close short network error reconciles success when position is gone afterwards" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_close_error: Hyperliquid::NetworkError.new("SSL_read: unexpected eof while reading"),
+      positions_after_close_error: []
+    )
+
+    assert_emails 1 do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.old_short_size
+    assert_equal BigDecimal("0"), rebalance.new_short_size
+    assert_match "Reconciled after ambiguous order error", rebalance.message
+  end
+
+  test "close short network error records failure with actual size when position remains" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [ { coin: "ETH", szi: "-0.5" } ],
+      market_close_error: Hyperliquid::NetworkError.new("SSL_read: unexpected eof while reading"),
+      positions_after_close_error: [ { coin: "ETH", szi: "-0.4" } ]
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.old_short_size
+    assert_equal BigDecimal("0.4"), rebalance.new_short_size
+    assert_match "SSL_read", rebalance.message
+  end
+
+  test "open short network error reconciles success when position reaches target" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [],
+      market_order_error: Hyperliquid::NetworkError.new("SSL_read: unexpected eof while reading"),
+      positions_after_open_error: [ { coin: "ETH", szi: "-0.5" } ]
+    )
+
+    assert_emails 1 do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
+    assert_equal BigDecimal("0"), rebalance.old_short_size
+    assert_equal BigDecimal("0.5"), rebalance.new_short_size
+    assert_match "Reconciled after ambiguous order error", rebalance.message
+  end
+
+  test "open short network error records failure with actual size when position remains zero" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+
+    mock_service = build_mock_service(
+      positions: [],
+      market_order_error: Hyperliquid::NetworkError.new("SSL_read: unexpected eof while reading"),
+      positions_after_open_error: []
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0"), rebalance.old_short_size
+    assert_equal BigDecimal("0"), rebalance.new_short_size
+    assert_match "SSL_read", rebalance.message
+  end
+
+  test "explicit API rejection remains failed without reconciled success" do
+    hedge = hedges(:eth_hedge)
+    hedge.position.update!(asset0_amount: BigDecimal("1.0"), asset1_amount: BigDecimal("0"))
+    rejected_order = {
+      "status" => "ok",
+      "response" => {
+        "data" => {
+          "statuses" => [
+            { "error" => "Order must have minimum value of $10" }
+          ]
+        }
+      }
+    }
+
+    mock_service = build_mock_service(
+      positions: [],
+      market_order_result: rejected_order,
+      positions_after_open_error: [ { coin: "ETH", szi: "-0.5" } ]
+    )
+
+    assert_no_emails do
+      assert_difference "ShortRebalance.count", 1 do
+        HyperliquidService.stub(:new, mock_service) do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = ShortRebalance.where(asset: "WETH").order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0"), rebalance.new_short_size
+    assert_match "minimum value", rebalance.message
   end
 
   test "close short rejected response records failed rebalance instead of success" do

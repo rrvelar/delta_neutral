@@ -221,22 +221,48 @@ class HedgeSyncJob < ApplicationJob
 
       HedgeRebalanceMailer.rebalance_notification(rebalance).deliver_later
     rescue => e
-      # Close succeeded but open failed — short is now 0; if close also failed, size unchanged
-      new_short_size = close_submitted ? BigDecimal("0") : current_short
+      actual_short = reconciled_short_size(hyperliquid, hl_asset, account_address, fallback: close_submitted ? BigDecimal("0") : current_short)
+      reconciled = ambiguous_order_error?(e) && reconciled_to_target?(hedge, target_short, actual_short)
+      status = reconciled ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
+      message = if reconciled
+        "Reconciled after ambiguous order error: #{e.message}"
+      else
+        "Attempted rebalance to #{target_short} #{hl_asset}: #{e.message}"
+      end
 
       rebalance = hedge.short_rebalances.create!(
         asset: asset,
         old_short_size: current_short,
-        new_short_size: new_short_size,
+        new_short_size: actual_short,
         realized_pnl: realized_pnl,
-        status: ShortRebalance::STATUS_FAILED,
-        message: "Attempted rebalance to #{target_short} #{hl_asset}: #{e.message}",
+        status: status,
+        message: message,
         rebalanced_at: Time.current
       )
-      Rails.logger.error("[HedgeSyncJob] hedge #{hedge.id} #{asset}: rebalance failed — ShortRebalance ##{rebalance.id}: #{e.message}")
+      Rails.logger.error("[HedgeSyncJob] hedge #{hedge.id} #{asset}: rebalance #{status} after error — ShortRebalance ##{rebalance.id}: #{e.message}")
 
-      raise
+      raise unless reconciled
+
+      HedgeRebalanceMailer.rebalance_notification(rebalance).deliver_later
     end
+  end
+
+  def reconciled_short_size(hyperliquid, hl_asset, account_address, fallback:)
+    position = hyperliquid.get_position(hl_asset, address: account_address)
+    position ? position[:size].abs : BigDecimal("0")
+  rescue => e
+    Rails.logger.warn("[HedgeSyncJob] failed to reconcile #{hl_asset} after order error: #{e.message}")
+    fallback
+  end
+
+  def reconciled_to_target?(hedge, target_short, actual_short)
+    return actual_short.zero? if target_short.zero?
+
+    (target_short - actual_short).abs <= (target_short * hedge.tolerance)
+  end
+
+  def ambiguous_order_error?(error)
+    !error.is_a?(HyperliquidService::OrderError) || error.message.include?("returned nil")
   end
 
   # Resolves which HL account (main or subaccount) to use for this hedge+asset.

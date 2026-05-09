@@ -166,7 +166,9 @@ When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome he
 
 With both rehearsal flags enabled and the kill switch unpaused, `HedgeSyncJob` first requires an active Aerodrome position with both assets, both persisted amounts, both persisted USD prices, and an explicit hedge record. Incomplete data is skipped before `HyperliquidService` construction. Complete data is filtered to ETH/WETH exposure only before it is passed into the existing hedge loop; USDC is explicitly skipped and cannot create a hedge order. Optional pre-live limits (`AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, `AERODROME_MAX_LEVERAGE`) block Aerodrome before the order path when exceeded; missing max limits are not enforced. Existing tolerance checks, failure records, circuit breaker behavior, subaccount logic, margin handling, and order methods are reused unchanged for the supported ETH/WETH side. Operators must complete testnet/manual verification and a separate pre-live checklist before considering live use.
 
-The first Aerodrome testnet hedge rehearsal confirmed that the WETH/ETH open path could submit a tiny testnet short and that the USDC side was skipped. The close path then exposed a false-success bug: SDK `market_close` logged `No open position to close for ETH` for an API-wallet/master-account short, while `HedgeSyncJob` still recorded a successful `ShortRebalance` with `new_short_size=0`. The close path now passes the known `current_short` size and submits an explicit opposite market order instead of relying on SDK position discovery. Do not trust successful close rebalances created before this close-path fix as proof that a Hyperliquid short was closed. Live remains blocked until the explicit close behavior is tested and confirmed on testnet.
+The first Aerodrome testnet hedge rehearsal confirmed that the WETH/ETH open path could submit a tiny testnet short and that the USDC side was skipped. The close path then exposed a false-success bug: SDK `market_close` logged `No open position to close for ETH` for an API-wallet/master-account short, while `HedgeSyncJob` still recorded a successful `ShortRebalance` with `new_short_size=0`. The close path now passes the known `current_short` size and submits an explicit opposite market order instead of relying on SDK position discovery. Do not trust successful close rebalances created before this close-path fix as proof that a Hyperliquid short was closed.
+
+The explicit close retest encountered `SSL_read: unexpected eof while reading`; the ETH short remained open and the app correctly recorded failure. Network ambiguity can happen after either open or close orders, including cases where the order executes but the client receives an SSL/read exception. `HedgeSyncJob` now reconciles ambiguous order errors by fetching actual Hyperliquid position state and recording the actual final short size. If the actual size is within tolerance of the intended target, the rebalance is recorded as success with a reconciliation message; otherwise it is recorded as failed. Explicit API rejections, such as minimum-order failures, remain failed. Live remains blocked until open and close reconciliation retests pass on testnet.
 
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 
@@ -221,6 +223,7 @@ Do not proceed beyond dry-run if:
 - hedge preview differs from the operator's manual WETH amount/notional check.
 - any close-short rehearsal logs `No open position to close` while a short remains open on Hyperliquid.
 - a close-short rehearsal records success locally but `get_position("ETH")` still shows an open short.
+- an open or close rehearsal hits SSL/network ambiguity and the local `ShortRebalance` does not match the actual post-error Hyperliquid position size.
 
 ## Future Hedge Integration Checklist
 
@@ -241,6 +244,7 @@ Do not proceed beyond dry-run if:
 - [x] Aerodrome positions remain disabled for hedging by default.
 - [x] Controlled Aerodrome hedge-loop entry is behind `AERODROME_HEDGE_ENABLED=true` and local readiness checks.
 - [ ] Fixed close-short path retested on Hyperliquid testnet after the false-success bug.
+- [ ] Open/close reconciliation retested on Hyperliquid testnet after SSL ambiguity.
 - [ ] Testnet/manual verification completed before any live Aerodrome hedge use.
 - [ ] Manual proposal workflow reviewed operationally; stale or blocked proposals are regenerated/rejected before review and review remains non-executing.
 - [ ] Mocked tests cover all RPC paths.
