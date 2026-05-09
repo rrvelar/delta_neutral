@@ -169,4 +169,28 @@ namespace :aerodrome do
 
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
+
+  desc "Run testnet-only emergency close for Aerodrome ETH short"
+  task testnet_emergency_close: :environment do
+    report = AerodromeTestnetEmergencyClose.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "HYPERLIQUID_TESTNET=#{report.fetch(:hyperliquid_testnet)}"
+      puts "live_approved=#{report.fetch(:live_approved)}"
+      puts "current ETH position before: #{report.fetch(:before_position).inspect}"
+      puts "attempts:"
+      report.fetch(:attempts).each { |attempt| puts "  #{attempt.inspect}" }
+      puts "current ETH position after: #{report.fetch(:after_position).inspect}"
+      puts "final status: #{report.fetch(:status)}"
+      if report.fetch(:errors).any?
+        puts "errors:"
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      end
+    end
+
+    exit(false) if report.fetch(:status) == "failed"
+  end
 end

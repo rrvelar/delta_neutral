@@ -141,6 +141,26 @@ CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check
 
 The pre-live check is read-only. It performs no DB writes, places no orders, and does not call Hyperliquid execution methods such as `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. With `CHECK_HYPERLIQUID=true`, it only reads `get_position("ETH")` and reports the current ETH short state. The report includes `AERODROME_LIVE_APPROVED` state. Passing this check is not permission for live trading; live remains blocked by default and requires a separate future approval/change.
 
+After any testnet soak, run:
+
+```bash
+CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check
+```
+
+If an ETH short remains open, run the testnet-only emergency close:
+
+```bash
+bin/rails aerodrome:testnet_emergency_close
+```
+
+JSON output is available with:
+
+```bash
+FORMAT=json bin/rails aerodrome:testnet_emergency_close
+```
+
+The emergency close task refuses to run unless `HYPERLIQUID_TESTNET=true` and `AERODROME_LIVE_APPROVED=false`. It retries explicit ETH close/readback after transient Hyperliquid testnet API/DNS failures and never touches USDC. Live close/emergency procedures must be separate future work; live remains disabled.
+
 ## Manual Verification For One Token ID
 
 1. Run `bin/rails aerodrome:verify_config`.
@@ -197,6 +217,8 @@ The explicit close retest encountered `SSL_read: unexpected eof while reading`; 
 The 10h testnet soak also showed unnecessary order churn. Same-size rounded target rebalances are skipped, and non-zero rebalances now use delta-only sizing: increasing a short opens only the additional size, decreasing a short closes only the excess size, and full close is reserved for `target_short == 0`. This reduces fees, slippage, and order/API risk. Live remains disabled.
 
 A 1h delta-only soak showed most target changes produced tiny deltas below Hyperliquid's minimum order notional, which created failed rows and tripped the circuit breaker. Aerodrome non-close deltas below `AERODROME_MIN_ORDER_NOTIONAL_USD` now skip without order submission or failed `ShortRebalance` rows. Missing `AERODROME_MIN_ORDER_NOTIONAL_USD` defaults to 10. Close-to-zero bypasses the failed-rebalance circuit breaker so final cleanup closes are still attempted and reconciled truthfully. Live remains disabled.
+
+A subsequent testnet soak showed final close can fail from Hyperliquid testnet DNS/API availability, leaving a testnet ETH short open until manual close. Use `CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check` after every soak, and if ETH remains open, use `bin/rails aerodrome:testnet_emergency_close`. This is testnet-only tooling and is not a live emergency procedure.
 
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 

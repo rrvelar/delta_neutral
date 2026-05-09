@@ -7,6 +7,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:dry_run"].reenable
     Rake::Task["aerodrome:verify_config"].reenable
     Rake::Task["aerodrome:pre_live_check"].reenable
+    Rake::Task["aerodrome:testnet_emergency_close"].reenable
   end
 
   test "dry run task fails clearly with no token ids" do
@@ -365,6 +366,43 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "testnet emergency close task outputs status" do
+    report = emergency_close_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeTestnetEmergencyClose.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:testnet_emergency_close"].invoke }
+
+        assert_match "TESTNET EMERGENCY CLOSE", out
+        assert_match "HYPERLIQUID_TESTNET=true", out
+        assert_match "live_approved=false", out
+        assert_match "current ETH position before", out
+        assert_match "attempts", out
+        assert_match "current ETH position after", out
+        assert_match "final status: success", out
+      end
+    end
+  end
+
+  test "testnet emergency close task supports JSON output" do
+    report = emergency_close_report(status: "noop")
+
+    with_env("FORMAT" => "json") do
+      AerodromeTestnetEmergencyClose.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:testnet_emergency_close"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "noop", parsed.fetch("status")
+        assert_equal [], parsed.fetch("attempts")
+        assert_equal [], parsed.fetch("errors")
+      end
+    end
+  end
+
   private
 
   def ok_report(token_id)
@@ -450,6 +488,21 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: blockers,
       warnings: warnings,
       next_steps: [ "Passing this check is not live approval." ]
+    }
+  end
+
+  def emergency_close_report(status:)
+    {
+      safety_banner: AerodromeTestnetEmergencyClose::BANNER,
+      status: status,
+      hyperliquid_testnet: true,
+      live_approved: false,
+      attempts: [],
+      before_position: { asset: "ETH", size: "0.25" },
+      after_position: nil,
+      errors: [],
+      database_write: false,
+      touched_asset: "ETH"
     }
   end
 
