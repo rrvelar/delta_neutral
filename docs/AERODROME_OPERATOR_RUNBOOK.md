@@ -202,7 +202,7 @@ JSON output:
 FORMAT=json bin/rails aerodrome:rewards_check
 ```
 
-This task discovers the configured Aerodrome position, attempts read-only `Voter.gauges(pool)` gauge discovery when `AERODROME_VOTER_ADDRESS` is configured, and attempts read-only CL gauge reward reads for wallet plus token id. It performs no DB writes, sends no transactions, claims nothing, and does not use private keys. AERO rewards are discovery-only and are not included in Total PnL yet. AERO USD valuation is a separate future task.
+This task discovers the configured Aerodrome position, attempts read-only `Voter.gauges(pool)` gauge discovery when `AERODROME_VOTER_ADDRESS` is configured, and attempts read-only CL gauge reward reads for the position wallet/depositor address plus token id. It reports `wallet_address`/`depositor_address` separately from `gauge_address`; the gauge address must never be used as the depositor fallback. `not_staked` means the token id was not found for that depositor in the discovered CL gauge. It performs no DB writes, sends no transactions, claims nothing, and does not use private keys. AERO rewards are discovery-only and are not included in Total PnL yet. AERO USD valuation is a separate future task.
 
 ## Manual Verification For One Token ID
 
@@ -254,7 +254,7 @@ The UI preview, manual proposal system, and safety-limit checks do not call RPC,
 
 Aerodrome LP fee read is not implemented yet. The dashboard keeps Aerodrome LP fees at zero and labels them as a future task.
 
-AERO reward claiming is not implemented. Rewards are not included in Total PnL yet and must not be faked. AERO USD valuation remains a future task. Live remains disabled.
+AERO reward claiming and staking are not implemented. Rewards are not included in Total PnL yet and must not be faked. AERO USD valuation remains a future task. Live remains disabled.
 
 When `AERODROME_HEDGE_ENABLED=false` or unset, `HedgeSyncJob` skips Aerodrome hedges before constructing `HyperliquidService`. Testnet rehearsal requires `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, and `HYPERLIQUID_TESTNET=true`. Hyperliquid mainnet Aerodrome hedge processing skips before `HyperliquidService` unless `AERODROME_LIVE_APPROVED=true`; missing `AERODROME_LIVE_APPROVED` behaves false. `AERODROME_LIVE_APPROVED=true` is not enough by itself: `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, all readiness/risk gates, and WETH/ETH-only filtering are still required. Production live must keep `AERODROME_HEDGE_ENABLED=false` and `AERODROME_HEDGE_PAUSED=true` until a separate future first-live procedure is approved.
 

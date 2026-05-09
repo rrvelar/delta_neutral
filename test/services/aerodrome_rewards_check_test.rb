@@ -21,9 +21,12 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       status: "detected",
       pool_address: position.pool_address,
       gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
       account_address: position.wallet.address,
       token_id: position.external_id,
       staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 77,
       reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
       claimable_aero_raw: 12_500_000_000_000_000_000,
       claimable_aero: BigDecimal("12.5"),
@@ -38,7 +41,12 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
       assert_equal "PASS", report.fetch(:status)
       assert_equal "detected", report.fetch(:gauge_status)
+      assert_equal position.wallet.address, report.fetch(:wallet_address)
+      assert_equal position.wallet.address, report.fetch(:depositor_address)
+      refute_equal report.fetch(:gauge_address), report.fetch(:depositor_address)
+      assert_equal true, report.fetch(:staked)
       assert_equal "12.5", report.fetch(:claimable_aero)
+      assert_equal 12_500_000_000_000_000_000, report.fetch(:claimable_aero_raw)
       assert_nil report.fetch(:claimable_aero_usd)
     end
   end
@@ -49,9 +57,12 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       status: "unavailable",
       pool_address: position.pool_address,
       gauge_address: nil,
+      depositor_address: position.wallet.address,
       account_address: position.wallet.address,
       token_id: position.external_id,
       staked: nil,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
       reward_token_address: nil,
       claimable_aero_raw: nil,
       claimable_aero: nil,
@@ -82,9 +93,9 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
   def reward_service_stub(position, reward_data)
     Object.new.tap do |object|
-      object.define_singleton_method(:reward_state) do |pool_address:, account_address:, token_id:|
+      object.define_singleton_method(:reward_state) do |pool_address:, depositor_address:, token_id:|
         raise "unexpected pool" unless pool_address == position.pool_address
-        raise "unexpected account" unless account_address == position.wallet.address
+        raise "unexpected depositor" unless depositor_address == position.wallet.address
         raise "unexpected token" unless token_id == position.external_id
 
         reward_data

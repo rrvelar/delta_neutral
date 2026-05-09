@@ -24,6 +24,7 @@ class AerodromeRewardsCheck
       pool_address: context[:pool_address],
       token_id: context[:token_id],
       wallet_address: context[:wallet_address],
+      depositor_address: context[:wallet_address],
       asset0: context[:asset0],
       asset1: context[:asset1],
       asset0_amount: decimal_string(context[:asset0_amount]),
@@ -31,6 +32,9 @@ class AerodromeRewardsCheck
       current_pooled_value_usd: decimal_string(context[:current_pooled_value_usd]),
       gauge_status: reward_data&.status || "unavailable",
       gauge_address: reward_data&.gauge_address,
+      staked: reward_data&.staked,
+      staked_token_ids: reward_data&.staked_token_ids,
+      reward_rate_raw: reward_data&.reward_rate_raw,
       claimable_aero: decimal_string(reward_data&.claimable_aero),
       claimable_aero_raw: reward_data&.claimable_aero_raw,
       claimable_aero_usd: nil,
@@ -82,9 +86,14 @@ class AerodromeRewardsCheck
       return nil
     end
 
+    if position.wallet.address.blank?
+      @blockers << "Position #{position.id} wallet address is missing; refusing to query rewards with gauge or fallback address"
+      return nil
+    end
+
     reward_data = rewards_service.reward_state(
       pool_address: position.pool_address,
-      account_address: position.wallet.address,
+      depositor_address: position.wallet.address,
       token_id: position.external_id
     )
     @checks << { name: "CL gauge reward read", status: reward_data.status, value: reward_data.gauge_address }

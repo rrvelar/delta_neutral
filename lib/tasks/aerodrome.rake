@@ -254,8 +254,10 @@ namespace :aerodrome do
       puts "Overall status: #{report.fetch(:status)}"
       puts "pool: #{report.fetch(:pool_address).inspect}"
       puts "token id: #{report.fetch(:token_id).inspect}"
+      puts "depositor/wallet address used: #{report.fetch(:depositor_address).inspect}"
       puts "gauge status: #{report.fetch(:gauge_status)}"
       puts "gauge address: #{report.fetch(:gauge_address).inspect}"
+      puts "staked: #{report.fetch(:staked).inspect}"
       puts "claimable AERO: #{report.fetch(:claimable_aero).inspect}"
       puts "claimable AERO USD: #{report.fetch(:claimable_aero_usd).inspect}"
 

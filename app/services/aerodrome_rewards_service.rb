@@ -17,9 +17,12 @@ class AerodromeRewardsService
     :status,
     :pool_address,
     :gauge_address,
+    :depositor_address,
     :account_address,
     :token_id,
     :staked,
+    :staked_token_ids,
+    :reward_rate_raw,
     :reward_token_address,
     :claimable_aero_raw,
     :claimable_aero,
@@ -31,9 +34,11 @@ class AerodromeRewardsService
   SELECTORS = {
     gauges: selector("gauges(address)"),
     earned: selector("earned(address,uint256)"),
+    rewards: selector("rewards(uint256)"),
     reward_token: selector("rewardToken()"),
     decimals: selector("decimals()"),
-    staked_contains: selector("stakedContains(address,uint256)")
+    staked_contains: selector("stakedContains(address,uint256)"),
+    staked_values: selector("stakedValues(address)")
   }.freeze
 
   def initialize(rpc_url: nil, voter_address: nil, aero_token_address: nil)
@@ -42,40 +47,48 @@ class AerodromeRewardsService
     @aero_token_address = aero_token_address.presence && normalize_address(aero_token_address)
   end
 
-  def reward_state(pool_address:, account_address:, token_id:)
+  def reward_state(pool_address:, depositor_address:, token_id:)
     normalized_pool = normalize_address(pool_address)
-    normalized_account = normalize_address(account_address)
+    normalized_depositor = normalize_address(depositor_address)
     gauge = gauge_for_pool(normalized_pool)
-    return no_gauge(normalized_pool, normalized_account, token_id) if gauge == ZERO_ADDRESS
+    return no_gauge(normalized_pool, normalized_depositor, token_id) if gauge == ZERO_ADDRESS
 
     reward_token = reward_token(gauge)
-    staked = staked_contains(gauge, normalized_account, token_id)
+    staked = staked_contains(gauge, normalized_depositor, token_id)
     unless staked
+      staked_token_ids = safe_staked_values(gauge, normalized_depositor)
       return RewardData.new(
         status: "not_staked",
         pool_address: normalized_pool,
         gauge_address: gauge,
-        account_address: normalized_account,
+        depositor_address: normalized_depositor,
+        account_address: normalized_depositor,
         token_id: token_id.to_s,
         staked: false,
+        staked_token_ids: staked_token_ids,
+        reward_rate_raw: nil,
         reward_token_address: reward_token,
         claimable_aero_raw: 0,
         claimable_aero: BigDecimal("0"),
         claimable_aero_usd: nil,
-        warnings: [ "position NFT is not staked in discovered CL gauge for wallet" ],
+        warnings: [ "position NFT #{token_id} is not staked in discovered CL gauge for depositor #{normalized_depositor}" ],
         blockers: []
       )
     end
 
-    raw = earned(gauge, normalized_account, token_id)
+    reward_rate_raw = safe_rewards(gauge, token_id)
+    raw = earned(gauge, normalized_depositor, token_id)
     decimals = reward_decimals(reward_token)
     RewardData.new(
       status: "detected",
       pool_address: normalized_pool,
       gauge_address: gauge,
-      account_address: normalized_account,
+      depositor_address: normalized_depositor,
+      account_address: normalized_depositor,
       token_id: token_id.to_s,
       staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: reward_rate_raw,
       reward_token_address: reward_token,
       claimable_aero_raw: raw,
       claimable_aero: decimal_amount(raw, decimals),
@@ -88,9 +101,12 @@ class AerodromeRewardsService
       status: "unavailable",
       pool_address: pool_address.to_s,
       gauge_address: nil,
-      account_address: account_address.to_s,
+      depositor_address: depositor_address.to_s,
+      account_address: depositor_address.to_s,
       token_id: token_id.to_s,
       staked: nil,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
       reward_token_address: nil,
       claimable_aero_raw: nil,
       claimable_aero: nil,
@@ -125,6 +141,14 @@ class AerodromeRewardsService
     @aero_token_address || raise
   end
 
+  def rewards(gauge_address, token_id)
+    uint_from_word(single_word_call(gauge_address, SELECTORS.fetch(:rewards) + uint256_word(token_id)))
+  end
+
+  def staked_values(gauge_address, depositor_address)
+    decode_uint_array(eth_call(gauge_address, SELECTORS.fetch(:staked_values) + address_word(depositor_address)))
+  end
+
   def reward_decimals(token_address)
     uint_from_word(single_word_call(token_address, SELECTORS.fetch(:decimals)))
   end
@@ -136,9 +160,12 @@ class AerodromeRewardsService
       status: "not_configured",
       pool_address: pool_address,
       gauge_address: nil,
+      depositor_address: account_address,
       account_address: account_address,
       token_id: token_id.to_s,
       staked: nil,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
       reward_token_address: nil,
       claimable_aero_raw: nil,
       claimable_aero: nil,
@@ -146,6 +173,18 @@ class AerodromeRewardsService
       warnings: [ "no CL gauge discovered for pool" ],
       blockers: []
     )
+  end
+
+  def safe_rewards(gauge_address, token_id)
+    rewards(gauge_address, token_id)
+  rescue Error
+    nil
+  end
+
+  def safe_staked_values(gauge_address, depositor_address)
+    staked_values(gauge_address, depositor_address)
+  rescue Error
+    nil
   end
 
   def aero_token_warnings(reward_token)
@@ -191,6 +230,23 @@ class AerodromeRewardsService
     raise DecodeError, "Aerodrome rewards RPC response expected 1 ABI word, got #{body.length / 64}" unless body.length == 64
 
     body
+  end
+
+  def decode_uint_array(hex)
+    body = hex.delete_prefix("0x")
+    raise DecodeError, "Aerodrome rewards array response is malformed" unless body.match?(/\A[0-9a-fA-F]*\z/) && (body.length % 64).zero?
+
+    words = body.scan(/.{64}/)
+    return [] if words.empty?
+
+    offset = uint_from_word(words[0])
+    raise DecodeError, "Aerodrome rewards array response has unsupported offset #{offset}" unless offset == 32
+
+    length = uint_from_word(words[1])
+    values = words[2, length]
+    raise DecodeError, "Aerodrome rewards array response has truncated data" unless values&.length == length
+
+    values.map { |word| uint_from_word(word) }
   end
 
   def normalize_address(address)

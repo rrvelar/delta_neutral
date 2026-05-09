@@ -14,15 +14,19 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
       "0x#{word(GAUGE)}",
       "0x#{word(AERO)}",
       "0x#{uint_word(1)}",
+      "0x#{uint_word(77)}",
       "0x#{uint_word(12_500_000_000_000_000_000)}",
       "0x#{uint_word(18)}"
     )
 
-    result = service.reward_state(pool_address: POOL, account_address: ACCOUNT, token_id: 5016)
+    result = service.reward_state(pool_address: POOL, depositor_address: ACCOUNT, token_id: 5016)
 
     assert_equal "detected", result.status
     assert_equal GAUGE, result.gauge_address
+    assert_equal ACCOUNT, result.depositor_address
+    assert_equal ACCOUNT, result.account_address
     assert_equal true, result.staked
+    assert_equal 77, result.reward_rate_raw
     assert_equal AERO, result.reward_token_address
     assert_equal 12_500_000_000_000_000_000, result.claimable_aero_raw
     assert_equal BigDecimal("12.5"), result.claimable_aero
@@ -34,10 +38,11 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
     service = AerodromeRewardsService.new(rpc_url: RPC_URL, voter_address: VOTER)
     stub_rpc_results("0x#{word(AerodromeRewardsService::ZERO_ADDRESS)}")
 
-    result = service.reward_state(pool_address: POOL, account_address: ACCOUNT, token_id: 5016)
+    result = service.reward_state(pool_address: POOL, depositor_address: ACCOUNT, token_id: 5016)
 
     assert_equal "not_configured", result.status
     assert_nil result.gauge_address
+    assert_equal ACCOUNT, result.depositor_address
     assert_includes result.warnings, "no CL gauge discovered for pool"
   end
 
@@ -46,14 +51,39 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
     stub_rpc_results(
       "0x#{word(GAUGE)}",
       "0x#{word(AERO)}",
-      "0x#{uint_word(0)}"
+      "0x#{uint_word(0)}",
+      encoded_uint_array([ 123, 456 ])
     )
 
-    result = service.reward_state(pool_address: POOL, account_address: ACCOUNT, token_id: 5016)
+    result = service.reward_state(pool_address: POOL, depositor_address: ACCOUNT, token_id: 5016)
 
     assert_equal "not_staked", result.status
     assert_equal false, result.staked
+    assert_equal [ 123, 456 ], result.staked_token_ids
     assert_equal BigDecimal("0"), result.claimable_aero
+    assert_includes result.warnings, "position NFT 5016 is not staked in discovered CL gauge for depositor #{ACCOUNT}"
+  end
+
+  test "stakedContains and earned are called with depositor address, not gauge address" do
+    service = AerodromeRewardsService.new(rpc_url: RPC_URL, voter_address: VOTER, aero_token_address: AERO)
+    stub_rpc_results(
+      "0x#{word(GAUGE)}",
+      "0x#{word(AERO)}",
+      "0x#{uint_word(1)}",
+      "0x#{uint_word(77)}",
+      "0x#{uint_word(12_500_000_000_000_000_000)}",
+      "0x#{uint_word(18)}"
+    )
+
+    service.reward_state(pool_address: POOL, depositor_address: ACCOUNT, token_id: 5016)
+
+    bodies = WebMock::RequestRegistry.instance.requested_signatures.hash.keys.map(&:body)
+    staked_call = bodies.find { |body| JSON.parse(body).dig("params", 0, "data").start_with?(AerodromeRewardsService::SELECTORS.fetch(:staked_contains)) }
+    earned_call = bodies.find { |body| JSON.parse(body).dig("params", 0, "data").start_with?(AerodromeRewardsService::SELECTORS.fetch(:earned)) }
+    assert_includes JSON.parse(staked_call).dig("params", 0, "data"), ACCOUNT.delete_prefix("0x").rjust(64, "0")
+    assert_includes JSON.parse(earned_call).dig("params", 0, "data"), ACCOUNT.delete_prefix("0x").rjust(64, "0")
+    refute_includes JSON.parse(staked_call).dig("params", 0, "data"), GAUGE.delete_prefix("0x").rjust(64, "0")
+    refute_includes JSON.parse(earned_call).dig("params", 0, "data"), GAUGE.delete_prefix("0x").rjust(64, "0")
   end
 
   test "unsupported gauge API is handled safely" do
@@ -64,7 +94,7 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
       { error: { code: -32000, message: "execution reverted" } }
     )
 
-    result = service.reward_state(pool_address: POOL, account_address: ACCOUNT, token_id: 5016)
+    result = service.reward_state(pool_address: POOL, depositor_address: ACCOUNT, token_id: 5016)
 
     assert_equal "unavailable", result.status
     assert_match "stakedContains unsupported", result.warnings.first
@@ -98,5 +128,9 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
 
   def uint_word(value)
     Integer(value).to_s(16).rjust(64, "0")
+  end
+
+  def encoded_uint_array(values)
+    "0x#{uint_word(32)}#{uint_word(values.length)}#{values.map { |value| uint_word(value) }.join}"
   end
 end
