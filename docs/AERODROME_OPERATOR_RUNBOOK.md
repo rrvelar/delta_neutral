@@ -22,6 +22,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Read-only amount0/amount1 math using verified Aerodrome Slipstream `TickMath` and `LiquidityAmounts` formulas.
 - Monitor-only `WalletSyncJob` and `PositionSyncJob` persistence for verified computed token amounts.
 - Monitor-only USD valuation preview for configured-USDC pools.
+- Read-only Aerodrome PnL snapshots from persisted token amounts and USD prices.
 - Monitor-only hedge preview for configured WETH/USDC pools.
 - Manual, non-executing hedge proposal records for configured WETH/USDC monitor-only positions.
 - Manual proposal lifecycle and recent-history UI with draft/reviewed/rejected/expired statuses.
@@ -43,7 +44,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Automatic use of reviewed proposals for any trading workflow.
 - Enforced trading risk management. Proposal safety limits are local review gates only and do not execute, size, or submit trades.
 - USD valuation for non-USDC pools.
-- Advanced uncollected fee calculations.
+- Aerodrome fee PnL. Aerodrome snapshot fees remain zero until a separate fee-read task is implemented.
 - Staking/gauge/escrow discovery.
 - Multi-manager automatic discovery.
 - UI for Aerodrome-specific metadata.
@@ -215,6 +216,7 @@ Aerodrome positions appear in the dashboard and position pages with:
 - Base chain and token id when available.
 - Monitor-only, no-orders, hedge-disabled, and Hyperliquid-not-called safety labels.
 - Persisted amounts, USD prices, and estimated LP value when available.
+- Read-only PnL snapshots when both Aerodrome amounts and USD prices are available. The snapshot pool PnL uses `asset0_amount * asset0_price_usd + asset1_amount * asset1_price_usd - entry_value_usd`; if `entry_value_usd` is missing, the first compatible Aerodrome snapshot sets it as the baseline. Hedge PnL and fees remain zero for Aerodrome snapshots in this task.
 - Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
 - Latest manual hedge proposal when present, including suggested side, asset, amount, notional, status, execution flags, Hyperliquid-called flag, and computed current/stale status.
 - Compact recent proposal history for the position, including proposal id, status, hedge asset/side, suggested amount/notional, generated/reviewed timestamps, `execution_enabled`, and `hyperliquid_called`.

@@ -231,15 +231,16 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     end
   end
 
-  test "Aerodrome read-only position sync refreshes metadata and amounts without Hyperliquid or snapshots" do
+  test "Aerodrome read-only position sync creates pnl snapshot without Hyperliquid" do
     position = aerodrome_position
+    position.update!(entry_value_usd: nil)
     service = Minitest::Mock.new
     service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
 
     with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
       HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
         AerodromeSlipstreamService.stub(:new, service) do
-          assert_no_difference "PnlSnapshot.count" do
+          assert_difference "PnlSnapshot.count", 1 do
             PositionSyncJob.perform_now(position.id)
           end
         end
@@ -255,6 +256,44 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_equal BigDecimal("2000"), position.asset0_price_usd
     assert_equal BigDecimal("1"), position.asset1_price_usd
     assert_equal "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", position.pool_address
+    assert_equal BigDecimal("2500.5"), position.entry_value_usd
+
+    snapshot = position.pnl_snapshots.order(captured_at: :desc).first
+    assert_equal BigDecimal("1.25"), snapshot.asset0_amount
+    assert_equal BigDecimal("0.5"), snapshot.asset1_amount
+    assert_equal BigDecimal("2000"), snapshot.asset0_price_usd
+    assert_equal BigDecimal("1"), snapshot.asset1_price_usd
+    assert_equal BigDecimal("0"), snapshot.pool_unrealized
+    assert_equal BigDecimal("0"), snapshot.hedge_unrealized
+    assert_equal BigDecimal("0"), snapshot.hedge_realized
+    assert_equal BigDecimal("0"), snapshot.collected_fees0
+    assert_equal BigDecimal("0"), snapshot.collected_fees1
+    assert_equal BigDecimal("0"), snapshot.uncollected_fees0
+    assert_equal BigDecimal("0"), snapshot.uncollected_fees1
+  end
+
+  test "Aerodrome pnl snapshot uses existing entry value for pool unrealized pnl" do
+    position = aerodrome_position
+    position.update!(entry_value_usd: BigDecimal("2000"))
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          assert_difference "PnlSnapshot.count", 1 do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+
+    service.verify
+    position.reload
+    snapshot = position.pnl_snapshots.order(captured_at: :desc).first
+    assert_equal BigDecimal("2000"), position.entry_value_usd
+    assert_equal BigDecimal("500.5"), snapshot.pool_unrealized
+    assert_equal BigDecimal("0"), snapshot.total_fees_usd
   end
 
   test "Aerodrome read-only position sync leaves amounts nil when amount math is partial" do

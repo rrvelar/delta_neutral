@@ -171,7 +171,46 @@ class PositionSyncJob < ApplicationJob
       pool_address: position_data.pool_address,
       active: true
     )
+    create_aerodrome_pnl_snapshot(position)
     Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; hedge integration remains disabled" }
+  end
+
+  def create_aerodrome_pnl_snapshot(position)
+    unless aerodrome_snapshot_ready?(position)
+      Rails.logger.warn("PositionSyncJob: skipping Aerodrome PnL snapshot for position #{position.id} — amount or price data is incomplete")
+      return
+    end
+
+    if position.entry_value_usd.nil?
+      position.update!(entry_value_usd: position.total_value_usd)
+      Rails.logger.debug { "[PositionSyncJob] Aerodrome position #{position.id} entry_value_usd set to #{position.entry_value_usd}" }
+    end
+
+    PnlSnapshot.create!(
+      position: position,
+      captured_at: Time.current,
+      asset0_amount: position.asset0_amount,
+      asset1_amount: position.asset1_amount,
+      asset0_price_usd: position.asset0_price_usd,
+      asset1_price_usd: position.asset1_price_usd,
+      hedge_unrealized: BigDecimal("0"),
+      hedge_realized: BigDecimal("0"),
+      pool_unrealized: position.total_value_usd - position.entry_value_usd,
+      collected_fees0: BigDecimal("0"),
+      collected_fees1: BigDecimal("0"),
+      uncollected_fees0: BigDecimal("0"),
+      uncollected_fees1: BigDecimal("0")
+    )
+    Rails.logger.debug { "[PositionSyncJob] Aerodrome position #{position.id} read-only PnlSnapshot created" }
+  end
+
+  def aerodrome_snapshot_ready?(position)
+    [
+      position.asset0_amount,
+      position.asset1_amount,
+      position.asset0_price_usd,
+      position.asset1_price_usd
+    ].all?(&:present?)
   end
 
   def aerodrome_position?(position)
