@@ -153,7 +153,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = create_aerodrome_position
     position.update!(entry_value_usd: BigDecimal("2500"))
 
-    with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5") do
+    with_env("AERODROME_REWARDS_ENABLED" => "false", "AERODROME_VOTER_ADDRESS" => nil) do
       HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
         get position_path(position)
       end
@@ -164,13 +164,69 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "Claimable AERO", response.body
     assert_match "USD value", response.body
+    assert_match "not configured", response.body
     assert_match "unavailable", response.body
-    assert_match "bin/rails aerodrome:rewards_check", response.body
     assert_match "AERO USD valuation is a separate future task.", response.body
     assert_match "$500.00", response.body
     assert_no_match "Claim rewards", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
+  end
+
+  test "show displays mocked read-only AERO rewards when enabled" do
+    position = create_aerodrome_position
+    position.update!(entry_value_usd: BigDecimal("2500"))
+    report = {
+      status: "PASS",
+      gauge_status: "detected",
+      token_id: position.external_id,
+      staked: true,
+      claimable_aero: "14.14",
+      claimable_aero_usd: nil,
+      depositor_address: "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6",
+      depositor_source: "env",
+      gauge_address: "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28",
+      warnings: []
+    }
+
+    with_env("AERODROME_REWARDS_ENABLED" => "true") do
+      AerodromeRewardsCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+          get position_path(position)
+        end
+      end
+    end
+
+    assert_response :success
+    assert_match "AERO Rewards", response.body
+    assert_match "detected", response.body
+    assert_match "true", response.body
+    assert_match "14.140000", response.body
+    assert_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
+    assert_match "env", response.body
+    assert_match "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28", response.body
+    assert_match "unavailable", response.body
+    assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
+    assert_match "$500.00", response.body
+    assert_no_match "$514.14", response.body
+    assert_no_match "Claim rewards", response.body
+  end
+
+  test "show renders unavailable AERO rewards when check raises" do
+    position = create_aerodrome_position
+
+    with_env("AERODROME_REWARDS_ENABLED" => "true") do
+      AerodromeRewardsCheck.stub(:new, -> { raise AerodromeRewardsService::RpcError, "RPC unavailable" }) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "AERO Rewards", response.body
+    assert_match "unavailable", response.body
+    assert_match "RPC unavailable", response.body
   end
 
   test "show displays latest manual proposal as local manual-only record" do
@@ -517,6 +573,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Regenerate Manual Hedge Proposal", response.body
     assert_no_match "Aerodrome Hedge Status", response.body
     assert_no_match "PnL baseline starts from first Aerodrome snapshot", response.body
+    assert_no_match "AERO Rewards", response.body
   end
 
   test "show displays stale amount reason for changed proposal values" do

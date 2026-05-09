@@ -30,6 +30,7 @@ class PositionsController < ApplicationController
       @aerodrome_proposal_safety_results = @aerodrome_hedge_proposals.to_h do |proposal|
         [ proposal.id, safety.evaluate(proposal, current_position: @position) ]
       end
+      @aerodrome_rewards_report = aerodrome_rewards_report
     end
   end
 
@@ -43,5 +44,38 @@ class PositionsController < ApplicationController
     @position = Current.user.positions.find(params[:id])
     PositionSyncJob.perform_later(@position.id)
     redirect_to position_path(@position), notice: "Position sync queued."
+  end
+
+  private
+
+  def aerodrome_rewards_report
+    unless ENV["AERODROME_REWARDS_ENABLED"].to_s.downcase == "true"
+      return {
+        status: "not configured",
+        gauge_status: "not configured",
+        claimable_aero: nil,
+        claimable_aero_usd: nil,
+        depositor_address: nil,
+        depositor_source: nil,
+        gauge_address: nil,
+        token_id: @position.external_id,
+        warnings: [ "AERODROME_REWARDS_ENABLED is not true" ]
+      }
+    end
+
+    AerodromeRewardsCheck.new.report
+  rescue => e
+    Rails.logger.warn("Aerodrome rewards dashboard read failed for position #{@position.id}: #{e.class} #{e.message}")
+    {
+      status: "unavailable",
+      gauge_status: "unavailable",
+      claimable_aero: nil,
+      claimable_aero_usd: nil,
+      depositor_address: nil,
+      depositor_source: nil,
+      gauge_address: nil,
+      token_id: @position.external_id,
+      warnings: [ e.message ]
+    }
   end
 end

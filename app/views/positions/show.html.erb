@@ -151,17 +151,26 @@
         <p class="text-gray-500 text-xs mt-3">PnL baseline starts from first Aerodrome snapshot unless manually set.</p>
       </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
+        <% rewards_report = @aerodrome_rewards_report || {} %>
         <p class="text-gray-400 text-xs uppercase tracking-wide">AERO Rewards</p>
         <p class="text-yellow-200/80 text-xs mt-2">Read-only. Claiming is not implemented. Rewards are not included in Total PnL.</p>
-        <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+        <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
           <div class="flex justify-between gap-4">
             <span class="text-gray-500">Status</span>
-            <span class="text-white"><%= ENV["AERODROME_VOTER_ADDRESS"].present? ? "configured / run rewards_check" : "not configured" %></span>
+            <span class="text-white"><%= rewards_report[:gauge_status] || rewards_report[:status] || "unavailable" %></span>
           </div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO</span><span class="text-white">unavailable</span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">USD value</span><span class="text-white">unavailable</span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Staked</span><span class="text-white"><%= rewards_report[:staked].nil? ? "unknown" : rewards_report[:staked] %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO</span><span class="text-white"><%= rewards_report[:claimable_aero].present? ? number_with_precision(BigDecimal(rewards_report[:claimable_aero].to_s), precision: 6) : "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD value</span><span class="text-white">unavailable</span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor address</span><span class="text-white text-right break-all"><%= rewards_report[:depositor_address].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor source</span><span class="text-white"><%= rewards_report[:depositor_source].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Gauge address</span><span class="text-white text-right break-all"><%= rewards_report[:gauge_address].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Token ID</span><span class="text-white"><%= rewards_report[:token_id].presence || @position.external_id %></span></div>
         </div>
-        <p class="text-gray-500 text-xs mt-3">Run <code>bin/rails aerodrome:rewards_check</code> for read-only gauge discovery and claimable AERO reporting. AERO USD valuation is a separate future task.</p>
+        <% if rewards_report[:warnings].present? %>
+          <p class="text-yellow-200 text-xs mt-3"><%= rewards_report[:warnings].join("; ") %></p>
+        <% end %>
+        <p class="text-gray-500 text-xs mt-3">AERO USD valuation is a separate future task.</p>
       </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
         <p class="text-gray-400 text-xs uppercase tracking-wide">Latest Manual Hedge Proposal</p>
