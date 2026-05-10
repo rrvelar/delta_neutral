@@ -237,6 +237,12 @@ This runbook does not enable live trading, does not change env values, does not 
 
 The first live micro-run is complete and documented in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. The retry recorded `ShortRebalance #183`, which opened a tiny mainnet ETH short (`new_short_size=0.011`) from the Aerodrome WETH side while USDC was skipped. The gated live emergency close then closed the ETH short and final mainnet ETH readback was nil. This is not approval for continuous live operation. The next stage should be a separately planned small live observation window or controlled one-cycle run, not immediate scaling.
 
+## Live Observation Window
+
+`bin/rails aerodrome:live_observation_window` is a strictly gated one-off live observation tool. It is live-order capable but blocked by default. It is not background automation and does not add UI live controls. It refuses to run unless explicit observation gates, live hedge gates, tiny max short limits, close-on-finish, and live emergency close gates are all present. Duration is capped at 1800 seconds, interval must be at least 60 seconds, `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true` is mandatory, and `AERODROME_MAX_LEVERAGE` must be `1`.
+
+The task records JSONL events under `storage/aerodrome_live_observation/`, runs one iteration at a time for the configured short window, stops on failed rebalances or max-short breaches, and attempts the existing gated live emergency close at the end if an ETH short exists. Success requires final mainnet ETH position to be nil. Live remains disabled by default, and any observation window requires separate manual approval. Next scaling requires another explicit approval and should not follow automatically from one successful window.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

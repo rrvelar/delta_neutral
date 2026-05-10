@@ -153,3 +153,5 @@ The next stage should be a separately planned small live observation window or c
 - tiny operator-defined risk caps;
 - live emergency close ready and gated;
 - explicit manual approval for that single stage only.
+
+The optional `bin/rails aerodrome:live_observation_window` tool is live-order capable but blocked by default. It is not daemon automation, is capped at 30 minutes, requires close-on-finish, requires emergency close gates, and still requires separate manual approval before use. Passing the first micro-run does not approve scaling.

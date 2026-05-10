@@ -4,6 +4,8 @@ This document is a planning runbook only. It does not enable live trading, does 
 
 The first live micro-run has completed and is recorded in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. `ShortRebalance #183` successfully opened a tiny mainnet ETH short from the Aerodrome WETH side, the USDC side was skipped, and the gated live emergency close successfully closed the short. Final mainnet ETH position was nil. This milestone is not approval for continuous live operation, and the default state remains disabled, paused, and not live-approved.
 
+A strictly gated one-off live observation window task exists for a separately approved next stage: `bin/rails aerodrome:live_observation_window`. It is not background automation and is blocked by default. It refuses windows longer than 30 minutes, requires `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true`, requires live emergency close gates to be present, and records JSONL events under `storage/aerodrome_live_observation/`. Do not run it from this document; any observation window requires a fresh manual approval and tiny risk caps.
+
 Current safe production state remains:
 
 ```bash
@@ -173,6 +175,7 @@ Do not proceed if any of these are true:
 - `AERODROME_HEDGE_PAUSED` is not known to be restored to true after the run.
 - Live emergency close is not ready, not reviewed, or not blocked by default.
 - Operator cannot monitor the run continuously.
+- Any proposed live observation window lacks mandatory close-on-finish or emergency-close gates.
 
 ## Rollback / Safe State
 
@@ -197,3 +200,9 @@ If an ETH short remains open unexpectedly, use the gated live emergency close pr
 Failed `ShortRebalance` records from live attempts must not be deleted. If a reviewed WETH/ETH failure has `old_short_size=0`, `new_short_size=0`, and mainnet readback confirms `get_position("ETH") = nil`, an operator may acknowledge that specific row with `bin/rails aerodrome:acknowledge_failed_rebalance` using the required id and confirmation env values. The task appends `[operator_acknowledged_no_open_position]` to the row message only; it does not change status, sizes, or history.
 
 This acknowledgment is only for reviewed zero-size failures where no mainnet ETH position exists. It is not live approval, does not permit trading, and does not replace a fresh preflight plus separate manual approval before any repeat micro-run.
+
+## Live Observation Window
+
+`bin/rails aerodrome:live_observation_window` is a live-order-capable one-off tool for a future controlled observation window. It is blocked by default and must not be treated as daemon/background automation. The window is capped at 1800 seconds, interval must be at least 60 seconds, close-on-finish is mandatory, and the live emergency close gates must also be configured.
+
+The task records JSONL events, runs only manual iterations, attempts the existing gated live emergency close at the end when an ETH short exists, and reports success only when the final mainnet ETH position is nil. It does not approve scaling. The next stage after the completed first micro-run should be a separately planned small live observation window or controlled one-cycle run, not immediate larger sizing.

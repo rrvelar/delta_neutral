@@ -294,6 +294,33 @@ namespace :aerodrome do
     exit(false) if report.fetch(:status) == "blocked"
   end
 
+  desc "Run a strictly gated one-off Aerodrome live observation window"
+  task live_observation_window: :environment do
+    report = AerodromeLiveObservationWindow.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "LIVE ORDER CAPABLE — MANUAL GATES REQUIRED"
+      puts "duration seconds: #{report.dig(:gates, :duration_seconds).inspect}"
+      puts "interval seconds: #{report.dig(:gates, :interval_seconds).inspect}"
+      puts "max short ETH: #{report.dig(:gates, :max_short_eth).inspect}"
+      puts "max short notional USD: #{report.dig(:gates, :max_short_notional_usd).inspect}"
+      puts "log path: #{report.fetch(:log_path).inspect}"
+      puts "iteration count: #{report.fetch(:iterations).size}"
+      puts "final close status: #{report.dig(:final_close, :status).inspect}"
+      puts "final mainnet ETH position: #{report.fetch(:final_position).inspect}"
+      puts "final status: #{report.fetch(:status)}"
+      if report.fetch(:errors).any?
+        puts "errors:"
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      end
+    end
+
+    exit(false) if %w[blocked failed].include?(report.fetch(:status))
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

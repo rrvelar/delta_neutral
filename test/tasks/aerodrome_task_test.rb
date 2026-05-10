@@ -11,6 +11,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:live_emergency_close"].reenable
     Rake::Task["aerodrome:live_preflight_check"].reenable
     Rake::Task["aerodrome:acknowledge_failed_rebalance"].reenable
+    Rake::Task["aerodrome:live_observation_window"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -647,6 +648,61 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "live observation window task outputs gated live safety banner" do
+    report = live_observation_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeLiveObservationWindow.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_observation_window"].invoke }
+
+        assert_match "AERODROME LIVE OBSERVATION WINDOW", out
+        assert_match "LIVE ORDER CAPABLE", out
+        assert_match "duration seconds: 60", out
+        assert_match "interval seconds: 60", out
+        assert_match "max short ETH: \"0.02\"", out
+        assert_match "log path:", out
+        assert_match "iteration count: 1", out
+        assert_match "final close status: \"success\"", out
+        assert_match "final status: success", out
+      end
+    end
+  end
+
+  test "live observation window task supports JSON output" do
+    report = live_observation_report(status: "success")
+
+    with_env("FORMAT" => "json") do
+      AerodromeLiveObservationWindow.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_observation_window"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "success", parsed.fetch("status")
+        assert_equal true, parsed.fetch("live_order_capable")
+        assert_equal "/tmp/aerodrome-live-observation.jsonl", parsed.fetch("log_path")
+        assert_equal 1, parsed.fetch("iterations").size
+        assert_equal "success", parsed.fetch("final_close").fetch("status")
+      end
+    end
+  end
+
+  test "live observation window task exits false when blocked" do
+    report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
+
+    with_env("FORMAT" => nil) do
+      AerodromeLiveObservationWindow.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        assert_raises(SystemExit) do
+          capture_io { Rake::Task["aerodrome:live_observation_window"].invoke }
+        end
+      end
+    end
+  end
+
   private
 
   def ok_report(token_id)
@@ -805,6 +861,25 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       old_short_size: "0.0",
       new_short_size: "0.0",
       acknowledgment_marker: AerodromeFailedRebalanceAcknowledgment::MARKER,
+      errors: errors
+    }
+  end
+
+  def live_observation_report(status:, errors: [])
+    {
+      safety_banner: AerodromeLiveObservationWindow::BANNER,
+      status: status,
+      live_order_capable: true,
+      log_path: "/tmp/aerodrome-live-observation.jsonl",
+      gates: {
+        duration_seconds: 60,
+        interval_seconds: 60,
+        max_short_eth: "0.02",
+        max_short_notional_usd: "50.0"
+      },
+      iterations: [ { iteration: 1 } ],
+      final_close: { status: "success" },
+      final_position: nil,
       errors: errors
     }
   end
