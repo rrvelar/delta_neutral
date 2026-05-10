@@ -1,5 +1,6 @@
 class AerodromeWatchdogAlerts
   BANNER = "AERODROME WATCHDOG ALERTS — READ ONLY"
+  SEVERITY_ORDER = { "pass" => 0, "warn" => 1, "blocked" => 2 }.freeze
 
   def initialize(watchdog_check: nil, clock: -> { Time.current })
     @watchdog_check = watchdog_check
@@ -9,7 +10,7 @@ class AerodromeWatchdogAlerts
   def report
     watchdog = watchdog_report
     severity = severity_for(watchdog)
-    {
+    alert = {
       safety_banner: BANNER,
       status: watchdog.fetch(:status),
       severity: severity,
@@ -19,13 +20,20 @@ class AerodromeWatchdogAlerts
       blockers: watchdog.fetch(:blockers),
       warnings: watchdog.fetch(:warnings),
       recommended_actions: recommended_actions(watchdog),
-      delivery: delivery,
       timestamp: @clock.call.iso8601,
       git_sha: git_sha,
+      safe_env: safe_env,
+      latest_observation_summary: latest_observation_summary(watchdog),
       database_write: false,
       orders_enabled: false,
       hyperliquid_execution: false
     }
+    delivery = deliver_alert(alert)
+    alert[:delivery] = delivery
+    alert[:sent] = delivery.fetch(:sent)
+    alert[:recipient] = delivery.fetch(:recipient)
+    alert[:skipped_reason] = delivery.fetch(:skipped_reason)
+    alert
   end
 
   private
@@ -123,11 +131,68 @@ class AerodromeWatchdogAlerts
     values.map { |value| "  - #{value}" }.join("\n")
   end
 
-  def delivery
+  def deliver_alert(alert)
+    result = delivery_config
+    return result.merge(sent: false, skipped_reason: "delivery mode dry_run") if result.fetch(:mode) == "dry_run"
+    return result.merge(sent: false, skipped_reason: "unsupported delivery mode") unless result.fetch(:mode) == "email"
+    return result.merge(sent: false, skipped_reason: "alerts disabled") unless result.fetch(:enabled)
+    unless recipient.present?
+      return result.merge(sent: false, skipped_reason: "missing AERODROME_ALERT_EMAIL_RECIPIENT")
+    end
+
+    unless severity_allowed?(alert.fetch(:severity), result.fetch(:min_severity))
+      return result.merge(sent: false, skipped_reason: "severity below #{result.fetch(:min_severity)}")
+    end
+
+    AerodromeWatchdogMailer.watchdog_alert(recipient: recipient, alert: alert).deliver_now
+    result.merge(sent: true, skipped_reason: nil)
+  rescue => e
+    result.merge(sent: false, skipped_reason: "email delivery failed: #{e.class}: #{e.message}")
+  end
+
+  def delivery_config
     {
       enabled: ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_ALERTS_ENABLED"]) == true,
-      mode: ENV["AERODROME_ALERTS_DELIVERY"].presence || "dry_run"
+      mode: ENV["AERODROME_ALERTS_DELIVERY"].presence || "dry_run",
+      recipient: redacted_recipient,
+      min_severity: min_severity
     }
+  end
+
+  def severity_allowed?(severity, minimum)
+    SEVERITY_ORDER.fetch(severity) >= SEVERITY_ORDER.fetch(minimum)
+  end
+
+  def min_severity
+    value = ENV["AERODROME_ALERT_EMAIL_MIN_SEVERITY"].presence || "warn"
+    SEVERITY_ORDER.key?(value) ? value : "warn"
+  end
+
+  def recipient
+    ENV["AERODROME_ALERT_EMAIL_RECIPIENT"].presence
+  end
+
+  def redacted_recipient
+    value = recipient
+    return nil unless value
+
+    local, domain = value.split("@", 2)
+    return "[redacted]" unless domain
+
+    "#{local.first}***@#{domain}"
+  end
+
+  def safe_env
+    %w[
+      AERODROME_HEDGE_ENABLED
+      AERODROME_HEDGE_PAUSED
+      AERODROME_LIVE_APPROVED
+      HYPERLIQUID_TESTNET
+    ].to_h { |key| [ key, ENV[key] ] }
+  end
+
+  def latest_observation_summary(watchdog)
+    watchdog.fetch(:checks).fetch(:observation, [])
   end
 
   def git_sha

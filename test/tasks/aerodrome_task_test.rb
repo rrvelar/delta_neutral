@@ -800,6 +800,8 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "AERODROME WATCHDOG ALERTS", out
         assert_match "severity: warn", out
         assert_match "delivery: dry_run", out
+        assert_match "sent: false", out
+        assert_match "skipped_reason: delivery mode dry_run", out
         assert_match "recommended actions:", out
       end
     end
@@ -1104,9 +1106,12 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: [],
       warnings: severity == "warn" ? [ "Latest PnL snapshot fresh" ] : [],
       recommended_actions: [ "Review warnings before any further live window." ],
-      delivery: { enabled: false, mode: "dry_run" },
+      delivery: { enabled: false, mode: "dry_run", sent: false, recipient: nil, skipped_reason: "delivery mode dry_run", min_severity: "warn" },
       timestamp: "2026-05-10T12:00:00Z",
       git_sha: "abc123",
+      sent: false,
+      recipient: nil,
+      skipped_reason: "delivery mode dry_run",
       database_write: false,
       orders_enabled: false,
       hyperliquid_execution: false

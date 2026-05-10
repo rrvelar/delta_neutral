@@ -33,6 +33,8 @@ FORMAT=json bin/rails aerodrome:watchdog_alerts
 ```bash
 AERODROME_ALERTS_ENABLED=false
 AERODROME_ALERTS_DELIVERY=dry_run
+AERODROME_ALERT_EMAIL_RECIPIENT=
+AERODROME_ALERT_EMAIL_MIN_SEVERITY=warn
 ```
 
 The alert task is read-only:
@@ -45,6 +47,15 @@ The alert task is read-only:
 - no email or Telegram sends.
 
 It does not close positions. If a blocker requires action, the operator must use the separate manually gated emergency close procedure or the Hyperliquid UI.
+
+Email delivery is available only when explicitly gated:
+
+- `AERODROME_ALERTS_ENABLED=true`
+- `AERODROME_ALERTS_DELIVERY=email`
+- `AERODROME_ALERT_EMAIL_RECIPIENT` is present
+- alert severity is at or above `AERODROME_ALERT_EMAIL_MIN_SEVERITY`
+
+Severity order is `pass < warn < blocked`; the recommended minimum severity is `warn`. SMTP must be configured separately through the existing Rails Action Mailer SMTP settings. Email alerts are still read-only: they do not close positions, open positions, or enable live operation.
 
 ## Alert Events
 
@@ -165,7 +176,7 @@ Future integrations may include:
 - VPS `systemd` journal alerts.
 - dashboard banner.
 
-Any real alert integration should be read-only and tested without live orders first. The current implementation only formats dry-run/local alert output; real email and Telegram delivery remain future work.
+Any real alert integration should be read-only and tested without live orders first. The current implementation supports dry-run/local output and gated email delivery only. Telegram delivery remains future work.
 
 ## Future Live Window Blocking Rules
 
