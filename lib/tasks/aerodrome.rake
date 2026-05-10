@@ -516,6 +516,38 @@ namespace :aerodrome do
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
 
+  desc "Run a strictly gated supervised Aerodrome production canary"
+  task production_canary_run: :environment do
+    report = AerodromeProductionCanaryRunner.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "LIVE ORDER CAPABLE — SUPERVISED ONLY"
+      puts "duration: #{report.dig(:gates, :duration_seconds)}"
+      puts "interval: #{report.dig(:gates, :interval_seconds)}"
+      puts "max short ETH: #{report.dig(:gates, :max_short_eth)}"
+      puts "max short notional USD: #{report.dig(:gates, :max_short_notional_usd)}"
+      puts "log path: #{report.fetch(:log_path) || "none"}"
+      puts "iterations: #{report.fetch(:iterations)}"
+      puts "rebalances count: #{report.fetch(:rebalances_count)}"
+      puts "stop reason: #{report.fetch(:stop_reason) || "none"}"
+      puts "final close status: #{report.dig(:final_close, :status) || "none"}"
+      puts "final mainnet ETH position: #{report.fetch(:final_position).inspect}"
+      puts "manual_action_required: #{report.fetch(:manual_action_required)}"
+      puts "final status: #{report.fetch(:status)}"
+      puts "errors:"
+      if report.fetch(:errors).any?
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      else
+        puts "  none"
+      end
+    end
+
+    exit(false) unless report.fetch(:status) == "success"
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

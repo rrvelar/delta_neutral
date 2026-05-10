@@ -265,6 +265,8 @@ Scheduled email alerts use cooldown/dedup state at `storage/aerodrome_watchdog_a
 
 VPS production deployment foundation is documented in `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard and watchdog only. Use `bin/vps-readiness-check`, `bin/vps-watchdog-tick`, and `bin/vps-backup-storage` for safe operational helpers. Live observation on the VPS is a separate manual procedure requiring fresh preflight and explicit gates. Watchdog scheduling must not run live observation or emergency close.
 
+Production canary runner tooling is documented in `docs/AERODROME_PRODUCTION_CANARY_RUNNER.md`. `bin/rails aerodrome:production_canary_run` is live-order capable only with explicit one-off gates and must be supervised. It runs bounded position/hedge sync iterations, writes JSONL heartbeat/iteration events, stops on safety conditions, and requires final emergency close with final mainnet ETH confirmed nil. `close_on_finish=true` remains mandatory in this phase. Do not schedule this task and do not use it as unattended 24/7 operation.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

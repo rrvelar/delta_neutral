@@ -235,6 +235,13 @@ Manual live observation later, only after separate preflight and explicit gates:
 docker compose -f docker-compose.prod.yml exec web bin/rails aerodrome:live_observation_window
 ```
 
+Manual production canary later, only after separate preflight and explicit one-off gates:
+
+```bash
+# DO NOT RUN FROM THIS DOC. Supervised canary procedure reference only.
+docker compose -f docker-compose.prod.yml exec web bin/rails aerodrome:production_canary_run
+```
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash
@@ -242,7 +249,7 @@ Manual live emergency close, only when explicitly gated:
 docker compose -f docker-compose.prod.yml exec web bin/rails aerodrome:live_emergency_close
 ```
 
-The watchdog scheduler must never run either live command.
+The watchdog scheduler must never run these live commands.
 
 ## Rollback
 

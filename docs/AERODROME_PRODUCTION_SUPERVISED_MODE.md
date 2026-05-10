@@ -183,6 +183,8 @@ Scheduled email alerts use file-backed deduplication under `storage/aerodrome_wa
 
 VPS deployment foundation is documented in `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard/watchdog operation only. Live observation on the VPS requires separate manual preflight and explicit one-off gates. No unattended 24/7 live operation is approved by the VPS deployment foundation.
 
+Production canary runner tooling is documented in `docs/AERODROME_PRODUCTION_CANARY_RUNNER.md`. The canary is supervised only and is closer to real production than observation windows because it runs bounded `PositionSyncJob`/`HedgeSyncJob` iterations with a lock, heartbeat JSONL log, stop conditions, watchdog checks, and mandatory final emergency close. It still requires explicit one-off gates, `close_on_finish=true`, and small caps. It is not unattended operation, and future leave-position-open mode requires separate approval.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

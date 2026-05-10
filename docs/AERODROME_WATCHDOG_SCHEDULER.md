@@ -195,3 +195,5 @@ Treat `BLOCKED` as immediate operator attention:
 The scheduler does not auto-close positions. Emergency close remains separate and manually gated.
 
 For VPS deployment details, Docker Compose startup, secure env transfer, firewalling, backups, rollback, and incident response, see `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard/watchdog only; live observation on the VPS requires separate manual preflight and explicit gates.
+
+The watchdog scheduler must not run `bin/rails aerodrome:production_canary_run`. The canary runner is live-order capable, supervised only, and documented separately in `docs/AERODROME_PRODUCTION_CANARY_RUNNER.md`.
