@@ -54,9 +54,13 @@ The runner:
    - `PositionSyncJob.perform_now(position.id)`
    - `HedgeSyncJob.perform_now(hedge.id)`
    - read-only mainnet ETH readback
-   - watchdog check
-7. Records iteration state, heartbeat, new `ShortRebalance` rows, errors, and PnL snapshot id.
+   - canary-aware runtime safety check
+7. Records iteration state, heartbeat, runtime safety status/blockers/warnings, new `ShortRebalance` rows, errors, and PnL snapshot id.
 8. Traps `SIGINT`/`SIGTERM`, records the signal, stops the loop, and attempts final close.
+
+The generic `aerodrome:watchdog_check` remains a persistent safe-mode monitor. It is intentionally strict when the normal persistent env is disabled/paused/not-approved/testnet, and it should block if a mainnet ETH short exists in that safe state. During an explicitly gated production canary, a tiny mainnet ETH short is expected after the first WETH hedge opens. The canary runner therefore uses `AerodromeCanaryRuntimeSafetyCheck` during the loop instead of the generic watchdog.
+
+Canary runtime safety is read-only. It allows the expected live canary state only when the live canary gates remain set, the ETH short is within `AERODROME_MAX_SHORT_ETH` and `AERODROME_MAX_SHORT_NOTIONAL_USD`, the position and hedge remain active, emergency close gates remain present, and the short is ETH/WETH only.
 
 ## Stop Conditions
 
@@ -68,8 +72,10 @@ The runner stops and goes to final close if:
 - `PositionSyncJob` or `HedgeSyncJob` raises.
 - current position becomes inactive/missing.
 - unexpected successful USDC rebalance appears.
-- watchdog returns `BLOCKED`.
+- canary runtime safety returns `BLOCKED`.
 - `SIGINT` or `SIGTERM` is received.
+
+Runtime safety blocks on cap breaches, missing readback, failed WETH/ETH rebalances during the run, any successful USDC rebalance, inactive/missing position or hedge, env gate mismatch, emergency close gate mismatch, or a previous canary final log with `manual_action_required=true` or non-nil final position.
 
 ## Finalization
 
@@ -102,3 +108,7 @@ JSON output includes the same fields plus `database_write`, `orders_enabled`, an
 ## Operational Rule
 
 A production canary run is supervised only. It is not background automation and must not be scheduled by systemd/cron. Watchdog scheduling remains read-only and must not run this task.
+
+## VPS Canary #190 Note
+
+The first VPS production canary behaved safely but stopped early because the generic safe-mode watchdog saw an expected live canary ETH short and returned `BLOCKED`. `ShortRebalance #190` opened a WETH hedge from `0.0` to `0.0108` ETH, the final emergency close succeeded, `final_position_confirmed=true`, `manual_action_required=false`, and final mainnet ETH was nil. This was a watchdog/canary-context mismatch, not approval to weaken persistent monitoring. Repeat canary runs require fresh readiness/preflight checks and explicit manual approval.

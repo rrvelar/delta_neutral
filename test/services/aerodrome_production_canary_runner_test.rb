@@ -154,16 +154,18 @@ class AerodromeProductionCanaryRunnerTest < ActiveSupport::TestCase
     end
   end
 
-  test "stop on watchdog blocked" do
+  test "canary runner does not stop merely because ETH short exists within caps" do
     with_position_and_hedge do |hedge|
-      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011"), nil ])
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011"), eth_position("-0.011"), nil ])
       hedge_sync = ->(_) { create_success_rebalance(hedge) }
 
-      with_env(@env) do
-        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, watchdog: ReportDouble.new(status: "BLOCKED")).report
+      with_env(@env.merge("AERODROME_PRODUCTION_CANARY_DURATION_SECONDS" => "360", "AERODROME_PRODUCTION_CANARY_INTERVAL_SECONDS" => "180")) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
 
-        assert_equal "failed", report.fetch(:status)
-        assert_equal "watchdog BLOCKED", report.fetch(:stop_reason)
+        assert_equal "success", report.fetch(:status)
+        assert_equal 2, report.fetch(:iterations)
+        assert_equal "duration complete", report.fetch(:stop_reason)
+        assert report.fetch(:iteration_events).all? { |event| event.fetch(:runtime_safety_status) == "PASS" }
       end
     end
   end
@@ -286,7 +288,6 @@ class AerodromeProductionCanaryRunnerTest < ActiveSupport::TestCase
     hedge_sync: ->(_) { },
     emergency_close_factory: -> { EmergencyCloseReport.new(status: "success") },
     readiness: ReportDouble.new(status: "PASS"),
-    watchdog: ReportDouble.new(status: "PASS"),
     lock_path: tmp_path("run.lock")
   )
     AerodromeProductionCanaryRunner.new(
@@ -295,7 +296,6 @@ class AerodromeProductionCanaryRunnerTest < ActiveSupport::TestCase
       hedge_sync: hedge_sync,
       emergency_close_factory: emergency_close_factory,
       readiness: readiness,
-      watchdog: watchdog,
       sleeper: ->(_) { },
       log_dir: tmp_path("logs"),
       lock_path: lock_path,

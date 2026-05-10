@@ -423,6 +423,14 @@ Counts should be unchanged.
 
 Always check timestamps to avoid stale log entries.
 
+## Canary Runtime Safety
+
+The generic watchdog is for persistent safe-mode monitoring, not for judging the normal in-loop state of an explicitly gated production canary. In safe mode it must continue to block if a mainnet ETH short exists. During a production canary, a small ETH short within the configured ETH/notional caps is expected after the WETH side opens; the canary runner uses canary-aware runtime safety for that period.
+
+Canary runtime safety is read-only. It does not close positions, place orders, or call Hyperliquid execution methods. It allows only the expected live canary env and ETH/WETH short within caps, and it still blocks failed WETH/ETH rebalances, any successful USDC rebalance, cap breaches, Hyperliquid readback failures, missing emergency close gates, inactive position/hedge state, or previous canary logs with `manual_action_required=true` or a non-nil final position.
+
+The VPS canary run that created `ShortRebalance #190` opened a `0.0108` ETH WETH hedge, stopped because the generic watchdog reported `BLOCKED` during expected canary state, and then closed successfully through the gated final close. Final mainnet ETH was nil and `manual_action_required=false`. Treat this as an operational context mismatch addressed by canary runtime safety, not as approval to weaken the normal watchdog or run unattended. Repeat canary runs require fresh preflight/readiness and manual approval.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

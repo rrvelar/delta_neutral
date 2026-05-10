@@ -40,10 +40,33 @@ class AerodromeWatchdogCheckTest < ActiveSupport::TestCase
         report = build_service(mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.011"))).report
 
         assert_equal "BLOCKED", report.fetch(:status)
-        assert_includes report.fetch(:alerts), "mainnet ETH position exists while Aerodrome hedge is disabled/paused"
+        assert report.fetch(:blockers).any? { |blocker| blocker.include?("Mainnet ETH position nil while safe env") }
       end
     end
   end
+
+  test "normal watchdog remains strict even if canary live env is set" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      canary_env = @env.merge(
+        "AERODROME_HEDGE_ENABLED" => "true",
+        "AERODROME_HEDGE_PAUSED" => "false",
+        "AERODROME_LIVE_APPROVED" => "true",
+        "HYPERLIQUID_TESTNET" => "false"
+      )
+
+      with_env(canary_env) do
+        report = build_service(mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.011"))).report
+
+        assert_equal "BLOCKED", report.fetch(:status)
+        assert report.fetch(:blockers).any? { |blocker| blocker.include?("AERODROME_HEDGE_ENABLED is false") }
+        assert report.fetch(:blockers).any? { |blocker| blocker.include?("AERODROME_HEDGE_PAUSED is true") }
+        assert report.fetch(:blockers).any? { |blocker| blocker.include?("HYPERLIQUID_TESTNET is true") }
+      end
+    end
+  end
+
 
   test "manual action required creates blocker" do
     with_position_and_hedge do |hedge|

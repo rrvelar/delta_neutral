@@ -242,6 +242,10 @@ Manual production canary later, only after separate preflight and explicit one-o
 docker compose -f docker-compose.prod.yml exec web bin/rails aerodrome:production_canary_run
 ```
 
+During a production canary, the runner uses canary-aware runtime safety instead of the generic safe-mode watchdog. The generic watchdog remains strict for persistent monitoring and should still block any unexpected mainnet ETH position when the VPS env is restored to disabled/paused/not-approved/testnet. A small ETH short within configured canary caps is expected only inside an explicitly gated canary run. Any successful USDC rebalance, failed WETH/ETH row, cap breach, readback failure, missing emergency close gate, inactive position/hedge, or previous canary `manual_action_required=true` remains a blocker.
+
+The first VPS canary created `ShortRebalance #190`, opened a `0.0108` ETH WETH hedge, stopped because the generic watchdog treated that expected canary short as `BLOCKED`, and then closed successfully. Final mainnet ETH was nil. A repeat canary still requires fresh readiness/preflight and manual approval.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

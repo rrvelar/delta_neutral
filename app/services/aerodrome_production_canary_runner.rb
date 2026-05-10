@@ -14,7 +14,6 @@ class AerodromeProductionCanaryRunner
     hedge_sync: ->(hedge_id) { HedgeSyncJob.perform_now(hedge_id) },
     emergency_close_factory: -> { AerodromeLiveEmergencyClose.new },
     readiness: nil,
-    watchdog: nil,
     sleeper: ->(seconds) { sleep(seconds) },
     log_dir: Rails.root.join("storage", "aerodrome_production_canary"),
     lock_path: Rails.root.join("storage", "aerodrome_production_canary", "run.lock"),
@@ -25,7 +24,6 @@ class AerodromeProductionCanaryRunner
     @hedge_sync = hedge_sync
     @emergency_close_factory = emergency_close_factory
     @readiness = readiness
-    @watchdog = watchdog
     @sleeper = sleeper
     @log_dir = Pathname(log_dir)
     @lock_path = Pathname(lock_path)
@@ -41,6 +39,7 @@ class AerodromeProductionCanaryRunner
     @last_known_short = BigDecimal("0")
     @stop_requested = false
     @signal = nil
+    @run_start_rebalance_id = nil
   end
 
   def report
@@ -52,6 +51,7 @@ class AerodromeProductionCanaryRunner
       return blocked([ "mainnet ETH position must be nil before canary start" ], final_position: before) if short_size(before).positive?
 
       initialize_log
+      @run_start_rebalance_id = ShortRebalance.maximum(:id) || 0
       install_signal_handlers
       record_event(type: "start", timestamp: timestamp, gates: gates, hedge_id: hedge.id, position_id: position.id)
       run_loop
@@ -126,7 +126,7 @@ class AerodromeProductionCanaryRunner
     actual_position = nil
     new_rebalances = []
     new_snapshot = nil
-    watchdog_report = nil
+    runtime_safety = nil
 
     begin
       @position_sync.call(position.id)
@@ -142,18 +142,18 @@ class AerodromeProductionCanaryRunner
       new_rebalances = hedge.short_rebalances.where("id > ?", before_rebalance_id).order(:id).to_a
       new_snapshot = PnlSnapshot.where("id > ?", before_snapshot_id || 0).order(:id).last if before_snapshot_id
       new_snapshot ||= PnlSnapshot.order(:id).last if before_snapshot_id.nil?
-      watchdog_report = watchdog.report
+      runtime_safety = runtime_safety_report(actual_position)
     rescue => e
       iteration_errors << "#{e.class}: #{e.message}"
       @errors.concat(iteration_errors)
     end
 
     @rebalances.concat(new_rebalances)
-    record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, watchdog_report: watchdog_report)
-    evaluate_stop_conditions(actual_position, new_rebalances, iteration_errors, watchdog_report)
+    record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: runtime_safety)
+    evaluate_stop_conditions(actual_position, new_rebalances, iteration_errors, runtime_safety)
   end
 
-  def record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, watchdog_report: nil)
+  def record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: nil)
     event = {
       type: "iteration",
       timestamp: timestamp,
@@ -163,7 +163,9 @@ class AerodromeProductionCanaryRunner
       actual_eth_position: serialize_position(actual_position),
       new_short_rebalances: new_rebalances.map { |rebalance| serialize_rebalance(rebalance) },
       pnl_snapshot_id: new_snapshot&.id,
-      watchdog_status: watchdog_report&.fetch(:status, nil),
+      runtime_safety_status: runtime_safety&.fetch(:status, nil),
+      runtime_safety_blockers: runtime_safety&.fetch(:blockers, []),
+      runtime_safety_warnings: runtime_safety&.fetch(:warnings, []),
       errors: iteration_errors
     }
     @iterations << event
@@ -171,7 +173,7 @@ class AerodromeProductionCanaryRunner
     record_event(event)
   end
 
-  def evaluate_stop_conditions(actual_position, new_rebalances, iteration_errors, watchdog_report)
+  def evaluate_stop_conditions(actual_position, new_rebalances, iteration_errors, runtime_safety)
     if iteration_errors.any?
       @stop_reason = "iteration error"
     elsif new_rebalances.any? { |rebalance| weth_rebalance?(rebalance) && rebalance.status == ShortRebalance::STATUS_FAILED }
@@ -180,10 +182,19 @@ class AerodromeProductionCanaryRunner
       @stop_reason = "unexpected successful USDC rebalance"
     elsif short_size(actual_position) > max_short_eth
       @stop_reason = "actual ETH short exceeds max"
-    elsif watchdog_report && watchdog_report.fetch(:status) == "BLOCKED"
-      @stop_reason = "watchdog BLOCKED"
+    elsif runtime_safety && runtime_safety.fetch(:status) == "BLOCKED"
+      @stop_reason = "runtime safety BLOCKED: #{runtime_safety.fetch(:blockers).join('; ')}"
     end
     record_event(type: "stop_condition", timestamp: timestamp, reason: @stop_reason) if @stop_reason
+  end
+
+  def runtime_safety_report(actual_position)
+    AerodromeCanaryRuntimeSafetyCheck.new(
+      hedge: hedge,
+      eth_position: actual_position,
+      since_rebalance_id: @run_start_rebalance_id,
+      during_finalization: false
+    ).report
   end
 
   def stop_requested!(reason)
@@ -430,10 +441,6 @@ class AerodromeProductionCanaryRunner
 
   def readiness
     @readiness ||= AerodromeProductionSupervisedReadiness.new
-  end
-
-  def watchdog
-    @watchdog ||= AerodromeWatchdogCheck.new(mainnet_hyperliquid_service: hyperliquid)
   end
 
   def short_size(position)
