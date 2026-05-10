@@ -243,6 +243,8 @@ The first live micro-run is complete and documented in `docs/AERODROME_FIRST_LIV
 
 The task records JSONL events under `storage/aerodrome_live_observation/`, runs one iteration at a time for the configured short window, stops on failed rebalances or max-short breaches, and attempts the existing gated live emergency close at the end if an ETH short exists. Success requires final mainnet ETH position to be nil. Live remains disabled by default, and any observation window requires separate manual approval. Next scaling requires another explicit approval and should not follow automatically from one successful window.
 
+The first controlled 15-minute live observation window is complete and documented in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. It created `ShortRebalance #184` (`WETH`, `0.0 -> 0.0109`, success), created no additional rebalances in iterations 2 through 5, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil. This is not approval for continuous unattended live operation, and live automation remains disabled by default.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

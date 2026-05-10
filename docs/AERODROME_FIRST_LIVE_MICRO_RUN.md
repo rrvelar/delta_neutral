@@ -6,6 +6,8 @@ The first live micro-run has completed and is recorded in `docs/AERODROME_FIRST_
 
 A strictly gated one-off live observation window task exists for a separately approved next stage: `bin/rails aerodrome:live_observation_window`. It is not background automation and is blocked by default. It refuses windows longer than 30 minutes, requires `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true`, requires live emergency close gates to be present, and records JSONL events under `storage/aerodrome_live_observation/`. Do not run it from this document; any observation window requires a fresh manual approval and tiny risk caps.
 
+The first controlled 15-minute live observation window has completed and is recorded in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. `ShortRebalance #184` opened a tiny mainnet ETH short, iterations 2 through 5 created no additional rebalances, the gated live emergency close closed the short, and final mainnet ETH position was nil. Live automation remains disabled by default, and this is not approval for continuous unattended operation.
+
 Current safe production state remains:
 
 ```bash
@@ -206,3 +208,5 @@ This acknowledgment is only for reviewed zero-size failures where no mainnet ETH
 `bin/rails aerodrome:live_observation_window` is a live-order-capable one-off tool for a future controlled observation window. It is blocked by default and must not be treated as daemon/background automation. The window is capped at 1800 seconds, interval must be at least 60 seconds, close-on-finish is mandatory, and the live emergency close gates must also be configured.
 
 The task records JSONL events, runs only manual iterations, attempts the existing gated live emergency close at the end when an ETH short exists, and reports success only when the final mainnet ETH position is nil. It does not approve scaling. The next stage after the completed first micro-run should be a separately planned small live observation window or controlled one-cycle run, not immediate larger sizing.
+
+The completed 15-minute window validates one small observation run only. Any next stage must be separately planned; do not scale immediately.

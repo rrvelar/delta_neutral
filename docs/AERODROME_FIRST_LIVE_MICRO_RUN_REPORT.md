@@ -155,3 +155,5 @@ The next stage should be a separately planned small live observation window or c
 - explicit manual approval for that single stage only.
 
 The optional `bin/rails aerodrome:live_observation_window` tool is live-order capable but blocked by default. It is not daemon automation, is capped at 30 minutes, requires close-on-finish, requires emergency close gates, and still requires separate manual approval before use. Passing the first micro-run does not approve scaling.
+
+The first controlled 15-minute live observation window has since passed and is recorded in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. `ShortRebalance #184` opened a tiny mainnet ETH short (`0.0109`), iterations 2 through 5 created no additional rebalances, the gated live emergency close closed the short, and final mainnet ETH position was nil. This still is not approval for continuous unattended live operation.
