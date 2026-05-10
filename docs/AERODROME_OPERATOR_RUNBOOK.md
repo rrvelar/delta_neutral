@@ -251,6 +251,8 @@ The observation guard now permits a separately approved supervised 1-hour window
 
 A supervised 1-hour observation exposed finalization ambiguity from Hyperliquid SSL/readback failures (`SSL_connect unexpected eof while reading` and `SSL_read: record layer failure`). The observation task aborted during finish/final close/readback, manual mainnet readback showed an open `-0.011 ETH` short, and the separately gated `aerodrome:live_emergency_close` then closed it successfully. Observation finalization now catches final close/readback network errors, records them in the JSONL final event and task output, retries final readback, and returns `close_unknown`/`failed` with `manual_action_required=true` unless final mainnet ETH is confirmed nil. More live windows should be avoided until this hardened finalization is tested under supervised conditions.
 
+The hardened finalization path was retested successfully in a supervised 15-minute live window and is documented in `docs/AERODROME_15M_FINALIZATION_RETEST_REPORT.md`. The retest created `ShortRebalance #187` on the WETH side, skipped USDC, completed final live emergency close with status `success`, confirmed final mainnet ETH position `nil`, and reported `manual_action_required=false`. Live automation remains disabled by default; this retest is not approval for continuous unattended operation. Any next stage must be separately planned and approved.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

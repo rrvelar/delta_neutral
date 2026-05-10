@@ -120,6 +120,7 @@ Final operator checks showed:
 - Hyperliquid API, SDK, DNS, or network behavior can fail or return ambiguous responses.
 - A later supervised 1-hour observation exposed exactly this finalization risk: SSL/readback failures occurred during finish/final close/readback, manual readback found an open `-0.011 ETH` short, and the manual gated live emergency close was required to close it.
 - Observation finalization now records final close/readback errors, retries final readback, and reports `close_unknown`/`failed` with manual action required unless final mainnet ETH is confirmed nil. Further live windows should wait until this hardening is retested.
+- Finalization hardening was later retested successfully in a supervised 15-minute live window, recorded in `docs/AERODROME_15M_FINALIZATION_RETEST_REPORT.md`. Final close status was `success`, final mainnet ETH position was `nil`, and `manual_action_required=false`.
 - Aerodrome amounts and prices can move during an observation window.
 - Emergency close may fail and require manual intervention.
 - A successful 15-minute window does not validate scaling or unattended operation.
@@ -134,3 +135,5 @@ The next stage should be separately planned, with fresh approval and conservativ
 A later controlled 30-minute live observation window has also passed and is recorded in `docs/AERODROME_30M_LIVE_OBSERVATION_REPORT.md`. `ShortRebalance #185` opened a tiny mainnet ETH short (`0.0111`), iterations 2 through 10 created no additional rebalances, the gated live emergency close closed the short, and final mainnet ETH position was nil. This still is not approval for continuous unattended live operation or scaling.
 
 The live observation guard now allows a separately approved supervised 1-hour window, but it remains a one-off manual tool. Close-on-finish and emergency close gates are still mandatory, and risk caps remain unchanged at max `0.02` ETH, max `$50` notional, and `1x` leverage unless a future review explicitly changes them.
+
+The post-hardening 15-minute finalization retest passed, but it is still not approval for continuous unattended live operation. Any next stage should be separately planned with fresh preflight, backup, tiny caps, and emergency close readiness.

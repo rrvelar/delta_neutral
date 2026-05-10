@@ -120,6 +120,7 @@ Final operator checks showed:
 - Hyperliquid API, SDK, DNS, or network behavior can fail or return ambiguous responses.
 - A later supervised 1-hour observation exposed finalization ambiguity from Hyperliquid SSL/readback errors during finish/final close/readback. Manual readback found an open `-0.011 ETH` short, and the manual gated live emergency close was required and succeeded.
 - Observation finalization now treats an unconfirmed final close/readback as `close_unknown` or `failed`, records final readback attempts, and requires manual action when final ETH is unknown or open. More live windows should be avoided until this hardening is retested.
+- Finalization hardening was later retested successfully in a supervised 15-minute live window, recorded in `docs/AERODROME_15M_FINALIZATION_RETEST_REPORT.md`. Final close status was `success`, final mainnet ETH position was `nil`, and `manual_action_required=false`.
 - Aerodrome amounts and prices can move during an observation window.
 - Emergency close may fail and require manual intervention.
 - A successful 30-minute window does not validate scaling or unattended operation.
@@ -132,3 +133,5 @@ Do not scale immediately. Do not enable continuous unattended live operation.
 The next stage should be separately planned with fresh approval and conservative constraints. Reasonable next steps are a controlled one-cycle run or another bounded observation window with current backup, fresh preflight, tiny caps, and emergency close readiness. Any increase in size, duration, or automation requires a separate approval and safety review.
 
 The observation guard now permits a separately approved supervised 1-hour window. This does not change the hard risk caps: max `0.02` ETH, max `$50` notional, `1x` leverage, close-on-finish, and mandatory emergency close gates still apply unless a future safety review explicitly changes them. A 1-hour run is not continuous unattended live operation.
+
+The post-hardening 15-minute finalization retest passed, but it is still not approval for continuous unattended live operation. Any next stage should be separately planned with fresh preflight, backup, tiny caps, and emergency close readiness.
