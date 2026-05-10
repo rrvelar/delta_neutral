@@ -256,19 +256,34 @@ class HyperliquidService
   # @raise [OrderError] if any order status contains an error
   # @return [void]
   def validate_order_response!(result)
+    raise unexpected_order_response_error(result) unless result.is_a?(Hash)
+
+    if result["status"] == "err"
+      raise OrderError, (result["response"] || result["error"] || result.inspect).to_s
+    end
+
+    raise unexpected_order_response_error(result) unless result["status"] == "ok"
+
     statuses = result.dig("response", "data", "statuses") || []
-    errors = statuses.filter_map { |s| s["error"] }
+    raise unexpected_order_response_error(result) unless statuses.is_a?(Array)
+
+    errors = statuses.filter_map { |status| status["error"] if status.is_a?(Hash) }
     return if errors.empty?
 
     raise OrderError, errors.join("; ")
   end
 
   def validate_close_response!(result)
-    if result.is_a?(Hash) && result["status"] == "err"
-      raise OrderError, (result["response"] || result["error"] || result.inspect).to_s
-    end
-
     validate_order_response!(result)
+  end
+
+  def unexpected_order_response_error(result)
+    OrderError.new("Unexpected Hyperliquid order response (#{result.class}): #{sanitized_order_response_preview(result)}")
+  end
+
+  def sanitized_order_response_preview(result)
+    preview = result.inspect.gsub(/0x[a-fA-F0-9]{64,}/, "0x[redacted]")
+    preview.length > 240 ? "#{preview[0, 240]}..." : preview
   end
 
   # Returns a memoized Hyperliquid SDK instance.

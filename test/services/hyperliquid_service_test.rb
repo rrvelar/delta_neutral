@@ -91,6 +91,79 @@ class HyperliquidServiceTest < ActiveSupport::TestCase
     assert_equal "0xsub1", called_with[:vault_address]
   end
 
+  test "open_short raises clear order error for string response" do
+    raw_response = "unexpected response 0x#{"a" * 64}"
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| raw_response }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.open_short(asset: "ETH", size: 0.5)
+    end
+    assert_match "Unexpected Hyperliquid order response", error.message
+    assert_match "String", error.message
+    assert_match "0x[redacted]", error.message
+    assert_no_match(/a{64}/, error.message)
+  end
+
+  test "open_short raises order error when response status is err" do
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| { "status" => "err", "response" => "rejected" } }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.open_short(asset: "ETH", size: 0.5)
+    end
+    assert_match "rejected", error.message
+  end
+
+  test "open_short raises order error for nested rejection" do
+    rejected_response = {
+      "status" => "ok",
+      "response" => {
+        "data" => {
+          "statuses" => [
+            { "error" => "Order must have minimum value of $10." }
+          ]
+        }
+      }
+    }
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| rejected_response }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.open_short(asset: "ETH", size: 0.001)
+    end
+    assert_match "minimum value", error.message
+  end
+
+  test "open_short returns normal ok hash with filled status" do
+    ok_response = {
+      "status" => "ok",
+      "response" => {
+        "data" => {
+          "statuses" => [
+            { "filled" => { "totalSz" => "0.5" } }
+          ]
+        }
+      }
+    }
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| ok_response }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    assert_equal ok_response, @service.open_short(asset: "ETH", size: 0.5)
+  end
+
   test "close_short calls market_close" do
     called_with = nil
     mock_exchange = Object.new
@@ -155,6 +228,20 @@ class HyperliquidServiceTest < ActiveSupport::TestCase
       @service.close_short(asset: "ETH", size: 0.3)
     end
     assert_match "returned nil", error.message
+  end
+
+  test "close_short with size raises clear order error for string response" do
+    mock_exchange = Object.new
+    mock_exchange.define_singleton_method(:market_order) { |**_| "unexpected close response" }
+    mock_sdk = Object.new
+    mock_sdk.define_singleton_method(:exchange) { mock_exchange }
+    @service.instance_variable_set(:@sdk, mock_sdk)
+
+    error = assert_raises(HyperliquidService::OrderError) do
+      @service.close_short(asset: "ETH", size: 0.3)
+    end
+    assert_match "Unexpected Hyperliquid order response", error.message
+    assert_match "String", error.message
   end
 
   test "close_short handles no open position gracefully" do

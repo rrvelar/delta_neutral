@@ -331,6 +331,8 @@ A 1h delta-only soak showed most target changes produced tiny deltas below Hyper
 
 A subsequent testnet soak showed final close can fail from Hyperliquid testnet DNS/API availability, leaving a testnet ETH short open until manual close. Use `CHECK_HYPERLIQUID=true bin/rails aerodrome:pre_live_check` after every soak, and if ETH remains open, use `bin/rails aerodrome:testnet_emergency_close`. This is testnet-only tooling and is not a live emergency procedure.
 
+The first live micro-run attempted a tiny mainnet ETH hedge (`target_short_eth=0.0111`, about $25.80 notional). Hyperliquid readback showed no ETH position before or after, and the rebalance failed with `String does not have #dig method` because the SDK/API returned a non-Hash order response. `HyperliquidService` now treats non-Hash and unknown order response shapes as explicit `OrderError` failures with sanitized previews instead of Ruby method errors. Do not retry live until live preflight is rerun and a separate explicit manual approval is given.
+
 Proposal freshness is display-only. A proposal is shown as stale when the current WETH amount or suggested notional differs by more than 0.5%, when the position is inactive, or when the proposal is rejected/expired. Stale status does not trigger any automated action.
 
 Proposal safety limits are display/local-review gates only. If a limit env var is blank, that limit is shown as not configured and produces a warning. If a configured limit is exceeded, the proposal is shown as `BLOCKED`, and the UI prevents marking it reviewed.
