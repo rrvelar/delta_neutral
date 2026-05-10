@@ -118,6 +118,8 @@ Final operator checks showed:
 
 - Mainnet market orders can lose money.
 - Hyperliquid API, SDK, DNS, or network behavior can fail or return ambiguous responses.
+- A later supervised 1-hour observation exposed finalization ambiguity from Hyperliquid SSL/readback errors during finish/final close/readback. Manual readback found an open `-0.011 ETH` short, and the manual gated live emergency close was required and succeeded.
+- Observation finalization now treats an unconfirmed final close/readback as `close_unknown` or `failed`, records final readback attempts, and requires manual action when final ETH is unknown or open. More live windows should be avoided until this hardening is retested.
 - Aerodrome amounts and prices can move during an observation window.
 - Emergency close may fail and require manual intervention.
 - A successful 30-minute window does not validate scaling or unattended operation.

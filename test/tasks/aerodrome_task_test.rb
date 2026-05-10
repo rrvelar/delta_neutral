@@ -665,6 +665,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "log path:", out
         assert_match "iteration count: 1", out
         assert_match "final close status: \"success\"", out
+        assert_match "manual action required: false", out
         assert_match "final status: success", out
       end
     end
@@ -880,6 +881,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       iterations: [ { iteration: 1 } ],
       final_close: { status: "success" },
       final_position: nil,
+      final_position_confirmed: true,
+      final_readback_attempts: [ { attempt: 1, status: "success", position: nil } ],
+      manual_action_required: false,
       errors: errors
     }
   end

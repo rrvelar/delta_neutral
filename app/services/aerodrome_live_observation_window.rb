@@ -26,13 +26,16 @@ class AerodromeLiveObservationWindow
     @errors = []
     @final_close = nil
     @final_position = nil
+    @final_position_confirmed = false
+    @final_readback_attempts = []
+    @manual_action_required = false
   end
 
   def report
     errors = gate_errors
     return blocked(errors) if errors.any?
 
-    before = eth_position
+    before = read_eth_position
     if short_size(before).positive?
       return blocked([ "mainnet ETH position must be nil before observation window" ], final_position: before)
     end
@@ -63,7 +66,7 @@ class AerodromeLiveObservationWindow
         @errors << error
       end
 
-      actual_position = eth_position
+      actual_position = read_eth_position
       new_rebalances = hedge.short_rebalances.where("id > ?", before_rebalance_id).order(:id).to_a
       event = iteration_event(iteration_number, actual_position, new_rebalances, error)
       @iterations << event
@@ -85,14 +88,31 @@ class AerodromeLiveObservationWindow
   end
 
   def finish
-    before_close = eth_position
-    @final_close = short_size(before_close).positive? ? run_final_close : { status: "noop", errors: [] }
-    @final_position = eth_position
-    record_event(type: "final", final_close: @final_close, final_position: serialize_position(@final_position), errors: @errors)
+    before_close, before_close_error = safe_eth_position_read("final pre-close")
+    should_close = short_size(before_close).positive? || before_close_error.present?
+    @final_close = should_close ? safe_run_final_close : { status: "noop", errors: [] }
+    @final_position = final_readback
+    @manual_action_required = !@final_position_confirmed || short_size(@final_position).positive?
+    record_event(
+      type: "final",
+      final_close: @final_close,
+      final_position: serialize_position(@final_position),
+      final_position_confirmed: @final_position_confirmed,
+      final_readback_attempts: @final_readback_attempts,
+      errors: @errors,
+      manual_action_required: @manual_action_required
+    )
 
-    status = @errors.empty? && short_size(@final_position).zero? ? "success" : "failed"
-    status = "failed" if @final_close && @final_close[:status].to_s == "failed"
+    status = final_status
     base_report(status)
+  end
+
+  def safe_run_final_close
+    run_final_close
+  rescue => e
+    error = "final emergency close failed: #{e.class}: #{e.message}"
+    @errors << error
+    { status: "failed", errors: [ error ], attempts: [] }
   end
 
   def run_final_close
@@ -102,6 +122,51 @@ class AerodromeLiveObservationWindow
     report.deep_symbolize_keys
   ensure
     previous_paused.nil? ? ENV.delete("AERODROME_HEDGE_PAUSED") : ENV["AERODROME_HEDGE_PAUSED"] = previous_paused
+  end
+
+  def safe_eth_position_read(context)
+    position = read_eth_position
+    [ position, nil ]
+  rescue => e
+    error = "#{context} ETH readback failed: #{e.class}: #{e.message}"
+    @errors << error
+    [ nil, error ]
+  end
+
+  def final_readback
+    final_readback_attempts.times do |index|
+      attempt = index + 1
+      begin
+        position = read_eth_position
+        @final_position_confirmed = true
+        @final_readback_attempts << {
+          attempt: attempt,
+          status: "success",
+          position: serialize_position(position)
+        }
+        return position
+      rescue => e
+        error = "final ETH readback attempt #{attempt} failed: #{e.class}: #{e.message}"
+        @errors << error
+        @final_readback_attempts << {
+          attempt: attempt,
+          status: "error",
+          error: "#{e.class}: #{e.message}"
+        }
+        @sleeper.call(final_readback_sleep_seconds) if attempt < final_readback_attempts
+      end
+    end
+
+    nil
+  end
+
+  def final_status
+    return "close_unknown" unless @final_position_confirmed
+    return "failed" if short_size(@final_position).positive?
+    return "failed" if @errors.any?
+    return "failed" if @final_close && @final_close[:status].to_s == "failed"
+
+    "success"
   end
 
   def initialize_log
@@ -196,6 +261,9 @@ class AerodromeLiveObservationWindow
       iterations: @iterations,
       final_close: @final_close,
       final_position: serialize_position(@final_position),
+      final_position_confirmed: @final_position_confirmed,
+      final_readback_attempts: @final_readback_attempts,
+      manual_action_required: @manual_action_required,
       errors: @errors
     }
   end
@@ -239,7 +307,7 @@ class AerodromeLiveObservationWindow
     (amount || 0) * hedge.target
   end
 
-  def eth_position
+  def read_eth_position
     hyperliquid.get_position("ETH")
   end
 
@@ -280,6 +348,14 @@ class AerodromeLiveObservationWindow
 
   def emergency_close_max_eth
     decimal_env("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH")
+  end
+
+  def final_readback_attempts
+    integer_env("AERODROME_LIVE_OBSERVATION_FINAL_READBACK_ATTEMPTS") || 5
+  end
+
+  def final_readback_sleep_seconds
+    integer_env("AERODROME_LIVE_OBSERVATION_FINAL_READBACK_SLEEP_SECONDS") || 10
   end
 
   def boolean_env(key)

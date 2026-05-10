@@ -195,6 +195,9 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
         assert_equal 1, report.fetch(:iterations).size
         assert_equal "success", report.dig(:final_close, :status)
         assert_nil report.fetch(:final_position)
+        assert_equal true, report.fetch(:final_position_confirmed)
+        assert_equal false, report.fetch(:manual_action_required)
+        assert_equal 1, report.fetch(:final_readback_attempts).size
         assert_equal true, File.exist?(report.fetch(:log_path))
         assert_equal [ "ETH", "ETH", "ETH", "ETH" ], hyperliquid.reads
         assert_equal true, emergency.called
@@ -234,6 +237,79 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
     end
   end
 
+  test "final readback SSL errors after close return close unknown with manual action" do
+    with_position_and_hedge do |hedge|
+      ssl_error = OpenSSL::SSL::SSLError.new("SSL_read: record layer failure")
+      hyperliquid = HyperliquidReadMock.new(positions: [
+        nil,
+        eth_position("-0.011"),
+        eth_position("-0.011"),
+        ssl_error,
+        OpenSSL::SSL::SSLError.new("SSL_connect unexpected eof while reading")
+      ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge) }
+      emergency = EmergencyCloseReport.new(status: "success")
+
+      with_env(@env.merge(
+        "AERODROME_LIVE_OBSERVATION_FINAL_READBACK_ATTEMPTS" => "2",
+        "AERODROME_LIVE_OBSERVATION_FINAL_READBACK_SLEEP_SECONDS" => "0"
+      )) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }).report
+
+        assert_equal "close_unknown", report.fetch(:status)
+        assert_equal true, report.fetch(:manual_action_required)
+        assert_equal false, report.fetch(:final_position_confirmed)
+        assert_nil report.fetch(:final_position)
+        assert_equal 2, report.fetch(:final_readback_attempts).size
+        assert report.fetch(:errors).any? { |error| error.include?("final ETH readback attempt 1 failed: OpenSSL::SSL::SSLError") }
+        assert report.fetch(:errors).none? { |error| error.include?("\n") }
+        assert_equal true, emergency.called
+      end
+    end
+  end
+
+  test "final close network error is captured instead of raised" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011"), nil ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge) }
+      emergency = EmergencyCloseReport.new(status: "success", error: Faraday::SSLError.new("SSL_read: unexpected eof while reading"))
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }).report
+
+        assert_equal "failed", report.fetch(:status)
+        assert_equal "failed", report.dig(:final_close, :status)
+        assert_equal true, report.fetch(:final_position_confirmed)
+        assert_nil report.fetch(:final_position)
+        assert_equal false, report.fetch(:manual_action_required)
+        assert report.fetch(:errors).any? { |error| error.include?("final emergency close failed: Faraday::SSLError") }
+      end
+    end
+  end
+
+  test "finish attempts emergency close when final pre-close readback fails after prior ETH short" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [
+        nil,
+        eth_position("-0.011"),
+        Faraday::SSLError.new("SSL_connect unexpected eof while reading"),
+        nil
+      ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge) }
+      emergency = EmergencyCloseReport.new(status: "success")
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }).report
+
+        assert_equal "failed", report.fetch(:status)
+        assert_equal true, emergency.called
+        assert_nil report.fetch(:final_position)
+        assert_equal true, report.fetch(:final_position_confirmed)
+        assert report.fetch(:errors).any? { |error| error.include?("final pre-close ETH readback failed: Faraday::SSLError") }
+      end
+    end
+  end
+
   test "success requires final ETH nil" do
     with_position_and_hedge do |hedge|
       hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011"), eth_position("-0.011") ])
@@ -246,6 +322,7 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
         assert_equal "failed", report.fetch(:status)
         assert_equal "failed", report.dig(:final_close, :status)
         assert_equal "-0.011", report.fetch(:final_position).fetch(:size)
+        assert_equal true, report.fetch(:manual_action_required)
       end
     end
   end
@@ -279,7 +356,10 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
       raise "USDC must not be read" if asset == "USDC"
 
       @reads << asset
-      @positions.empty? ? nil : @positions.shift
+      position = @positions.empty? ? nil : @positions.shift
+      raise position if position.is_a?(Exception)
+
+      position
     end
 
     def open_short(*)
@@ -301,8 +381,9 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
   class EmergencyCloseReport
     attr_reader :called
 
-    def initialize(status:)
+    def initialize(status:, error: nil)
       @status = status
+      @error = error
       @called = false
     end
 
@@ -310,6 +391,8 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
       raise "emergency close should temporarily pause hedge" unless ENV["AERODROME_HEDGE_PAUSED"] == "true"
 
       @called = true
+      raise @error if @error
+
       { status: @status, errors: [], attempts: [] }
     end
   end

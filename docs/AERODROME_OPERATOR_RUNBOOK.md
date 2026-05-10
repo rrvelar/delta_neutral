@@ -249,6 +249,8 @@ The first controlled 30-minute live observation window is complete and documente
 
 The observation guard now permits a separately approved supervised 1-hour window, but the risk caps remain unchanged: max `0.02` ETH, max `$50` notional, and `1x` leverage. Close-on-finish and live emergency close gates remain mandatory. A 1-hour run is still not continuous unattended live operation, and any next scaling step requires separate review.
 
+A supervised 1-hour observation exposed finalization ambiguity from Hyperliquid SSL/readback failures (`SSL_connect unexpected eof while reading` and `SSL_read: record layer failure`). The observation task aborted during finish/final close/readback, manual mainnet readback showed an open `-0.011 ETH` short, and the separately gated `aerodrome:live_emergency_close` then closed it successfully. Observation finalization now catches final close/readback network errors, records them in the JSONL final event and task output, retries final readback, and returns `close_unknown`/`failed` with `manual_action_required=true` unless final mainnet ETH is confirmed nil. More live windows should be avoided until this hardened finalization is tested under supervised conditions.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

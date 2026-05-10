@@ -219,7 +219,7 @@ namespace :aerodrome do
       end
     end
 
-    exit(false) if %w[blocked failed].include?(report.fetch(:status))
+    exit(false) if %w[blocked failed close_unknown].include?(report.fetch(:status))
   end
 
   desc "Run a read-only Aerodrome first-live preflight check"
@@ -310,7 +310,10 @@ namespace :aerodrome do
       puts "log path: #{report.fetch(:log_path).inspect}"
       puts "iteration count: #{report.fetch(:iterations).size}"
       puts "final close status: #{report.dig(:final_close, :status).inspect}"
-      puts "final mainnet ETH position: #{report.fetch(:final_position).inspect}"
+      final_position = report.fetch(:final_position)
+      final_position_display = report.fetch(:final_position_confirmed, true) ? final_position.inspect : "unknown"
+      puts "final mainnet ETH position: #{final_position_display}"
+      puts "manual action required: #{report.fetch(:manual_action_required, false)}"
       puts "final status: #{report.fetch(:status)}"
       if report.fetch(:errors).any?
         puts "errors:"
