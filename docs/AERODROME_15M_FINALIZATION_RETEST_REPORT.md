@@ -123,3 +123,5 @@ Final operator checks showed:
 Do not scale immediately. Do not enable continuous unattended live operation.
 
 The next stage should be separately planned with fresh approval and conservative constraints. Any additional live observation should use fresh preflight, current backup, tiny caps, emergency close readiness, and explicit post-run verification that mainnet and testnet ETH positions are nil.
+
+The live observation guard now allows a separately approved supervised 3-hour window, but it is still a one-off manual tool and not continuous unattended operation. It still requires explicit one-off env gates, close-on-finish, final readback retries, live emergency close gates, max `0.02` ETH, max `$50` notional, and `1x` leverage unless a future review changes those caps. For any 3-hour run, prefer interval >= 300 seconds, actively watch the run, and verify final mainnet ETH is nil. Next scaling requires separate review.
