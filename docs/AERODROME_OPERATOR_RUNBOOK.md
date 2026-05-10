@@ -32,12 +32,15 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Config verification task: `bin/rails aerodrome:verify_config`.
 - Read-only pre-live readiness task: `bin/rails aerodrome:pre_live_check`.
 - Read-only AERO rewards discovery task: `bin/rails aerodrome:rewards_check`.
+- First live micro-run planning runbook: `docs/AERODROME_FIRST_LIVE_MICRO_RUN.md`.
 - Mocked tests for dry-run and config verification.
 - Documentation for limitations, rollback, and pre-live audit.
 
 ## Not Implemented
 
 - Live trading.
+- First live micro-run execution task.
+- Live emergency close task/procedure.
 - Aerodrome hedge execution by default.
 - Any new Aerodrome-specific Hyperliquid order path.
 - Hyperliquid hedge preview execution.
@@ -187,6 +190,16 @@ CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check
 ```
 
 The live preflight expects mainnet-mode configuration while trading remains disabled: `HYPERLIQUID_TESTNET=false`, `AERODROME_LIVE_APPROVED=false`, `AERODROME_HEDGE_ENABLED=false`, and `AERODROME_HEDGE_PAUSED=true`. It performs no DB writes, places no orders, and does not call `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. PASS is not live approval. The first live micro-run requires a separate manual procedure, and a separate live emergency close procedure must be ready before first live. Live remains disabled by default.
+
+## First Live Micro-Run Runbook
+
+The first-live micro-run plan is documentation only:
+
+```bash
+docs/AERODROME_FIRST_LIVE_MICRO_RUN.md
+```
+
+This runbook does not enable live trading, does not change env values, does not add a live execution task, and does not provide an executable live command. It defines required preconditions, tiny operator-defined risk caps, manual stop/backup/preflight/readback steps, and stop conditions. A separate tested live emergency close procedure must exist before any live micro-run. Dashboard rewards and fees remain read-only estimates and are not execution approval. The current default remains disabled, paused, and not live-approved.
 
 ## Run AERO Rewards Check
 
