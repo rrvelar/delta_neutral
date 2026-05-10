@@ -548,6 +548,92 @@ namespace :aerodrome do
     exit(false) unless report.fetch(:status) == "success"
   end
 
+  desc "Run a strictly gated supervised Aerodrome production live hedge"
+  task production_live_run: :environment do
+    report = AerodromeProductionLiveRunner.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "LIVE ORDER CAPABLE — PRODUCTION SUPERVISED"
+      puts "duration: #{report.dig(:gates, :duration_seconds)}"
+      puts "interval: #{report.dig(:gates, :interval_seconds)}"
+      puts "max short ETH: #{report.dig(:gates, :max_short_eth)}"
+      puts "max short notional USD: #{report.dig(:gates, :max_short_notional_usd)}"
+      puts "leave_position_open: #{report.dig(:gates, :leave_position_open)}"
+      puts "close_on_error: #{report.dig(:gates, :close_on_error)}"
+      puts "log path: #{report.fetch(:log_path) || "none"}"
+      puts "iterations: #{report.fetch(:iterations)}"
+      puts "rebalances count: #{report.fetch(:rebalances_count)}"
+      puts "stop reason: #{report.fetch(:stop_reason) || "none"}"
+      puts "final ETH position: #{report.fetch(:final_position).inspect}"
+      puts "final_position_confirmed: #{report.fetch(:final_position_confirmed)}"
+      puts "position_left_open: #{report.fetch(:position_left_open)}"
+      puts "manual_action_required: #{report.fetch(:manual_action_required)}"
+      puts "final status: #{report.fetch(:status)}"
+      puts "errors:"
+      if report.fetch(:errors).any?
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      else
+        puts "  none"
+      end
+    end
+
+    exit(false) unless report.fetch(:status) == "success"
+  end
+
+  desc "Run a read-only Aerodrome production live status check"
+  task production_live_status: :environment do
+    report = AerodromeProductionLiveStatus.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "status: #{report.fetch(:status)}"
+      puts "lock exists: #{report.fetch(:lock_exists)}"
+      puts "latest log path: #{report.fetch(:latest_log_path).inspect}"
+      puts "latest final status: #{report.fetch(:latest_final_status).inspect}"
+      puts "current mainnet ETH position: #{report.fetch(:current_mainnet_eth_position).inspect}"
+      puts "manual_action_required: #{report.fetch(:manual_action_required).inspect}"
+      puts "errors:"
+      if report.fetch(:errors).any?
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      else
+        puts "  none"
+      end
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
+
+  desc "Print a read-only Aerodrome production live stop plan"
+  task production_live_stop_plan: :environment do
+    report = AerodromeProductionLiveStopPlan.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "status: #{report.fetch(:status)}"
+      puts "current mainnet ETH position: #{report.fetch(:current_mainnet_eth_position).inspect}"
+      puts "emergency close persistently armed: #{report.fetch(:emergency_close_persistently_armed)}"
+      puts "warnings:"
+      report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      puts "stop steps:"
+      report.fetch(:stop_steps).each { |step| puts "  #{step}" }
+    end
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

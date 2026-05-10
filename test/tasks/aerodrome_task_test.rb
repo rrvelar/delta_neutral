@@ -18,6 +18,9 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:watchdog_alerts"].reenable
     Rake::Task["aerodrome:watchdog_scheduler_check"].reenable
     Rake::Task["aerodrome:production_canary_run"].reenable
+    Rake::Task["aerodrome:production_live_run"].reenable
+    Rake::Task["aerodrome:production_live_status"].reenable
+    Rake::Task["aerodrome:production_live_stop_plan"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -896,6 +899,80 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "production live run task outputs supervised status" do
+    report = production_live_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeProductionLiveRunner.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_live_run"].invoke }
+
+        assert_match "AERODROME PRODUCTION LIVE RUN", out
+        assert_match "LIVE ORDER CAPABLE", out
+        assert_match "position_left_open: true", out
+        assert_match "final status: success", out
+      end
+    end
+  end
+
+  test "production live status task supports JSON output" do
+    report = {
+      safety_banner: AerodromeProductionLiveStatus::BANNER,
+      status: "PASS",
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      lock_exists: false,
+      latest_log_path: nil,
+      latest_event: nil,
+      latest_final_status: nil,
+      current_mainnet_eth_position: nil,
+      safe_env: {},
+      manual_action_required: nil,
+      errors: []
+    }
+
+    with_env("FORMAT" => "json") do
+      AerodromeProductionLiveStatus.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_live_status"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+      end
+    end
+  end
+
+  test "production live stop plan task is read-only" do
+    report = {
+      safety_banner: AerodromeProductionLiveStopPlan::BANNER,
+      status: "PASS",
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      current_mainnet_eth_position: nil,
+      emergency_close_persistently_armed: false,
+      warnings: [ "read-only" ],
+      stop_steps: [ "run status", "run live_emergency_close if needed" ],
+      errors: []
+    }
+
+    with_env("FORMAT" => nil) do
+      AerodromeProductionLiveStopPlan.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_live_stop_plan"].invoke }
+
+        assert_match "AERODROME PRODUCTION LIVE STOP PLAN", out
+        assert_match "READ ONLY", out
+        assert_match "run live_emergency_close if needed", out
+      end
+    end
+  end
+
   test "live observation window task exits false when blocked" do
     report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
 
@@ -1226,6 +1303,36 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       final_close: { status: "success" },
       final_position: nil,
       final_position_confirmed: true,
+      manual_action_required: false,
+      errors: [],
+      database_write: true,
+      orders_enabled: true,
+      hyperliquid_execution: true
+    }
+  end
+
+  def production_live_report(status:)
+    {
+      safety_banner: AerodromeProductionLiveRunner::BANNER,
+      status: status,
+      live_order_capable: true,
+      log_path: "storage/aerodrome_production_live/test.jsonl",
+      gates: {
+        duration_seconds: 900,
+        interval_seconds: 180,
+        max_short_eth: "0.02",
+        max_short_notional_usd: "50",
+        leave_position_open: true,
+        close_on_error: true
+      },
+      iterations: 1,
+      iteration_events: [],
+      rebalances_count: 1,
+      stop_reason: "duration complete",
+      final_position: { asset: "ETH", size: "-0.011" },
+      final_position_confirmed: true,
+      position_left_open: true,
+      close_result: { status: "not_run_leave_position_open" },
       manual_action_required: false,
       errors: [],
       database_write: true,

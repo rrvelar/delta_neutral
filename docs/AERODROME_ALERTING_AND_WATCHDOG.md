@@ -185,6 +185,8 @@ For supervised mode:
 
 Do not run watchdog polling as live automation by default. `bin/aerodrome-watchdog-tick` and `bin/rails aerodrome:watchdog_scheduler_check` are scheduler foundation tools only; they run watchdog alerts, do not start live observation, do not close positions, and do not call Hyperliquid execution methods. See `docs/AERODROME_WATCHDOG_SCHEDULER.md` for systemd/cron templates and operator response rules.
 
+Production live runner V1 is separate from watchdog alerting. Watchdog tasks remain read-only and must not start `bin/rails aerodrome:production_live_run`, must not close positions, and must not approve leave-position-open operation. After every production live run, the operator must run `bin/rails aerodrome:production_live_status`; any `manual_action_required=true`, unknown readback, failed close, or unexpected USDC rebalance remains an alert/blocker condition.
+
 ## Future Alert Channels
 
 Future integrations may include:
