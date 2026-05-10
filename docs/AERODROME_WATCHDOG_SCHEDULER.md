@@ -193,3 +193,5 @@ Treat `BLOCKED` as immediate operator attention:
 7. Do not start another live window until the blocker is reviewed.
 
 The scheduler does not auto-close positions. Emergency close remains separate and manually gated.
+
+For VPS deployment details, Docker Compose startup, secure env transfer, firewalling, backups, rollback, and incident response, see `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard/watchdog only; live observation on the VPS requires separate manual preflight and explicit gates.

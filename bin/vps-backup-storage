@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+backup_dir="${BACKUP_DIR:-storage/backups}"
+timestamp="$(date -u +%Y%m%d%H%M%S)"
+destination="${backup_dir}/storage-${timestamp}.tar.gz"
+
+mkdir -p "$backup_dir"
+tar --exclude="./backups" -czf "$destination" -C storage .
+
+echo "$destination"

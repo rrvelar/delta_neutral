@@ -10,6 +10,7 @@
 # Ignore all environment files except .env.example.
 /.env*
 !/.env.example
+!/docs/templates/vps-production-env-template.txt
 
 # Ignore all logfiles and tempfiles.
 /log/*

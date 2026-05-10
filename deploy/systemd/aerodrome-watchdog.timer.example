@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Aerodrome watchdog alert tick every 5 minutes
+Documentation=docs/VPS_PRODUCTION_DEPLOYMENT.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=aerodrome-watchdog.service
+
+[Install]
+WantedBy=timers.target

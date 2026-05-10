@@ -263,6 +263,8 @@ Watchdog scheduler foundation is documented in `docs/AERODROME_WATCHDOG_SCHEDULE
 
 Scheduled email alerts use cooldown/dedup state at `storage/aerodrome_watchdog_alerts/state.json`. Repeated identical warnings are suppressed during `AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS` (default 1800 seconds), while blocked alerts may repeat after `AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS` (default 300 seconds). Dry-run does not write alert state. Reset only after operator review with `rm storage/aerodrome_watchdog_alerts/state.json`; this can cause the next matching email to send again and does not affect trading state.
 
+VPS production deployment foundation is documented in `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard and watchdog only. Use `bin/vps-readiness-check`, `bin/vps-watchdog-tick`, and `bin/vps-backup-storage` for safe operational helpers. Live observation on the VPS is a separate manual procedure requiring fresh preflight and explicit gates. Watchdog scheduling must not run live observation or emergency close.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

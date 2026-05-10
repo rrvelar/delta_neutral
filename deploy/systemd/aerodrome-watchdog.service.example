@@ -1,0 +1,12 @@
+[Unit]
+Description=Aerodrome watchdog alert tick
+Documentation=docs/VPS_PRODUCTION_DEPLOYMENT.md
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/delta_neutral
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml exec -T web bin/vps-watchdog-tick
+
+# This unit runs watchdog alerts only. It must not run live observation or emergency close.

@@ -181,6 +181,8 @@ Scheduler foundation is documented in `docs/AERODROME_WATCHDOG_SCHEDULER.md`. `b
 
 Scheduled email alerts use file-backed deduplication under `storage/aerodrome_watchdog_alerts/state.json`. Repeated identical warnings are suppressed during `AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS` (default 1800 seconds), while blocked alerts can repeat after `AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS` (default 300 seconds). Dry-run does not write alert state. Reset state only after review with `rm storage/aerodrome_watchdog_alerts/state.json`; emergency close remains separate and manually gated.
 
+VPS deployment foundation is documented in `docs/VPS_PRODUCTION_DEPLOYMENT.md`. The VPS phase starts with read-only dashboard/watchdog operation only. Live observation on the VPS requires separate manual preflight and explicit one-off gates. No unattended 24/7 live operation is approved by the VPS deployment foundation.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

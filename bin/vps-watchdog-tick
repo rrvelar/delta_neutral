@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+export RAILS_ENV="${RAILS_ENV:-production}"
+
+exec bin/aerodrome-watchdog-tick
