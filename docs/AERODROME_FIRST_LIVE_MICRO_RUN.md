@@ -35,7 +35,8 @@ Sources checked on 2026-05-10:
 - Local code:
   - `HedgeSyncJob` gates Aerodrome execution behind `AERODROME_HEDGE_ENABLED`, `AERODROME_HEDGE_PAUSED`, `AERODROME_LIVE_APPROVED`, readiness checks, risk limits, and ETH/WETH-only filtering.
   - `AerodromeLivePreflightCheck` is read-only and requires live-mode env to remain disabled/paused during preflight.
-  - `AerodromeTestnetEmergencyClose` is testnet-only; there is no live emergency close task in this branch.
+  - `AerodromeTestnetEmergencyClose` is testnet-only.
+  - `AerodromeLiveEmergencyClose` is live-order capable but blocked by default and only closes ETH when all manual emergency gates pass.
 
 ## Preconditions
 
@@ -48,7 +49,7 @@ First live micro-run is forbidden unless all are true:
 - `bin/rails aerodrome:pre_live_check` passes.
 - `CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check` passes in mainnet read-only mode.
 - Hyperliquid mainnet readback shows no existing ETH short for the account/subaccount that will be used.
-- A live emergency close procedure exists, is documented, and has been tested separately. The current `aerodrome:testnet_emergency_close` task is testnet-only and is not a live emergency procedure.
+- A live emergency close procedure exists, is documented, and has been tested/read-reviewed separately. `bin/rails aerodrome:live_emergency_close` is live-order capable and must remain blocked unless its explicit manual gates are set.
 - Operator manually confirms risk, limits, target hedge, account address, API wallet setup, and emergency-close responsibility.
 - No seed phrase or main wallet private key is stored in git or pasted into logs. Prefer an approved API wallet where possible.
 
@@ -104,6 +105,30 @@ This is a conceptual sequence only. Do not paste or run a live command from this
 10. Monitor logs, dashboard, ShortRebalance history, and Hyperliquid position state.
 11. If anything unexpected occurs, close manually or use the separately verified live emergency close procedure. Do not rely on the testnet-only emergency close task.
 
+## Live Emergency Close Procedure
+
+`bin/rails aerodrome:live_emergency_close` exists only as an emergency close tool. It is live-order capable but blocked by default. It closes ETH only and never opens positions, never touches USDC, never calls `set_leverage`, and never calls Aerodrome contracts.
+
+It refuses unless all gates are set:
+
+```bash
+HYPERLIQUID_TESTNET=false
+AERODROME_LIVE_APPROVED=true
+AERODROME_HEDGE_PAUSED=true
+AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED=true
+AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM=I_UNDERSTAND_THIS_CLOSES_LIVE_ETH_SHORT
+AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=<operator-defined max close size>
+```
+
+Optional retry controls:
+
+```bash
+AERODROME_LIVE_CLOSE_RETRY_ATTEMPTS=5
+AERODROME_LIVE_CLOSE_RETRY_SLEEP_SECONDS=10
+```
+
+The live emergency close tool must be tested/read-reviewed before any first-live micro-run. Its existence is not approval to trade and not approval to leave live gates enabled.
+
 Example command shape, intentionally commented and incomplete:
 
 ```bash
@@ -128,7 +153,7 @@ Example command shape, intentionally commented and incomplete:
 - The bot uses market-order behavior through the existing Hyperliquid path; market orders execute immediately at the current market price.
 - Hyperliquid API wallets are signing wallets only; readback must use the actual master/subaccount address.
 - Subaccount/vault execution uses `vaultAddress`; confirm account mode before the run.
-- A live emergency close procedure must be ready before any first-live run.
+- The live emergency close procedure must be ready before any first-live run and must be blocked again after use.
 - Never use a seed phrase in env.
 - Never commit `.env`, private keys, wallet secrets, API secrets, screenshots of secrets, or logs containing secrets.
 - Dashboard rewards and fees are read-only estimates and are not execution approval.
@@ -143,7 +168,7 @@ Do not proceed if any of these are true:
 - Live readback cannot confirm no existing ETH short.
 - Risk caps are missing, parse incorrectly, or are larger than the intended tiny first-live run.
 - `AERODROME_HEDGE_PAUSED` is not known to be restored to true after the run.
-- Live emergency close is not ready.
+- Live emergency close is not ready, not reviewed, or not blocked by default.
 - Operator cannot monitor the run continuously.
 
 ## Rollback / Safe State
@@ -162,4 +187,4 @@ Then run:
 CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check
 ```
 
-If an ETH short remains open unexpectedly, use the separate live emergency procedure. Do not use `aerodrome:testnet_emergency_close` on mainnet.
+If an ETH short remains open unexpectedly, use the gated live emergency close procedure or close manually. Do not use `aerodrome:testnet_emergency_close` on mainnet.

@@ -40,7 +40,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 
 - Live trading.
 - First live micro-run execution task.
-- Live emergency close task/procedure.
+- Automatic live emergency close. The live emergency close task is manual-only and blocked by default.
 - Aerodrome hedge execution by default.
 - Any new Aerodrome-specific Hyperliquid order path.
 - Hyperliquid hedge preview execution.
@@ -169,6 +169,22 @@ FORMAT=json bin/rails aerodrome:testnet_emergency_close
 
 The emergency close task refuses to run unless `HYPERLIQUID_TESTNET=true` and `AERODROME_LIVE_APPROVED=false`. It retries explicit ETH close/readback after transient Hyperliquid testnet API/DNS failures and never touches USDC. Live close/emergency procedures must be separate future work; live remains disabled.
 
+## Run Live Emergency Close
+
+The live emergency close task is live-order capable but blocked by default. It is manual-only, closes ETH only, never opens positions, never touches USDC, never calls `set_leverage`, and never calls Aerodrome contracts:
+
+```bash
+bin/rails aerodrome:live_emergency_close
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails aerodrome:live_emergency_close
+```
+
+It refuses unless `HYPERLIQUID_TESTNET=false`, `AERODROME_LIVE_APPROVED=true`, `AERODROME_HEDGE_PAUSED=true`, `AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED=true`, `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH` is configured, and `AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM=I_UNDERSTAND_THIS_CLOSES_LIVE_ETH_SHORT`. It reads the current ETH position, blocks if size exceeds the max, closes only ETH with explicit `close_short(asset: "ETH", size: current_short)`, and retries/readbacks until ETH is closed or attempts are exhausted. This task must be tested/read-reviewed before the first live micro-run. It is not live approval.
+
 ## Run Live Preflight Check
 
 The first-live preflight is read-only and is not permission to trade:
@@ -199,7 +215,7 @@ The first-live micro-run plan is documentation only:
 docs/AERODROME_FIRST_LIVE_MICRO_RUN.md
 ```
 
-This runbook does not enable live trading, does not change env values, does not add a live execution task, and does not provide an executable live command. It defines required preconditions, tiny operator-defined risk caps, manual stop/backup/preflight/readback steps, and stop conditions. A separate tested live emergency close procedure must exist before any live micro-run. Dashboard rewards and fees remain read-only estimates and are not execution approval. The current default remains disabled, paused, and not live-approved.
+This runbook does not enable live trading, does not change env values, does not add a first-live execution task, and does not provide an executable live command. It defines required preconditions, tiny operator-defined risk caps, manual stop/backup/preflight/readback steps, and stop conditions. The gated live emergency close task must be tested/read-reviewed before any live micro-run. Dashboard rewards and fees remain read-only estimates and are not execution approval. The current default remains disabled, paused, and not live-approved.
 
 ## Run AERO Rewards Check
 

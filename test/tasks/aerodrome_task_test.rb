@@ -8,6 +8,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:verify_config"].reenable
     Rake::Task["aerodrome:pre_live_check"].reenable
     Rake::Task["aerodrome:testnet_emergency_close"].reenable
+    Rake::Task["aerodrome:live_emergency_close"].reenable
     Rake::Task["aerodrome:live_preflight_check"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
@@ -499,6 +500,60 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "live emergency close task outputs gated live safety banner" do
+    report = live_emergency_close_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeLiveEmergencyClose.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_emergency_close"].invoke }
+
+        assert_match "AERODROME LIVE EMERGENCY CLOSE", out
+        assert_match "LIVE ORDER CAPABLE", out
+        assert_match "HYPERLIQUID_TESTNET=false", out
+        assert_match "live approved=true", out
+        assert_match "paused=true", out
+        assert_match "confirmation valid=true", out
+        assert_match "max close ETH=\"0.5\"", out
+        assert_match "ETH position before", out
+        assert_match "ETH position after", out
+        assert_match "final status: success", out
+      end
+    end
+  end
+
+  test "live emergency close task supports JSON output" do
+    report = live_emergency_close_report(status: "noop")
+
+    with_env("FORMAT" => "json") do
+      AerodromeLiveEmergencyClose.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_emergency_close"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "noop", parsed.fetch("status")
+        assert_equal true, parsed.fetch("live_order_capable")
+        assert_equal "ETH", parsed.fetch("touched_asset")
+      end
+    end
+  end
+
+  test "live emergency close task exits false when blocked" do
+    report = live_emergency_close_report(status: "blocked", errors: [ "blocked gate" ])
+
+    with_env("FORMAT" => nil) do
+      AerodromeLiveEmergencyClose.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        assert_raises(SystemExit) do
+          capture_io { Rake::Task["aerodrome:live_emergency_close"].invoke }
+        end
+      end
+    end
+  end
+
   test "live preflight check task outputs read-only safety banner" do
     report = live_preflight_report(status: "WARN", warnings: [ "review warning" ])
 
@@ -638,6 +693,29 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       before_position: { asset: "ETH", size: "0.25" },
       after_position: nil,
       errors: [],
+      database_write: false,
+      touched_asset: "ETH"
+    }
+  end
+
+  def live_emergency_close_report(status:, errors: [])
+    {
+      safety_banner: AerodromeLiveEmergencyClose::BANNER,
+      status: status,
+      live_order_capable: true,
+      gates: {
+        hyperliquid_testnet: "false",
+        live_approved: true,
+        hedge_paused: true,
+        emergency_close_enabled: true,
+        confirmation_present: true,
+        confirmation_valid: true,
+        max_close_eth: "0.5"
+      },
+      before_position: { asset: "ETH", size: "-0.25" },
+      after_position: nil,
+      attempts: [],
+      errors: errors,
       database_write: false,
       touched_asset: "ETH"
     }

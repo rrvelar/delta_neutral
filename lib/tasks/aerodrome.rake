@@ -194,6 +194,34 @@ namespace :aerodrome do
     exit(false) if report.fetch(:status) == "failed"
   end
 
+  desc "Run strictly gated Aerodrome live emergency ETH close"
+  task live_emergency_close: :environment do
+    report = AerodromeLiveEmergencyClose.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "LIVE ORDER CAPABLE — REQUIRES MANUAL GATES"
+      puts "HYPERLIQUID_TESTNET=#{report.dig(:gates, :hyperliquid_testnet)}"
+      puts "live approved=#{report.dig(:gates, :live_approved)}"
+      puts "paused=#{report.dig(:gates, :hedge_paused)}"
+      puts "confirmation valid=#{report.dig(:gates, :confirmation_valid)}"
+      puts "max close ETH=#{report.dig(:gates, :max_close_eth).inspect}"
+      puts "ETH position before: #{report.fetch(:before_position).inspect}"
+      puts "attempts:"
+      report.fetch(:attempts).each { |attempt| puts "  #{attempt.inspect}" }
+      puts "ETH position after: #{report.fetch(:after_position).inspect}"
+      puts "final status: #{report.fetch(:status)}"
+      if report.fetch(:errors).any?
+        puts "errors:"
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      end
+    end
+
+    exit(false) if %w[blocked failed].include?(report.fetch(:status))
+  end
+
   desc "Run a read-only Aerodrome first-live preflight check"
   task live_preflight_check: :environment do
     report = AerodromeLivePreflightCheck.new(

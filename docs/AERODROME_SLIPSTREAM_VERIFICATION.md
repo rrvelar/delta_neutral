@@ -10,7 +10,7 @@ Aerodrome hedge-loop processing is controlled by `AERODROME_HEDGE_ENABLED=false`
 
 Aerodrome hedge execution is additionally paused by default. `AERODROME_HEDGE_PAUSED` defaults to true when missing, so testnet rehearsal requires explicitly setting `AERODROME_HEDGE_PAUSED=false`. Optional pre-live limits can also block the Aerodrome path before the order path: `AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_MAX_LEVERAGE`. Live trading is still not approved; live use requires a separate future checklist/change.
 
-`docs/AERODROME_FIRST_LIVE_MICRO_RUN.md` is a documentation-only first-live plan. It does not enable live trading, does not edit env, does not add a live task, and does not add any execution path. It requires a separate tested live emergency close procedure before any first-live micro-run. Dashboard AERO rewards and LP fees are read-only estimates and are not execution approval.
+`docs/AERODROME_FIRST_LIVE_MICRO_RUN.md` is a documentation-only first-live plan. It does not enable live trading, does not edit env, does not add a first-live execution task, and does not add an automatic execution path. `aerodrome:live_emergency_close` is a manual ETH-only emergency close tool that is live-order capable but blocked by default behind explicit live approval, paused state, enable flag, confirmation phrase, and max ETH cap. It must be tested/read-reviewed before any first-live micro-run. Dashboard AERO rewards and LP fees are read-only estimates and are not execution approval.
 
 ## Verified Facts As Of 2026-05-08
 
