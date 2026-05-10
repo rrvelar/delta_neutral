@@ -261,6 +261,8 @@ Alerting/watchdog foundation is documented in `docs/AERODROME_ALERTING_AND_WATCH
 
 Watchdog scheduler foundation is documented in `docs/AERODROME_WATCHDOG_SCHEDULER.md`. `bin/aerodrome-watchdog-tick` runs only `bin/rails aerodrome:watchdog_alerts`, and `bin/rails aerodrome:watchdog_scheduler_check` verifies the scheduler setup read-only. A scheduler tick does not start live trading, does not run live observation, does not run emergency close, and does not close positions. Recommended frequency is 5 minutes. On `BLOCKED`, stop any supervised run, read mainnet ETH independently, and use the separate manually gated emergency close only if ETH remains open.
 
+Scheduled email alerts use cooldown/dedup state at `storage/aerodrome_watchdog_alerts/state.json`. Repeated identical warnings are suppressed during `AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS` (default 1800 seconds), while blocked alerts may repeat after `AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS` (default 300 seconds). Dry-run does not write alert state. Reset only after operator review with `rm storage/aerodrome_watchdog_alerts/state.json`; this can cause the next matching email to send again and does not affect trading state.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

@@ -66,6 +66,25 @@ bin/aerodrome-watchdog-tick
 
 SMTP must be configured separately through the app's Rails Action Mailer SMTP environment variables. This sends only watchdog alert email; it does not close or open positions.
 
+Scheduled email delivery deduplicates repeated identical alerts using:
+
+```bash
+storage/aerodrome_watchdog_alerts/state.json
+```
+
+Defaults:
+
+```bash
+AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS=1800
+AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS=300
+```
+
+Warnings repeat only after the cooldown unless the alert fingerprint changes. Blocked alerts repeat on the shorter blocked interval. Dry-run mode does not write alert state. To reset state after operator review:
+
+```bash
+rm storage/aerodrome_watchdog_alerts/state.json
+```
+
 ## Docker Compose
 
 Run one tick from the host:

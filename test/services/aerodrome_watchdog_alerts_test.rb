@@ -7,7 +7,8 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
 
   test "dry-run output for pass" do
     with_env("AERODROME_ALERTS_ENABLED" => "false", "AERODROME_ALERTS_DELIVERY" => "dry_run", "APP_GIT_SHA" => "abc123") do
-      report = build_service(watchdog: WatchdogReport.new(status: "PASS")).report
+      state_path = tmp_state_path
+      report = build_service(watchdog: WatchdogReport.new(status: "PASS"), state_path: state_path).report
 
       assert_equal "pass", report.fetch(:severity)
       assert_equal "Aerodrome watchdog PASS", report.fetch(:title)
@@ -17,8 +18,10 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
       assert_equal "delivery mode dry_run", report.dig(:delivery, :skipped_reason)
       assert_equal "delivery mode dry_run", report.fetch(:skipped_reason)
       assert_equal false, report.fetch(:database_write)
+      assert_equal false, report.fetch(:state_write)
       assert_equal false, report.fetch(:orders_enabled)
       assert_equal false, report.fetch(:hyperliquid_execution)
+      assert_not_predicate state_path, :exist?
       assert_equal "abc123", report.fetch(:git_sha)
       assert_empty ActionMailer::Base.deliveries
     end
@@ -85,7 +88,7 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
 
   test "severity warn sends when enabled email and recipient present" do
     with_env(email_env) do
-      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ])).report
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: tmp_state_path).report
 
       assert_equal true, report.dig(:delivery, :sent)
       assert_equal true, report.fetch(:sent)
@@ -149,6 +152,127 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
     end
   end
 
+  test "first warn email sends and writes state" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal true, report.fetch(:state_write)
+      assert_predicate state_path, :exist?
+      state = JSON.parse(state_path.read)
+      assert_equal report.fetch(:fingerprint), state.fetch("last_fingerprint")
+      assert_equal "warn", state.fetch("last_severity")
+    end
+  end
+
+  test "repeated same warn within cooldown suppresses" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 10, 0)).report
+
+      assert_equal false, report.fetch(:sent)
+      assert_equal false, report.fetch(:state_write)
+      assert_equal "suppressed by alert cooldown", report.fetch(:skipped_reason)
+      assert_equal false, report.fetch(:fingerprint_changed)
+      assert_empty ActionMailer::Base.deliveries
+    end
+  end
+
+  test "same warn after cooldown sends" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 31, 0)).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal false, report.fetch(:fingerprint_changed)
+      assert_equal 1800, report.fetch(:cooldown_seconds)
+      assert_equal 1, ActionMailer::Base.deliveries.size
+    end
+  end
+
+  test "changed warning fingerprint sends immediately" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Rewards unavailable" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 1, 0)).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal true, report.fetch(:fingerprint_changed)
+      assert_equal 1, ActionMailer::Base.deliveries.size
+    end
+  end
+
+  test "blocked sends immediately" do
+    with_env(email_env) do
+      report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: tmp_state_path).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal 300, report.fetch(:cooldown_seconds)
+    end
+  end
+
+  test "repeated blocked within blocked repeat suppresses" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 4, 0)).report
+
+      assert_equal false, report.fetch(:sent)
+      assert_equal "suppressed by alert cooldown", report.fetch(:skipped_reason)
+      assert_empty ActionMailer::Base.deliveries
+    end
+  end
+
+  test "repeated blocked after repeat interval sends" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 6, 0)).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal 1, ActionMailer::Base.deliveries.size
+    end
+  end
+
+  test "severity escalation warn to blocked sends immediately" do
+    state_path = tmp_state_path
+    with_env(email_env) do
+      build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+      ActionMailer::Base.deliveries.clear
+
+      report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "mainnet ETH position exists" ]), state_path: state_path, clock: Time.zone.local(2026, 5, 10, 12, 1, 0)).report
+
+      assert_equal true, report.fetch(:sent)
+      assert_equal true, report.dig(:delivery, :severity_escalated)
+      assert_equal 1, ActionMailer::Base.deliveries.size
+    end
+  end
+
+  test "min severity blocked suppresses warn before state logic" do
+    state_path = tmp_state_path
+    with_env(email_env("AERODROME_ALERT_EMAIL_MIN_SEVERITY" => "blocked")) do
+      report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ "Latest PnL snapshot fresh" ]), state_path: state_path).report
+
+      assert_equal false, report.fetch(:sent)
+      assert_equal "severity below blocked", report.fetch(:skipped_reason)
+      assert_not_predicate state_path, :exist?
+      assert_empty ActionMailer::Base.deliveries
+    end
+  end
+
   test "does not call Hyperliquid execution methods" do
     watchdog = WatchdogReport.new(status: "PASS")
 
@@ -202,8 +326,12 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
     end
   end
 
-  def build_service(watchdog:)
-    AerodromeWatchdogAlerts.new(watchdog_check: watchdog, clock: -> { Time.zone.local(2026, 5, 10, 12, 0, 0) })
+  def build_service(watchdog:, state_path: tmp_state_path, clock: Time.zone.local(2026, 5, 10, 12, 0, 0))
+    AerodromeWatchdogAlerts.new(
+      watchdog_check: watchdog,
+      clock: -> { clock },
+      alert_state: AerodromeWatchdogAlertState.new(path: state_path, clock: -> { clock })
+    )
   end
 
   def email_env(overrides = {})
@@ -225,6 +353,10 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
     writes
   ensure
     ActiveSupport::Notifications.unsubscribe(subscriber) if subscriber
+  end
+
+  def tmp_state_path
+    Pathname(Dir.mktmpdir).join("state.json")
   end
 
   def with_env(values)

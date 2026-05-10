@@ -57,6 +57,24 @@ Email delivery is available only when explicitly gated:
 
 Severity order is `pass < warn < blocked`; the recommended minimum severity is `warn`. SMTP must be configured separately through the existing Rails Action Mailer SMTP settings. Email alerts are still read-only: they do not close positions, open positions, or enable live operation.
 
+Scheduled email alerts use deduplication and cooldown to avoid repeated identical messages:
+
+- state file: `storage/aerodrome_watchdog_alerts/state.json`
+- warning/pass cooldown default: `AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS=1800`
+- blocked repeat default: `AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS=300`
+- fingerprint changes send immediately.
+- severity escalation sends immediately.
+- blocked alerts repeat more frequently than warnings.
+- dry-run delivery does not write alert state.
+
+Reset alert state only after operator review:
+
+```bash
+rm storage/aerodrome_watchdog_alerts/state.json
+```
+
+Resetting state can cause the next matching email alert to send again. It does not affect trading state.
+
 ## Alert Events
 
 Alerting should eventually cover:

@@ -2,9 +2,10 @@ class AerodromeWatchdogAlerts
   BANNER = "AERODROME WATCHDOG ALERTS — READ ONLY"
   SEVERITY_ORDER = { "pass" => 0, "warn" => 1, "blocked" => 2 }.freeze
 
-  def initialize(watchdog_check: nil, clock: -> { Time.current })
+  def initialize(watchdog_check: nil, clock: -> { Time.current }, alert_state: nil)
     @watchdog_check = watchdog_check
     @clock = clock
+    @alert_state = alert_state || AerodromeWatchdogAlertState.new(clock: clock)
   end
 
   def report
@@ -17,6 +18,7 @@ class AerodromeWatchdogAlerts
       title: title_for(severity),
       summary: summary_for(watchdog),
       body: body_for(watchdog),
+      watchdog_alerts: watchdog.fetch(:alerts),
       blockers: watchdog.fetch(:blockers),
       warnings: watchdog.fetch(:warnings),
       recommended_actions: recommended_actions(watchdog),
@@ -25,6 +27,7 @@ class AerodromeWatchdogAlerts
       safe_env: safe_env,
       latest_observation_summary: latest_observation_summary(watchdog),
       database_write: false,
+      state_write: false,
       orders_enabled: false,
       hyperliquid_execution: false
     }
@@ -33,6 +36,11 @@ class AerodromeWatchdogAlerts
     alert[:sent] = delivery.fetch(:sent)
     alert[:recipient] = delivery.fetch(:recipient)
     alert[:skipped_reason] = delivery.fetch(:skipped_reason)
+    alert[:fingerprint] = delivery.fetch(:fingerprint)
+    alert[:fingerprint_changed] = delivery.fetch(:fingerprint_changed)
+    alert[:cooldown_seconds] = delivery.fetch(:cooldown_seconds)
+    alert[:last_sent_at] = delivery.fetch(:last_sent_at)
+    alert[:state_write] = delivery.fetch(:state_write)
     alert
   end
 
@@ -133,21 +141,25 @@ class AerodromeWatchdogAlerts
 
   def deliver_alert(alert)
     result = delivery_config
-    return result.merge(sent: false, skipped_reason: "delivery mode dry_run") if result.fetch(:mode) == "dry_run"
-    return result.merge(sent: false, skipped_reason: "unsupported delivery mode") unless result.fetch(:mode) == "email"
-    return result.merge(sent: false, skipped_reason: "alerts disabled") unless result.fetch(:enabled)
+    state = state_result(alert)
+    return result.merge(state).merge(sent: false, skipped_reason: "delivery mode dry_run", state_write: false) if result.fetch(:mode) == "dry_run"
+    return result.merge(state).merge(sent: false, skipped_reason: "unsupported delivery mode", state_write: false) unless result.fetch(:mode) == "email"
+    return result.merge(state).merge(sent: false, skipped_reason: "alerts disabled", state_write: false) unless result.fetch(:enabled)
     unless recipient.present?
-      return result.merge(sent: false, skipped_reason: "missing AERODROME_ALERT_EMAIL_RECIPIENT")
+      return result.merge(state).merge(sent: false, skipped_reason: "missing AERODROME_ALERT_EMAIL_RECIPIENT", state_write: false)
     end
 
     unless severity_allowed?(alert.fetch(:severity), result.fetch(:min_severity))
-      return result.merge(sent: false, skipped_reason: "severity below #{result.fetch(:min_severity)}")
+      return result.merge(state).merge(sent: false, skipped_reason: "severity below #{result.fetch(:min_severity)}", state_write: false)
     end
 
+    return result.merge(state).merge(sent: false, skipped_reason: state.fetch(:skipped_reason), state_write: false) unless state.fetch(:send_allowed)
+
     AerodromeWatchdogMailer.watchdog_alert(recipient: recipient, alert: alert).deliver_now
-    result.merge(sent: true, skipped_reason: nil)
+    @alert_state.record_sent(alert: alert, fingerprint: state.fetch(:fingerprint))
+    result.merge(state).merge(sent: true, skipped_reason: nil, state_write: true)
   rescue => e
-    result.merge(sent: false, skipped_reason: "email delivery failed: #{e.class}: #{e.message}")
+    result.merge(state || state_result(alert)).merge(sent: false, skipped_reason: "email delivery failed: #{e.class}: #{e.message}", state_write: false)
   end
 
   def delivery_config
@@ -157,6 +169,31 @@ class AerodromeWatchdogAlerts
       recipient: redacted_recipient,
       min_severity: min_severity
     }
+  end
+
+  def state_result(alert)
+    @state_result ||= @alert_state.evaluate(
+      alert: alert,
+      cooldown_seconds: cooldown_seconds,
+      blocked_repeat_seconds: blocked_repeat_seconds
+    )
+  end
+
+  def cooldown_seconds
+    integer_env("AERODROME_ALERT_EMAIL_COOLDOWN_SECONDS", 1800)
+  end
+
+  def blocked_repeat_seconds
+    integer_env("AERODROME_ALERT_EMAIL_REPEAT_BLOCKED_SECONDS", 300)
+  end
+
+  def integer_env(key, default)
+    value = ENV[key].presence
+    return default unless value
+
+    Integer(value)
+  rescue ArgumentError
+    default
   end
 
   def severity_allowed?(severity, minimum)
