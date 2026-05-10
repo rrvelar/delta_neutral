@@ -245,6 +245,8 @@ The task records JSONL events under `storage/aerodrome_live_observation/`, runs 
 
 The first controlled 15-minute live observation window is complete and documented in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. It created `ShortRebalance #184` (`WETH`, `0.0 -> 0.0109`, success), created no additional rebalances in iterations 2 through 5, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil. This is not approval for continuous unattended live operation, and live automation remains disabled by default.
 
+The first controlled 30-minute live observation window is complete and documented in `docs/AERODROME_30M_LIVE_OBSERVATION_REPORT.md`. It created `ShortRebalance #185` (`WETH`, `0.0 -> 0.0111`, success), created no additional rebalances in iterations 2 through 10, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil. This is still not approval for continuous unattended live operation or scaling, and live automation remains disabled by default.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

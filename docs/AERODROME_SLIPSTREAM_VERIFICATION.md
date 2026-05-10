@@ -16,6 +16,8 @@ The first live micro-run is documented in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_R
 
 The first controlled 15-minute live observation window is documented in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. Local operator evidence shows `ShortRebalance #184` successfully opened a tiny mainnet ETH short (`new_short_size=0.0109`), iterations 2 through 5 created no additional rebalances, USDC was skipped, the gated live emergency close closed the short, and final mainnet ETH readback was nil. This verifies one short controlled observation window only. It is not approval for continuous unattended live operation or scaling.
 
+The first controlled 30-minute live observation window is documented in `docs/AERODROME_30M_LIVE_OBSERVATION_REPORT.md`. Local operator evidence shows `ShortRebalance #185` successfully opened a tiny mainnet ETH short (`new_short_size=0.0111`), iterations 2 through 10 created no additional rebalances, USDC was skipped, the gated live emergency close closed the short, and final mainnet ETH readback was nil. This verifies one 30-minute controlled observation window only. It is not approval for continuous unattended live operation or scaling.
+
 ## Verified Facts As Of 2026-05-08
 
 Status legend: **VERIFIED** means checked from a trusted source in this session. **CANDIDATE** means a trusted source lists the value, but implementation should keep it configurable or verify against a concrete position before relying on it. **UNRESOLVED** means do not implement from this fact. **DEFERRED** means intentionally out of scope for the read-only migration.
