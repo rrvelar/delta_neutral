@@ -22,6 +22,9 @@ class AerodromeProductionLiveStatus
       orders_enabled: false,
       hyperliquid_execution: false,
       lock_exists: @lock_path.exist?,
+      lock_state: lock_state,
+      lock_active: lock_state == "active",
+      stale_lock: lock_state.to_s.start_with?("stale"),
       latest_log_path: latest_log_path&.to_s,
       latest_event: latest_event,
       latest_final_status: latest_final_event&.fetch("status", nil),
@@ -36,9 +39,29 @@ class AerodromeProductionLiveStatus
   private
 
   def status
+    return "WARN" if lock_state.to_s.start_with?("stale")
     return "WARN" if @errors.any? || latest_final_event&.fetch("manual_action_required", nil) == true
 
     "PASS"
+  end
+
+  def lock_state
+    @lock_state ||= begin
+      return "absent" unless @lock_path.exist?
+      return "active" unless lock_available?
+
+      latest_final_event ? "stale_finished" : "stale_unfinished"
+    end
+  end
+
+  def lock_available?
+    File.open(@lock_path, File::RDWR) do |file|
+      locked = file.flock(File::LOCK_EX | File::LOCK_NB)
+      file.flock(File::LOCK_UN) if locked
+      locked
+    end
+  rescue Errno::ENOENT
+    true
   end
 
   def latest_event

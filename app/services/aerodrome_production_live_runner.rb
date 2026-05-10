@@ -93,11 +93,15 @@ class AerodromeProductionLiveRunner
   def with_lock
     FileUtils.mkdir_p(@lock_path.dirname)
     File.open(@lock_path, File::RDWR | File::CREAT, 0o644) do |file|
-      raise AlreadyRunning unless file.flock(File::LOCK_EX | File::LOCK_NB)
+      locked = file.flock(File::LOCK_EX | File::LOCK_NB)
+      raise AlreadyRunning unless locked
 
       yield
     ensure
-      file&.flock(File::LOCK_UN)
+      if locked
+        file&.flock(File::LOCK_UN)
+        FileUtils.rm_f(@lock_path)
+      end
     end
   end
 

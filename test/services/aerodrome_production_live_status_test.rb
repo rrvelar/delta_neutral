@@ -30,6 +30,51 @@ class AerodromeProductionLiveStatusTest < ActiveSupport::TestCase
     end
   end
 
+  test "production live status reports stale finished lock" do
+    Dir.mktmpdir do |dir|
+      lock_path = File.join(dir, "run.lock")
+      File.write(lock_path, "")
+      File.write(
+        File.join(dir, "20260510120000-test.jsonl"),
+        [
+          { type: "start", gates: { max_short_eth: "0.02", max_short_notional_usd: "50" } }.to_json,
+          { type: "finish", status: "success", stop_reason: "duration complete", position_left_open: true, manual_action_required: false, final_position_confirmed: true, final_position: { asset: "ETH", size: "-0.011" }, errors: [] }.to_json
+        ].join("\n")
+      )
+
+      report = AerodromeProductionLiveStatus.new(
+        hyperliquid_service: HyperliquidReadMock.new(position: { asset: "ETH", size: BigDecimal("-0.011") }),
+        log_dir: dir,
+        lock_path: lock_path
+      ).report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_equal true, report.fetch(:lock_exists)
+      assert_equal "stale_finished", report.fetch(:lock_state)
+      assert_equal false, report.fetch(:lock_active)
+      assert_equal true, report.fetch(:stale_lock)
+    end
+  end
+
+  test "production live status reports active lock" do
+    Dir.mktmpdir do |dir|
+      lock_path = File.join(dir, "run.lock")
+      File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |file|
+        file.flock(File::LOCK_EX | File::LOCK_NB)
+
+        report = AerodromeProductionLiveStatus.new(
+          hyperliquid_service: HyperliquidReadMock.new(position: nil),
+          log_dir: dir,
+          lock_path: lock_path
+        ).report
+
+        assert_equal "active", report.fetch(:lock_state)
+        assert_equal true, report.fetch(:lock_active)
+        assert_equal false, report.fetch(:stale_lock)
+      end
+    end
+  end
+
   test "production live stop plan is read-only" do
     hyperliquid = HyperliquidReadMock.new(position: nil)
 

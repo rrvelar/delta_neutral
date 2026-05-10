@@ -31,6 +31,8 @@ Default persistent env must remain disabled, paused, not live-approved, and test
 
 The runner takes a file lock at `storage/aerodrome_production_live/run.lock` and writes JSONL events to `storage/aerodrome_production_live/*.jsonl`.
 
+The runner removes its own lock file after releasing the lock on normal finish or error finalization. If a lock file remains after a finished log, `production_live_status` reports `stale_finished` as a warning. Operators should verify no live runner process is active, inspect the latest JSONL finish event, and confirm current mainnet ETH state before manually removing the stale lock file.
+
 Each iteration runs:
 
 - `PositionSyncJob.perform_now(position.id)`
@@ -75,3 +77,5 @@ After the run, mainnet ETH was later verified nil and `live_emergency_close` ret
 Approved open position monitoring is documented in `docs/AERODROME_APPROVED_OPEN_POSITION_MONITORING.md`. It is read-only and treats an open ETH short as non-blocking only when the latest successful production live finish left `position_left_open=true`, final position was confirmed, `manual_action_required=false`, and current ETH remains within caps/tolerance. It does not approve new live runs and does not close positions.
 
 Current Hyperliquid readback decides whether a previous approved-open position is still open. If the latest production live log has a non-nil `final_position` but current ETH readback is nil, that stale approved-open state is warning-only and does not permanently block a future run after fresh preflight. If readback is unavailable, current ETH exists without explicit adoption, or current ETH is mismatched/out of caps, the runner blocks.
+
+Watchdog/readiness integration is approved-open-aware. `production_supervised_readiness` remains strict safe-mode evidence and can be `BLOCKED` solely because mainnet ETH is open. When the approved-open detector validates that ETH as the expected in-cap hedge, watchdog suppresses only that readiness nil-position blocker and reports it as monitored state. Other readiness blockers remain blockers.

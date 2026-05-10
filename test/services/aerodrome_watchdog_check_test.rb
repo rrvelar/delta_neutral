@@ -65,6 +65,51 @@ class AerodromeWatchdogCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "approved open ETH suppresses only strict readiness nil-position blocker" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      approved = ApprovedOpenReport.new(approval_status: "approved")
+      readiness = ReadinessReport.new(status: "BLOCKED", blockers: [ "Mainnet ETH position is nil: 0.0098" ])
+
+      with_env(@env) do
+        report = build_service(
+          mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.0098")),
+          approved_open_position: approved,
+          production_readiness: readiness
+        ).report
+
+        assert_equal "WARN", report.fetch(:status)
+        assert_empty report.fetch(:blockers)
+        assert_equal "BLOCKED", report.fetch(:readiness_status)
+        assert_equal [ "Mainnet ETH position is nil: 0.0098" ], report.fetch(:readiness_blockers_suppressed_due_approved_open)
+        assert_includes report.fetch(:warnings), "production readiness is strict safe-mode; approved open ETH is monitored by approved-open detector"
+        assert report.fetch(:checks).fetch(:readiness).any? { |check| check.fetch(:name) == "Readiness blockers suppressed due approved open" }
+      end
+    end
+  end
+
+  test "approved open ETH does not suppress unrelated readiness blocker" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      approved = ApprovedOpenReport.new(approval_status: "approved")
+      readiness = ReadinessReport.new(status: "BLOCKED", blockers: [ "Active Aerodrome position exists" ])
+
+      with_env(@env) do
+        report = build_service(
+          mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.0098")),
+          approved_open_position: approved,
+          production_readiness: readiness
+        ).report
+
+        assert_equal "BLOCKED", report.fetch(:status)
+        assert_includes report.fetch(:blockers), "Production readiness blocker: Active Aerodrome position exists"
+        assert_empty report.fetch(:readiness_blockers_suppressed_due_approved_open)
+      end
+    end
+  end
+
   test "approved open current nil warns without blocking" do
     with_position_and_hedge do |hedge|
       create_success_rebalance(hedge)

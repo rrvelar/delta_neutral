@@ -187,12 +187,13 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
 
   test "successful mocked production live run completes duration and leaves ETH open" do
     with_position_and_hedge do |hedge|
+      lock_path = tmp_path("run.lock")
       hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011") ])
       hedge_sync = ->(_) { create_success_rebalance(hedge) }
       emergency = EmergencyCloseReport.new(status: "success")
 
       with_env(@env) do
-        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }).report
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }, lock_path: lock_path).report
 
         assert_equal "success", report.fetch(:status)
         assert_equal "duration complete", report.fetch(:stop_reason)
@@ -200,23 +201,26 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
         assert_equal false, report.fetch(:manual_action_required)
         assert_equal "not_run_leave_position_open", report.dig(:close_result, :status)
         assert_equal false, emergency.called
+        assert_not_predicate lock_path, :exist?
       end
     end
   end
 
   test "error stop calls emergency close when close_on_error true" do
     with_position_and_hedge do |hedge|
+      lock_path = tmp_path("run.lock")
       hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), nil ])
       hedge_sync = ->(_) { create_failed_rebalance(hedge) }
       emergency = EmergencyCloseReport.new(status: "success")
 
       with_env(@env) do
-        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }).report
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, emergency_close_factory: -> { emergency }, lock_path: lock_path).report
 
         assert_equal "success", report.fetch(:status)
         assert_equal "failed WETH rebalance", report.fetch(:stop_reason)
         assert_equal true, emergency.called
         assert_nil report.fetch(:final_position)
+        assert_not_predicate lock_path, :exist?
       end
     end
   end

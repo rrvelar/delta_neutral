@@ -256,6 +256,10 @@ For VPS reruns, do not treat an old non-nil production live `final_position` as 
 
 Approved open position monitoring is read-only and does not make the VPS a live daemon. It allows watchdog/status to recognize a known valid ETH hedge from the latest successful production live log as intended state only while it remains within caps/tolerance. Unexpected ETH, cap breaches, failed WETH, successful USDC, unknown readback, or manual-action logs still require operator attention and may require manually gated emergency close.
 
+Production readiness is still a strict safe-mode check. During an approved-open monitoring period, watchdog may suppress only the readiness blocker caused by the expected open ETH hedge and will report the suppressed readiness fields. Any unrelated readiness blocker still requires operator action.
+
+If `production_live_status` reports `lock_state=stale_finished`, do not assume a runner is active. Verify with process listings/system logs, inspect the latest production live JSONL finish event, run current mainnet ETH readback, and only then remove `storage/aerodrome_production_live/run.lock` if it is stale. Emergency close remains manual and gated.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

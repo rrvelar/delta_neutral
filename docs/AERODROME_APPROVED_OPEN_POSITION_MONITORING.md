@@ -8,6 +8,8 @@ Approved open position monitoring is read-only. It does not place orders, close 
 
 Production Live Runner V1 can intentionally leave a valid ETH hedge open after clean duration completion. The generic watchdog remains strict for persistent safe mode and should block unexpected mainnet ETH positions. Approved open position monitoring distinguishes a known valid open ETH hedge from an unexpected stale/open position.
 
+`aerodrome:production_supervised_readiness` remains strict safe-mode evidence. It can report `BLOCKED` when mainnet ETH is open because readiness is designed to prove the default disabled/paused/not-approved/testnet state. `aerodrome:watchdog_check` is approved-open-aware: if the approved-open detector validates the current ETH short as in-cap and matching, the readiness nil-position blocker is warning-only. Other readiness blockers still block.
+
 ## Approval Source
 
 An open ETH hedge is approved only when the latest `storage/aerodrome_production_live/*.jsonl` finish event has:
@@ -53,6 +55,10 @@ The watchdog still blocks:
 - unconfirmed or failed production live finishes.
 
 Emergency close remains separate and manually gated.
+
+## Stale Lock Handling
+
+`aerodrome:production_live_status` distinguishes an active lock from a stale lock file. A lock file with a finished latest JSONL run is `stale_finished` and warning-only. Before removing it manually, verify no production live process is running, inspect the latest log, run current mainnet ETH readback, and confirm whether emergency close is needed. The watchdog/status tasks do not close positions.
 
 ## Next Stage
 

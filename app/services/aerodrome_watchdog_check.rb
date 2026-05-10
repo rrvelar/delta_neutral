@@ -51,6 +51,10 @@ class AerodromeWatchdogCheck
       warnings: @warnings,
       blockers: @blockers,
       approved_open_position: @approved_open_position_report,
+      readiness_status: @readiness_status,
+      readiness_blockers: @readiness_blockers || [],
+      readiness_warnings: @readiness_warnings || [],
+      readiness_blockers_suppressed_due_approved_open: @readiness_blockers_suppressed_due_approved_open || [],
       checks: @checks,
       next_steps: next_steps
     }
@@ -178,7 +182,32 @@ class AerodromeWatchdogCheck
 
   def check_production_readiness
     report = production_readiness.report
-    add_check(:readiness, "Production supervised readiness has no blockers", report.fetch(:blockers).empty?, blocker: true, value: report.fetch(:status))
+    @readiness_status = report.fetch(:status)
+    @readiness_blockers = Array(report.fetch(:blockers, []))
+    @readiness_warnings = Array(report.fetch(:warnings, []))
+    @readiness_blockers_suppressed_due_approved_open = []
+
+    @checks[:readiness] << { name: "Production readiness status", status: @readiness_status.downcase, value: @readiness_status }
+    @checks[:readiness] << { name: "Production readiness blockers", status: @readiness_blockers.empty? ? "pass" : "fail", value: @readiness_blockers }
+    @checks[:readiness] << { name: "Production readiness warnings", status: @readiness_warnings.empty? ? "pass" : "warn", value: @readiness_warnings }
+
+    blockers = @readiness_blockers
+    if approved_open_monitoring?
+      suppressible, blockers = blockers.partition { |message| approved_open_readiness_blocker?(message) }
+      @readiness_blockers_suppressed_due_approved_open = suppressible
+      if suppressible.any?
+        @checks[:readiness] << { name: "Readiness blockers suppressed due approved open", status: "warn", value: suppressible }
+        @warnings << "production readiness is strict safe-mode; approved open ETH is monitored by approved-open detector"
+      end
+    end
+
+    if blockers.empty?
+      @checks[:readiness] << { name: "Production readiness unrelated blockers absent", status: "pass" }
+    else
+      blockers.each do |message|
+        add_check(:readiness, "Production readiness blocker", false, blocker: true, value: message)
+      end
+    end
   end
 
   def check_logs
@@ -225,6 +254,15 @@ class AerodromeWatchdogCheck
 
   def approved_open_position(mainnet)
     @approved_open_position || AerodromeApprovedOpenPosition.new(current_position: mainnet)
+  end
+
+  def approved_open_monitoring?
+    @approved_open_position_report&.fetch(:approval_status, nil) == "approved" &&
+      @approved_open_position_report&.fetch(:status, nil) == "PASS"
+  end
+
+  def approved_open_readiness_blocker?(message)
+    message.to_s.include?("Mainnet ETH position is nil")
   end
 
   def safe_env?

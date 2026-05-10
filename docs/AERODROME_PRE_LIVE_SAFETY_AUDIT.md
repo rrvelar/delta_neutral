@@ -150,4 +150,8 @@ Approved open position monitoring is read-only. It does not approve new live run
 
 A stale approved-open log no longer blocks by itself when current Hyperliquid readback confirms ETH is nil. In that case the prior non-nil `final_position` is warning-only because nil is safe. Readback unavailable, current ETH mismatch, out-of-caps ETH, `manual_action_required=true`, failed WETH, or successful USDC remains blocked.
 
+Watchdog/readiness integration is approved-open-aware without weakening normal safe-mode behavior. `production_supervised_readiness` remains strict safe-mode evidence and can be blocked solely by open mainnet ETH. If the approved-open detector validates that ETH as the expected in-cap hedge, watchdog suppresses only that readiness nil-position blocker and reports the suppression explicitly. Unrelated readiness blockers, failed WETH, USDC success, readback failure, mismatch, cap breach, or manual-action state remains blocked.
+
+Production live lock handling is explicit. The runner removes its own lock file after releasing the lock. If a finished-run lock file remains, `production_live_status` reports it as stale warning state. Operators must verify no live process is running and current mainnet ETH state before manual lock cleanup. No live automation or automatic close is enabled.
+
 Do not enable Aerodrome hedge execution until amount math, USD valuation, hedge preview/proposal behavior, proposal history/staleness handling, proposal safety-limit operations, fee strategy, staking/gauge behavior, manager/factory coverage, and end-to-end comparisons against Aerodrome UI/BaseScan are complete and tested. Current valuation, hedge previews, safety checks, and manual proposals do not make Aerodrome positions hedge-ready.

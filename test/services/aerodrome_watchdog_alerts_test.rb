@@ -57,6 +57,15 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
     assert_includes report.fetch(:recommended_actions), "Approved open ETH hedge is being monitored: continue monitoring with production_live_status; use emergency close only if the operator wants to close or a blocker appears."
   end
 
+  test "approved open safe-mode readiness warning does not recommend emergency close" do
+    warning = "production readiness is strict safe-mode; approved open ETH is monitored by approved-open detector"
+    report = build_service(watchdog: WatchdogReport.new(status: "WARN", warnings: [ warning ])).report
+
+    assert_equal "warn", report.fetch(:severity)
+    assert_includes report.fetch(:recommended_actions), "Approved open ETH hedge is monitored by approved-open detector; continue monitoring with production_live_status and watchdog checks."
+    assert report.fetch(:recommended_actions).none? { |action| action.include?("run live emergency close") }
+  end
+
   test "approved open out of bounds is blocked" do
     report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "Current ETH short differs from approved final size beyond tolerance" ])).report
 
@@ -323,6 +332,10 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
         approved_open_position: {
           approval_status: @approval_status
         },
+        readiness_status: "PASS",
+        readiness_blockers: [],
+        readiness_warnings: [],
+        readiness_blockers_suppressed_due_approved_open: [],
         checks: {
           observation: [
             { name: "Latest observation final position nil", status: "pass" }

@@ -21,6 +21,10 @@ class AerodromeWatchdogAlerts
       watchdog_alerts: watchdog.fetch(:alerts),
       blockers: watchdog.fetch(:blockers),
       warnings: watchdog.fetch(:warnings),
+      readiness_status: watchdog.fetch(:readiness_status, nil),
+      readiness_blockers: watchdog.fetch(:readiness_blockers, []),
+      readiness_warnings: watchdog.fetch(:readiness_warnings, []),
+      readiness_blockers_suppressed_due_approved_open: watchdog.fetch(:readiness_blockers_suppressed_due_approved_open, []),
       recommended_actions: recommended_actions(watchdog),
       timestamp: @clock.call.iso8601,
       git_sha: git_sha,
@@ -90,6 +94,10 @@ class AerodromeWatchdogAlerts
       list_or_none(watchdog.fetch(:blockers)),
       "Warnings:",
       list_or_none(watchdog.fetch(:warnings)),
+      "Readiness:",
+      "  status: #{watchdog.fetch(:readiness_status, 'unavailable')}",
+      "  blockers: #{watchdog.fetch(:readiness_blockers, []).inspect}",
+      "  suppressed due approved open: #{watchdog.fetch(:readiness_blockers_suppressed_due_approved_open, []).inspect}",
       "Recommended actions:",
       list_or_none(recommended_actions(watchdog))
     ].join("\n")
@@ -107,7 +115,14 @@ class AerodromeWatchdogAlerts
     text = message.to_s.downcase
     actions = []
     if text.include?("mainnet eth position")
-      actions << "Mainnet ETH is open while safe env is expected: run live emergency close or close manually in Hyperliquid UI."
+      if text.include?("approved open")
+        actions << "Approved open ETH hedge is being monitored: continue monitoring with production_live_status; use emergency close only if the operator wants to close or a blocker appears."
+      else
+        actions << "Mainnet ETH is open while safe env is expected: run live emergency close or close manually in Hyperliquid UI."
+      end
+    end
+    if text.include?("production readiness is strict safe-mode")
+      actions << "Approved open ETH hedge is monitored by approved-open detector; continue monitoring with production_live_status and watchdog checks."
     end
     if text.include?("approved open eth hedge")
       actions << "Approved open ETH hedge is being monitored: continue monitoring with production_live_status; use emergency close only if the operator wants to close or a blocker appears."

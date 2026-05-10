@@ -191,6 +191,10 @@ The first Production Live Runner V1 run showed that a valid in-cap ETH hedge can
 
 Approved open position monitoring is now read-only watchdog context. It does not close positions and does not approve new live runs. It only suppresses the generic open-ETH blocker when the latest production live log proves `position_left_open=true`, final position confirmed, no manual action required, and the current ETH short remains within caps/tolerance. Any out-of-bounds, unknown, unconfirmed, manual-action, failed WETH, or USDC-success condition remains `BLOCKED`.
 
+Production supervised readiness remains strict safe-mode evidence. When an approved-open ETH hedge is valid and in caps, the watchdog may suppress the readiness blocker that only says mainnet ETH is not nil, and it reports that suppression explicitly in `readiness_status`, `readiness_blockers`, `readiness_warnings`, and `readiness_blockers_suppressed_due_approved_open`. This is monitored state, not an emergency. Readiness blockers unrelated to the approved open ETH still make the watchdog `BLOCKED`.
+
+`aerodrome:production_live_status` reports lock state as active, absent, or stale. A stale finished-run lock is a warning; verify no live process is running, inspect the latest log, and confirm current mainnet ETH state before manually removing `storage/aerodrome_production_live/run.lock`. Watchdog alerts do not remove locks and do not close positions.
+
 ## Future Alert Channels
 
 Future integrations may include:

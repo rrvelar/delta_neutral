@@ -441,6 +441,10 @@ Approved open position monitoring is now available and documented in `docs/AEROD
 
 A prior approved-open production live log with non-nil `final_position` is not permanent proof that ETH is still open. Current Hyperliquid readback is authoritative. If current readback is nil, the old approved-open state is warning-only and a new run may proceed after fresh preflight and explicit gates. If readback is unavailable or current ETH is mismatched/out of caps, block and resolve before continuing.
 
+`aerodrome:production_supervised_readiness` stays strict safe-mode evidence. It may be `BLOCKED` when approved-open ETH is intentionally open. `aerodrome:watchdog_check` suppresses only the readiness blocker caused by that validated approved-open ETH and reports the suppressed readiness fields explicitly; unrelated readiness blockers still block. Approved open ETH within caps is monitored state, not an automatic emergency-close condition.
+
+If `aerodrome:production_live_status` reports `lock_state=stale_finished`, verify no live runner process is active, inspect the latest production live JSONL finish event, run current mainnet ETH readback, and decide whether manual emergency close is needed before removing `storage/aerodrome_production_live/run.lock`. Status/watchdog tasks do not remove locks and do not close positions.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:
