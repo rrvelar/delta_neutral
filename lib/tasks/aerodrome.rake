@@ -441,6 +441,41 @@ namespace :aerodrome do
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
 
+  desc "Build read-only dry-run Aerodrome watchdog alert messages"
+  task watchdog_alerts: :environment do
+    report = AerodromeWatchdogAlerts.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "status: #{report.fetch(:status)}"
+      puts "severity: #{report.fetch(:severity)}"
+      puts "title: #{report.fetch(:title)}"
+      puts "summary: #{report.fetch(:summary)}"
+      puts "delivery: #{report.dig(:delivery, :mode)}"
+      puts "database_write=#{report.fetch(:database_write)}"
+      puts "orders_enabled=#{report.fetch(:orders_enabled)}"
+      puts "hyperliquid_execution=#{report.fetch(:hyperliquid_execution)}"
+      puts "blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+      puts "warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+      puts "recommended actions:"
+      report.fetch(:recommended_actions).each { |action| puts "  #{action}" }
+    end
+
+    exit(false) if report.fetch(:severity) == "blocked"
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

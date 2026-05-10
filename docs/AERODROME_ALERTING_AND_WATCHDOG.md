@@ -19,6 +19,33 @@ The task is read-only:
 - no Hyperliquid execution.
 - no transactions.
 
+## Watchdog Alert Messages
+
+Run the read-only dry-run alert formatter:
+
+```bash
+bin/rails aerodrome:watchdog_alerts
+FORMAT=json bin/rails aerodrome:watchdog_alerts
+```
+
+`aerodrome:watchdog_alerts` converts watchdog status, blockers, warnings, readback state, observation summary, and recommended next steps into an operator-friendly alert message. Default delivery is local dry-run output only:
+
+```bash
+AERODROME_ALERTS_ENABLED=false
+AERODROME_ALERTS_DELIVERY=dry_run
+```
+
+The alert task is read-only:
+
+- no database writes.
+- no orders.
+- no close.
+- no Hyperliquid execution.
+- no transactions.
+- no email or Telegram sends.
+
+It does not close positions. If a blocker requires action, the operator must use the separate manually gated emergency close procedure or the Hyperliquid UI.
+
 ## Alert Events
 
 Alerting should eventually cover:
@@ -138,7 +165,7 @@ Future integrations may include:
 - VPS `systemd` journal alerts.
 - dashboard banner.
 
-Any alert integration should be read-only and tested without live orders first.
+Any real alert integration should be read-only and tested without live orders first. The current implementation only formats dry-run/local alert output; real email and Telegram delivery remain future work.
 
 ## Future Live Window Blocking Rules
 

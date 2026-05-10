@@ -15,6 +15,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:production_supervised_readiness"].reenable
     Rake::Task["aerodrome:live_observation_summary"].reenable
     Rake::Task["aerodrome:watchdog_check"].reenable
+    Rake::Task["aerodrome:watchdog_alerts"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -787,6 +788,42 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "watchdog alerts task outputs dry-run alert" do
+    report = watchdog_alerts_report(severity: "warn")
+
+    with_env("FORMAT" => nil) do
+      AerodromeWatchdogAlerts.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_alerts"].invoke }
+
+        assert_match "AERODROME WATCHDOG ALERTS", out
+        assert_match "severity: warn", out
+        assert_match "delivery: dry_run", out
+        assert_match "recommended actions:", out
+      end
+    end
+  end
+
+  test "watchdog alerts task supports JSON output" do
+    report = watchdog_alerts_report(severity: "pass")
+
+    with_env("FORMAT" => "json") do
+      AerodromeWatchdogAlerts.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_alerts"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "pass", parsed.fetch("severity")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+        assert_equal "dry_run", parsed.fetch("delivery").fetch("mode")
+      end
+    end
+  end
+
   test "live observation window task exits false when blocked" do
     report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
 
@@ -1053,6 +1090,26 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         hyperliquid: [ { name: "Mainnet ETH position nil while safe env", status: "pass" } ]
       },
       next_steps: [ "Watchdog is read-only." ]
+    }
+  end
+
+  def watchdog_alerts_report(severity:)
+    {
+      safety_banner: AerodromeWatchdogAlerts::BANNER,
+      status: severity == "pass" ? "PASS" : "WARN",
+      severity: severity,
+      title: "Aerodrome watchdog #{severity}",
+      summary: "status=#{severity}",
+      body: "body",
+      blockers: [],
+      warnings: severity == "warn" ? [ "Latest PnL snapshot fresh" ] : [],
+      recommended_actions: [ "Review warnings before any further live window." ],
+      delivery: { enabled: false, mode: "dry_run" },
+      timestamp: "2026-05-10T12:00:00Z",
+      git_sha: "abc123",
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false
     }
   end
 

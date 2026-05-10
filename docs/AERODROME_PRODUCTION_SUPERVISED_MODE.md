@@ -175,7 +175,7 @@ Alert events:
 - RPC/API error streak.
 - process crash.
 
-No real alert delivery is implemented by this document. `bin/rails aerodrome:watchdog_check` is read-only: it does not close positions, does not place orders, and does not call Hyperliquid execution methods. Blockers require operator action, and the emergency close remains a separate manually gated task.
+`bin/rails aerodrome:watchdog_check` is read-only: it does not close positions, does not place orders, and does not call Hyperliquid execution methods. `bin/rails aerodrome:watchdog_alerts` is also read-only and formats watchdog output into dry-run/local alert messages with title, summary, blockers, warnings, and recommended actions. It does not send email or Telegram messages, does not close positions, and does not automate live operation. Blockers require operator action, and the emergency close remains a separate manually gated task.
 
 ## VPS And Runtime Setup
 
