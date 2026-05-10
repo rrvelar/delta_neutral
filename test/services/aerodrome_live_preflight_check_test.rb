@@ -13,6 +13,7 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "2000",
       "AERODROME_MIN_ORDER_NOTIONAL_USD" => "10",
       "BASE_RPC_URL" => "https://base.example/rpc",
+      "HYPERLIQUID_WALLET_ADDRESS" => "0x5eC8Cd4881eba87279f5F243Eb89EA9383E677c6",
       "AERODROME_SLIPSTREAM_TOKEN_IDS" => "315985",
       "AERODROME_USDC_ADDRESS" => "0xusdc",
       "AERODROME_WETH_ADDRESS" => "0xweth"
@@ -95,7 +96,28 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
 
         assert_equal "PASS", report.fetch(:status)
         assert_equal [ "ETH" ], service.reads
-        assert_equal [ nil ], service.balance_reads
+        assert_equal [ "0x5eC8Cd4881eba87279f5F243Eb89EA9383E677c6" ], service.balance_reads
+        assert_empty service.order_calls
+        balance_check = report.dig(:checks, :hyperliquid_readback).find { |check| check[:name] == "Hyperliquid account balance read-only" }
+        assert_equal "pass", balance_check.fetch(:status)
+        assert_equal "1000.0", balance_check.fetch(:account_value)
+        assert_equal "1000.0", balance_check.fetch(:withdrawable)
+        assert_equal "0x5eC8Cd4881eba87279f5F243Eb89EA9383E677c6", balance_check.fetch(:wallet_address)
+      end
+    end
+  end
+
+  test "Hyperliquid balance read failure is clear warning when ETH readback succeeds" do
+    service = ReadOnlyHyperliquidMock.new(position: nil, balance_error: RuntimeError.new("Unexpected response status: 422"))
+
+    with_complete_state do
+      with_env(@env) do
+        report = AerodromeLivePreflightCheck.new(check_hyperliquid: true, hyperliquid_service: service).report
+
+        assert_equal "WARN", report.fetch(:status)
+        assert_includes report.fetch(:warnings), "Hyperliquid account balance read-only: Unexpected response status: 422"
+        refute report.fetch(:warnings).any? { |warning| warning.include?("Hyperliquid read-only checks") }
+        assert_equal [ "ETH" ], service.reads
         assert_empty service.order_calls
       end
     end
@@ -119,8 +141,9 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
   class ReadOnlyHyperliquidMock
     attr_reader :reads, :balance_reads, :order_calls
 
-    def initialize(position:)
+    def initialize(position:, balance_error: nil)
       @position = position
+      @balance_error = balance_error
       @reads = []
       @balance_reads = []
       @order_calls = []
@@ -133,6 +156,8 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
 
     def account_balance(address)
       @balance_reads << address
+      raise @balance_error if @balance_error
+
       { account_value: BigDecimal("1000"), withdrawable: BigDecimal("1000") }
     end
 

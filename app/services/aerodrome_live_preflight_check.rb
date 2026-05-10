@@ -123,16 +123,32 @@ class AerodromeLivePreflightCheck
     current_short = position ? decimal(position[:size]).abs : BigDecimal("0")
     @checks[:hyperliquid_readback] << { name: "Hyperliquid get_position(\"ETH\") read-only", status: "pass", value: current_short.to_s("F") }
     add_check(:hyperliquid_readback, "No open ETH short before first live micro-run", current_short.zero?, blocker: true, value: current_short.to_s("F"))
-    balance = read_account_balance
-    @checks[:hyperliquid_readback] << { name: "Hyperliquid account balance read-only", status: "pass", value: balance.inspect } if balance
+    read_account_balance
   rescue => e
-    add_check(:hyperliquid_readback, "Hyperliquid read-only checks", false, warning: true, value: e.message)
+    add_check(:hyperliquid_readback, "Hyperliquid ETH position readback", false, warning: true, value: e.message)
   end
 
   def read_account_balance
     return nil unless hyperliquid_service.respond_to?(:account_balance)
 
-    hyperliquid_service.account_balance(nil)
+    wallet_address = ENV["HYPERLIQUID_WALLET_ADDRESS"].presence
+    unless wallet_address
+      add_check(:hyperliquid_readback, "Hyperliquid account balance read-only", false, warning: true, value: "HYPERLIQUID_WALLET_ADDRESS missing")
+      return nil
+    end
+
+    balance = hyperliquid_service.account_balance(wallet_address)
+    @checks[:hyperliquid_readback] << {
+      name: "Hyperliquid account balance read-only",
+      status: "pass",
+      wallet_address: wallet_address,
+      account_value: decimal(balance[:account_value]).to_s("F"),
+      withdrawable: decimal(balance[:withdrawable]).to_s("F")
+    }
+    balance
+  rescue => e
+    add_check(:hyperliquid_readback, "Hyperliquid account balance read-only", false, warning: true, value: e.message)
+    nil
   end
 
   def hyperliquid_service
