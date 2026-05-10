@@ -10,6 +10,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:testnet_emergency_close"].reenable
     Rake::Task["aerodrome:live_emergency_close"].reenable
     Rake::Task["aerodrome:live_preflight_check"].reenable
+    Rake::Task["aerodrome:acknowledge_failed_rebalance"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -595,6 +596,57 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "acknowledge failed rebalance task outputs safety details" do
+    report = acknowledge_failed_rebalance_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeFailedRebalanceAcknowledgment.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:acknowledge_failed_rebalance"].invoke }
+
+        assert_match "AERODROME FAILED REBALANCE ACKNOWLEDGMENT", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "DB write: true", out
+        assert_match "status: success", out
+        assert_match AerodromeFailedRebalanceAcknowledgment::MARKER, out
+      end
+    end
+  end
+
+  test "acknowledge failed rebalance task supports JSON output" do
+    report = acknowledge_failed_rebalance_report(status: "success")
+
+    with_env("FORMAT" => "json") do
+      AerodromeFailedRebalanceAcknowledgment.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:acknowledge_failed_rebalance"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "success", parsed.fetch("status")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+        assert_equal AerodromeFailedRebalanceAcknowledgment::MARKER, parsed.fetch("acknowledgment_marker")
+      end
+    end
+  end
+
+  test "acknowledge failed rebalance task exits false when blocked" do
+    report = acknowledge_failed_rebalance_report(status: "blocked", errors: [ "missing id" ])
+
+    with_env("FORMAT" => nil) do
+      AerodromeFailedRebalanceAcknowledgment.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        assert_raises(SystemExit) do
+          capture_io { Rake::Task["aerodrome:acknowledge_failed_rebalance"].invoke }
+        end
+      end
+    end
+  end
+
   private
 
   def ok_report(token_id)
@@ -738,6 +790,22 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: blockers,
       warnings: warnings,
       next_steps: [ "PASS is not permission to live trade." ]
+    }
+  end
+
+  def acknowledge_failed_rebalance_report(status:, errors: [])
+    {
+      safety_banner: AerodromeFailedRebalanceAcknowledgment::BANNER,
+      status: status,
+      database_write: status == "success",
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      rebalance_id: 182,
+      asset: "WETH",
+      old_short_size: "0.0",
+      new_short_size: "0.0",
+      acknowledgment_marker: AerodromeFailedRebalanceAcknowledgment::MARKER,
+      errors: errors
     }
   end
 

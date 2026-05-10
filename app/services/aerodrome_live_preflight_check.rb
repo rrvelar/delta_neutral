@@ -113,8 +113,9 @@ class AerodromeLivePreflightCheck
       add_check(:testnet_evidence, "WETH rebalance up/down success exists", weth_successes.any? { |r| decimal(r.old_short_size).positive? && decimal(r.new_short_size).positive? && decimal(r.old_short_size) != decimal(r.new_short_size) }, blocker: true)
       add_check(:testnet_evidence, "WETH close-to-zero success exists", close.present?, blocker: true)
       add_check(:testnet_evidence, "No successful USDC rebalance exists", usdc_successes.empty?, blocker: true)
-      failed_after_close = close ? failed_weth.any? { |r| r.rebalanced_at && r.rebalanced_at > close.rebalanced_at } : false
-      add_check(:testnet_evidence, "No failed WETH after last close", !failed_after_close, blocker: true)
+      failed_after_close = close ? failed_weth.select { |r| r.rebalanced_at && r.rebalanced_at > close.rebalanced_at } : []
+      blocking_failures = failed_after_close.reject { |rebalance| acknowledged_zero_size_failure?(rebalance) }
+      add_check(:testnet_evidence, "No failed WETH after last close", blocking_failures.empty?, blocker: true)
     end
   end
 
@@ -218,5 +219,12 @@ class AerodromeLivePreflightCheck
 
   def weth_rebalance?(rebalance)
     HEDGEABLE_SYMBOLS.include?(rebalance.asset.to_s.upcase)
+  end
+
+  def acknowledged_zero_size_failure?(rebalance)
+    failed?(rebalance) &&
+      decimal(rebalance.old_short_size).zero? &&
+      decimal(rebalance.new_short_size).zero? &&
+      rebalance.message.to_s.include?(AerodromeFailedRebalanceAcknowledgment::MARKER)
   end
 end

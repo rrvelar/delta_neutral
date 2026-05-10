@@ -87,6 +87,60 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "blocks unacknowledged failed WETH after last close" do
+    with_complete_state do |hedge|
+      create_failed_rebalance!(
+        hedge,
+        old_short_size: "0",
+        new_short_size: "0",
+        message: "Attempted rebalance to 0.0111 ETH: failed"
+      )
+
+      with_env(@env) do
+        report = AerodromeLivePreflightCheck.new.report
+
+        assert_equal "BLOCKED", report.fetch(:status)
+        assert_includes report.fetch(:blockers), "No failed WETH after last close"
+      end
+    end
+  end
+
+  test "passes after acknowledged zero-size failed WETH after last close" do
+    with_complete_state do |hedge|
+      create_failed_rebalance!(
+        hedge,
+        old_short_size: "0",
+        new_short_size: "0",
+        message: "Attempted rebalance failed\n#{AerodromeFailedRebalanceAcknowledgment::MARKER}"
+      )
+
+      with_env(@env) do
+        report = AerodromeLivePreflightCheck.new.report
+
+        assert_equal "PASS", report.fetch(:status)
+        assert_empty report.fetch(:blockers)
+      end
+    end
+  end
+
+  test "blocks acknowledged failed WETH after last close with nonzero size" do
+    with_complete_state do |hedge|
+      create_failed_rebalance!(
+        hedge,
+        old_short_size: "0.01",
+        new_short_size: "0",
+        message: "Attempted close failed\n#{AerodromeFailedRebalanceAcknowledgment::MARKER}"
+      )
+
+      with_env(@env) do
+        report = AerodromeLivePreflightCheck.new.report
+
+        assert_equal "BLOCKED", report.fetch(:status)
+        assert_includes report.fetch(:blockers), "No failed WETH after last close"
+      end
+    end
+  end
+
   test "Hyperliquid readback uses mocked read-only calls only" do
     service = ReadOnlyHyperliquidMock.new(position: nil)
 
@@ -183,7 +237,7 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
     create_rebalance!(hedge, old_short_size: "0", new_short_size: "0.5")
     create_rebalance!(hedge, old_short_size: "0.5", new_short_size: "0.75")
     create_rebalance!(hedge, old_short_size: "0.75", new_short_size: "0")
-    yield
+    yield hedge
   ensure
     position&.destroy
   end
@@ -219,6 +273,18 @@ class AerodromeLivePreflightCheckTest < ActiveSupport::TestCase
       realized_pnl: "0",
       status: ShortRebalance::STATUS_SUCCESS,
       rebalanced_at: Time.current
+    )
+  end
+
+  def create_failed_rebalance!(hedge, old_short_size:, new_short_size:, message:)
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: old_short_size,
+      new_short_size: new_short_size,
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_FAILED,
+      message: message,
+      rebalanced_at: 1.minute.from_now
     )
   end
 

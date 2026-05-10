@@ -268,6 +268,32 @@ namespace :aerodrome do
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
 
+  desc "Acknowledge a reviewed zero-size failed Aerodrome WETH rebalance"
+  task acknowledge_failed_rebalance: :environment do
+    report = AerodromeFailedRebalanceAcknowledgment.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "status: #{report.fetch(:status)}"
+      puts "rebalance id: #{report.fetch(:rebalance_id).inspect}"
+      puts "asset: #{report.fetch(:asset).inspect}"
+      puts "old short size: #{report.fetch(:old_short_size).inspect}"
+      puts "new short size: #{report.fetch(:new_short_size).inspect}"
+      puts "acknowledgment marker: #{report.fetch(:acknowledgment_marker)}"
+      if report.fetch(:errors).any?
+        puts "errors:"
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      end
+    end
+
+    exit(false) if report.fetch(:status) == "blocked"
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

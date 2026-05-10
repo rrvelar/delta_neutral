@@ -165,6 +165,7 @@ Do not proceed if any of these are true:
 - `bin/rake` fails.
 - `git status --short` is dirty.
 - Preflight is blocked or warning is not understood.
+- Preflight is blocked by a failed WETH rebalance after the last close that has not been reviewed and explicitly acknowledged.
 - Live readback cannot confirm no existing ETH short.
 - Risk caps are missing, parse incorrectly, or are larger than the intended tiny first-live run.
 - `AERODROME_HEDGE_PAUSED` is not known to be restored to true after the run.
@@ -188,3 +189,9 @@ CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check
 ```
 
 If an ETH short remains open unexpectedly, use the gated live emergency close procedure or close manually. Do not use `aerodrome:testnet_emergency_close` on mainnet.
+
+## Failed No-Position Acknowledgment
+
+Failed `ShortRebalance` records from live attempts must not be deleted. If a reviewed WETH/ETH failure has `old_short_size=0`, `new_short_size=0`, and mainnet readback confirms `get_position("ETH") = nil`, an operator may acknowledge that specific row with `bin/rails aerodrome:acknowledge_failed_rebalance` using the required id and confirmation env values. The task appends `[operator_acknowledged_no_open_position]` to the row message only; it does not change status, sizes, or history.
+
+This acknowledgment is only for reviewed zero-size failures where no mainnet ETH position exists. It is not live approval, does not permit trading, and does not replace a fresh preflight plus separate manual approval before any repeat micro-run.

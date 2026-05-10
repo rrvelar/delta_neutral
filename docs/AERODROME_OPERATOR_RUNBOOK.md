@@ -207,6 +207,23 @@ CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check
 
 The live preflight expects mainnet-mode configuration while trading remains disabled: `HYPERLIQUID_TESTNET=false`, `AERODROME_LIVE_APPROVED=false`, `AERODROME_HEDGE_ENABLED=false`, and `AERODROME_HEDGE_PAUSED=true`. It performs no DB writes, places no orders, and does not call `open_short`, `close_short`, `set_leverage`, `market_order`, `market_close`, or `update_leverage`. PASS is not live approval. The first live micro-run requires a separate manual procedure, and a separate live emergency close procedure must be ready before first live. Live remains disabled by default.
 
+## Acknowledge Reviewed Failed Rebalance
+
+Failed `ShortRebalance` rows must not be deleted. If a failed WETH/ETH row is reviewed, has `old_short_size=0` and `new_short_size=0`, and mainnet readback confirms no ETH position exists, it can be acknowledged with:
+
+```bash
+bin/rails aerodrome:acknowledge_failed_rebalance
+```
+
+Required env gates:
+
+```bash
+AERODROME_ACK_FAILED_REBALANCE_ID=<short_rebalance_id>
+AERODROME_ACK_FAILED_REBALANCE_CONFIRM=I_CONFIRM_MAINNET_ETH_POSITION_IS_NIL_AND_FAILURE_REVIEWED
+```
+
+The task performs no orders and no Hyperliquid execution methods. It reads mainnet `get_position("ETH")` only and appends `[operator_acknowledged_no_open_position]` to the failed row message if eligible. It does not change status to success, does not change sizes, and does not delete history. Acknowledgment is not live approval; repeat live micro-run attempts still require fresh preflight and separate manual approval.
+
 ## First Live Micro-Run Runbook
 
 The first-live micro-run plan is documentation only:
