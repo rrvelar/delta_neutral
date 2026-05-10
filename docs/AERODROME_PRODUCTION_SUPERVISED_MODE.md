@@ -73,10 +73,11 @@ Before a supervised production run:
 5. Run `bin/rails aerodrome:pre_live_check`.
 6. Run `CHECK_HYPERLIQUID=true bin/rails aerodrome:live_preflight_check` in mainnet read-only mode.
 7. Run `bin/rails aerodrome:production_supervised_readiness`.
-8. Confirm mainnet ETH position is nil.
-9. Confirm testnet ETH position is nil.
-10. Confirm latest observation JSONL ended with final position nil and `manual_action_required=false`.
-11. Confirm live emergency close gates are ready but not persistently armed outside the supervised window.
+8. Run `bin/rails aerodrome:watchdog_check`.
+9. Confirm mainnet ETH position is nil.
+10. Confirm testnet ETH position is nil.
+11. Confirm latest observation JSONL ended with final position nil and `manual_action_required=false`.
+12. Confirm live emergency close gates are ready but not persistently armed outside the supervised window.
 
 Passing readiness is not permission to run live. A human operator must still explicitly approve the run.
 
@@ -174,7 +175,7 @@ Alert events:
 - RPC/API error streak.
 - process crash.
 
-No real alert delivery is implemented by this document.
+No real alert delivery is implemented by this document. `bin/rails aerodrome:watchdog_check` is read-only: it does not close positions, does not place orders, and does not call Hyperliquid execution methods. Blockers require operator action, and the emergency close remains a separate manually gated task.
 
 ## VPS And Runtime Setup
 
@@ -243,7 +244,7 @@ Do not delete or rewrite `ShortRebalance` history.
 
 1. Keep safe defaults.
 2. Add/read `aerodrome:production_supervised_readiness`.
-3. Add alerting and watchdog implementation in a separate task.
+3. Use `aerodrome:watchdog_check` as read-only watchdog evidence.
 4. Test alerting without orders.
 5. Test crash/stop/final-close behavior under mocks.
 6. Plan one supervised production-mode window with tiny caps.

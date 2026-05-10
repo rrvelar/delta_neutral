@@ -257,6 +257,8 @@ The supervised 3-hour live observation window is complete and documented in `doc
 
 Production supervised mode foundation is documented in `docs/AERODROME_PRODUCTION_SUPERVISED_MODE.md`. Use `bin/rails aerodrome:production_supervised_readiness` for a read-only readiness report and `bin/rails aerodrome:live_observation_summary` for a read-only summary of the latest JSONL observation log. These tasks do not place orders, do not write to the database, and do not approve live operation. Safe defaults remain disabled, paused, not approved, and testnet. Production container deployments should set `APP_GIT_SHA=$(git rev-parse --short HEAD)` at build/deploy time so readiness can report deployed revision metadata when `.git` is absent; this is metadata only and does not enable live trading.
 
+Alerting/watchdog foundation is documented in `docs/AERODROME_ALERTING_AND_WATCHDOG.md`. Use `bin/rails aerodrome:watchdog_check` for a read-only watchdog report. It does not close positions, does not place orders, and does not call Hyperliquid execution methods. Watchdog blockers require operator action; the live emergency close remains separate and manually gated. No live automation is enabled by this change.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

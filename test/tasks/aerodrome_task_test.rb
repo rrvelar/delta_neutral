@@ -14,6 +14,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:live_observation_window"].reenable
     Rake::Task["aerodrome:production_supervised_readiness"].reenable
     Rake::Task["aerodrome:live_observation_summary"].reenable
+    Rake::Task["aerodrome:watchdog_check"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -748,6 +749,44 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "watchdog check task outputs read-only report" do
+    report = watchdog_report(status: "WARN")
+
+    with_env("FORMAT" => nil) do
+      AerodromeWatchdogCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_check"].invoke }
+
+        assert_match "AERODROME WATCHDOG CHECK", out
+        assert_match "READ ONLY", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "status: WARN", out
+        assert_match "critical alerts:", out
+        assert_match "next actions:", out
+      end
+    end
+  end
+
+  test "watchdog check task supports JSON output" do
+    report = watchdog_report(status: "PASS")
+
+    with_env("FORMAT" => "json") do
+      AerodromeWatchdogCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
   test "live observation window task exits false when blocked" do
     report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
 
@@ -996,6 +1035,24 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: [],
       warnings: [],
       next_steps: [ "Observation summary is read-only evidence only." ]
+    }
+  end
+
+  def watchdog_report(status:)
+    {
+      safety_banner: AerodromeWatchdogCheck::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      alerts: status == "WARN" ? [ "review warning" ] : [],
+      warnings: status == "WARN" ? [ "stale pnl" ] : [],
+      blockers: [],
+      checks: {
+        env: [ { name: "AERODROME_HEDGE_ENABLED is false", status: "pass" } ],
+        hyperliquid: [ { name: "Mainnet ETH position nil while safe env", status: "pass" } ]
+      },
+      next_steps: [ "Watchdog is read-only." ]
     }
   end
 
