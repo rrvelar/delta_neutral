@@ -191,6 +191,8 @@ The VPS canary run that created `ShortRebalance #190` stopped because the generi
 
 The VPS canary runtime-safety retest passed after the canary-aware check was added. The 1-hour run reported runtime safety `PASS` with no blockers or warnings, treated the in-cap ETH short as expected during the canary, completed with `stop_reason="duration complete"`, closed `0.0106` ETH on the first final-close attempt, and ended with final mainnet ETH nil and `manual_action_required=false`. This confirms the context-specific runtime safety path for supervised canaries while keeping the generic watchdog strict for persistent monitoring.
 
+Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNER.md`. It is the first leave-position-open mode, but it is still supervised and manually launched only. It requires explicit one-off production-live gates, leaves ETH open only on clean duration completion, closes on errors/signals when gated, and requires `aerodrome:production_live_status` after every run. USDC remains unsupported, and unattended/systemd live service remains future work requiring separate approval.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

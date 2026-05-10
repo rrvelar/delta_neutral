@@ -118,3 +118,7 @@ The first VPS production canary behaved safely but stopped early because the gen
 After adding canary-aware runtime safety, a VPS production canary retest ran for 1 hour and passed. Iterations reported `runtime_safety_status="PASS"`, `runtime_safety_blockers=[]`, and `runtime_safety_warnings=[]`. The expected in-cap ETH short was not blocked during the canary. Final close started at `2026-05-10T12:13:45-04:00`, closed `0.0106` ETH on attempt 1, completed at `2026-05-10T12:13:59-04:00`, and final mainnet ETH readback was nil with `manual_action_required=false`.
 
 This confirms the canary/runtime-safety split for this retest only. The generic watchdog remains strict for persistent safe monitoring. This is not approval for unattended 24/7 operation; the next stage requires explicit operator approval.
+
+## Production Live Runner V1
+
+`docs/AERODROME_PRODUCTION_LIVE_RUNNER.md` documents the next supervised stage. Unlike the canary, the production live runner can leave the ETH hedge open on clean duration completion, but only under explicit one-off gates with small caps, `AERODROME_PRODUCTION_LIVE_LEAVE_POSITION_OPEN=true`, close-on-error/signal gates, and live emergency close gates. USDC remains unsupported. It is not scheduled and not unattended 24/7 operation.

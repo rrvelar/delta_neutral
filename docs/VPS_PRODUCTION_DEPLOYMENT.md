@@ -248,6 +248,8 @@ The first VPS canary created `ShortRebalance #190`, opened a `0.0108` ETH WETH h
 
 The VPS canary runtime-safety retest passed after the canary-aware check was added. The 1-hour retest reported runtime safety `PASS` with no blockers or warnings, allowed the expected in-cap ETH short during the canary, completed with `stop_reason="duration complete"`, closed `0.0106` ETH on the first final-close attempt, and ended with final mainnet ETH nil and `manual_action_required=false`. This does not approve unattended operation. A longer supervised canary or production supervised mode step still requires explicit operator approval.
 
+Production live runner V1 is a later manually launched step, not a VPS background service. It may leave ETH open only after clean duration completion and requires `bin/rails aerodrome:production_live_status` after every run. Do not add a systemd live runner service, scheduler, or UI start control without a separate approval. Watchdog scheduling remains read-only and must not start production live runs.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

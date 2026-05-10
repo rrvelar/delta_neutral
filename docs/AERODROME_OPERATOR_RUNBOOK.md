@@ -433,6 +433,8 @@ The VPS canary run that created `ShortRebalance #190` opened a `0.0108` ETH WETH
 
 The VPS canary runtime-safety retest passed after the fix. A 1-hour canary reported `runtime_safety_status="PASS"`, no blockers, and no warnings while the in-cap ETH short was open. Final close started at `2026-05-10T12:13:45-04:00`, submitted `0.0106` ETH on attempt 1, completed at `2026-05-10T12:13:59-04:00`, and final mainnet ETH readback was nil with `manual_action_required=false`. This is not approval for unattended 24/7 operation; the next stage should be a longer supervised canary or production supervised mode planning with explicit operator approval.
 
+Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNER.md`. It is the first supervised leave-position-open mode and must be manually launched with explicit one-off gates. It leaves the ETH hedge open only on clean duration completion, closes on errors/signals when emergency gates are present, and never supports USDC. After every run, the operator must run `bin/rails aerodrome:production_live_status` and verify the final state. Future unattended/systemd live service requires separate approval and implementation.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:
