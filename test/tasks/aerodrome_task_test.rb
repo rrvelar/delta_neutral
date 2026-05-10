@@ -706,6 +706,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "NO ORDERS", out
         assert_match "NO HYPERLIQUID EXECUTION", out
         assert_match "Overall status: WARN", out
+        assert_match "git SHA source: env", out
         assert_match "Observation summary:", out
       end
     end
@@ -953,6 +954,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       orders_enabled: false,
       hyperliquid_execution: false,
       git_sha: "abc123",
+      git_sha_source: "env",
       rails_env: "test",
       safe_env: {
         "AERODROME_HEDGE_ENABLED" => "false",

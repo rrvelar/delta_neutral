@@ -338,6 +338,7 @@ namespace :aerodrome do
       puts "DB write: #{report.fetch(:database_write)}"
       puts "Overall status: #{report.fetch(:status)}"
       puts "git SHA: #{report.fetch(:git_sha).inspect}"
+      puts "git SHA source: #{report.fetch(:git_sha_source)}"
       puts "Rails env: #{report.fetch(:rails_env)}"
       puts
 
