@@ -259,6 +259,8 @@ Production supervised mode foundation is documented in `docs/AERODROME_PRODUCTIO
 
 Alerting/watchdog foundation is documented in `docs/AERODROME_ALERTING_AND_WATCHDOG.md`. Use `bin/rails aerodrome:watchdog_check` for a read-only watchdog report, and `bin/rails aerodrome:watchdog_alerts` to format that report into an operator alert with blockers, warnings, and recommended actions. Default delivery is `dry_run`. Email delivery is disabled by default and only sends when `AERODROME_ALERTS_ENABLED=true`, `AERODROME_ALERTS_DELIVERY=email`, `AERODROME_ALERT_EMAIL_RECIPIENT` is present, and severity is at or above `AERODROME_ALERT_EMAIL_MIN_SEVERITY`; keep the recommended minimum at `warn` unless separately reviewed. SMTP must be configured separately through Rails Action Mailer settings. These tasks do not close positions, do not place orders, and do not call Hyperliquid execution methods. Watchdog blockers require operator action; the live emergency close remains separate and manually gated. No live automation is enabled by this change.
 
+Watchdog scheduler foundation is documented in `docs/AERODROME_WATCHDOG_SCHEDULER.md`. `bin/aerodrome-watchdog-tick` runs only `bin/rails aerodrome:watchdog_alerts`, and `bin/rails aerodrome:watchdog_scheduler_check` verifies the scheduler setup read-only. A scheduler tick does not start live trading, does not run live observation, does not run emergency close, and does not close positions. Recommended frequency is 5 minutes. On `BLOCKED`, stop any supervised run, read mainnet ETH independently, and use the separate manually gated emergency close only if ETH remains open.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

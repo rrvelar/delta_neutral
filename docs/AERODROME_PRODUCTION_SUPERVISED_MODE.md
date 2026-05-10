@@ -177,6 +177,8 @@ Alert events:
 
 `bin/rails aerodrome:watchdog_check` is read-only: it does not close positions, does not place orders, and does not call Hyperliquid execution methods. `bin/rails aerodrome:watchdog_alerts` is also read-only and formats watchdog output into dry-run/local alert messages with title, summary, blockers, warnings, and recommended actions. Dry-run remains the default. Email delivery is disabled by default and requires `AERODROME_ALERTS_ENABLED=true`, `AERODROME_ALERTS_DELIVERY=email`, `AERODROME_ALERT_EMAIL_RECIPIENT`, and severity at or above `AERODROME_ALERT_EMAIL_MIN_SEVERITY` (`warn` recommended). SMTP must be configured separately. Watchdog alerts do not close positions, open positions, or automate live operation. Blockers require operator action, and the emergency close remains a separate manually gated task.
 
+Scheduler foundation is documented in `docs/AERODROME_WATCHDOG_SCHEDULER.md`. `bin/aerodrome-watchdog-tick` runs only `bin/rails aerodrome:watchdog_alerts`, and `bin/rails aerodrome:watchdog_scheduler_check` verifies scheduler readiness read-only. A scheduler must not run live observation or emergency close. It does not start live trading, does not close positions, and defaults to dry-run alerts unless email is explicitly enabled by env.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

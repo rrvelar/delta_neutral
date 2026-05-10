@@ -161,10 +161,11 @@ For supervised mode:
 
 - during live observation: watch logs continuously.
 - watchdog check: every 5 minutes during a supervised window.
+- watchdog scheduler tick: every 5 minutes when explicitly configured by the operator.
 - readiness check: before and after each supervised window.
 - post-run Hyperliquid readback: immediately after final close, then again after a short delay.
 
-Do not run watchdog polling as live automation by default. A future scheduler must be approved separately.
+Do not run watchdog polling as live automation by default. `bin/aerodrome-watchdog-tick` and `bin/rails aerodrome:watchdog_scheduler_check` are scheduler foundation tools only; they run watchdog alerts, do not start live observation, do not close positions, and do not call Hyperliquid execution methods. See `docs/AERODROME_WATCHDOG_SCHEDULER.md` for systemd/cron templates and operator response rules.
 
 ## Future Alert Channels
 

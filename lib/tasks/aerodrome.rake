@@ -479,6 +479,38 @@ namespace :aerodrome do
     exit(false) if report.fetch(:severity) == "blocked"
   end
 
+  desc "Run a read-only Aerodrome watchdog scheduler readiness check"
+  task watchdog_scheduler_check: :environment do
+    report = AerodromeWatchdogSchedulerCheck.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "status: #{report.fetch(:status)}"
+      puts "blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+      puts "warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+      puts "next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

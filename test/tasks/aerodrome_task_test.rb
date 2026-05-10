@@ -16,6 +16,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:live_observation_summary"].reenable
     Rake::Task["aerodrome:watchdog_check"].reenable
     Rake::Task["aerodrome:watchdog_alerts"].reenable
+    Rake::Task["aerodrome:watchdog_scheduler_check"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -826,6 +827,41 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "watchdog scheduler check task outputs read-only status" do
+    report = watchdog_scheduler_report(status: "PASS")
+
+    with_env("FORMAT" => nil) do
+      AerodromeWatchdogSchedulerCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_scheduler_check"].invoke }
+
+        assert_match "AERODROME WATCHDOG SCHEDULER CHECK", out
+        assert_match "READ ONLY", out
+        assert_match "NO ORDERS", out
+        assert_match "status: PASS", out
+      end
+    end
+  end
+
+  test "watchdog scheduler check task supports JSON output" do
+    report = watchdog_scheduler_report(status: "PASS")
+
+    with_env("FORMAT" => "json") do
+      AerodromeWatchdogSchedulerCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:watchdog_scheduler_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
   test "live observation window task exits false when blocked" do
     report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
 
@@ -1115,6 +1151,20 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       database_write: false,
       orders_enabled: false,
       hyperliquid_execution: false
+    }
+  end
+
+  def watchdog_scheduler_report(status:)
+    {
+      safety_banner: AerodromeWatchdogSchedulerCheck::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      checks: {},
+      blockers: [],
+      warnings: [],
+      next_steps: [ "Scheduler foundation is read-only." ]
     }
   end
 
