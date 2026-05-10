@@ -112,6 +112,25 @@ class AerodromeCanaryRuntimeSafetyCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "warns on previous canary final position when current ETH is nil" do
+    with_position_and_hedge do |hedge|
+      Dir.mktmpdir do |dir|
+        File.write(
+          File.join(dir, "20260510120000-test.jsonl"),
+          { type: "finish", manual_action_required: false, final_position: { size: "-0.011" } }.to_json + "\n"
+        )
+
+        with_env(@env) do
+          report = build_service(hedge: hedge, eth_position: nil, log_dir: dir).report
+
+          assert_equal "WARN", report.fetch(:status)
+          assert_empty report.fetch(:blockers)
+          assert report.fetch(:warnings).any? { |warning| warning.include?("Previous canary final position nil") }
+        end
+      end
+    end
+  end
+
   test "does not call execution methods or write DB" do
     with_position_and_hedge do |hedge|
       with_env(@env) do

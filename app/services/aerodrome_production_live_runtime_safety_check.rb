@@ -90,8 +90,18 @@ class AerodromeProductionLiveRuntimeSafetyCheck
     if final_event.fetch("manual_action_required", nil) == true
       add_check(:previous_run, "Previous live/canary manual_action_required false", false, blocker: true)
     end
-    if final_event.fetch("final_position", nil).present?
-      add_check(:previous_run, "Previous live/canary final position nil", false, blocker: true, value: final_event.fetch("final_position").inspect)
+    if final_event.fetch("final_position_confirmed", nil) == false
+      if short_size(@eth_position).zero?
+        add_check(:previous_run, "Previous live/canary final position confirmed", false, warning: true, value: "current ETH readback nil")
+      else
+        add_check(:previous_run, "Previous live/canary final position confirmed", false, blocker: true, value: final_event.fetch("final_position", nil).inspect)
+      end
+    elsif final_event.fetch("final_position", nil).present?
+      if short_size(@eth_position).zero?
+        add_check(:previous_run, "Previous live/canary final position nil", false, warning: true, value: "current ETH readback nil")
+      else
+        add_check(:previous_run, "Previous live/canary final position nil", false, blocker: true, value: final_event.fetch("final_position").inspect)
+      end
     end
   rescue JSON::ParserError, Errno::ENOENT
     add_check(:previous_run, "Previous live/canary log readable", true)

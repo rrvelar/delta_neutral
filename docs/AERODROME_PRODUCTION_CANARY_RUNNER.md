@@ -75,7 +75,7 @@ The runner stops and goes to final close if:
 - canary runtime safety returns `BLOCKED`.
 - `SIGINT` or `SIGTERM` is received.
 
-Runtime safety blocks on cap breaches, missing readback, failed WETH/ETH rebalances during the run, any successful USDC rebalance, inactive/missing position or hedge, env gate mismatch, emergency close gate mismatch, or a previous canary final log with `manual_action_required=true` or non-nil final position.
+Runtime safety blocks on cap breaches, missing readback, failed WETH/ETH rebalances during the run, any successful USDC rebalance, inactive/missing position or hedge, env gate mismatch, emergency close gate mismatch, or a previous canary final log with `manual_action_required=true`. A previous non-nil final position is warning-only when current ETH readback is nil; if current ETH exists or readback is unavailable, resolve it before another run.
 
 ## Finalization
 

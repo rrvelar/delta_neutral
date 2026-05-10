@@ -39,7 +39,7 @@ Canary runtime safety allows the expected live canary state only when:
 - ETH notional is within `AERODROME_MAX_SHORT_NOTIONAL_USD`
 - position and hedge remain active
 
-It still blocks failed WETH/ETH rebalances, successful USDC rebalances, cap breaches, readback failures, inactive or missing position/hedge state, gate mismatch, or previous canary final logs with `manual_action_required=true` or a non-nil final position.
+It still blocks failed WETH/ETH rebalances, successful USDC rebalances, cap breaches, readback failures, inactive or missing position/hedge state, gate mismatch, or previous canary final logs with `manual_action_required=true`. A previous non-nil final position is warning-only when current ETH readback is nil.
 
 ## VPS Retest Evidence
 
