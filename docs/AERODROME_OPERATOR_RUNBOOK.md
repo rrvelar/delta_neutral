@@ -239,13 +239,15 @@ The first live micro-run is complete and documented in `docs/AERODROME_FIRST_LIV
 
 ## Live Observation Window
 
-`bin/rails aerodrome:live_observation_window` is a strictly gated one-off live observation tool. It is live-order capable but blocked by default. It is not background automation and does not add UI live controls. It refuses to run unless explicit observation gates, live hedge gates, tiny max short limits, close-on-finish, and live emergency close gates are all present. Duration is capped at 1800 seconds, interval must be at least 60 seconds, `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true` is mandatory, and `AERODROME_MAX_LEVERAGE` must be `1`.
+`bin/rails aerodrome:live_observation_window` is a strictly gated one-off live observation tool. It is live-order capable but blocked by default. It is not background automation and does not add UI live controls. It refuses to run unless explicit observation gates, live hedge gates, tiny max short limits, close-on-finish, and live emergency close gates are all present. Duration is capped at 3600 seconds, interval must be at least 60 seconds, `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true` is mandatory, and `AERODROME_MAX_LEVERAGE` must be `1`. For supervised 1-hour runs, prefer an interval of at least 300 seconds unless a separate review approves tighter polling.
 
 The task records JSONL events under `storage/aerodrome_live_observation/`, runs one iteration at a time for the configured short window, stops on failed rebalances or max-short breaches, and attempts the existing gated live emergency close at the end if an ETH short exists. Success requires final mainnet ETH position to be nil. Live remains disabled by default, and any observation window requires separate manual approval. Next scaling requires another explicit approval and should not follow automatically from one successful window.
 
 The first controlled 15-minute live observation window is complete and documented in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. It created `ShortRebalance #184` (`WETH`, `0.0 -> 0.0109`, success), created no additional rebalances in iterations 2 through 5, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil. This is not approval for continuous unattended live operation, and live automation remains disabled by default.
 
 The first controlled 30-minute live observation window is complete and documented in `docs/AERODROME_30M_LIVE_OBSERVATION_REPORT.md`. It created `ShortRebalance #185` (`WETH`, `0.0 -> 0.0111`, success), created no additional rebalances in iterations 2 through 10, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil. This is still not approval for continuous unattended live operation or scaling, and live automation remains disabled by default.
+
+The observation guard now permits a separately approved supervised 1-hour window, but the risk caps remain unchanged: max `0.02` ETH, max `$50` notional, and `1x` leverage. Close-on-finish and live emergency close gates remain mandatory. A 1-hour run is still not continuous unattended live operation, and any next scaling step requires separate review.
 
 ## Run AERO Rewards Check
 

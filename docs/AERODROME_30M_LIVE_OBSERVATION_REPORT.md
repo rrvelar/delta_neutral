@@ -128,3 +128,5 @@ Final operator checks showed:
 Do not scale immediately. Do not enable continuous unattended live operation.
 
 The next stage should be separately planned with fresh approval and conservative constraints. Reasonable next steps are a controlled one-cycle run or another bounded observation window with current backup, fresh preflight, tiny caps, and emergency close readiness. Any increase in size, duration, or automation requires a separate approval and safety review.
+
+The observation guard now permits a separately approved supervised 1-hour window. This does not change the hard risk caps: max `0.02` ETH, max `$50` notional, `1x` leverage, close-on-finish, and mandatory emergency close gates still apply unless a future safety review explicitly changes them. A 1-hour run is not continuous unattended live operation.

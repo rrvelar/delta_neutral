@@ -80,11 +80,25 @@ class AerodromeLiveObservationWindowTest < ActiveSupport::TestCase
 
   test "blocks if duration exceeds maximum" do
     with_position_and_hedge do
-      with_env(@env.merge("AERODROME_LIVE_OBSERVATION_DURATION_SECONDS" => "1801")) do
+      with_env(@env.merge("AERODROME_LIVE_OBSERVATION_DURATION_SECONDS" => "3601")) do
         report = build_service.report
 
         assert_equal "blocked", report.fetch(:status)
-        assert_includes report.fetch(:errors), "duration must be <= 1800 seconds"
+        assert_includes report.fetch(:errors), "duration must be <= 3600 seconds"
+      end
+    end
+  end
+
+  test "allows duration up to one hour when all gates pass" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011"), nil ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge) }
+
+      with_env(@env.merge("AERODROME_LIVE_OBSERVATION_DURATION_SECONDS" => "3600", "AERODROME_LIVE_OBSERVATION_INTERVAL_SECONDS" => "3600")) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_equal 3600, report.dig(:gates, :duration_seconds)
       end
     end
   end
