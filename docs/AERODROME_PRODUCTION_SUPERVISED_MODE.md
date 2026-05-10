@@ -85,7 +85,7 @@ Passing readiness is not permission to run live. A human operator must still exp
 Before a run:
 
 - create a database/application backup.
-- record git SHA.
+- record git SHA. Production container deployments should set `APP_GIT_SHA=$(git rev-parse --short HEAD)` at build/deploy time because `.git` may not exist inside the image.
 - record env gate plan without secrets.
 - record latest mainnet/testnet ETH readback.
 
@@ -250,3 +250,5 @@ Do not delete or rewrite `ShortRebalance` history.
 7. Review logs and incident readiness before any longer duration.
 
 Scaling duration, size, or autonomy requires a separate approval and safety review.
+
+`APP_GIT_SHA` is metadata only. It helps readiness identify the deployed revision and does not enable live trading, orders, or any execution path.

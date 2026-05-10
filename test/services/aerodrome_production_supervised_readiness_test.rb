@@ -12,7 +12,7 @@ class AerodromeProductionSupervisedReadinessTest < ActiveSupport::TestCase
       "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "0.025",
       "AERODROME_REWARDS_ENABLED" => "false",
       "AERODROME_FEES_ENABLED" => "false",
-      "GIT_SHA" => "abc123"
+      "APP_GIT_SHA" => "abc123"
     }
   end
 
@@ -31,6 +31,7 @@ class AerodromeProductionSupervisedReadinessTest < ActiveSupport::TestCase
           assert_equal false, report.fetch(:orders_enabled)
           assert_equal false, report.fetch(:hyperliquid_execution)
           assert_equal "abc123", report.fetch(:git_sha)
+          assert_equal "env", report.fetch(:git_sha_source)
           assert_empty report.fetch(:blockers)
           assert_equal "success", report.dig(:observation_summary, :final_close_status)
         end
@@ -90,6 +91,39 @@ class AerodromeProductionSupervisedReadinessTest < ActiveSupport::TestCase
     end
   end
 
+  test "uses APP_GIT_SHA env when present" do
+    with_env(@env.merge("APP_GIT_SHA" => "envsha")) do
+      report = build_metadata_only_service.report
+
+      assert_equal "envsha", report.fetch(:git_sha)
+      assert_equal "env", report.fetch(:git_sha_source)
+    end
+  end
+
+  test "falls back to git command when env missing and git available" do
+    with_env(@env.merge("APP_GIT_SHA" => nil)) do
+      service = build_metadata_only_service
+      service.stub(:git_command_sha, "gitsha") do
+        report = service.report
+
+        assert_equal "gitsha", report.fetch(:git_sha)
+        assert_equal "git", report.fetch(:git_sha_source)
+      end
+    end
+  end
+
+  test "reports unavailable when env and git command are unavailable" do
+    with_env(@env.merge("APP_GIT_SHA" => nil)) do
+      service = build_metadata_only_service
+      service.stub(:git_command_sha, nil) do
+        report = service.report
+
+        assert_nil report.fetch(:git_sha)
+        assert_equal "unavailable", report.fetch(:git_sha_source)
+      end
+    end
+  end
+
   test "does not call Hyperliquid execution methods" do
     with_position_and_hedge do |hedge|
       create_success_rebalance(hedge)
@@ -106,6 +140,15 @@ class AerodromeProductionSupervisedReadinessTest < ActiveSupport::TestCase
       assert_empty mainnet.order_calls
       assert_empty testnet.order_calls
     end
+  end
+
+  def build_metadata_only_service
+    AerodromeProductionSupervisedReadiness.new(
+      mainnet_hyperliquid_service: HyperliquidReadMock.new(position: nil),
+      testnet_hyperliquid_service: HyperliquidReadMock.new(position: nil),
+      observation_summary: SummaryReport.new(status: "PASS"),
+      log_dir: Rails.root.join("tmp")
+    )
   end
 
   private

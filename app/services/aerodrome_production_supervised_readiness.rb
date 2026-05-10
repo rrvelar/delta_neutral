@@ -1,3 +1,5 @@
+require "open3"
+
 class AerodromeProductionSupervisedReadiness
   BANNER = "AERODROME PRODUCTION SUPERVISED READINESS — READ ONLY"
   DEX_NAME = "aerodrome_slipstream"
@@ -49,6 +51,7 @@ class AerodromeProductionSupervisedReadiness
       orders_enabled: false,
       hyperliquid_execution: false,
       git_sha: git_sha,
+      git_sha_source: git_sha_source,
       rails_env: Rails.env,
       safe_env: safe_env,
       checks: @checks,
@@ -64,6 +67,7 @@ class AerodromeProductionSupervisedReadiness
 
   def add_git_and_runtime
     add_check(:git, "Git SHA available", git_sha.present?, warning: true, value: git_sha || "unavailable")
+    add_check(:git, "Git SHA source", true, value: git_sha_source)
     add_check(:git, "Rails env", true, value: Rails.env)
   end
 
@@ -216,18 +220,46 @@ class AerodromeProductionSupervisedReadiness
   end
 
   def git_sha
-    @git_sha ||= ENV["GIT_SHA"].presence || git_head_sha
+    @git_sha ||= begin
+      sha, = git_sha_with_source
+      sha
+    end
   end
 
-  def git_head_sha
-    head_path = Rails.root.join(".git", "HEAD")
-    return nil unless head_path.exist?
+  def git_sha_source
+    @git_sha_source ||= begin
+      _, source = git_sha_with_source
+      source
+    end
+  end
 
-    head = head_path.read.strip
-    return head unless head.start_with?("ref: ")
+  def git_sha_with_source
+    return [ @git_sha_value, @git_sha_source_value ] if defined?(@git_sha_value)
 
-    ref_path = Rails.root.join(".git", head.delete_prefix("ref: "))
-    ref_path.read.strip if ref_path.exist?
+    env_sha = ENV["APP_GIT_SHA"].presence
+    if env_sha
+      @git_sha_value = env_sha
+      @git_sha_source_value = "env"
+      return [ @git_sha_value, @git_sha_source_value ]
+    end
+
+    git_sha = git_command_sha
+    if git_sha
+      @git_sha_value = git_sha
+      @git_sha_source_value = "git"
+      return [ @git_sha_value, @git_sha_source_value ]
+    end
+
+    @git_sha_value = nil
+    @git_sha_source_value = "unavailable"
+    [ @git_sha_value, @git_sha_source_value ]
+  end
+
+  def git_command_sha
+    stdout, _stderr, status = Open3.capture3("git", "rev-parse", "--short", "HEAD", chdir: Rails.root.to_s)
+    return nil unless status.success?
+
+    stdout.strip.presence
   rescue Errno::ENOENT
     nil
   end
