@@ -324,6 +324,90 @@ namespace :aerodrome do
     exit(false) if %w[blocked failed].include?(report.fetch(:status))
   end
 
+  desc "Run a read-only Aerodrome production supervised readiness check"
+  task production_supervised_readiness: :environment do
+    report = AerodromeProductionSupervisedReadiness.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "Overall status: #{report.fetch(:status)}"
+      puts "git SHA: #{report.fetch(:git_sha).inspect}"
+      puts "Rails env: #{report.fetch(:rails_env)}"
+      puts
+
+      report.fetch(:checks).each do |section, checks|
+        puts section.to_s.tr("_", " ")
+        checks.each do |check|
+          value = check[:value] ? " (#{check[:value]})" : ""
+          puts "  #{check.fetch(:status).upcase}: #{check.fetch(:name)}#{value}"
+        end
+        puts
+      end
+
+      puts "Observation summary:"
+      summary = report.fetch(:observation_summary)
+      puts "  log path: #{summary.fetch(:log_path).inspect}"
+      puts "  iterations: #{summary.fetch(:iterations).inspect}"
+      puts "  final close status: #{summary.fetch(:final_close_status).inspect}"
+      puts "  final position: #{summary.fetch(:final_position).inspect}"
+      puts "  manual action required: #{summary.fetch(:manual_action_required).inspect}"
+
+      puts "Blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+
+      puts "Warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+
+      puts "Next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
+
+  desc "Summarize the latest Aerodrome live observation JSONL log read-only"
+  task live_observation_summary: :environment do
+    report = AerodromeLiveObservationSummary.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "Overall status: #{report.fetch(:status)}"
+      puts "log path: #{report.fetch(:log_path).inspect}"
+      puts "duration seconds: #{report.fetch(:duration_seconds).inspect}"
+      puts "iterations: #{report.fetch(:iterations)}"
+      puts "first timestamp: #{report.fetch(:first_timestamp).inspect}"
+      puts "last timestamp: #{report.fetch(:last_timestamp).inspect}"
+      puts "max observed ETH short: #{report.fetch(:max_observed_eth_short)}"
+      puts "rebalances: #{report.fetch(:rebalances_count)}"
+      puts "errors count: #{report.fetch(:errors_count)}"
+      puts "final close status: #{report.fetch(:final_close_status).inspect}"
+      puts "final position: #{report.fetch(:final_position).inspect}"
+      puts "manual action required: #{report.fetch(:manual_action_required).inspect}"
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

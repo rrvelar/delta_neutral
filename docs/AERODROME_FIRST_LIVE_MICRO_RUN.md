@@ -4,9 +4,11 @@ This document is a planning runbook only. It does not enable live trading, does 
 
 The first live micro-run has completed and is recorded in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. `ShortRebalance #183` successfully opened a tiny mainnet ETH short from the Aerodrome WETH side, the USDC side was skipped, and the gated live emergency close successfully closed the short. Final mainnet ETH position was nil. This milestone is not approval for continuous live operation, and the default state remains disabled, paused, and not live-approved.
 
-A strictly gated one-off live observation window task exists for a separately approved next stage: `bin/rails aerodrome:live_observation_window`. It is not background automation and is blocked by default. It refuses windows longer than 30 minutes, requires `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true`, requires live emergency close gates to be present, and records JSONL events under `storage/aerodrome_live_observation/`. Do not run it from this document; any observation window requires a fresh manual approval and tiny risk caps.
+A strictly gated one-off live observation window task exists for separately approved supervised windows: `bin/rails aerodrome:live_observation_window`. It is not background automation and is blocked by default. It refuses windows longer than 3 hours, requires `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true`, requires live emergency close gates to be present, and records JSONL events under `storage/aerodrome_live_observation/`. Do not run it from this document; any observation window requires a fresh manual approval and tiny risk caps.
 
 The first controlled 15-minute live observation window has completed and is recorded in `docs/AERODROME_LIVE_OBSERVATION_WINDOW_REPORT.md`. `ShortRebalance #184` opened a tiny mainnet ETH short, iterations 2 through 5 created no additional rebalances, the gated live emergency close closed the short, and final mainnet ETH position was nil. Live automation remains disabled by default, and this is not approval for continuous unattended operation.
+
+Subsequent supervised observation milestones are documented in `docs/AERODROME_30M_LIVE_OBSERVATION_REPORT.md`, `docs/AERODROME_15M_FINALIZATION_RETEST_REPORT.md`, and `docs/AERODROME_3H_LIVE_OBSERVATION_REPORT.md`. The 3-hour window passed with `ShortRebalance #188`, no extra rebalances in iterations 2 through 36, final mainnet ETH nil, and `manual_action_required=false`. This is still not approval for continuous unattended operation. The next stage is production supervised mode planning in `docs/AERODROME_PRODUCTION_SUPERVISED_MODE.md`.
 
 Current safe production state remains:
 
@@ -205,8 +207,8 @@ This acknowledgment is only for reviewed zero-size failures where no mainnet ETH
 
 ## Live Observation Window
 
-`bin/rails aerodrome:live_observation_window` is a live-order-capable one-off tool for a future controlled observation window. It is blocked by default and must not be treated as daemon/background automation. The window is capped at 1800 seconds, interval must be at least 60 seconds, close-on-finish is mandatory, and the live emergency close gates must also be configured.
+`bin/rails aerodrome:live_observation_window` is a live-order-capable one-off tool for a future controlled observation window. It is blocked by default and must not be treated as daemon/background automation. The window is capped at 10800 seconds, interval must be at least 60 seconds, close-on-finish is mandatory, and the live emergency close gates must also be configured.
 
 The task records JSONL events, runs only manual iterations, attempts the existing gated live emergency close at the end when an ETH short exists, and reports success only when the final mainnet ETH position is nil. It does not approve scaling. The next stage after the completed first micro-run should be a separately planned small live observation window or controlled one-cycle run, not immediate larger sizing.
 
-The completed 15-minute window validates one small observation run only. Any next stage must be separately planned; do not scale immediately.
+The completed 15-minute, 30-minute, finalization retest, and 3-hour windows validate bounded supervised runs only. Any next stage must be separately planned; do not scale immediately. Production supervised mode requires readiness checks, alerts, watchdog planning, final close guarantees, and incident response.

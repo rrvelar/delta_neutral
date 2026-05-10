@@ -255,6 +255,8 @@ The hardened finalization path was retested successfully in a supervised 15-minu
 
 The supervised 3-hour live observation window is complete and documented in `docs/AERODROME_3H_LIVE_OBSERVATION_REPORT.md`. It created `ShortRebalance #188` (`WETH`, `0.0 -> 0.011`, success), created no additional rebalances in iterations 2 through 36, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil, `final_position_confirmed=true`, and `manual_action_required=false`. Live automation remains disabled by default; this is not approval for continuous unattended operation. The next stage should be production supervised mode planning: watchdogs, alerts, healthchecks, logs, VPS/uptime, and clear stop/close rules.
 
+Production supervised mode foundation is documented in `docs/AERODROME_PRODUCTION_SUPERVISED_MODE.md`. Use `bin/rails aerodrome:production_supervised_readiness` for a read-only readiness report and `bin/rails aerodrome:live_observation_summary` for a read-only summary of the latest JSONL observation log. These tasks do not place orders, do not write to the database, and do not approve live operation. Safe defaults remain disabled, paused, not approved, and testnet.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:

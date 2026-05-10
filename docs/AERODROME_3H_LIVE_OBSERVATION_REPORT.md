@@ -136,4 +136,6 @@ Final operator checks showed:
 
 Do not scale immediately. Do not enable continuous unattended live operation.
 
-The next stage should be production supervised mode planning, not larger sizing. That plan should cover watchdog behavior, alerts, healthchecks, log retention, VPS/uptime expectations, runbook ownership, and clear stop/close rules before any longer or more operationally ambitious live run is approved.
+The next stage should be production supervised mode planning, not larger sizing. That plan is started in `docs/AERODROME_PRODUCTION_SUPERVISED_MODE.md` and should cover watchdog behavior, alerts, healthchecks, log retention, VPS/uptime expectations, runbook ownership, and clear stop/close rules before any longer or more operationally ambitious live run is approved.
+
+Use `bin/rails aerodrome:production_supervised_readiness` and `bin/rails aerodrome:live_observation_summary` only as read-only evidence gathering. They do not enable live trading and do not replace explicit operator approval.

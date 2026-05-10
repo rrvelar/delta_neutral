@@ -12,6 +12,8 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:live_preflight_check"].reenable
     Rake::Task["aerodrome:acknowledge_failed_rebalance"].reenable
     Rake::Task["aerodrome:live_observation_window"].reenable
+    Rake::Task["aerodrome:production_supervised_readiness"].reenable
+    Rake::Task["aerodrome:live_observation_summary"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -690,6 +692,61 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "production supervised readiness task outputs read-only report" do
+    report = production_readiness_report(status: "WARN")
+
+    with_env("FORMAT" => nil) do
+      AerodromeProductionSupervisedReadiness.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_supervised_readiness"].invoke }
+
+        assert_match "AERODROME PRODUCTION SUPERVISED READINESS", out
+        assert_match "READ ONLY", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "Overall status: WARN", out
+        assert_match "Observation summary:", out
+      end
+    end
+  end
+
+  test "production supervised readiness task supports JSON output" do
+    report = production_readiness_report(status: "PASS")
+
+    with_env("FORMAT" => "json") do
+      AerodromeProductionSupervisedReadiness.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_supervised_readiness"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("orders_enabled")
+        assert_equal false, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
+  test "live observation summary task outputs read-only report" do
+    report = observation_summary_report(status: "PASS")
+
+    with_env("FORMAT" => nil) do
+      AerodromeLiveObservationSummary.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:live_observation_summary"].invoke }
+
+        assert_match "AERODROME LIVE OBSERVATION SUMMARY", out
+        assert_match "READ ONLY", out
+        assert_match "NO ORDERS", out
+        assert_match "NO HYPERLIQUID EXECUTION", out
+        assert_match "final close status: \"success\"", out
+      end
+    end
+  end
+
   test "live observation window task exits false when blocked" do
     report = live_observation_report(status: "blocked", errors: [ "blocked gate" ])
 
@@ -885,6 +942,58 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       final_readback_attempts: [ { attempt: 1, status: "success", position: nil } ],
       manual_action_required: false,
       errors: errors
+    }
+  end
+
+  def production_readiness_report(status:)
+    {
+      safety_banner: AerodromeProductionSupervisedReadiness::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      git_sha: "abc123",
+      rails_env: "test",
+      safe_env: {
+        "AERODROME_HEDGE_ENABLED" => "false",
+        "AERODROME_HEDGE_PAUSED" => "true",
+        "AERODROME_LIVE_APPROVED" => "false",
+        "HYPERLIQUID_TESTNET" => "true"
+      },
+      checks: {
+        env: [ { name: "AERODROME_HEDGE_ENABLED is false", status: "pass" } ],
+        logs: [ { name: "Latest observation final position nil", status: "pass" } ]
+      },
+      observation_summary: observation_summary_report(status: "PASS"),
+      backup_path_suggestion: "storage/backups",
+      blockers: [],
+      warnings: status == "WARN" ? [ "review warning" ] : [],
+      next_steps: [ "Readiness is not live approval." ]
+    }
+  end
+
+  def observation_summary_report(status:)
+    {
+      safety_banner: AerodromeLiveObservationSummary::BANNER,
+      status: status,
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      log_path: "storage/aerodrome_live_observation/test.jsonl",
+      duration_seconds: 10_800,
+      iterations: 36,
+      first_timestamp: "2026-05-10T06:01:57Z",
+      last_timestamp: "2026-05-10T09:01:57Z",
+      max_observed_eth_short: "0.011",
+      rebalances_count: 1,
+      errors_count: 0,
+      final_close_status: "success",
+      final_position: nil,
+      final_position_confirmed: true,
+      manual_action_required: false,
+      blockers: [],
+      warnings: [],
+      next_steps: [ "Observation summary is read-only evidence only." ]
     }
   end
 
