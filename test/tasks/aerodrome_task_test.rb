@@ -1148,6 +1148,11 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       sent: false,
       recipient: nil,
       skipped_reason: "delivery mode dry_run",
+      fingerprint: "abc123fingerprint",
+      fingerprint_changed: true,
+      cooldown_seconds: 1800,
+      last_sent_at: nil,
+      state_write: false,
       database_write: false,
       orders_enabled: false,
       hyperliquid_execution: false
