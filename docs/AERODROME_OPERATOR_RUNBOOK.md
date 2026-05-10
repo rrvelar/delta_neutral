@@ -445,6 +445,8 @@ A prior approved-open production live log with non-nil `final_position` is not p
 
 If `aerodrome:production_live_status` reports `lock_state=stale_finished`, verify no live runner process is active, inspect the latest production live JSONL finish event, run current mainnet ETH readback, and decide whether manual emergency close is needed before removing `storage/aerodrome_production_live/run.lock`. Status/watchdog tasks do not remove locks and do not close positions.
 
+The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, `approved_open_position` reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` with no blockers. The warning stated that production readiness is strict safe-mode evidence and approved open ETH is monitored by the approved-open detector. The operator then manually ran the gated live emergency close, which closed ETH to nil. This is not unattended 24/7 approval; the next stage is either a longer supervised `production_live_run` with approved-open monitoring active or explicit restart/adopt-existing workflow design.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

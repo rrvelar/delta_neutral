@@ -260,6 +260,8 @@ Production readiness is still a strict safe-mode check. During an approved-open 
 
 If `production_live_status` reports `lock_state=stale_finished`, do not assume a runner is active. Verify with process listings/system logs, inspect the latest production live JSONL finish event, run current mainnet ETH readback, and only then remove `storage/aerodrome_production_live/run.lock` if it is stale. Emergency close remains manual and gated.
 
+The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an in-cap ETH short around `-0.0093` open by design. Approved-open monitoring reported `approved`, status reported `PASS`, and watchdog alerts reported `WARN` rather than `BLOCKED` because strict readiness was the only suppressed safe-mode signal. The operator then manually closed ETH through the gated emergency close, and final mainnet readback was nil. Future VPS production live runs remain supervised and require explicit gates; unattended 24/7 operation is not approved.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

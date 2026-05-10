@@ -197,6 +197,8 @@ The first VPS Production Live Runner V1 run passed. It ran for 1 hour with 12 it
 
 Approved open position monitoring is read-only and lets watchdog distinguish a known valid open ETH hedge from an unexpected ETH position. It only treats ETH as intended state when the latest production live log is successful, duration-complete, `position_left_open=true`, confirmed, no manual action required, and current ETH is within caps/tolerance. It does not close positions or approve new live runs.
 
+The VPS approved-open watchdog/readiness retest passed and is recorded in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, approved-open monitoring validated it, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` rather than `BLOCKED` because the only suppressed readiness blocker was strict safe-mode ETH-open evidence. The operator then manually ran the gated live emergency close and final mainnet ETH readback was nil. This remains supervised production mode, not unattended operation.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

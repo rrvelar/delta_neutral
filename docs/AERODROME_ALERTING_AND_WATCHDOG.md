@@ -195,6 +195,8 @@ Production supervised readiness remains strict safe-mode evidence. When an appro
 
 `aerodrome:production_live_status` reports lock state as active, absent, or stale. A stale finished-run lock is a warning; verify no live process is running, inspect the latest log, and confirm current mainnet ETH state before manually removing `storage/aerodrome_production_live/run.lock`. Watchdog alerts do not remove locks and do not close positions.
 
+The VPS approved-open watchdog retest passed. During a 360 second production live run, an in-cap ETH hedge around `-0.0093` was left open by design. Approved-open monitoring reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` returned `WARN` with no blockers because strict readiness was the only suppressed signal. The operator then used the separately gated live emergency close and final mainnet ETH readback was nil. Approved open ETH within caps is monitored state, not an emergency; emergency close remains manual and gated.
+
 ## Future Alert Channels
 
 Future integrations may include:

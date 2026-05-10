@@ -60,6 +60,10 @@ Emergency close remains separate and manually gated.
 
 `aerodrome:production_live_status` distinguishes an active lock from a stale lock file. A lock file with a finished latest JSONL run is `stale_finished` and warning-only. Before removing it manually, verify no production live process is running, inspect the latest log, run current mainnet ETH readback, and confirm whether emergency close is needed. The watchdog/status tasks do not close positions.
 
+## VPS Retest
+
+The approved-open watchdog/readiness integration retest passed on VPS and is recorded in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, `approved_open_position` reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` returned `WARN` with no blockers because the open ETH was approved and within caps. The operator then ran the separately gated live emergency close, which closed ETH to nil. This remains supervised production mode only, not unattended 24/7 approval.
+
 ## Next Stage
 
 This is supervised production monitoring only. It is not unattended 24/7 approval. Future work may add an explicit archive/acknowledgment workflow for approved-open logs that are later manually closed.
