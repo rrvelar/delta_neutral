@@ -437,6 +437,8 @@ Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNE
 
 The first VPS Production Live Runner V1 run passed. It ran for 3600 seconds with 12 iterations and one WETH-side rebalance. Runtime safety stayed `PASS` with no blockers/warnings, USDC was not used, and clean duration completion intentionally left an in-cap ETH hedge open with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and status `success`. Mainnet ETH was later verified nil, emergency close returned noop, and safe env was restored. This is still not approval for unattended 24/7 operation; next work should add approved-open-position monitoring/watchdog.
 
+Approved open position monitoring is now available and documented in `docs/AERODROME_APPROVED_OPEN_POSITION_MONITORING.md`. It is read-only and does not close positions. It treats an open ETH short as non-blocking only if it came from a successful production live run with `position_left_open=true` and remains within caps/tolerance. Any out-of-bounds, unknown, failed, unconfirmed, `manual_action_required`, failed WETH, or USDC success condition remains a blocker.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

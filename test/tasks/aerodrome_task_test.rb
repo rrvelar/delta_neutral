@@ -20,6 +20,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:production_canary_run"].reenable
     Rake::Task["aerodrome:production_live_run"].reenable
     Rake::Task["aerodrome:production_live_status"].reenable
+    Rake::Task["aerodrome:approved_open_position"].reenable
     Rake::Task["aerodrome:production_live_stop_plan"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
@@ -969,6 +970,40 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_match "AERODROME PRODUCTION LIVE STOP PLAN", out
         assert_match "READ ONLY", out
         assert_match "run live_emergency_close if needed", out
+      end
+    end
+  end
+
+  test "approved open position task supports JSON output" do
+    report = {
+      safety_banner: AerodromeApprovedOpenPosition::BANNER,
+      status: "PASS",
+      database_write: false,
+      orders_enabled: false,
+      hyperliquid_execution: false,
+      approved: true,
+      approval_status: "approved",
+      log_path: "storage/aerodrome_production_live/test.jsonl",
+      approved_final_position: { asset: "ETH", size: "-0.0101" },
+      current_mainnet_position: { asset: "ETH", size: "-0.0101" },
+      blockers: [],
+      warnings: [],
+      next_steps: []
+    }
+    hyperliquid = Object.new.tap { |object| object.define_singleton_method(:get_position) { |_| { asset: "ETH", size: "-0.0101" } } }
+
+    with_env("FORMAT" => "json") do
+      HyperliquidService.stub(:new, hyperliquid) do
+        AerodromeApprovedOpenPosition.stub(:new, ->(current_position:) {
+          assert_equal({ asset: "ETH", size: "-0.0101" }, current_position)
+          Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+        }) do
+          out, = capture_io { Rake::Task["aerodrome:approved_open_position"].invoke }
+          parsed = JSON.parse(out)
+
+          assert_equal "PASS", parsed.fetch("status")
+          assert_equal true, parsed.fetch("approved")
+        end
       end
     end
   end

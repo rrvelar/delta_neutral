@@ -45,6 +45,60 @@ class AerodromeWatchdogCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "approved open ETH within caps does not block safe env watchdog" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      approved = ApprovedOpenReport.new(approval_status: "approved")
+
+      with_env(@env) do
+        report = build_service(
+          mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.0101")),
+          approved_open_position: approved
+        ).report
+
+        assert_equal "PASS", report.fetch(:status)
+        assert_empty report.fetch(:blockers)
+        assert_includes report.fetch(:alerts), "approved open ETH hedge monitored"
+        assert_equal "approved", report.fetch(:approved_open_position).fetch(:approval_status)
+      end
+    end
+  end
+
+  test "approved open current nil warns without blocking" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      approved = ApprovedOpenReport.new(approval_status: "current_nil", status: "WARN", warnings: [ "Approved open hedge is no longer open" ])
+
+      with_env(@env) do
+        report = build_service(approved_open_position: approved).report
+
+        assert_equal "WARN", report.fetch(:status)
+        assert_empty report.fetch(:blockers)
+        assert_includes report.fetch(:warnings), "Approved open hedge is no longer open"
+      end
+    end
+  end
+
+  test "approved open out of bounds blocks" do
+    with_position_and_hedge do |hedge|
+      create_success_rebalance(hedge)
+      create_snapshot(hedge.position)
+      approved = ApprovedOpenReport.new(approval_status: "out_of_bounds", status: "BLOCKED", blockers: [ "Current ETH short exceeds approved max ETH" ])
+
+      with_env(@env) do
+        report = build_service(
+          mainnet_hyperliquid_service: HyperliquidReadMock.new(position: eth_position("-0.03")),
+          approved_open_position: approved
+        ).report
+
+        assert_equal "BLOCKED", report.fetch(:status)
+        assert_includes report.fetch(:blockers), "Current ETH short exceeds approved max ETH"
+      end
+    end
+  end
+
   test "normal watchdog remains strict even if canary live env is set" do
     with_position_and_hedge do |hedge|
       create_success_rebalance(hedge)
@@ -252,17 +306,41 @@ class AerodromeWatchdogCheckTest < ActiveSupport::TestCase
     end
   end
 
+  class ApprovedOpenReport
+    def initialize(approval_status:, status: "PASS", blockers: [], warnings: [])
+      @approval_status = approval_status
+      @status = status
+      @blockers = blockers
+      @warnings = warnings
+    end
+
+    def report
+      {
+        status: @status,
+        approved: @approval_status == "approved",
+        approval_status: @approval_status,
+        approved_log_path: "storage/aerodrome_production_live/test.jsonl",
+        approved_final_position: { asset: "ETH", size: "-0.0101" },
+        current_mainnet_position: { asset: "ETH", size: "-0.0101" },
+        blockers: @blockers,
+        warnings: @warnings
+      }
+    end
+  end
+
   def build_service(
     mainnet_hyperliquid_service: HyperliquidReadMock.new(position: nil),
     testnet_hyperliquid_service: HyperliquidReadMock.new(position: nil),
     observation_summary: SummaryReport.new,
-    production_readiness: ReadinessReport.new
+    production_readiness: ReadinessReport.new,
+    approved_open_position: ApprovedOpenReport.new(approval_status: "not_approved")
   )
     AerodromeWatchdogCheck.new(
       mainnet_hyperliquid_service: mainnet_hyperliquid_service,
       testnet_hyperliquid_service: testnet_hyperliquid_service,
       observation_summary: observation_summary,
       production_readiness: production_readiness,
+      approved_open_position: approved_open_position,
       log_dir: Rails.root.join("tmp"),
       clock: -> { Time.current }
     )

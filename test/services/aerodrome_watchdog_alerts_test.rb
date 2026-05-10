@@ -49,6 +49,21 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
     assert_includes report.fetch(:recommended_actions), "Inspect the latest observation log and run emergency close/readback before any further live window."
   end
 
+  test "approved open hedge warning action is monitoring only" do
+    report = build_service(watchdog: WatchdogReport.new(status: "WARN", alerts: [ "approved open ETH hedge monitored" ])).report
+
+    assert_equal "warn", report.fetch(:severity)
+    assert_match "approved_open_position=approved", report.fetch(:summary)
+    assert_includes report.fetch(:recommended_actions), "Approved open ETH hedge is being monitored: continue monitoring with production_live_status; use emergency close only if the operator wants to close or a blocker appears."
+  end
+
+  test "approved open out of bounds is blocked" do
+    report = build_service(watchdog: WatchdogReport.new(status: "BLOCKED", blockers: [ "Current ETH short differs from approved final size beyond tolerance" ])).report
+
+    assert_equal "blocked", report.fetch(:severity)
+    assert_includes report.fetch(:recommended_actions), "Approved open ETH hedge is out of bounds or mismatched: inspect immediately and use manually gated emergency close if needed."
+  end
+
   test "does not send real notifications" do
     report = build_service(watchdog: WatchdogReport.new(status: "PASS")).report
 
@@ -286,11 +301,12 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
   class WatchdogReport
     attr_reader :order_calls
 
-    def initialize(status:, alerts: [], warnings: [], blockers: [])
+    def initialize(status:, alerts: [], warnings: [], blockers: [], approval_status: "approved")
       @status = status
       @alerts = alerts
       @warnings = warnings
       @blockers = blockers
+      @approval_status = approval_status
       @order_calls = []
     end
 
@@ -304,6 +320,9 @@ class AerodromeWatchdogAlertsTest < ActiveSupport::TestCase
         alerts: @alerts,
         warnings: @warnings,
         blockers: @blockers,
+        approved_open_position: {
+          approval_status: @approval_status
+        },
         checks: {
           observation: [
             { name: "Latest observation final position nil", status: "pass" }

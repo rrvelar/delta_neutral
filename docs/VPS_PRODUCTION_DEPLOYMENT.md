@@ -252,6 +252,8 @@ Production live runner V1 is a later manually launched step, not a VPS backgroun
 
 The first VPS Production Live Runner V1 run passed: 3600 seconds, 300 second interval, 12 iterations, one WETH rebalance, runtime safety `PASS`, no blockers/warnings, no USDC use, and clean duration completion with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and status `success`. Mainnet ETH was later verified nil and emergency close returned noop. Safe env was restored. This does not approve a VPS live service; approved-open-position monitoring/watchdog is the next required safety step.
 
+Approved open position monitoring is read-only and does not make the VPS a live daemon. It allows watchdog/status to recognize a known valid ETH hedge from the latest successful production live log as intended state only while it remains within caps/tolerance. Unexpected ETH, cap breaches, failed WETH, successful USDC, unknown readback, or manual-action logs still require operator attention and may require manually gated emergency close.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

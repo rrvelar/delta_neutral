@@ -11,6 +11,7 @@ class AerodromeWatchdogCheck
     production_readiness: nil,
     rewards_check: nil,
     fees_check: nil,
+    approved_open_position: nil,
     log_dir: Rails.root.join("storage", "aerodrome_live_observation"),
     clock: -> { Time.current }
   )
@@ -20,9 +21,10 @@ class AerodromeWatchdogCheck
     @production_readiness = production_readiness
     @rewards_check = rewards_check
     @fees_check = fees_check
+    @approved_open_position = approved_open_position
     @log_dir = Pathname(log_dir)
     @clock = clock
-    @checks = { env: [], hyperliquid: [], observation: [], history: [], dashboard: [], readiness: [], logs: [], metadata: [] }
+    @checks = { env: [], hyperliquid: [], approved_open_position: [], observation: [], history: [], dashboard: [], readiness: [], logs: [], metadata: [] }
     @alerts = []
     @warnings = []
     @blockers = []
@@ -48,6 +50,7 @@ class AerodromeWatchdogCheck
       alerts: @alerts,
       warnings: @warnings,
       blockers: @blockers,
+      approved_open_position: @approved_open_position_report,
       checks: @checks,
       next_steps: next_steps
     }
@@ -72,15 +75,41 @@ class AerodromeWatchdogCheck
 
   def check_hyperliquid
     mainnet = read_eth_position(:mainnet, mainnet_hyperliquid_service)
+    approved = approved_open_position(mainnet).report
+    record_approved_open_position(approved)
+
     if safe_env? && short_size(mainnet).positive?
-      add_check(:hyperliquid, "Mainnet ETH position nil while safe env", false, blocker: true, value: short_size(mainnet).to_s("F"))
-      @alerts << "mainnet ETH position exists while Aerodrome hedge is disabled/paused"
+      if approved.fetch(:approval_status) == "approved"
+        add_check(:hyperliquid, "Mainnet ETH position approved open while safe env", true, value: short_size(mainnet).to_s("F"))
+        @alerts << "approved open ETH hedge monitored"
+      else
+        add_check(:hyperliquid, "Mainnet ETH position nil while safe env", false, blocker: true, value: short_size(mainnet).to_s("F"))
+        @alerts << "mainnet ETH position exists while Aerodrome hedge is disabled/paused"
+      end
     else
       add_check(:hyperliquid, "Mainnet ETH position nil while safe env", true, value: short_size(mainnet).to_s("F"))
     end
 
     testnet = read_eth_position(:testnet, testnet_hyperliquid_service)
     add_check(:hyperliquid, "Testnet ETH position read-only", true, value: short_size(testnet).to_s("F"))
+  end
+
+  def record_approved_open_position(report)
+    @approved_open_position_report = report
+    @checks[:approved_open_position] << {
+      name: "Approved open position status",
+      status: report.fetch(:status).downcase,
+      value: report.fetch(:approval_status)
+    }
+
+    case report.fetch(:approval_status)
+    when "approved"
+      nil
+    when "current_nil"
+      @warnings.concat(report.fetch(:warnings))
+    else
+      @blockers.concat(report.fetch(:blockers))
+    end
   end
 
   def check_observation
@@ -192,6 +221,10 @@ class AerodromeWatchdogCheck
 
   def fees_check
     @fees_check ||= AerodromeFeesCheck.new
+  end
+
+  def approved_open_position(mainnet)
+    @approved_open_position || AerodromeApprovedOpenPosition.new(current_position: mainnet)
   end
 
   def safe_env?

@@ -70,12 +70,15 @@ class AerodromeWatchdogAlerts
   end
 
   def summary_for(watchdog)
-    [
+    approved = watchdog.fetch(:approved_open_position, nil)
+    parts = [
       "status=#{watchdog.fetch(:status)}",
       "alerts=#{watchdog.fetch(:alerts).size}",
       "blockers=#{watchdog.fetch(:blockers).size}",
       "warnings=#{watchdog.fetch(:warnings).size}"
-    ].join(", ")
+    ]
+    parts << "approved_open_position=#{approved.fetch(:approval_status)}" if approved
+    parts.join(", ")
   end
 
   def body_for(watchdog)
@@ -105,6 +108,15 @@ class AerodromeWatchdogAlerts
     actions = []
     if text.include?("mainnet eth position")
       actions << "Mainnet ETH is open while safe env is expected: run live emergency close or close manually in Hyperliquid UI."
+    end
+    if text.include?("approved open eth hedge")
+      actions << "Approved open ETH hedge is being monitored: continue monitoring with production_live_status; use emergency close only if the operator wants to close or a blocker appears."
+    end
+    if text.include?("approved open hedge is no longer open")
+      actions << "Approved open hedge is no longer open: inspect whether it was manually closed and consider future archive/acknowledgment workflow."
+    end
+    if text.include?("approved final size") || text.include?("approved max")
+      actions << "Approved open ETH hedge is out of bounds or mismatched: inspect immediately and use manually gated emergency close if needed."
     end
     if text.include?("manual_action_required")
       actions << "Inspect the latest observation log and run emergency close/readback before any further live window."

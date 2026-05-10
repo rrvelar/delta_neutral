@@ -189,6 +189,8 @@ Production live runner V1 is separate from watchdog alerting. Watchdog tasks rem
 
 The first Production Live Runner V1 run showed that a valid in-cap ETH hedge can be intentionally left open on clean duration completion. Generic safe-mode watchdog behavior still treats unexpected mainnet ETH as `BLOCKED`, which is correct outside an approved live period. The next alerting/watchdog stage should add approved-open-position monitoring so a known valid open ETH hedge can be monitored as intended state while still blocking cap breaches, failed WETH rows, USDC activity, stale approval, unknown readback, or manual-action logs.
 
+Approved open position monitoring is now read-only watchdog context. It does not close positions and does not approve new live runs. It only suppresses the generic open-ETH blocker when the latest production live log proves `position_left_open=true`, final position confirmed, no manual action required, and the current ETH short remains within caps/tolerance. Any out-of-bounds, unknown, unconfirmed, manual-action, failed WETH, or USDC-success condition remains `BLOCKED`.
+
 ## Future Alert Channels
 
 Future integrations may include:

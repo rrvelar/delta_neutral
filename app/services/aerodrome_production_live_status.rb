@@ -14,6 +14,7 @@ class AerodromeProductionLiveStatus
 
   def report
     current_position = current_eth_position
+    approved = AerodromeApprovedOpenPosition.new(current_position: current_position, log_dir: @log_dir).report
     {
       safety_banner: BANNER,
       status: status,
@@ -25,6 +26,7 @@ class AerodromeProductionLiveStatus
       latest_event: latest_event,
       latest_final_status: latest_final_event&.fetch("status", nil),
       current_mainnet_eth_position: current_position,
+      approved_open_position: approved,
       safe_env: safe_env,
       manual_action_required: latest_final_event&.fetch("manual_action_required", nil),
       errors: @errors

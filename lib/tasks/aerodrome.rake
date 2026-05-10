@@ -600,6 +600,8 @@ namespace :aerodrome do
       puts "latest log path: #{report.fetch(:latest_log_path).inspect}"
       puts "latest final status: #{report.fetch(:latest_final_status).inspect}"
       puts "current mainnet ETH position: #{report.fetch(:current_mainnet_eth_position).inspect}"
+      puts "approved open position: #{report.dig(:approved_open_position, :approved).inspect}"
+      puts "approval status: #{report.dig(:approved_open_position, :approval_status).inspect}"
       puts "manual_action_required: #{report.fetch(:manual_action_required).inspect}"
       puts "errors:"
       if report.fetch(:errors).any?
@@ -607,6 +609,35 @@ namespace :aerodrome do
       else
         puts "  none"
       end
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
+
+  desc "Run a read-only Aerodrome approved open position check"
+  task approved_open_position: :environment do
+    current = HyperliquidService.new(testnet: false).get_position("ETH")
+    report = AerodromeApprovedOpenPosition.new(current_position: current).report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "READ ONLY"
+      puts "NO ORDERS"
+      puts "NO HYPERLIQUID EXECUTION"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "approved: #{report.fetch(:approved)}"
+      puts "approval status: #{report.fetch(:approval_status)}"
+      puts "log path: #{report.fetch(:log_path).inspect}"
+      puts "approved final position: #{report.fetch(:approved_final_position).inspect}"
+      puts "current mainnet position: #{report.fetch(:current_mainnet_position).inspect}"
+      puts "blockers:"
+      report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      puts "warnings:"
+      report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      puts "next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
     end
 
     exit(false) if report.fetch(:status) == "BLOCKED"

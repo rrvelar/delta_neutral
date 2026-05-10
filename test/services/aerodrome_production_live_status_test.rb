@@ -5,7 +5,13 @@ class AerodromeProductionLiveStatusTest < ActiveSupport::TestCase
   test "production live status is read-only" do
     Dir.mktmpdir do |dir|
       log_path = File.join(dir, "20260510120000-test.jsonl")
-      File.write(log_path, { type: "finish", status: "success", manual_action_required: false, final_position: { size: "-0.011" } }.to_json + "\n")
+      File.write(
+        log_path,
+        [
+          { type: "start", gates: { max_short_eth: "0.02", max_short_notional_usd: "50" } }.to_json,
+          { type: "finish", status: "success", stop_reason: "duration complete", position_left_open: true, manual_action_required: false, final_position_confirmed: true, final_position: { asset: "ETH", size: "-0.011" }, errors: [] }.to_json
+        ].join("\n")
+      )
       hyperliquid = HyperliquidReadMock.new(position: { asset: "ETH", size: BigDecimal("-0.011") })
 
       writes = capture_write_sql do
@@ -16,6 +22,7 @@ class AerodromeProductionLiveStatusTest < ActiveSupport::TestCase
         assert_equal false, report.fetch(:orders_enabled)
         assert_equal false, report.fetch(:hyperliquid_execution)
         assert_equal log_path, report.fetch(:latest_log_path)
+        assert_equal true, report.fetch(:approved_open_position).fetch(:approved)
       end
 
       assert_empty writes
