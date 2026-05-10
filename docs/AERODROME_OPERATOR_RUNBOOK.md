@@ -253,6 +253,8 @@ A supervised 1-hour observation exposed finalization ambiguity from Hyperliquid 
 
 The hardened finalization path was retested successfully in a supervised 15-minute live window and is documented in `docs/AERODROME_15M_FINALIZATION_RETEST_REPORT.md`. The retest created `ShortRebalance #187` on the WETH side, skipped USDC, completed final live emergency close with status `success`, confirmed final mainnet ETH position `nil`, and reported `manual_action_required=false`. Live automation remains disabled by default; this retest is not approval for continuous unattended operation. Any next stage must be separately planned and approved.
 
+The supervised 3-hour live observation window is complete and documented in `docs/AERODROME_3H_LIVE_OBSERVATION_REPORT.md`. It created `ShortRebalance #188` (`WETH`, `0.0 -> 0.011`, success), created no additional rebalances in iterations 2 through 36, skipped USDC, and closed the ETH short through the gated live emergency close. Final mainnet ETH position was nil, `final_position_confirmed=true`, and `manual_action_required=false`. Live automation remains disabled by default; this is not approval for continuous unattended operation. The next stage should be production supervised mode planning: watchdogs, alerts, healthchecks, logs, VPS/uptime, and clear stop/close rules.
+
 ## Run AERO Rewards Check
 
 The AERO rewards check is read-only and does not claim rewards:
