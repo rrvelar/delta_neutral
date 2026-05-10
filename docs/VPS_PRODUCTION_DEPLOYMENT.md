@@ -250,6 +250,8 @@ The VPS canary runtime-safety retest passed after the canary-aware check was add
 
 Production live runner V1 is a later manually launched step, not a VPS background service. It may leave ETH open only after clean duration completion and requires `bin/rails aerodrome:production_live_status` after every run. Do not add a systemd live runner service, scheduler, or UI start control without a separate approval. Watchdog scheduling remains read-only and must not start production live runs.
 
+The first VPS Production Live Runner V1 run passed: 3600 seconds, 300 second interval, 12 iterations, one WETH rebalance, runtime safety `PASS`, no blockers/warnings, no USDC use, and clean duration completion with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and status `success`. Mainnet ETH was later verified nil and emergency close returned noop. Safe env was restored. This does not approve a VPS live service; approved-open-position monitoring/watchdog is the next required safety step.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

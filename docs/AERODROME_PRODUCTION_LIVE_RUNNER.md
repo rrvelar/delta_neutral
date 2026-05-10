@@ -65,3 +65,9 @@ Manual emergency close remains a separate explicitly gated task.
 ## Not Approved
 
 This runner is not an unattended live service. Do not add systemd, cron, or UI start controls for it without a separate review. Future unattended/systemd live service and larger limits require separate approval and implementation.
+
+## First VPS Run
+
+The first VPS Production Live Runner V1 run passed. It ran for 3600 seconds with 300 second intervals, one WETH-side rebalance, max `0.02` ETH / `$50` notional caps, and 1x leverage. Runtime safety stayed `PASS` with no blockers or warnings, USDC was not used, and the clean duration-complete path intentionally left an in-cap ETH hedge open. Final output reported `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and `status=success`.
+
+After the run, mainnet ETH was later verified nil and `live_emergency_close` returned noop because there was no ETH position to close. Safe env was restored. This is not unattended 24/7 approval. The next stage is approved-open-position monitoring/watchdog so a known valid open ETH hedge can be monitored as intended state instead of generic safe-mode `BLOCKED`.

@@ -435,6 +435,8 @@ The VPS canary runtime-safety retest passed after the fix. A 1-hour canary repor
 
 Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNER.md`. It is the first supervised leave-position-open mode and must be manually launched with explicit one-off gates. It leaves the ETH hedge open only on clean duration completion, closes on errors/signals when emergency gates are present, and never supports USDC. After every run, the operator must run `bin/rails aerodrome:production_live_status` and verify the final state. Future unattended/systemd live service requires separate approval and implementation.
 
+The first VPS Production Live Runner V1 run passed. It ran for 3600 seconds with 12 iterations and one WETH-side rebalance. Runtime safety stayed `PASS` with no blockers/warnings, USDC was not used, and clean duration completion intentionally left an in-cap ETH hedge open with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and status `success`. Mainnet ETH was later verified nil, emergency close returned noop, and safe env was restored. This is still not approval for unattended 24/7 operation; next work should add approved-open-position monitoring/watchdog.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

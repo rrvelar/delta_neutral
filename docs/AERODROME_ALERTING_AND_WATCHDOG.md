@@ -187,6 +187,8 @@ Do not run watchdog polling as live automation by default. `bin/aerodrome-watchd
 
 Production live runner V1 is separate from watchdog alerting. Watchdog tasks remain read-only and must not start `bin/rails aerodrome:production_live_run`, must not close positions, and must not approve leave-position-open operation. After every production live run, the operator must run `bin/rails aerodrome:production_live_status`; any `manual_action_required=true`, unknown readback, failed close, or unexpected USDC rebalance remains an alert/blocker condition.
 
+The first Production Live Runner V1 run showed that a valid in-cap ETH hedge can be intentionally left open on clean duration completion. Generic safe-mode watchdog behavior still treats unexpected mainnet ETH as `BLOCKED`, which is correct outside an approved live period. The next alerting/watchdog stage should add approved-open-position monitoring so a known valid open ETH hedge can be monitored as intended state while still blocking cap breaches, failed WETH rows, USDC activity, stale approval, unknown readback, or manual-action logs.
+
 ## Future Alert Channels
 
 Future integrations may include:

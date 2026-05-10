@@ -193,6 +193,8 @@ The VPS canary runtime-safety retest passed after the canary-aware check was add
 
 Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNER.md`. It is the first leave-position-open mode, but it is still supervised and manually launched only. It requires explicit one-off production-live gates, leaves ETH open only on clean duration completion, closes on errors/signals when gated, and requires `aerodrome:production_live_status` after every run. USDC remains unsupported, and unattended/systemd live service remains future work requiring separate approval.
 
+The first VPS Production Live Runner V1 run passed. It ran for 1 hour with 12 iterations, one WETH rebalance, runtime safety `PASS`, no blockers or warnings, and no USDC activity. On clean duration completion it intentionally left an in-cap ETH hedge open with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and final status `success`. Mainnet ETH was later verified nil, `live_emergency_close` returned noop, and safe env was restored. This milestone does not approve unattended 24/7 operation; the next stage is approved-open-position monitoring/watchdog.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:
