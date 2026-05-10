@@ -33,7 +33,11 @@ When current mainnet ETH exists and an approved open log exists, monitoring veri
 - current notional is within max notional cap.
 - current size is within `AERODROME_APPROVED_OPEN_POSITION_SIZE_TOLERANCE_ETH` of the approved final size.
 
-If current ETH is nil while an approved open log exists, the watchdog warns instead of blocking because nil is safe. Operators should inspect whether the hedge was manually closed.
+Current Hyperliquid readback is authoritative for whether ETH is currently open. A prior approved-open `final_position` in JSONL history is evidence of what the runner left open at finish time, not permanent proof that the position still exists.
+
+If current ETH is nil while an approved open log exists, the watchdog warns instead of blocking because nil is safe. Operators should inspect whether the hedge was manually closed. Future production live runs may proceed after fresh preflight if all other gates pass.
+
+If current readback is unavailable, mismatched, out of tolerance, or out of caps, the watchdog blocks and requires operator action.
 
 ## Blockers
 

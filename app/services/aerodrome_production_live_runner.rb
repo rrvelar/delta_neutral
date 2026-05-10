@@ -37,6 +37,7 @@ class AerodromeProductionLiveRunner
     @final_position_confirmed = false
     @position_left_open = false
     @manual_action_required = false
+    @warnings = []
     @last_known_short = BigDecimal("0")
     @stop_requested = false
     @signal = nil
@@ -48,19 +49,31 @@ class AerodromeProductionLiveRunner
     return blocked(errors) if errors.any?
 
     with_lock do
-      before = read_eth_position
+      before, readback_error = pre_start_eth_position
+      return blocked([ readback_error ]) if readback_error
+
+      previous_errors, previous_warnings = previous_log_review(before)
+      return blocked(previous_errors, final_position: before) if previous_errors.any?
+
+      @warnings.concat(previous_warnings)
       if short_size(before).positive? && !adopt_existing_eth_short?
         return blocked([ "mainnet ETH position must be nil before live run start unless adopt existing is true" ], final_position: before)
       end
       if short_size(before).positive? && !position_within_caps?(before)
         return blocked([ "existing mainnet ETH position exceeds caps" ], final_position: before)
       end
+      if short_size(before).positive? && adopt_existing_eth_short?
+        approved = approved_open_position_report(before)
+        unless approved.fetch(:approval_status) == "approved"
+          return blocked([ "existing mainnet ETH position is not approved open state: #{approved.fetch(:approval_status)}" ].concat(approved.fetch(:blockers)), final_position: before)
+        end
+      end
 
       initialize_log
       @last_known_short = short_size(before)
       @run_start_rebalance_id = ShortRebalance.maximum(:id) || 0
       install_signal_handlers
-      record_event(type: "start", timestamp: timestamp, gates: gates, hedge_id: hedge.id, position_id: position.id, adopted_position: serialize_position(before))
+      record_event(type: "start", timestamp: timestamp, gates: gates, hedge_id: hedge.id, position_id: position.id, adopted_position: serialize_position(before), warnings: @warnings)
       run_loop
       finish
     ensure
@@ -332,7 +345,6 @@ class AerodromeProductionLiveRunner
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH must be configured and >= AERODROME_MAX_SHORT_ETH" unless emergency_close_max_eth && max_short_eth && emergency_close_max_eth >= max_short_eth
     errors << "No Aerodrome hedge/position found" unless hedge
     errors.concat(history_gate_errors) if hedge
-    errors.concat(previous_log_gate_errors)
     errors.concat(readiness_gate_errors)
     errors
   end
@@ -348,16 +360,30 @@ class AerodromeProductionLiveRunner
     errors
   end
 
-  def previous_log_gate_errors
+  def previous_log_review(current_position)
     final = latest_final_event
-    return [] unless final
+    return [ [], [] ] unless final
 
     errors = []
-    errors << "previous production live/canary log has manual_action_required=true" if final.fetch("manual_action_required", nil) == true
-    errors << "previous production live/canary log final_position is not nil" if final.fetch("final_position", nil).present?
-    errors
+    warnings = []
+    current_short = short_size(current_position)
+    final_position_present = final.fetch("final_position", nil).present?
+
+    if final.fetch("manual_action_required", nil) == true
+      errors << "previous production live/canary log has manual_action_required=true"
+    elsif final.fetch("final_position_confirmed", nil) == false
+      if current_short.zero?
+        warnings << "previous production live/canary final position was unconfirmed but current ETH readback is nil"
+      else
+        errors << "previous production live/canary final position was unconfirmed and current ETH exists"
+      end
+    elsif final_position_present && current_short.zero?
+      warnings << "previous approved open hedge is no longer open / current readback nil"
+    end
+
+    [ errors, warnings ]
   rescue JSON::ParserError, Errno::ENOENT
-    []
+    [ [], [] ]
   end
 
   def latest_final_event
@@ -412,6 +438,7 @@ class AerodromeProductionLiveRunner
       close_result: @close_result,
       manual_action_required: @manual_action_required,
       errors: @errors,
+      warnings: @warnings,
       database_write: live_capable,
       orders_enabled: live_capable,
       hyperliquid_execution: live_capable
@@ -498,6 +525,20 @@ class AerodromeProductionLiveRunner
 
   def read_eth_position
     hyperliquid.get_position("ETH")
+  end
+
+  def pre_start_eth_position
+    [ read_eth_position, nil ]
+  rescue => e
+    [ nil, "mainnet ETH readback failed before live run: #{e.class}: #{e.message}" ]
+  end
+
+  def approved_open_position_report(current_position)
+    AerodromeApprovedOpenPosition.new(
+      current_position: current_position,
+      log_dir: @log_dir,
+      position: position
+    ).report
   end
 
   def hyperliquid

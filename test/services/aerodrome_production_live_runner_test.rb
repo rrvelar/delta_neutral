@@ -82,14 +82,78 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
 
   test "allows existing ETH within caps only when adopt existing true" do
     with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.011" })
       hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.011"), eth_position("-0.011"), eth_position("-0.011") ])
 
       with_env(@env.merge("AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "true")) do
-        report = build_service(hyperliquid_service: hyperliquid).report
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
 
         assert_equal "success", report.fetch(:status)
         assert_equal true, report.fetch(:position_left_open)
         assert_equal false, report.fetch(:manual_action_required)
+      end
+    end
+  end
+
+  test "previous approved open final position with current ETH nil allows run with warning" do
+    with_position_and_hedge do |hedge|
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.0101" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.0108"), eth_position("-0.0108") ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge, new_short_size: "0.0108") }
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync, log_dir: log_dir).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_includes report.fetch(:warnings), "previous approved open hedge is no longer open / current readback nil"
+        assert_equal true, report.fetch(:position_left_open)
+      end
+    end
+  end
+
+  test "previous approved open final position with current ETH matching still requires explicit adopt" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.0101" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.0101") ])
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "mainnet ETH position must be nil before live run start unless adopt existing is true"
+      end
+    end
+  end
+
+  test "previous manual action required still blocks even when current ETH nil" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, manual_action_required: true)
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil ])
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "previous production live/canary log has manual_action_required=true"
+      end
+    end
+  end
+
+  test "current ETH readback error blocks when previous final position exists" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.0101" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ OpenSSL::SSL::SSLError.new("SSL_read") ])
+
+      with_env(@env) do
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_match(/mainnet ETH readback failed before live run: OpenSSL::SSL::SSLError: SSL_read/, report.fetch(:errors).join("\n"))
       end
     end
   end
@@ -275,6 +339,7 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
     hedge_sync: ->(_) { },
     emergency_close_factory: -> { EmergencyCloseReport.new(status: "success") },
     readiness: ReportDouble.new(status: "PASS"),
+    log_dir: tmp_path("logs"),
     lock_path: tmp_path("run.lock")
   )
     AerodromeProductionLiveRunner.new(
@@ -284,9 +349,35 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
       emergency_close_factory: emergency_close_factory,
       readiness: readiness,
       sleeper: ->(_) { },
-      log_dir: tmp_path("logs"),
+      log_dir: log_dir,
       lock_path: lock_path,
       clock: -> { Time.zone.local(2026, 5, 10, 12, 0, 0) }
+    )
+  end
+
+  def write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.0101" }, manual_action_required: false, confirmed: true)
+    FileUtils.mkdir_p(log_dir)
+    File.write(
+      Pathname(log_dir).join("20260510110000-previous.jsonl"),
+      [
+        {
+          type: "start",
+          gates: {
+            max_short_eth: "0.02",
+            max_short_notional_usd: "50"
+          }
+        }.to_json,
+        {
+          type: "finish",
+          status: "success",
+          stop_reason: "duration complete",
+          position_left_open: true,
+          final_position: final_position,
+          final_position_confirmed: confirmed,
+          manual_action_required: manual_action_required,
+          errors: []
+        }.to_json
+      ].join("\n")
     )
   end
 
