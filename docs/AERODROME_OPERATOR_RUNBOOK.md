@@ -33,6 +33,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Read-only pre-live readiness task: `bin/rails aerodrome:pre_live_check`.
 - Read-only AERO rewards discovery task: `bin/rails aerodrome:rewards_check`.
 - First live micro-run planning runbook: `docs/AERODROME_FIRST_LIVE_MICRO_RUN.md`.
+- First live micro-run evidence report: `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`.
 - Mocked tests for dry-run and config verification.
 - Documentation for limitations, rollback, and pre-live audit.
 
@@ -233,6 +234,8 @@ docs/AERODROME_FIRST_LIVE_MICRO_RUN.md
 ```
 
 This runbook does not enable live trading, does not change env values, does not add a first-live execution task, and does not provide an executable live command. It defines required preconditions, tiny operator-defined risk caps, manual stop/backup/preflight/readback steps, and stop conditions. The gated live emergency close task must be tested/read-reviewed before any live micro-run. Dashboard rewards and fees remain read-only estimates and are not execution approval. The current default remains disabled, paused, and not live-approved.
+
+The first live micro-run is complete and documented in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. The retry recorded `ShortRebalance #183`, which opened a tiny mainnet ETH short (`new_short_size=0.011`) from the Aerodrome WETH side while USDC was skipped. The gated live emergency close then closed the ETH short and final mainnet ETH readback was nil. This is not approval for continuous live operation. The next stage should be a separately planned small live observation window or controlled one-cycle run, not immediate scaling.
 
 ## Run AERO Rewards Check
 

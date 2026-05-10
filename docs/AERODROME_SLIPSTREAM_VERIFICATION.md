@@ -12,6 +12,8 @@ Aerodrome hedge execution is additionally paused by default. `AERODROME_HEDGE_PA
 
 `docs/AERODROME_FIRST_LIVE_MICRO_RUN.md` is a documentation-only first-live plan. It does not enable live trading, does not edit env, does not add a first-live execution task, and does not add an automatic execution path. `aerodrome:live_emergency_close` is a manual ETH-only emergency close tool that is live-order capable but blocked by default behind explicit live approval, paused state, enable flag, confirmation phrase, and max ETH cap. It must be tested/read-reviewed before any first-live micro-run. Dashboard AERO rewards and LP fees are read-only estimates and are not execution approval.
 
+The first live micro-run is documented in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. Local operator evidence shows `ShortRebalance #183` successfully opened a tiny mainnet ETH short (`new_short_size=0.011`) from the WETH side, USDC was skipped, the gated live emergency close closed the short, and final mainnet ETH readback was nil. This verifies one controlled tiny mainnet open/close cycle only. It is not approval for continuous live operation or larger sizing; live automation remains disabled by default.
+
 ## Verified Facts As Of 2026-05-08
 
 Status legend: **VERIFIED** means checked from a trusted source in this session. **CANDIDATE** means a trusted source lists the value, but implementation should keep it configurable or verify against a concrete position before relying on it. **UNRESOLVED** means do not implement from this fact. **DEFERRED** means intentionally out of scope for the read-only migration.

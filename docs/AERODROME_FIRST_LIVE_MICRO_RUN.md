@@ -2,6 +2,8 @@
 
 This document is a planning runbook only. It does not enable live trading, does not change environment variables, does not add an execution task, and does not authorize a live run.
 
+The first live micro-run has completed and is recorded in `docs/AERODROME_FIRST_LIVE_MICRO_RUN_REPORT.md`. `ShortRebalance #183` successfully opened a tiny mainnet ETH short from the Aerodrome WETH side, the USDC side was skipped, and the gated live emergency close successfully closed the short. Final mainnet ETH position was nil. This milestone is not approval for continuous live operation, and the default state remains disabled, paused, and not live-approved.
+
 Current safe production state remains:
 
 ```bash
