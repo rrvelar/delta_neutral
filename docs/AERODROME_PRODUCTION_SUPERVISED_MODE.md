@@ -189,6 +189,8 @@ The persistent watchdog and the production canary runtime safety checks have dif
 
 The VPS canary run that created `ShortRebalance #190` stopped because the generic watchdog was used during expected live canary state. The final emergency close succeeded, `manual_action_required=false`, and final mainnet ETH was nil. This does not approve continuous operation; any repeat canary requires fresh readiness/preflight evidence and explicit manual approval.
 
+The VPS canary runtime-safety retest passed after the canary-aware check was added. The 1-hour run reported runtime safety `PASS` with no blockers or warnings, treated the in-cap ETH short as expected during the canary, completed with `stop_reason="duration complete"`, closed `0.0106` ETH on the first final-close attempt, and ended with final mainnet ETH nil and `manual_action_required=false`. This confirms the context-specific runtime safety path for supervised canaries while keeping the generic watchdog strict for persistent monitoring.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

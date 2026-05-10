@@ -246,6 +246,8 @@ During a production canary, the runner uses canary-aware runtime safety instead 
 
 The first VPS canary created `ShortRebalance #190`, opened a `0.0108` ETH WETH hedge, stopped because the generic watchdog treated that expected canary short as `BLOCKED`, and then closed successfully. Final mainnet ETH was nil. A repeat canary still requires fresh readiness/preflight and manual approval.
 
+The VPS canary runtime-safety retest passed after the canary-aware check was added. The 1-hour retest reported runtime safety `PASS` with no blockers or warnings, allowed the expected in-cap ETH short during the canary, completed with `stop_reason="duration complete"`, closed `0.0106` ETH on the first final-close attempt, and ended with final mainnet ETH nil and `manual_action_required=false`. This does not approve unattended operation. A longer supervised canary or production supervised mode step still requires explicit operator approval.
+
 Manual live emergency close, only when explicitly gated:
 
 ```bash

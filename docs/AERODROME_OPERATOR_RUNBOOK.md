@@ -431,6 +431,8 @@ Canary runtime safety is read-only. It does not close positions, place orders, o
 
 The VPS canary run that created `ShortRebalance #190` opened a `0.0108` ETH WETH hedge, stopped because the generic watchdog reported `BLOCKED` during expected canary state, and then closed successfully through the gated final close. Final mainnet ETH was nil and `manual_action_required=false`. Treat this as an operational context mismatch addressed by canary runtime safety, not as approval to weaken the normal watchdog or run unattended. Repeat canary runs require fresh preflight/readiness and manual approval.
 
+The VPS canary runtime-safety retest passed after the fix. A 1-hour canary reported `runtime_safety_status="PASS"`, no blockers, and no warnings while the in-cap ETH short was open. Final close started at `2026-05-10T12:13:45-04:00`, submitted `0.0106` ETH on attempt 1, completed at `2026-05-10T12:13:59-04:00`, and final mainnet ETH readback was nil with `manual_action_required=false`. This is not approval for unattended 24/7 operation; the next stage should be a longer supervised canary or production supervised mode planning with explicit operator approval.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:
