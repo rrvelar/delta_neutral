@@ -285,4 +285,46 @@ namespace :aerodrome do
 
     exit(false) if report.fetch(:status) == "BLOCKED"
   end
+
+  desc "Run a read-only Aerodrome LP fees discovery check"
+  task fees_check: :environment do
+    report = AerodromeFeesCheck.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "NO COLLECT"
+      puts "NO TRANSACTIONS"
+      puts "DB write: #{report.fetch(:database_write)}"
+      puts "Overall status: #{report.fetch(:status)}"
+      puts "pool: #{report.fetch(:pool_address).inspect}"
+      puts "token id: #{report.fetch(:token_id).inspect}"
+      puts "fee source/method: #{report.fetch(:fee_source)}"
+      puts "fee0: #{report.fetch(:fee0_amount).inspect} #{report.fetch(:fee0_symbol)}"
+      puts "fee0 USD: #{report.fetch(:fee0_usd).inspect}"
+      puts "fee1: #{report.fetch(:fee1_amount).inspect} #{report.fetch(:fee1_symbol)}"
+      puts "fee1 USD: #{report.fetch(:fee1_usd).inspect}"
+      puts "total fees USD: #{report.fetch(:total_fees_usd).inspect}"
+
+      puts "Blockers:"
+      if report.fetch(:blockers).any?
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      else
+        puts "  none"
+      end
+
+      puts "Warnings:"
+      if report.fetch(:warnings).any?
+        report.fetch(:warnings).each { |warning| puts "  #{warning}" }
+      else
+        puts "  none"
+      end
+
+      puts "Next steps:"
+      report.fetch(:next_steps).each { |step| puts "  #{step}" }
+    end
+
+    exit(false) if report.fetch(:status) == "BLOCKED"
+  end
 end

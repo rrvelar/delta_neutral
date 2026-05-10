@@ -10,6 +10,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:testnet_emergency_close"].reenable
     Rake::Task["aerodrome:live_preflight_check"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
+    Rake::Task["aerodrome:fees_check"].reenable
   end
 
   test "dry run task fails clearly with no token ids" do
@@ -320,6 +321,49 @@ class AerodromeTaskTest < ActiveSupport::TestCase
         assert_equal "0.75", parsed.fetch("aero_usd_price")
         assert_equal "manual", parsed.fetch("aero_usd_price_source")
         assert_equal "9.375", parsed.fetch("claimable_aero_usd")
+      end
+    end
+  end
+
+  test "fees check task outputs read-only safety banner" do
+    report = fees_report
+
+    AerodromeFeesCheck.stub(:new, -> {
+      Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+    }) do
+      out, = capture_io { Rake::Task["aerodrome:fees_check"].invoke }
+
+      assert_match "AERODROME FEES CHECK — READ ONLY", out
+      assert_match "NO COLLECT", out
+      assert_match "NO TRANSACTIONS", out
+      assert_match "DB write: false", out
+      assert_match "fee source/method: nonfungible_position_manager.positions.tokens_owed", out
+      assert_match "fee0: \"0.01\" WETH", out
+      assert_match "fee1: \"3.5\" USDC", out
+      assert_match "total fees USD: \"23.5\"", out
+    end
+  end
+
+  test "fees check task supports JSON output" do
+    report = fees_report
+
+    with_env("FORMAT" => "json") do
+      AerodromeFeesCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:fees_check"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "PASS", parsed.fetch("status")
+        assert_equal false, parsed.fetch("database_write")
+        assert_equal false, parsed.fetch("transactions_enabled")
+        assert_equal false, parsed.fetch("collect_enabled")
+        assert_equal "WETH", parsed.fetch("fee0_symbol")
+        assert_equal "0.01", parsed.fetch("fee0_amount")
+        assert_equal "20.0", parsed.fetch("fee0_usd")
+        assert_equal "USDC", parsed.fetch("fee1_symbol")
+        assert_equal "3.5", parsed.fetch("fee1_amount")
+        assert_equal "23.5", parsed.fetch("total_fees_usd")
       end
     end
   end
@@ -651,6 +695,29 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       blockers: [],
       warnings: [],
       next_steps: [ "Rewards are read-only discovery only." ]
+    }
+  end
+
+  def fees_report
+    {
+      safety_banner: AerodromeFeesCheck::BANNER,
+      status: "PASS",
+      database_write: false,
+      transactions_enabled: false,
+      collect_enabled: false,
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      token_id: "315985",
+      fee_source: AerodromeFeesService::SOURCE,
+      fee0_symbol: "WETH",
+      fee0_amount: "0.01",
+      fee0_usd: "20.0",
+      fee1_symbol: "USDC",
+      fee1_amount: "3.5",
+      fee1_usd: "3.5",
+      total_fees_usd: "23.5",
+      blockers: [],
+      warnings: [],
+      next_steps: [ "Fee values are read-only estimates until collected." ]
     }
   end
 

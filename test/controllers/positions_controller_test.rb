@@ -143,7 +143,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Pool delta from entry", response.body
     assert_match "$500.00", response.body
     assert_match "PnL baseline starts from first Aerodrome snapshot unless manually set.", response.body
-    assert_match "Aerodrome fee read not implemented yet.", response.body
+    assert_match "Aerodrome LP Fees", response.body
+    assert_match "Collecting fees is not implemented", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
@@ -214,11 +215,103 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28", response.body
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "$500.00", response.body
-    assert_match "Total PnL Excluding AERO Rewards", response.body
+    assert_match "Total PnL Excluding Rewards / Fees", response.body
     assert_match "Total PnL Including Unclaimed AERO Rewards Estimate", response.body
     assert_match "$507.07", response.body
     assert_match "Unclaimed rewards are not realized until claimed/sold", response.body
     assert_no_match "Claim rewards", response.body
+  end
+
+  test "show displays mocked read-only Aerodrome LP fees and combined estimate" do
+    position = create_aerodrome_position
+    position.update!(entry_value_usd: BigDecimal("2500"))
+    rewards_report = {
+      status: "PASS",
+      gauge_status: "detected",
+      token_id: position.external_id,
+      staked: true,
+      claimable_aero: "14.14",
+      aero_usd_price: "0.5",
+      aero_usd_price_source: "manual",
+      claimable_aero_usd: "7.07",
+      depositor_address: "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6",
+      depositor_source: "env",
+      gauge_address: "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28",
+      warnings: []
+    }
+    fees_report = {
+      status: "PASS",
+      fee_source: AerodromeFeesService::SOURCE,
+      token_id: position.external_id,
+      fee0_symbol: "WETH",
+      fee0_amount: "0.01",
+      fee0_usd: "20.0",
+      fee1_symbol: "USDC",
+      fee1_amount: "3.5",
+      fee1_usd: "3.5",
+      total_fees_usd: "23.5",
+      warnings: []
+    }
+
+    with_env("AERODROME_REWARDS_ENABLED" => "true", "AERODROME_FEES_ENABLED" => "true") do
+      AerodromeRewardsCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { rewards_report } }
+      }) do
+        AerodromeFeesCheck.stub(:new, -> {
+          Object.new.tap { |object| object.define_singleton_method(:report) { fees_report } }
+        }) do
+          HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+            get position_path(position)
+          end
+        end
+      end
+    end
+
+    assert_response :success
+    assert_match "Aerodrome LP Fees", response.body
+    assert_match "nonfungible_position_manager.positions.tokens_owed", response.body
+    assert_match "0.010000 WETH", response.body
+    assert_match "$20.00", response.body
+    assert_match "3.500000 USDC", response.body
+    assert_match "$23.50", response.body
+    assert_match "Total PnL Excluding Rewards / Fees", response.body
+    assert_match "Total PnL Including Rewards + LP Fees Estimate", response.body
+    assert_match "$530.57", response.body
+    assert_match "Unclaimed fees are not realized PnL until collected", response.body
+    assert_no_match "Collect fees", response.body
+    assert_no_match "Claim rewards", response.body
+  end
+
+  test "show displays Aerodrome LP fees unavailable without fake zero" do
+    position = create_aerodrome_position
+    fees_report = {
+      status: "WARN",
+      fee_source: "unavailable",
+      token_id: position.external_id,
+      fee0_symbol: nil,
+      fee0_amount: nil,
+      fee0_usd: nil,
+      fee1_symbol: nil,
+      fee1_amount: nil,
+      fee1_usd: nil,
+      total_fees_usd: nil,
+      warnings: [ "fee read for staked Slipstream NFT is not verified" ]
+    }
+
+    with_env("AERODROME_FEES_ENABLED" => "true") do
+      AerodromeFeesCheck.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { fees_report } }
+      }) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "Aerodrome LP Fees", response.body
+    assert_match "unavailable", response.body
+    assert_match "fee read for staked Slipstream NFT is not verified", response.body
+    assert_match "Including fees unavailable", response.body
+    assert_no_match "Aerodrome fee read not implemented yet.", response.body
   end
 
   test "show renders unavailable AERO rewards when check raises" do

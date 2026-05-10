@@ -214,6 +214,24 @@ AERODROME_AERO_USD_MANUAL_PRICE=
 
 If on-chain valuation is unavailable, leave `AERODROME_AERO_USD_VALUATION_ENABLED=false` and use `AERODROME_AERO_USD_MANUAL_PRICE` only as an explicit operator-provided fallback. Manual price values can go stale and remain estimates.
 
+## Run Aerodrome LP Fees Check
+
+The Aerodrome LP fees check is read-only and does not collect fees:
+
+```bash
+bin/rails aerodrome:fees_check
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails aerodrome:fees_check
+```
+
+The check reads the active Aerodrome Slipstream position token id and, for unstaked positions where the source is safe, reads `NonfungiblePositionManager.positions(tokenId)` `tokensOwed0` and `tokensOwed1`. It converts the raw amounts using verified token decimals and values WETH/USDC fees from persisted token prices. It performs no DB writes, sends no transactions, does not call `collect`, and does not use private keys.
+
+The dashboard only runs the fee check when `AERODROME_FEES_ENABLED=true`; otherwise it shows fees as not configured/unavailable instead of fake zero. If the NFT is staked in a CL gauge, the check reports fees as unavailable instead of showing a fake zero. Aerodrome CL gauge staking is documented as receiving emissions instead of fees, so staked-position fee readback needs a separate verified procedure before being displayed as a number. Unclaimed fees are estimates until collected and are separate from realized PnL. Collecting fees is not implemented. Live remains disabled.
+
 ## Manual Verification For One Token ID
 
 
@@ -250,7 +268,8 @@ Aerodrome positions appear in the dashboard and position pages with:
 - A read-only Aerodrome hedge status card when an explicit `Hedge` record exists. It shows target/tolerance, target ETH short, execution gate env state, mode labels, and the latest WETH/ETH rebalance from local history only. Actual ETH short readback is disabled by default and is not queried from Hyperliquid on the dashboard.
 - A read-only PnL baseline card showing `entry_value_usd`, current pooled value, and pool delta from entry. Dashboard PnL baseline starts from `entry_value_usd`, which may be set by the first Aerodrome snapshot unless manually set earlier.
 - A read-only AERO Rewards section. When `AERODROME_REWARDS_ENABLED=true`, it runs the read-only rewards check and shows status, staked state, claimable AERO amount, AERO USD price/source when configured, claimable AERO USD estimate, depositor address/source, gauge address, and token id. If config or RPC is unavailable, the page shows unavailable without crashing.
-- Explicit PnL totals for Aerodrome: Total PnL excluding AERO rewards, and Total PnL including unclaimed AERO rewards estimate when AERO USD valuation is available. Unclaimed rewards are not realized until claimed/sold.
+- A read-only Aerodrome LP Fees section. If the verified fee read is available, it shows fee0/fee1 amounts, symbols, and USD estimate. If the position is staked or fee readback is unavailable, it shows unavailable instead of fake zero. Collecting fees is not implemented.
+- Explicit PnL totals for Aerodrome: Total PnL excluding rewards/fees, Total PnL including unclaimed AERO rewards estimate, and Total PnL including unclaimed AERO rewards plus unclaimed LP fees estimate when both USD estimates are available. Unclaimed rewards and fees are not realized until claimed/collected.
 - Display-only hedge preview for configured WETH/USDC data, or a clear unavailable reason.
 - Latest manual hedge proposal when present, including suggested side, asset, amount, notional, status, execution flags, Hyperliquid-called flag, and computed current/stale status.
 - Compact recent proposal history for the position, including proposal id, status, hedge asset/side, suggested amount/notional, generated/reviewed timestamps, `execution_enabled`, and `hyperliquid_called`.

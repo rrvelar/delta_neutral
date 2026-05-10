@@ -31,6 +31,7 @@ class PositionsController < ApplicationController
         [ proposal.id, safety.evaluate(proposal, current_position: @position) ]
       end
       @aerodrome_rewards_report = aerodrome_rewards_report
+      @aerodrome_fees_report = aerodrome_fees_report
     end
   end
 
@@ -79,6 +80,40 @@ class PositionsController < ApplicationController
       token_id: @position.external_id,
       aero_usd_price: nil,
       aero_usd_price_source: "unavailable",
+      warnings: [ e.message ]
+    }
+  end
+
+  def aerodrome_fees_report
+    unless ENV["AERODROME_FEES_ENABLED"].to_s.downcase == "true"
+      return {
+        status: "not configured",
+        fee_source: "not configured",
+        fee0_symbol: nil,
+        fee0_amount: nil,
+        fee0_usd: nil,
+        fee1_symbol: nil,
+        fee1_amount: nil,
+        fee1_usd: nil,
+        total_fees_usd: nil,
+        token_id: @position.external_id,
+        warnings: [ "AERODROME_FEES_ENABLED is not true" ]
+      }
+    end
+
+    AerodromeFeesCheck.new.report
+  rescue => e
+    Rails.logger.warn("Aerodrome fees dashboard read failed for position #{@position.id}: #{e.class} #{e.message}")
+    {
+      status: "unavailable",
+      fee_source: "unavailable",
+      fee0_symbol: nil,
+      fee0_amount: nil,
+      fee0_usd: nil,
+      fee1_symbol: nil,
+      fee1_amount: nil,
+      fee1_usd: nil,
+      total_fees_usd: nil,
       warnings: [ e.message ]
     }
   end
