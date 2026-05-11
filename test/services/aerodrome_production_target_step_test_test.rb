@@ -94,6 +94,18 @@ class AerodromeProductionTargetStepTestTest < ActiveSupport::TestCase
     end
   end
 
+  test "keeps target step test micro capped" do
+    with_position_and_hedge do
+      with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "0.55", "AERODROME_MAX_SHORT_NOTIONAL_USD" => "1300")) do
+        report = build_service.report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "AERODROME_MAX_SHORT_ETH must be configured and <= 0.02"
+        assert_includes report.fetch(:errors), "AERODROME_MAX_SHORT_NOTIONAL_USD must be configured and <= 50.0"
+      end
+    end
+  end
+
   test "saves and restores original target" do
     with_position_and_hedge do |hedge|
       with_env(@env) do
