@@ -1,6 +1,8 @@
 class AerodromeProductionLiveRuntimeSafetyCheck
   BANNER = "AERODROME PRODUCTION LIVE RUNTIME SAFETY — READ ONLY"
   CONFIRMATION = "I_UNDERSTAND_THIS_RUNS_PRODUCTION_LIVE_HEDGE"
+  PRODUCTION_MAX_SHORT_ETH = BigDecimal("0.75")
+  PRODUCTION_MAX_SHORT_NOTIONAL_USD = BigDecimal("2000")
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
   def initialize(
@@ -71,6 +73,8 @@ class AerodromeProductionLiveRuntimeSafetyCheck
     price = eth_price
     notional = size * (price || BigDecimal("0"))
 
+    add_check(:risk, "Configured max ETH <= production hard ceiling", max_eth && max_eth <= PRODUCTION_MAX_SHORT_ETH, blocker: true, value: max_eth&.to_s("F"))
+    add_check(:risk, "Configured max notional <= production hard ceiling", max_notional && max_notional <= PRODUCTION_MAX_SHORT_NOTIONAL_USD, blocker: true, value: max_notional&.to_s("F"))
     add_check(:risk, "ETH short <= max ETH", max_eth && size <= max_eth, blocker: true, value: size.to_s("F"))
     add_check(:risk, "ETH notional <= max notional", max_notional && price && notional <= max_notional, blocker: true, value: notional.to_s("F"))
   end

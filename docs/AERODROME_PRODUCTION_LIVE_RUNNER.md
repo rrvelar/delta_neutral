@@ -20,12 +20,14 @@ The runner refuses unless all production live gates are set:
 - `AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR=true`
 - `AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL=true`
 - `AERODROME_MAX_LEVERAGE=1`
-- `AERODROME_MAX_SHORT_ETH <= 0.02`
-- `AERODROME_MAX_SHORT_NOTIONAL_USD <= 50`
+- `AERODROME_MAX_SHORT_ETH` configured and `<= 0.75`
+- `AERODROME_MAX_SHORT_NOTIONAL_USD` configured and `<= 2000`
 - `AERODROME_MIN_ORDER_NOTIONAL_USD >= 10`
 - live emergency close gates present and valid.
 
 Default persistent env must remain disabled, paused, not live-approved, and testnet outside an explicitly approved supervised run.
+
+Production live V1 has a higher supervised cap tier than the micro tools. The production live runner accepts operator-configured caps up to `0.75` ETH and `$2000` notional at exactly `1x` leverage, while `production_canary_run`, `live_observation_window`, and `production_target_step_test` remain micro-capped at `0.02` ETH / `$50` unless a future task explicitly changes them. The current first real direct Slipstream position is intended to use `AERODROME_MAX_SHORT_ETH=0.55`, `AERODROME_MAX_SHORT_NOTIONAL_USD=1300`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=0.60` for a roughly `$925` 1.0x WETH hedge. Increasing beyond the production hard ceiling requires separate review and code changes.
 
 ## Runtime Behavior
 
@@ -71,6 +73,8 @@ This runner is not an unattended live service. Do not add systemd, cron, or UI s
 ## First VPS Run
 
 The first VPS Production Live Runner V1 run passed. It ran for 3600 seconds with 300 second intervals, one WETH-side rebalance, max `0.02` ETH / `$50` notional caps, and 1x leverage. Runtime safety stayed `PASS` with no blockers or warnings, USDC was not used, and the clean duration-complete path intentionally left an in-cap ETH hedge open. Final output reported `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and `status=success`.
+
+After the micro-test milestone, production live V1 was moved to the supervised production cap tier described above. The historical first V1 run remains a micro-cap proof; new production live runs may use the larger supervised env caps only when explicitly supplied and still remain manual, gated, monitored, and non-24/7.
 
 After the run, mainnet ETH was later verified nil and `live_emergency_close` returned noop because there was no ETH position to close. Safe env was restored. This is not unattended 24/7 approval. The next stage is approved-open-position monitoring/watchdog so a known valid open ETH hedge can be monitored as intended state instead of generic safe-mode `BLOCKED`.
 

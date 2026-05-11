@@ -57,14 +57,35 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
       {
         "AERODROME_PRODUCTION_LIVE_DURATION_SECONDS" => "21601",
         "AERODROME_PRODUCTION_LIVE_INTERVAL_SECONDS" => "179",
-        "AERODROME_MAX_SHORT_ETH" => "0.021",
-        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "51",
+        "AERODROME_MAX_SHORT_ETH" => "0.751",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "2001",
         "AERODROME_MIN_ORDER_NOTIONAL_USD" => "9",
         "AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED" => "false"
       }.each do |key, value|
         with_env(@env.merge(key => value)) do
           assert_equal "blocked", build_service.report.fetch(:status), key
         end
+      end
+    end
+  end
+
+  test "allows supervised production cap tier" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.40"), eth_position("-0.40") ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge, new_short_size: "0.40") }
+      production_env = @env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "0.55",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "1300",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "0.60"
+      )
+
+      with_env(production_env) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_equal true, report.fetch(:position_left_open)
+        assert_equal "0.55", report.dig(:gates, :max_short_eth)
+        assert_equal "1300.0", report.dig(:gates, :max_short_notional_usd)
       end
     end
   end

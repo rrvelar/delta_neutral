@@ -27,6 +27,52 @@ class AerodromeApprovedOpenPositionTest < ActiveSupport::TestCase
     end
   end
 
+  test "approved production cap tier passes within hard ceiling" do
+    with_position do |position|
+      Dir.mktmpdir do |dir|
+        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.55", max_notional: "1300")
+
+        with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "0.55", "AERODROME_MAX_SHORT_NOTIONAL_USD" => "1300")) do
+          report = build_service(log_dir: dir, position: position, current_position: eth_position("-0.4005")).report
+
+          assert_equal "approved", report.fetch(:approval_status)
+          assert_equal "PASS", report.fetch(:status)
+          assert_empty report.fetch(:blockers)
+        end
+      end
+    end
+  end
+
+  test "blocks approved log max ETH over production hard ceiling" do
+    with_position do |position|
+      Dir.mktmpdir do |dir|
+        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.76", max_notional: "1300")
+
+        with_env(@env) do
+          report = build_service(log_dir: dir, position: position, current_position: eth_position("-0.40")).report
+
+          assert_equal "out_of_bounds", report.fetch(:approval_status)
+          assert_includes report.fetch(:blockers), "Approved max ETH exceeds production hard ceiling"
+        end
+      end
+    end
+  end
+
+  test "blocks approved log max notional over production hard ceiling" do
+    with_position do |position|
+      Dir.mktmpdir do |dir|
+        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.55", max_notional: "2001")
+
+        with_env(@env) do
+          report = build_service(log_dir: dir, position: position, current_position: eth_position("-0.40")).report
+
+          assert_equal "out_of_bounds", report.fetch(:approval_status)
+          assert_includes report.fetch(:blockers), "Approved max notional exceeds production hard ceiling"
+        end
+      end
+    end
+  end
+
   test "current ETH nil warns when approved open hedge is no longer open" do
     with_position do |position|
       Dir.mktmpdir do |dir|

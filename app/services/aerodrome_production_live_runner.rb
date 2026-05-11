@@ -3,8 +3,8 @@ class AerodromeProductionLiveRunner
   CONFIRMATION = AerodromeProductionLiveRuntimeSafetyCheck::CONFIRMATION
   MAX_DURATION_SECONDS = 21_600
   MIN_INTERVAL_SECONDS = 180
-  MAX_SHORT_ETH = BigDecimal("0.02")
-  MAX_SHORT_NOTIONAL_USD = BigDecimal("50")
+  PRODUCTION_MAX_SHORT_ETH = BigDecimal("0.75")
+  PRODUCTION_MAX_SHORT_NOTIONAL_USD = BigDecimal("2000")
   MIN_ORDER_NOTIONAL_USD = BigDecimal("10")
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
@@ -379,8 +379,8 @@ class AerodromeProductionLiveRunner
     errors << "AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR must be true" unless boolean_env("AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR") == true
     errors << "AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL must be true" unless boolean_env("AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL") == true
     errors << "AERODROME_MAX_LEVERAGE must be 1" unless max_leverage == BigDecimal("1")
-    errors << "AERODROME_MAX_SHORT_ETH must be configured and <= #{MAX_SHORT_ETH.to_s('F')}" unless max_short_eth && max_short_eth <= MAX_SHORT_ETH
-    errors << "AERODROME_MAX_SHORT_NOTIONAL_USD must be configured and <= #{MAX_SHORT_NOTIONAL_USD.to_s('F')}" unless max_short_notional_usd && max_short_notional_usd <= MAX_SHORT_NOTIONAL_USD
+    errors << "AERODROME_MAX_SHORT_ETH must be configured and <= #{PRODUCTION_MAX_SHORT_ETH.to_s('F')}" unless max_short_eth && max_short_eth <= PRODUCTION_MAX_SHORT_ETH
+    errors << "AERODROME_MAX_SHORT_NOTIONAL_USD must be configured and <= #{PRODUCTION_MAX_SHORT_NOTIONAL_USD.to_s('F')}" unless max_short_notional_usd && max_short_notional_usd <= PRODUCTION_MAX_SHORT_NOTIONAL_USD
     errors << "AERODROME_MIN_ORDER_NOTIONAL_USD must be configured and >= #{MIN_ORDER_NOTIONAL_USD.to_s('F')}" unless min_order_notional_usd && min_order_notional_usd >= MIN_ORDER_NOTIONAL_USD
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED must be true" unless boolean_env("AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED") == true
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM must equal #{AerodromeLiveEmergencyClose::CONFIRMATION}" unless ENV["AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM"].to_s == AerodromeLiveEmergencyClose::CONFIRMATION

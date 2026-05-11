@@ -1,6 +1,8 @@
 class AerodromeApprovedOpenPosition
   BANNER = "AERODROME APPROVED OPEN POSITION — READ ONLY"
   DEFAULT_TOLERANCE_ETH = BigDecimal("0.002")
+  PRODUCTION_MAX_SHORT_ETH = BigDecimal("0.75")
+  PRODUCTION_MAX_SHORT_NOTIONAL_USD = BigDecimal("2000")
 
   def initialize(
     current_position: nil,
@@ -55,6 +57,16 @@ class AerodromeApprovedOpenPosition
     if current_size.zero?
       @warnings << "Approved open hedge is no longer open"
       return "current_nil"
+    end
+
+    if max_short_eth(start) > PRODUCTION_MAX_SHORT_ETH
+      @blockers << "Approved max ETH exceeds production hard ceiling"
+      return "out_of_bounds"
+    end
+
+    if max_short_notional_usd(start) > PRODUCTION_MAX_SHORT_NOTIONAL_USD
+      @blockers << "Approved max notional exceeds production hard ceiling"
+      return "out_of_bounds"
     end
 
     if current_size > max_short_eth(start)

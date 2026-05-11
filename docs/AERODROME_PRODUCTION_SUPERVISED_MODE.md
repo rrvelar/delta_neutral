@@ -51,16 +51,17 @@ Any supervised live window still requires explicit one-off live gates:
 - `AERODROME_LIVE_APPROVED=true`
 - `AERODROME_HEDGE_ENABLED=true`
 - `AERODROME_HEDGE_PAUSED=false`
-- live observation confirmation phrase.
-- `AERODROME_LIVE_OBSERVATION_CLOSE_ON_FINISH=true`
+- the task-specific confirmation phrase.
+- the task-specific close/leave-position gates.
 - `AERODROME_MAX_LEVERAGE=1`
-- `AERODROME_MAX_SHORT_ETH<=0.02`
-- `AERODROME_MAX_SHORT_NOTIONAL_USD<=50`
+- task-specific max short ETH and max notional caps.
 - live emergency close enabled.
 - live emergency close confirmation phrase.
 - live emergency close max ETH greater than or equal to max short ETH.
 
 These gates are temporary for a supervised run. Restore safe defaults immediately after the run.
+
+Cap tiers are task-specific. Live observation, production canary, and target-step test runs remain micro-capped at `0.02` ETH / `$50`. Production live runner V1 has a higher supervised production tier and can accept explicit env caps up to `0.75` ETH / `$2000` at exactly `1x`, with emergency close max ETH covering the configured max short ETH.
 
 ## Required Preflight Sequence
 
@@ -193,6 +194,8 @@ The VPS canary runtime-safety retest passed after the canary-aware check was add
 
 Production live runner V1 is documented in `docs/AERODROME_PRODUCTION_LIVE_RUNNER.md`. It is the first leave-position-open mode, but it is still supervised and manually launched only. It requires explicit one-off production-live gates, leaves ETH open only on clean duration completion, closes on errors/signals when gated, and requires `aerodrome:production_live_status` after every run. USDC remains unsupported, and unattended/systemd live service remains future work requiring separate approval.
 
+For the first real direct Slipstream position, use the production live tier with `AERODROME_MAX_SHORT_ETH=0.55`, `AERODROME_MAX_SHORT_NOTIONAL_USD=1300`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=0.60`. This is still supervised production, not approval for unattended 24/7 operation or further cap increases.
+
 The first VPS Production Live Runner V1 run passed. It ran for 1 hour with 12 iterations, one WETH rebalance, runtime safety `PASS`, no blockers or warnings, and no USDC activity. On clean duration completion it intentionally left an in-cap ETH hedge open with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and final status `success`. Mainnet ETH was later verified nil, `live_emergency_close` returned noop, and safe env was restored. This milestone does not approve unattended 24/7 operation; the next stage is approved-open-position monitoring/watchdog.
 
 Approved open position monitoring is read-only and lets watchdog distinguish a known valid open ETH hedge from an unexpected ETH position. It only treats ETH as intended state when the latest production live log is successful, duration-complete, `position_left_open=true`, confirmed, no manual action required, and current ETH is within caps/tolerance. It does not close positions or approve new live runs.
@@ -279,7 +282,7 @@ Do not delete or rewrite `ShortRebalance` history.
 3. Use `aerodrome:watchdog_check` as read-only watchdog evidence.
 4. Test alerting without orders.
 5. Test crash/stop/final-close behavior under mocks.
-6. Plan one supervised production-mode window with tiny caps.
+6. Plan one supervised production-mode window with task-appropriate caps; micro tools stay at `0.02` ETH / `$50`, while production live V1 may use the reviewed supervised tier.
 7. Review logs and incident readiness before any longer duration.
 
 Scaling duration, size, or autonomy requires a separate approval and safety review.
