@@ -94,6 +94,8 @@ The VPS target-step rebalance test passed and is recorded in `docs/AERODROME_TAR
 
 Operator command wrappers for supervised production are documented in `docs/AERODROME_PRODUCTION_OPERATOR_COMMANDS.md`. `bin/vps-production-open-run-template` prints a manual command template but does not run the live runner. `bin/vps-production-close-template` prints a manual emergency close template but does not close. Backups are required before and after live runs, and `bin/vps-production-post-run-check` should be run after every supervised run.
 
+The VPS production live command should run as a one-off Docker Compose runner container with `docker compose -f docker-compose.prod.yml run --rm --no-deps web ...`. Do not stop the existing web container for normal production-supervised operation; the dashboard and PnL views should stay available through the SSH tunnel. Stopping web is reserved for debug/emergency maintenance, not the normal live-run template.
+
 ## Adopt-Existing Recovery Test
 
 The VPS adopt-existing recovery workflow passed and is documented in `docs/AERODROME_ADOPT_EXISTING_RECOVERY_TEST_REPORT.md`. Step A opened WETH hedge `#198` from `0.0` to about `0.011` ETH and left it open by design. Step B ran with `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true`, adopted the approved ETH short around `-0.0109`, logged the warning that the approved open hedge was being adopted, kept runtime safety `PASS`, and finished successfully with `position_left_open=true` and `manual_action_required=false`. A later manual emergency close returned mainnet ETH to nil.

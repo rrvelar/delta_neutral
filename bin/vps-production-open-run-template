@@ -13,9 +13,10 @@ AERODROME PRODUCTION LIVE RUN TEMPLATE — DO NOT RUN AUTOMATICALLY
 This script prints a copy/paste template only.
 It does not execute production_live_run.
 Operator must fill placeholders, review gates, confirm mainnet ETH state, and paste manually inside tmux.
+The web container stays running; this uses a one-off Docker Compose runner.
 
 # DO NOT RUN UNTIL REVIEWED AND FILLED IN MANUALLY
-docker compose -f docker-compose.prod.yml exec -T \
+docker compose -f docker-compose.prod.yml run --rm --no-deps \
   -e HYPERLIQUID_TESTNET=false \
   -e AERODROME_LIVE_APPROVED=true \
   -e AERODROME_HEDGE_ENABLED=true \

@@ -61,12 +61,17 @@ class VpsDeploymentFoundationTest < ActiveSupport::TestCase
       assert_includes path.read, "DO NOT RUN AUTOMATICALLY"
       assert_includes path.read, "copy/paste template only"
       refute_includes path.read, "exec bin/rails"
-      assert_includes path.read, "docker compose -f docker-compose.prod.yml exec -T"
+      assert_no_match(/docker compose .* stop web/, path.read)
     end
 
+    assert_includes open_template.read, "docker compose -f docker-compose.prod.yml run --rm --no-deps"
     assert_includes open_template.read, "web bin/rails aerodrome:production_live_run"
+    assert_includes open_template.read, "The web container stays running"
+    assert_no_match(/docker compose .* exec .* web bin\/rails aerodrome:production_live_run/, open_template.read)
+    assert_no_match(/stop web/, open_template.read)
     assert_includes open_template.read, "<duration_seconds>"
     assert_includes open_template.read, "<max_eth_<=_0.02>"
+    assert_includes close_template.read, "docker compose -f docker-compose.prod.yml exec -T"
     assert_includes close_template.read, "web bin/rails aerodrome:live_emergency_close"
     assert_includes close_template.read, "check current mainnet ETH"
   end

@@ -207,6 +207,8 @@ The VPS adopt-existing recovery workflow passed. A first supervised production r
 
 Production operator command wrappers are documented in `docs/AERODROME_PRODUCTION_OPERATOR_COMMANDS.md`. They make the VPS workflow explicit: status checks are read-only, backups are required before and after live runs, open/close helpers print templates only, and watchdog/approved-open monitoring never closes positions. The live runner remains manual and gated; no unattended live scheduler is approved.
 
+The production live runner should be launched as a one-off Docker Compose runner while the web container remains online. The dashboard and PnL pages should remain available through the SSH tunnel for operator monitoring. Stopping web is a debug/emergency action, not normal supervised production flow.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

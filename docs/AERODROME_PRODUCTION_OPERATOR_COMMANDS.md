@@ -32,7 +32,8 @@ If an earlier bad backup was written inside `storage/backups` and grew large, de
 
 - prints a supervised `production_live_run` command template only;
 - does not execute the command;
-- prints a Docker Compose command for the `web` container, not a host Ruby command;
+- prints a Docker Compose `run --rm --no-deps web` command, not a host Ruby command;
+- keeps the existing web container running so the dashboard/PnL view remains available;
 - includes placeholders for duration, interval, max ETH, max notional, and leave-position-open mode;
 - operator must copy/paste manually inside `tmux` after preflight and review.
 
@@ -66,6 +67,8 @@ Before a supervised run:
 5. Confirm mainnet ETH state and approved-open state.
 6. Print the command with `bin/vps-production-open-run-template`.
 7. Copy/paste only after manual review and explicit approval.
+
+Normal production-supervised live runs do not stop the web container. Keep the dashboard online and monitor it through the SSH tunnel while the one-off runner container executes. Stopping web is a debug/emergency action only, not normal production flow.
 
 After a supervised run:
 
