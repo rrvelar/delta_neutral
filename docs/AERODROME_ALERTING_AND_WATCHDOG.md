@@ -199,6 +199,8 @@ The VPS approved-open watchdog retest passed. During a 360 second production liv
 
 Production operator wrappers keep watchdog behavior read-only. `bin/vps-production-status` and `bin/vps-production-post-run-check` run watchdog alerts as part of a broader read-only status pack. They do not close positions and do not start live runs. On `BLOCKED`, the operator must inspect blockers and decide separately whether the manually gated emergency close is needed.
 
+During normal production-supervised live runs, the web container should remain online so the dashboard and PnL remain visible through the SSH tunnel. Watchdog/status commands are read-only and should not stop web, start live runs, or close positions.
+
 ## Future Alert Channels
 
 Future integrations may include:
