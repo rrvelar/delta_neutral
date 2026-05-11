@@ -79,3 +79,9 @@ This is supervised production monitoring only. It is not unattended 24/7 approva
 The VPS adopt-existing recovery workflow passed and is recorded in `docs/AERODROME_ADOPT_EXISTING_RECOVERY_TEST_REPORT.md`. A production live run opened WETH hedge `#198` and left ETH open as approved state. A follow-up production live run with `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true` adopted the approved ETH short around `-0.0109`, produced the expected adoption warning, kept runtime safety `PASS`, and finished successfully. After manual emergency close, final mainnet ETH readback was nil.
 
 Approved-open monitoring is still read-only. It validates whether adoption is allowed; it does not start runs, place orders, or close positions.
+
+## New Position First Live Run
+
+The first real new-position 1x supervised run is recorded in `docs/AERODROME_NEW_POSITION_FIRST_LIVE_RUN_REPORT.md`. Production live runner opened WETH hedge `#200` at `0.3912` ETH for token id `70184676` and left it open by design after clean duration completion. Approved-open monitoring reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` with no blockers rather than `BLOCKED`.
+
+The operator later ran the separately gated live emergency close, which closed ETH to nil. This proves approved-open monitoring at the first real production-size supervised position, but it remains read-only monitoring and does not approve unattended 24/7 operation.

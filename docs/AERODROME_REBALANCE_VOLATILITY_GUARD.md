@@ -44,3 +44,9 @@ The guard result explains the distinction between normal production movement and
 ## Adopt-Existing Recovery Evidence
 
 During the VPS adopt-existing recovery test, the guard skipped an unnecessary rebalance because the prior successful rebalance was within the configured `AERODROME_REBALANCE_MIN_SECONDS_BETWEEN_REBALANCES` window of `600` seconds. This was expected behavior: an approved open hedge had already been rebalanced recently, so skipping a redundant order was safer than forcing another trade.
+
+## New Position First Live Run
+
+The first real new-position 1x supervised run on Aerodrome token id `70184676` confirmed the guard behavior at larger supervised size. The initial WETH hedge rebalance opened `0.3912` ETH successfully, and a later small rebalance was skipped because the prior rebalance was still within the `600` second minimum-rebalance interval. The run completed successfully, approved-open monitoring worked, and the manually gated emergency close later returned mainnet ETH to nil.
+
+The guard remains a skip-only control. It does not close positions, does not place orders by itself, and does not approve unattended operation.
