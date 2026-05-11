@@ -201,6 +201,8 @@ The VPS approved-open watchdog/readiness retest passed and is recorded in `docs/
 
 Volatility-aware rebalance guarding is part of supervised mode preparation. When enabled, it prevents the runner from chasing sharp pump/dump movement by skipping unsafe rebalance attempts; it does not close positions. The controlled target-step test is a separate live-capable supervised tool for verifying rebalance up/down behavior without relying on market movement. It requires explicit gates, restores the original target, closes ETH at finish, and remains outside unattended 24/7 operation.
 
+The VPS target-step rebalance test passed. Rebalances `#196` and `#197` verified controlled WETH hedge movement up and down while the volatility guard allowed both steps. The target was restored, final ETH was nil, and manual action was not required. The earlier 5-hour run’s lack of extra rebalances is consistent with the `$10` minimum order notional because the observed delta was only about `$6.31`.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

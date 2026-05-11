@@ -262,6 +262,8 @@ If `production_live_status` reports `lock_state=stale_finished`, do not assume a
 
 The VPS target-step test is not part of the scheduler. `bin/rails aerodrome:production_target_step_test` is live-capable and must only be run manually with explicit one-off gates after preflight. It temporarily changes the hedge target, requires the volatility guard, restores the target, and closes ETH at finish. Watchdog scheduling remains read-only and must not run this task.
 
+The VPS target-step rebalance test passed and is documented in `docs/AERODROME_TARGET_STEP_REBALANCE_TEST_REPORT.md`. The volatility guard allowed the controlled up/down steps, WETH rebalances `#196` and `#197` succeeded, the target was restored, and final mainnet ETH was nil. This is operational evidence for supervised target-step testing only; it does not approve unattended 24/7 operation or automatic VPS live scheduling.
+
 The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an in-cap ETH short around `-0.0093` open by design. Approved-open monitoring reported `approved`, status reported `PASS`, and watchdog alerts reported `WARN` rather than `BLOCKED` because strict readiness was the only suppressed safe-mode signal. The operator then manually closed ETH through the gated emergency close, and final mainnet readback was nil. Future VPS production live runs remain supervised and require explicit gates; unattended 24/7 operation is not approved.
 
 Manual live emergency close, only when explicitly gated:

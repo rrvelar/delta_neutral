@@ -59,3 +59,9 @@ Events include `start`, `target_changed`, `guard_check`, `rebalance_attempt`, `r
 ## Safety
 
 The task never supports USDC. Emergency close remains separate and manually gated. This does not approve unattended 24/7 operation or larger limits.
+
+## VPS Test Result
+
+The VPS controlled target-step rebalance test passed and is documented in `docs/AERODROME_TARGET_STEP_REBALANCE_TEST_REPORT.md`. The task stepped the target from `0.01` to `0.015` and back to `0.01`. The volatility guard allowed both steps. `ShortRebalance #196` moved WETH from `0.0` to about `0.0153`, and `ShortRebalance #197` moved WETH from about `0.0153` to about `0.0102`; both succeeded. The target was restored to `0.01`, final ETH was nil, and `manual_action_required=false`.
+
+The previous 5-hour production live run did not rebalance more often because the largest observed delta was about `$6.31`, below `AERODROME_MIN_ORDER_NOTIONAL_USD=10`. That was expected safety behavior.

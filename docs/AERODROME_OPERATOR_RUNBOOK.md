@@ -453,6 +453,8 @@ The VPS approved-open watchdog retest passed and is documented in `docs/AERODROM
 
 `bin/rails aerodrome:production_target_step_test` is a live-capable supervised test for intentionally stepping the Aerodrome WETH hedge target up and back down to produce controlled rebalance attempts. It requires explicit one-off gates, requires the volatility guard to be enabled, refuses if mainnet ETH is already open, restores the original target, and closes ETH at finish. Do not lower `AERODROME_MIN_ORDER_NOTIONAL_USD` below `10`.
 
+The VPS target-step rebalance test passed and is documented in `docs/AERODROME_TARGET_STEP_REBALANCE_TEST_REPORT.md`. The task stepped the target `0.01 -> 0.015 -> 0.01`, the volatility guard allowed both steps, WETH rebalances `#196` and `#197` succeeded, the target was restored to `0.01`, and final mainnet ETH was nil. The earlier 5-hour market-movement run did not rebalance more often because the largest observed delta was about `$6.31`, below the `$10` minimum order notional. This remains supervised production only, not unattended 24/7 approval.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

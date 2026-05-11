@@ -34,3 +34,9 @@ The guard only decides whether a rebalance should be attempted. It does not clos
 `AerodromeProductionLiveRunner` runs the guard before `HedgeSyncJob.perform_now`. If the guard blocks, the runner records `rebalance_skipped_by_volatility_guard` and continues unless another runtime safety blocker exists.
 
 `AerodromeProductionTargetStepTest` requires the guard to be enabled. A blocked target-step rebalance is recorded and the task restores the original target and closes any ETH at finish.
+
+## VPS Target-Step Evidence
+
+The VPS controlled target-step test passed. The guard allowed both the up step and the down step. The up step proposed about `0.01534 ETH` / `$35.98`; the down step proposed about `0.00508 ETH` / `$11.92`. Both were above the `$10` minimum order notional and inside configured caps. The down step reported only about `0.65 bps` price movement and about `0.22 bps` price divergence.
+
+The guard result explains the distinction between normal production movement and the controlled test: the previous 5-hour production run saw a max delta around `$6.31`, below `AERODROME_MIN_ORDER_NOTIONAL_USD=10`, so no extra rebalance was expected.
