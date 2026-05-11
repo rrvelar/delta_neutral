@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+export RAILS_ENV="${RAILS_ENV:-production}"
+
+failures=0
+
+run_step() {
+  local title="$1"
+  shift
+  echo
+  echo "== ${title} =="
+  if "$@"; then
+    return 0
+  fi
+
+  failures=$((failures + 1))
+  echo "WARN: ${title} exited nonzero; inspect output above."
+}
+
+echo "AERODROME VPS PRODUCTION STATUS — READ ONLY"
+echo "NO ORDERS"
+echo "NO CLOSE"
+echo "NO HYPERLIQUID EXECUTION"
+
+run_step "production_supervised_readiness" bin/rails aerodrome:production_supervised_readiness
+run_step "production_live_status" bin/rails aerodrome:production_live_status
+run_step "approved_open_position" bin/rails aerodrome:approved_open_position
+run_step "watchdog_alerts" bin/rails aerodrome:watchdog_alerts
+run_step "mainnet ETH readback" bin/rails runner 'require "json"; puts JSON.pretty_generate(mainnet_eth_position: HyperliquidService.new(testnet: false).get_position("ETH"))'
+
+exit "$failures"

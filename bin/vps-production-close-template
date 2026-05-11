@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat <<'TEXT'
+AERODROME LIVE EMERGENCY CLOSE TEMPLATE — DO NOT RUN AUTOMATICALLY
+
+This script prints a copy/paste template only.
+It does not execute live_emergency_close.
+Before running, check current mainnet ETH position and confirm the max close ETH is sufficient.
+
+# DO NOT RUN UNTIL REVIEWED AND FILLED IN MANUALLY
+HYPERLIQUID_TESTNET=false \
+AERODROME_LIVE_APPROVED=true \
+AERODROME_HEDGE_PAUSED=true \
+AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED=true \
+AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM=I_UNDERSTAND_THIS_CLOSES_LIVE_ETH_SHORT \
+AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=<max_close_eth> \
+bin/rails aerodrome:live_emergency_close
+TEXT

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+backup_dir="${BACKUP_DIR:-/root/delta_neutral_backups}"
+timestamp="$(date -u +%Y%m%d%H%M%S)"
+destination="${backup_dir}/storage-${timestamp}.tar.gz"
+
+mkdir -p "$backup_dir"
+tar \
+  --exclude="./backups" \
+  --exclude="./._*" \
+  --exclude="*/._*" \
+  -czf "$destination" \
+  -C storage .
+
+echo "Storage backup created:"
+echo "$destination"

@@ -203,6 +203,8 @@ Volatility-aware rebalance guarding is part of supervised mode preparation. When
 
 The VPS target-step rebalance test passed. Rebalances `#196` and `#197` verified controlled WETH hedge movement up and down while the volatility guard allowed both steps. The target was restored, final ETH was nil, and manual action was not required. The earlier 5-hour run’s lack of extra rebalances is consistent with the `$10` minimum order notional because the observed delta was only about `$6.31`.
 
+Production operator command wrappers are documented in `docs/AERODROME_PRODUCTION_OPERATOR_COMMANDS.md`. They make the VPS workflow explicit: status checks are read-only, backups are required before and after live runs, open/close helpers print templates only, and watchdog/approved-open monitoring never closes positions. The live runner remains manual and gated; no unattended live scheduler is approved.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:

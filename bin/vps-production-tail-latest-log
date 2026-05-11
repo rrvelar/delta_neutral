@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+latest_live_log="$(ls -t storage/aerodrome_production_live/*.jsonl 2>/dev/null | head -n 1 || true)"
+latest_operator_log="$(ls -t log/*.log 2>/dev/null | head -n 1 || true)"
+
+echo "AERODROME VPS PRODUCTION LOG TAIL — READ ONLY"
+
+if [ -n "$latest_live_log" ]; then
+  echo
+  echo "== latest production live JSONL: ${latest_live_log} =="
+  tail -n "${TAIL_LINES:-80}" "$latest_live_log"
+else
+  echo
+  echo "No production live JSONL log found."
+fi
+
+if [ -n "$latest_operator_log" ]; then
+  echo
+  echo "== latest app/operator log: ${latest_operator_log} =="
+  tail -n "${TAIL_LINES:-80}" "$latest_operator_log"
+else
+  echo
+  echo "No log/*.log file found."
+fi

@@ -264,6 +264,17 @@ The VPS target-step test is not part of the scheduler. `bin/rails aerodrome:prod
 
 The VPS target-step rebalance test passed and is documented in `docs/AERODROME_TARGET_STEP_REBALANCE_TEST_REPORT.md`. The volatility guard allowed the controlled up/down steps, WETH rebalances `#196` and `#197` succeeded, the target was restored, and final mainnet ETH was nil. This is operational evidence for supervised target-step testing only; it does not approve unattended 24/7 operation or automatic VPS live scheduling.
 
+Production operator wrappers are documented in `docs/AERODROME_PRODUCTION_OPERATOR_COMMANDS.md`:
+
+- `bin/vps-production-status` for read-only status/readback/watchdog checks.
+- `bin/vps-production-backup` for timestamped VPS storage backups.
+- `bin/vps-production-open-run-template` for a copy/paste production live run template only.
+- `bin/vps-production-close-template` for a copy/paste emergency close template only.
+- `bin/vps-production-post-run-check` for read-only post-run verification.
+- `bin/vps-production-tail-latest-log` for read-only log tailing.
+
+The VPS is the production runtime and VPS `storage/` is production data. The Mac mini remains a development/operator station. Never run live from Mac and VPS at the same time.
+
 The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an in-cap ETH short around `-0.0093` open by design. Approved-open monitoring reported `approved`, status reported `PASS`, and watchdog alerts reported `WARN` rather than `BLOCKED` because strict readiness was the only suppressed safe-mode signal. The operator then manually closed ETH through the gated emergency close, and final mainnet readback was nil. Future VPS production live runs remain supervised and require explicit gates; unattended 24/7 operation is not approved.
 
 Manual live emergency close, only when explicitly gated:
