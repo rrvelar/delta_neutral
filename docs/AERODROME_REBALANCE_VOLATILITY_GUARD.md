@@ -49,4 +49,6 @@ During the VPS adopt-existing recovery test, the guard skipped an unnecessary re
 
 The first real new-position 1x supervised run on Aerodrome token id `70184676` confirmed the guard behavior at larger supervised size. The initial WETH hedge rebalance opened `0.3912` ETH successfully, and a later small rebalance was skipped because the prior rebalance was still within the `600` second minimum-rebalance interval. The run completed successfully, approved-open monitoring worked, and the manually gated emergency close later returned mainnet ETH to nil.
 
+The first 6-hour supervised run on token id `70184676` also passed. It opened WETH hedge `#201` at `0.3973` ETH, kept runtime safety `PASS`, and left the in-cap hedge open by design after clean duration completion. During that run, additional natural rebalances did not execute even when some `proposed_delta_usd` values exceeded `$10`, likely because `hedge.tolerance=0.05` kept the relative deviation too small. This is anti-churn behavior from the hedge policy, not a volatility guard failure. Review rebalance tolerance policy separately before changing it.
+
 The guard remains a skip-only control. It does not close positions, does not place orders by itself, and does not approve unattended operation.

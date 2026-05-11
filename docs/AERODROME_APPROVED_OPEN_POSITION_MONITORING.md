@@ -85,3 +85,9 @@ Approved-open monitoring is still read-only. It validates whether adoption is al
 The first real new-position 1x supervised run is recorded in `docs/AERODROME_NEW_POSITION_FIRST_LIVE_RUN_REPORT.md`. Production live runner opened WETH hedge `#200` at `0.3912` ETH for token id `70184676` and left it open by design after clean duration completion. Approved-open monitoring reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` with no blockers rather than `BLOCKED`.
 
 The operator later ran the separately gated live emergency close, which closed ETH to nil. This proves approved-open monitoring at the first real production-size supervised position, but it remains read-only monitoring and does not approve unattended 24/7 operation.
+
+## New Position 6H Live Run
+
+The first 6-hour supervised production run on token id `70184676` is recorded in `docs/AERODROME_NEW_POSITION_6H_LIVE_RUN_REPORT.md`. Production live runner opened WETH hedge `#201` at `0.3973` ETH, finished duration-complete with `position_left_open=true`, `final_position_confirmed=true`, `manual_action_required=false`, and no errors.
+
+While the position remains open, approved-open monitoring should report the in-cap ETH short as approved monitored state, and watchdog should be `WARN` or `PASS` with blockers empty. The manual emergency close remains separate and gated, and final post-close mainnet ETH readback should be nil before the next live run.
