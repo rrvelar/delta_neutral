@@ -12,6 +12,7 @@ class AerodromeProductionLiveRunner
     hyperliquid_service: nil,
     position_sync: ->(position_id) { PositionSyncJob.perform_now(position_id) },
     hedge_sync: ->(hedge_id) { HedgeSyncJob.perform_now(hedge_id) },
+    volatility_guard: nil,
     emergency_close_factory: -> { AerodromeLiveEmergencyClose.new },
     readiness: nil,
     sleeper: ->(seconds) { sleep(seconds) },
@@ -22,6 +23,7 @@ class AerodromeProductionLiveRunner
     @hyperliquid_service = hyperliquid_service
     @position_sync = position_sync
     @hedge_sync = hedge_sync
+    @volatility_guard = volatility_guard
     @emergency_close_factory = emergency_close_factory
     @readiness = readiness
     @sleeper = sleeper
@@ -151,6 +153,7 @@ class AerodromeProductionLiveRunner
     new_rebalances = []
     new_snapshot = nil
     runtime_safety = nil
+    guard = nil
 
     begin
       @position_sync.call(position.id)
@@ -160,7 +163,13 @@ class AerodromeProductionLiveRunner
         return record_iteration(iteration_number, nil, [], nil, [ @stop_reason ])
       end
 
-      @hedge_sync.call(hedge.id)
+      actual_position = volatility_guard.enabled? ? read_eth_position : nil
+      guard = rebalance_guard_report(actual_position)
+      if guard.fetch(:allowed)
+        @hedge_sync.call(hedge.id)
+      else
+        record_event(type: "rebalance_skipped_by_volatility_guard", timestamp: timestamp, guard: guard)
+      end
       actual_position = read_eth_position
       @last_known_short = short_size(actual_position)
       new_rebalances = hedge.short_rebalances.where("id > ?", before_rebalance_id).order(:id).to_a
@@ -173,11 +182,11 @@ class AerodromeProductionLiveRunner
     end
 
     @rebalances.concat(new_rebalances)
-    record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: runtime_safety)
+    record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: runtime_safety, guard: guard)
     evaluate_stop_conditions(actual_position, new_rebalances, iteration_errors, runtime_safety)
   end
 
-  def record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: nil)
+  def record_iteration(iteration_number, actual_position, new_rebalances, new_snapshot, iteration_errors, runtime_safety: nil, guard: nil)
     event = {
       type: "iteration",
       timestamp: timestamp,
@@ -190,11 +199,19 @@ class AerodromeProductionLiveRunner
       runtime_safety_status: runtime_safety&.fetch(:status, nil),
       runtime_safety_blockers: runtime_safety&.fetch(:blockers, []),
       runtime_safety_warnings: runtime_safety&.fetch(:warnings, []),
+      rebalance_guard_status: guard&.fetch(:status, nil),
+      rebalance_guard_allowed: guard&.fetch(:allowed, nil),
+      rebalance_guard_reason: guard&.fetch(:reason, nil),
+      rebalance_guard_blockers: guard&.fetch(:blockers, []),
+      rebalance_guard_warnings: guard&.fetch(:warnings, []),
+      proposed_delta_eth: guard&.fetch(:proposed_delta_eth, nil),
+      proposed_delta_usd: guard&.fetch(:proposed_delta_usd, nil),
       errors: iteration_errors
     }
     @iterations << event
     record_event(type: "heartbeat", timestamp: timestamp, iteration: iteration_number, actual_eth_position: serialize_position(actual_position))
     new_rebalances.each { |rebalance| record_event(type: "rebalance", timestamp: timestamp, rebalance: serialize_rebalance(rebalance)) }
+    volatility_guard.record_rebalance!(at: @clock.call) if new_rebalances.any? { |rebalance| weth_rebalance?(rebalance) && rebalance.status == ShortRebalance::STATUS_SUCCESS }
     record_event(event)
   end
 
@@ -221,6 +238,20 @@ class AerodromeProductionLiveRunner
       eth_position: actual_position,
       since_rebalance_id: @run_start_rebalance_id
     ).report
+  end
+
+  def rebalance_guard_report(actual_position)
+    volatility_guard.report(
+      lp_price_usd: eth_price,
+      mark_price_usd: actual_position&.fetch(:mark_price, nil),
+      target_short: target_short,
+      current_short: short_size(actual_position),
+      last_rebalance_at: latest_weth_rebalance_at
+    )
+  end
+
+  def volatility_guard
+    @volatility_guard ||= AerodromeRebalanceVolatilityGuard.new(clock: @clock)
   end
 
   def stop_requested!(reason)
@@ -587,6 +618,14 @@ class AerodromeProductionLiveRunner
 
   def weth_rebalance?(rebalance)
     HEDGEABLE_SYMBOLS.include?(rebalance.asset.to_s.upcase)
+  end
+
+  def latest_weth_rebalance_at
+    hedge.short_rebalances
+      .where(asset: HEDGEABLE_SYMBOLS)
+      .where(status: ShortRebalance::STATUS_SUCCESS)
+      .order(rebalanced_at: :desc, id: :desc)
+      .first&.rebalanced_at
   end
 
   def max_iterations

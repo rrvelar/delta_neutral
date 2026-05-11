@@ -269,6 +269,48 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
     end
   end
 
+  test "guard blocked skips hedge sync for that iteration" do
+    with_position_and_hedge do
+      guard = GuardDouble.new(enabled: true, allowed: false)
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, nil, nil ])
+      hedge_sync_called = false
+
+      with_env(@env) do
+        report = build_service(
+          hyperliquid_service: hyperliquid,
+          hedge_sync: ->(_) { hedge_sync_called = true },
+          volatility_guard: guard
+        ).report
+
+        assert_equal "failed", report.fetch(:status)
+        assert_equal true, report.fetch(:manual_action_required)
+        assert_equal false, hedge_sync_called
+        assert_equal "blocked", report.fetch(:iteration_events).first.fetch(:rebalance_guard_status)
+        assert_equal false, report.fetch(:iteration_events).first.fetch(:rebalance_guard_allowed)
+      end
+    end
+  end
+
+  test "guard allowed calls hedge sync" do
+    with_position_and_hedge do |hedge|
+      guard = GuardDouble.new(enabled: true, allowed: true)
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, nil, eth_position("-0.011"), eth_position("-0.011") ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge) }
+
+      with_env(@env) do
+        report = build_service(
+          hyperliquid_service: hyperliquid,
+          hedge_sync: hedge_sync,
+          volatility_guard: guard
+        ).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_equal "pass", report.fetch(:iteration_events).first.fetch(:rebalance_guard_status)
+        assert_equal true, report.fetch(:iteration_events).first.fetch(:rebalance_guard_allowed)
+      end
+    end
+  end
+
   private
 
   class HyperliquidReadMock
@@ -337,11 +379,42 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
     end
   end
 
+  class GuardDouble
+    attr_reader :recorded_rebalance
+
+    def initialize(enabled:, allowed:)
+      @enabled = enabled
+      @allowed = allowed
+      @recorded_rebalance = false
+    end
+
+    def enabled?
+      @enabled
+    end
+
+    def report(*)
+      {
+        status: @allowed ? "pass" : "blocked",
+        allowed: @allowed,
+        reason: @allowed ? "allowed" : "test blocked",
+        blockers: @allowed ? [] : [ "test blocked" ],
+        warnings: [],
+        proposed_delta_eth: "0.001",
+        proposed_delta_usd: "2.3"
+      }
+    end
+
+    def record_rebalance!(at:)
+      @recorded_rebalance = true
+    end
+  end
+
   def build_service(
     hyperliquid_service: HyperliquidReadMock.new(positions: []),
     position_sync: ->(_) { },
     hedge_sync: ->(_) { },
     emergency_close_factory: -> { EmergencyCloseReport.new(status: "success") },
+    volatility_guard: AerodromeRebalanceVolatilityGuard.new(clock: -> { Time.zone.local(2026, 5, 10, 12, 0, 0) }),
     readiness: ReportDouble.new(status: "PASS"),
     log_dir: tmp_path("logs"),
     lock_path: tmp_path("run.lock")
@@ -350,6 +423,7 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
       hyperliquid_service: hyperliquid_service,
       position_sync: position_sync,
       hedge_sync: hedge_sync,
+      volatility_guard: volatility_guard,
       emergency_close_factory: emergency_close_factory,
       readiness: readiness,
       sleeper: ->(_) { },
