@@ -665,6 +665,39 @@ namespace :aerodrome do
     end
   end
 
+  desc "Run a strictly gated Aerodrome production target-step rebalance test"
+  task production_target_step_test: :environment do
+    report = AerodromeProductionTargetStepTest.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "LIVE ORDER CAPABLE — STRICTLY GATED"
+      puts "original target: #{report.fetch(:original_target).inspect}"
+      puts "up target: #{report.fetch(:up_target).inspect}"
+      puts "down target: #{report.fetch(:down_target).inspect}"
+      puts "log path: #{report.fetch(:log_path) || "none"}"
+      puts "guard status/results:"
+      report.fetch(:guard_results).each { |guard| puts "  #{guard.inspect}" }
+      puts "rebalance rows:"
+      report.fetch(:rebalance_rows).each { |row| puts "  #{row.inspect}" }
+      puts "target restored: #{report.fetch(:target_restored)}"
+      puts "final ETH position: #{report.fetch(:final_position).inspect}"
+      puts "final_position_confirmed: #{report.fetch(:final_position_confirmed)}"
+      puts "manual_action_required: #{report.fetch(:manual_action_required)}"
+      puts "final status: #{report.fetch(:status)}"
+      puts "errors:"
+      if report.fetch(:errors).any?
+        report.fetch(:errors).each { |error| puts "  #{error}" }
+      else
+        puts "  none"
+      end
+    end
+
+    exit(false) if %w[blocked failed close_unknown].include?(report.fetch(:status))
+  end
+
   desc "Run a read-only Aerodrome AERO rewards discovery check"
   task rewards_check: :environment do
     report = AerodromeRewardsCheck.new.report

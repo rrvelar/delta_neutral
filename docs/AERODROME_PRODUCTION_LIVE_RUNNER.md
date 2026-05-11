@@ -81,3 +81,9 @@ Current Hyperliquid readback decides whether a previous approved-open position i
 Watchdog/readiness integration is approved-open-aware. `production_supervised_readiness` remains strict safe-mode evidence and can be `BLOCKED` solely because mainnet ETH is open. When the approved-open detector validates that ETH as the expected in-cap hedge, watchdog suppresses only that readiness nil-position blocker and reports it as monitored state. Other readiness blockers remain blockers.
 
 The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, approved-open monitoring validated it, `watchdog_alerts` returned `WARN` rather than `BLOCKED`, and the operator then manually closed ETH through the separately gated live emergency close. Longer production live runs or restart/adopt-existing workflow require separate approval and planning.
+
+## Volatility Guard And Target-Step Testing
+
+Production live runner iterations run `AerodromeRebalanceVolatilityGuard` before `HedgeSyncJob`. If the guard is disabled, behavior is unchanged. If the guard is enabled and detects sharp movement, excessive window move, price divergence, cooldown, or too-recent rebalance, the runner skips that rebalance attempt and logs the guard result. The guard does not close positions and does not bypass emergency close.
+
+`docs/AERODROME_TARGET_STEP_TEST.md` documents the controlled target-step rebalance test. It is live-capable, supervised only, and requires explicit one-off gates. It temporarily changes the hedge target up/down, restores the original target, and closes ETH at finish. It must not be used as unattended automation.

@@ -22,6 +22,7 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     Rake::Task["aerodrome:production_live_status"].reenable
     Rake::Task["aerodrome:approved_open_position"].reenable
     Rake::Task["aerodrome:production_live_stop_plan"].reenable
+    Rake::Task["aerodrome:production_target_step_test"].reenable
     Rake::Task["aerodrome:rewards_check"].reenable
     Rake::Task["aerodrome:fees_check"].reenable
   end
@@ -974,6 +975,40 @@ class AerodromeTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "production target step test task outputs gated live status" do
+    report = production_target_step_report(status: "success")
+
+    with_env("FORMAT" => nil) do
+      AerodromeProductionTargetStepTest.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_target_step_test"].invoke }
+
+        assert_match "AERODROME TARGET STEP TEST", out
+        assert_match "LIVE ORDER CAPABLE", out
+        assert_match "target restored: true", out
+        assert_match "final status: success", out
+      end
+    end
+  end
+
+  test "production target step test task supports JSON output" do
+    report = production_target_step_report(status: "success")
+
+    with_env("FORMAT" => "json") do
+      AerodromeProductionTargetStepTest.stub(:new, -> {
+        Object.new.tap { |object| object.define_singleton_method(:report) { report } }
+      }) do
+        out, = capture_io { Rake::Task["aerodrome:production_target_step_test"].invoke }
+        parsed = JSON.parse(out)
+
+        assert_equal "success", parsed.fetch("status")
+        assert_equal true, parsed.fetch("orders_enabled")
+        assert_equal true, parsed.fetch("hyperliquid_execution")
+      end
+    end
+  end
+
   test "approved open position task supports JSON output" do
     report = {
       safety_banner: AerodromeApprovedOpenPosition::BANNER,
@@ -1369,6 +1404,35 @@ class AerodromeTaskTest < ActiveSupport::TestCase
       position_left_open: true,
       close_result: { status: "not_run_leave_position_open" },
       manual_action_required: false,
+      errors: [],
+      database_write: true,
+      orders_enabled: true,
+      hyperliquid_execution: true
+    }
+  end
+
+  def production_target_step_report(status:)
+    {
+      safety_banner: AerodromeProductionTargetStepTest::BANNER,
+      status: status,
+      live_order_capable: true,
+      log_path: "storage/aerodrome_target_step_test/test.jsonl",
+      original_target: "0.01",
+      up_target: "0.015",
+      down_target: "0.01",
+      rebalance_rows: [
+        { id: 1, asset: "WETH", old_short_size: "0", new_short_size: "0.015", status: "success" },
+        { id: 2, asset: "WETH", old_short_size: "0.015", new_short_size: "0.01", status: "success" }
+      ],
+      guard_results: [
+        { step: "up", status: "pass", allowed: true, reason: "test allowed" },
+        { step: "down", status: "pass", allowed: true, reason: "test allowed" }
+      ],
+      target_restored: true,
+      final_position: nil,
+      final_position_confirmed: true,
+      manual_action_required: false,
+      close_result: { status: "success" },
       errors: [],
       database_write: true,
       orders_enabled: true,

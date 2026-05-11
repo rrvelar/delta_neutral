@@ -447,6 +447,12 @@ If `aerodrome:production_live_status` reports `lock_state=stale_finished`, verif
 
 The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, `approved_open_position` reported `approved`, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` with no blockers. The warning stated that production readiness is strict safe-mode evidence and approved open ETH is monitored by the approved-open detector. The operator then manually ran the gated live emergency close, which closed ETH to nil. This is not unattended 24/7 approval; the next stage is either a longer supervised `production_live_run` with approved-open monitoring active or explicit restart/adopt-existing workflow design.
 
+### Volatility Guard And Target-Step Test
+
+`AerodromeRebalanceVolatilityGuard` is disabled by default. When enabled, it can skip rebalances during sharp price moves, excessive window moves, price divergence, cooldown, or too-recent prior rebalances. A skipped rebalance is safer than forcing a trade during volatile conditions. The guard does not close positions; live emergency close remains separate and manually gated.
+
+`bin/rails aerodrome:production_target_step_test` is a live-capable supervised test for intentionally stepping the Aerodrome WETH hedge target up and back down to produce controlled rebalance attempts. It requires explicit one-off gates, requires the volatility guard to be enabled, refuses if mainnet ETH is already open, restores the original target, and closes ETH at finish. Do not lower `AERODROME_MIN_ORDER_NOTIONAL_USD` below `10`.
+
 ## When Not To Proceed
 
 Do not proceed beyond dry-run if:

@@ -199,6 +199,8 @@ Approved open position monitoring is read-only and lets watchdog distinguish a k
 
 The VPS approved-open watchdog/readiness retest passed and is recorded in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an ETH short around `-0.0093` open by design, approved-open monitoring validated it, `production_live_status` reported `PASS`, and `watchdog_alerts` reported `WARN` rather than `BLOCKED` because the only suppressed readiness blocker was strict safe-mode ETH-open evidence. The operator then manually ran the gated live emergency close and final mainnet ETH readback was nil. This remains supervised production mode, not unattended operation.
 
+Volatility-aware rebalance guarding is part of supervised mode preparation. When enabled, it prevents the runner from chasing sharp pump/dump movement by skipping unsafe rebalance attempts; it does not close positions. The controlled target-step test is a separate live-capable supervised tool for verifying rebalance up/down behavior without relying on market movement. It requires explicit gates, restores the original target, closes ETH at finish, and remains outside unattended 24/7 operation.
+
 ## VPS And Runtime Setup
 
 Recommended foundation before production supervised mode:
