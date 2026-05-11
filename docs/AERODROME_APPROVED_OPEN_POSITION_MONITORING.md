@@ -73,3 +73,9 @@ The approved-open watchdog/readiness integration retest passed on VPS and is rec
 ## Next Stage
 
 This is supervised production monitoring only. It is not unattended 24/7 approval. Future work may add an explicit archive/acknowledgment workflow for approved-open logs that are later manually closed.
+
+## VPS Adopt-Existing Retest
+
+The VPS adopt-existing recovery workflow passed and is recorded in `docs/AERODROME_ADOPT_EXISTING_RECOVERY_TEST_REPORT.md`. A production live run opened WETH hedge `#198` and left ETH open as approved state. A follow-up production live run with `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true` adopted the approved ETH short around `-0.0109`, produced the expected adoption warning, kept runtime safety `PASS`, and finished successfully. After manual emergency close, final mainnet ETH readback was nil.
+
+Approved-open monitoring is still read-only. It validates whether adoption is allowed; it does not start runs, place orders, or close positions.

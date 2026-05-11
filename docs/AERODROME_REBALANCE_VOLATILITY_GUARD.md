@@ -40,3 +40,7 @@ The guard only decides whether a rebalance should be attempted. It does not clos
 The VPS controlled target-step test passed. The guard allowed both the up step and the down step. The up step proposed about `0.01534 ETH` / `$35.98`; the down step proposed about `0.00508 ETH` / `$11.92`. Both were above the `$10` minimum order notional and inside configured caps. The down step reported only about `0.65 bps` price movement and about `0.22 bps` price divergence.
 
 The guard result explains the distinction between normal production movement and the controlled test: the previous 5-hour production run saw a max delta around `$6.31`, below `AERODROME_MIN_ORDER_NOTIONAL_USD=10`, so no extra rebalance was expected.
+
+## Adopt-Existing Recovery Evidence
+
+During the VPS adopt-existing recovery test, the guard skipped an unnecessary rebalance because the prior successful rebalance was within the configured `AERODROME_REBALANCE_MIN_SECONDS_BETWEEN_REBALANCES` window of `600` seconds. This was expected behavior: an approved open hedge had already been rebalanced recently, so skipping a redundant order was safer than forcing another trade.

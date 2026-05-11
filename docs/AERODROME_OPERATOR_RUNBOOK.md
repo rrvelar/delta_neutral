@@ -269,6 +269,8 @@ Production operator command wrappers are documented in `docs/AERODROME_PRODUCTIO
 
 Adopt-existing production live runs are allowed only for an already-open ETH short that approved-open monitoring validates as `approved` and in caps. Set `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true` only for that reviewed case. The runner suppresses only the expected strict-readiness blocker that mainnet ETH is not nil and logs a warning that the approved hedge is being adopted. All unrelated readiness blockers, mismatches, out-of-caps positions, unavailable readback, or `manual_action_required=true` remain blockers. Emergency close remains manual and gated.
 
+The VPS adopt-existing recovery workflow passed and is documented in `docs/AERODROME_ADOPT_EXISTING_RECOVERY_TEST_REPORT.md`. Step A opened WETH hedge `#198` and left ETH open as approved state. Step B used the explicit adopt gate, adopted the approved ETH short, kept runtime safety `PASS`, skipped an unnecessary rebalance because the last rebalance was within `600` seconds, and finished successfully. Manual close later returned mainnet ETH to nil. This remains supervised production only.
+
 Production canary runner tooling is documented in `docs/AERODROME_PRODUCTION_CANARY_RUNNER.md`. `bin/rails aerodrome:production_canary_run` is live-order capable only with explicit one-off gates and must be supervised. It runs bounded position/hedge sync iterations, writes JSONL heartbeat/iteration events, stops on safety conditions, and requires final emergency close with final mainnet ETH confirmed nil. `close_on_finish=true` remains mandatory in this phase. Do not schedule this task and do not use it as unattended 24/7 operation.
 
 ## Run AERO Rewards Check

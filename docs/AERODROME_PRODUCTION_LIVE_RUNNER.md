@@ -93,3 +93,9 @@ Production live runner iterations run `AerodromeRebalanceVolatilityGuard` before
 The VPS target-step rebalance test passed and is recorded in `docs/AERODROME_TARGET_STEP_REBALANCE_TEST_REPORT.md`. The test intentionally stepped the target `0.01 -> 0.015 -> 0.01`, the volatility guard allowed both steps, WETH rebalances `#196` and `#197` succeeded, the target was restored, and final ETH was nil. The test also confirmed why a normal 5-hour run may not rebalance again when observed deltas remain below the `$10` minimum order notional.
 
 Operator command wrappers for supervised production are documented in `docs/AERODROME_PRODUCTION_OPERATOR_COMMANDS.md`. `bin/vps-production-open-run-template` prints a manual command template but does not run the live runner. `bin/vps-production-close-template` prints a manual emergency close template but does not close. Backups are required before and after live runs, and `bin/vps-production-post-run-check` should be run after every supervised run.
+
+## Adopt-Existing Recovery Test
+
+The VPS adopt-existing recovery workflow passed and is documented in `docs/AERODROME_ADOPT_EXISTING_RECOVERY_TEST_REPORT.md`. Step A opened WETH hedge `#198` from `0.0` to about `0.011` ETH and left it open by design. Step B ran with `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true`, adopted the approved ETH short around `-0.0109`, logged the warning that the approved open hedge was being adopted, kept runtime safety `PASS`, and finished successfully with `position_left_open=true` and `manual_action_required=false`. A later manual emergency close returned mainnet ETH to nil.
+
+Adopt-existing remains supervised only. Non-adopt runs remain strict. Future unattended restart/adopt behavior requires separate design and approval.
