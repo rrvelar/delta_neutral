@@ -44,6 +44,7 @@ class AerodromeProductionLiveRunner
     @stop_requested = false
     @signal = nil
     @run_start_rebalance_id = nil
+    @adopted_position = nil
   end
 
   def report
@@ -64,13 +65,19 @@ class AerodromeProductionLiveRunner
       if short_size(before).positive? && !position_within_caps?(before)
         return blocked([ "existing mainnet ETH position exceeds caps" ], final_position: before)
       end
+      approved = nil
       if short_size(before).positive? && adopt_existing_eth_short?
         approved = approved_open_position_report(before)
-        unless approved.fetch(:approval_status) == "approved"
+        unless approved.fetch(:approval_status) == "approved" && approved.fetch(:blockers).empty?
           return blocked([ "existing mainnet ETH position is not approved open state: #{approved.fetch(:approval_status)}" ].concat(approved.fetch(:blockers)), final_position: before)
         end
+        @adopted_position = before
       end
 
+      readiness_errors, readiness_warnings = readiness_gate_review(current_position: before, approved_open_report: approved)
+      return blocked(readiness_errors, final_position: before) if readiness_errors.any?
+
+      @warnings.concat(readiness_warnings)
       initialize_log
       @last_known_short = short_size(before)
       @run_start_rebalance_id = ShortRebalance.maximum(:id) || 0
@@ -380,7 +387,6 @@ class AerodromeProductionLiveRunner
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH must be configured and >= AERODROME_MAX_SHORT_ETH" unless emergency_close_max_eth && max_short_eth && emergency_close_max_eth >= max_short_eth
     errors << "No Aerodrome hedge/position found" unless hedge
     errors.concat(history_gate_errors) if hedge
-    errors.concat(readiness_gate_errors)
     errors
   end
 
@@ -432,12 +438,24 @@ class AerodromeProductionLiveRunner
     end.last
   end
 
-  def readiness_gate_errors
+  def readiness_gate_review(current_position:, approved_open_report:)
     blockers = readiness.report.fetch(:blockers, [])
-    filtered = blockers.reject { |message| expected_live_readiness_blocker?(message) }
-    filtered.map { |message| "production supervised readiness blocker: #{message}" }
+    suppressed = []
+    filtered = blockers.reject do |message|
+      if expected_live_readiness_blocker?(message)
+        true
+      elsif expected_adopt_existing_readiness_blocker?(message, current_position, approved_open_report)
+        suppressed << message
+        true
+      else
+        false
+      end
+    end
+
+    warnings = suppressed.any? ? [ "mainnet ETH is approved open hedge and is being adopted" ] : []
+    [ filtered.map { |message| "production supervised readiness blocker: #{message}" }, warnings ]
   rescue => e
-    [ "production supervised readiness failed: #{e.class}: #{e.message}" ]
+    [ [ "production supervised readiness failed: #{e.class}: #{e.message}" ], [] ]
   end
 
   def expected_live_readiness_blocker?(message)
@@ -447,6 +465,16 @@ class AerodromeProductionLiveRunner
       "AERODROME_LIVE_APPROVED is false",
       "HYPERLIQUID_TESTNET is true"
     ].any? { |expected| message.to_s.include?(expected) }
+  end
+
+  def expected_adopt_existing_readiness_blocker?(message, current_position, approved_open_report)
+    return false unless adopt_existing_eth_short?
+    return false unless short_size(current_position).positive?
+    return false unless approved_open_report
+    return false unless approved_open_report.fetch(:approval_status) == "approved"
+    return false unless approved_open_report.fetch(:blockers).empty?
+
+    message.to_s.include?("Mainnet ETH position is nil")
   end
 
   def blocked(errors, final_position: nil)
@@ -470,6 +498,7 @@ class AerodromeProductionLiveRunner
       final_position: serialize_position(@final_position),
       final_position_confirmed: @final_position_confirmed,
       position_left_open: @position_left_open,
+      adopted_position: serialize_position(@adopted_position),
       close_result: @close_result,
       manual_action_required: @manual_action_required,
       errors: @errors,

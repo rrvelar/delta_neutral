@@ -92,6 +92,71 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
         assert_equal "success", report.fetch(:status)
         assert_equal true, report.fetch(:position_left_open)
         assert_equal false, report.fetch(:manual_action_required)
+        assert_equal({ asset: "ETH", size: "-0.011" }, report.fetch(:adopted_position).slice(:asset, :size))
+      end
+    end
+  end
+
+  test "adopt existing suppresses only strict readiness mainnet ETH blocker" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.011" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.011"), eth_position("-0.011"), eth_position("-0.011") ])
+      readiness = ReportDouble.new(status: "BLOCKED", blockers: [ "Mainnet ETH position is nil: 0.011" ])
+
+      with_env(@env.merge("AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "true")) do
+        report = build_service(hyperliquid_service: hyperliquid, readiness: readiness, log_dir: log_dir).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_includes report.fetch(:warnings), "mainnet ETH is approved open hedge and is being adopted"
+        assert_empty report.fetch(:errors)
+      end
+    end
+  end
+
+  test "adopt existing keeps unrelated readiness blocker" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.011" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.011") ])
+      readiness = ReportDouble.new(status: "BLOCKED", blockers: [ "Mainnet ETH position is nil: 0.011", "unrelated blocker" ])
+
+      with_env(@env.merge("AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "true")) do
+        report = build_service(hyperliquid_service: hyperliquid, readiness: readiness, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "production supervised readiness blocker: unrelated blocker"
+        refute_includes report.fetch(:errors), "production supervised readiness blocker: Mainnet ETH position is nil: 0.011"
+      end
+    end
+  end
+
+  test "adopt existing blocks when approved open detector is not approved" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.011" }, manual_action_required: true)
+      hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.011") ])
+
+      with_env(@env.merge("AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "true")) do
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "previous production live/canary log has manual_action_required=true"
+      end
+    end
+  end
+
+  test "adopt existing blocks current ETH over caps" do
+    with_position_and_hedge do
+      log_dir = tmp_path("logs")
+      write_previous_live_log(log_dir, final_position: { asset: "ETH", size: "-0.011" })
+      hyperliquid = HyperliquidReadMock.new(positions: [ eth_position("-0.021") ])
+
+      with_env(@env.merge("AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "true")) do
+        report = build_service(hyperliquid_service: hyperliquid, log_dir: log_dir).report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "existing mainnet ETH position exceeds caps"
       end
     end
   end

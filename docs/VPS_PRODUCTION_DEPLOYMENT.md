@@ -254,6 +254,8 @@ The first VPS Production Live Runner V1 run passed: 3600 seconds, 300 second int
 
 For VPS reruns, do not treat an old non-nil production live `final_position` as permanent proof of an open hedge. Run current Hyperliquid readback. If current ETH is nil, the old approved-open state is warning-only and a new explicitly gated run can proceed after preflight. If current ETH exists, is mismatched/out of caps, or cannot be read, stop and resolve before starting another live run.
 
+For an adopt-existing VPS run, set `AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true` only when the current ETH short is the approved open hedge from the latest successful production live run and remains within caps. Strict readiness remains safe-mode evidence; the runner suppresses only the expected mainnet-ETH-non-nil blocker for an approved adopt-existing start. Any unrelated readiness blocker, unavailable readback, out-of-caps ETH, mismatch, or `manual_action_required=true` blocks the run. Emergency close remains manual and gated.
+
 Approved open position monitoring is read-only and does not make the VPS a live daemon. It allows watchdog/status to recognize a known valid ETH hedge from the latest successful production live log as intended state only while it remains within caps/tolerance. Unexpected ETH, cap breaches, failed WETH, successful USDC, unknown readback, or manual-action logs still require operator attention and may require manually gated emergency close.
 
 Production readiness is still a strict safe-mode check. During an approved-open monitoring period, watchdog may suppress only the readiness blocker caused by the expected open ETH hedge and will report the suppressed readiness fields. Any unrelated readiness blocker still requires operator action.

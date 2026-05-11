@@ -41,6 +41,12 @@ If current ETH is nil while an approved open log exists, the watchdog warns inst
 
 If current readback is unavailable, mismatched, out of tolerance, or out of caps, the watchdog blocks and requires operator action.
 
+## Adopt-Existing Production Runs
+
+`AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT=true` is the only mode that may start a production live run while ETH is already open. It is allowed only when approved-open monitoring reports `approved`, the current ETH short is within caps/tolerance, `manual_action_required=false`, and the approved-open detector has no blockers.
+
+`aerodrome:production_supervised_readiness` remains strict safe-mode evidence and can still report a blocker because mainnet ETH is not nil. During an approved adopt-existing start, the runner suppresses only that expected ETH-non-nil readiness blocker and turns it into a warning. Any unrelated readiness blocker, out-of-caps ETH, mismatch, unavailable readback, or manual-action state blocks the run. Emergency close remains manual and gated.
+
 ## Blockers
 
 The watchdog still blocks:
