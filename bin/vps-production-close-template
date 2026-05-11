@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+if [ ! -f docker-compose.prod.yml ]; then
+  echo "ERROR: docker-compose.prod.yml not found. Run this script from /opt/delta_neutral." >&2
+  exit 1
+fi
+
 cat <<'TEXT'
 AERODROME LIVE EMERGENCY CLOSE TEMPLATE — DO NOT RUN AUTOMATICALLY
 
@@ -9,11 +15,12 @@ It does not execute live_emergency_close.
 Before running, check current mainnet ETH position and confirm the max close ETH is sufficient.
 
 # DO NOT RUN UNTIL REVIEWED AND FILLED IN MANUALLY
-HYPERLIQUID_TESTNET=false \
-AERODROME_LIVE_APPROVED=true \
-AERODROME_HEDGE_PAUSED=true \
-AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED=true \
-AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM=I_UNDERSTAND_THIS_CLOSES_LIVE_ETH_SHORT \
-AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=<max_close_eth> \
-bin/rails aerodrome:live_emergency_close
+docker compose -f docker-compose.prod.yml exec -T \
+  -e HYPERLIQUID_TESTNET=false \
+  -e AERODROME_LIVE_APPROVED=true \
+  -e AERODROME_HEDGE_PAUSED=true \
+  -e AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED=true \
+  -e AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM=I_UNDERSTAND_THIS_CLOSES_LIVE_ETH_SHORT \
+  -e AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=<max_close_eth> \
+  web bin/rails aerodrome:live_emergency_close
 TEXT

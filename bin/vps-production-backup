@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [ ! -d storage ]; then
+  echo "ERROR: storage directory not found. Run this script from /opt/delta_neutral." >&2
+  exit 1
+fi
+
 backup_dir="${BACKUP_DIR:-/root/delta_neutral_backups}"
 timestamp="$(date -u +%Y%m%d%H%M%S)"
 destination="${backup_dir}/storage-${timestamp}.tar.gz"

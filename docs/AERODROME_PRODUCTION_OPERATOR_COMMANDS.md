@@ -8,6 +8,8 @@ The VPS is the production runtime. The Mac mini is the development and operator 
 
 These scripts do not enable live trading by default, do not schedule the live runner, do not add UI controls, and do not weaken emergency close gates.
 
+Run these scripts from `/opt/delta_neutral` on the VPS host. The VPS host does not need Ruby installed. Rails commands are executed inside the Docker Compose `web` container through `docker compose -f docker-compose.prod.yml exec -T web ...`.
+
 ## Command Summary
 
 `bin/vps-production-status`
@@ -24,10 +26,13 @@ These scripts do not enable live trading by default, do not schedule the live ru
 - excludes nested storage backups and macOS AppleDouble files;
 - does not print secrets.
 
+If an earlier bad backup was written inside `storage/backups` and grew large, delete it manually only after confirming a good backup exists under `/root/delta_neutral_backups`.
+
 `bin/vps-production-open-run-template`
 
 - prints a supervised `production_live_run` command template only;
 - does not execute the command;
+- prints a Docker Compose command for the `web` container, not a host Ruby command;
 - includes placeholders for duration, interval, max ETH, max notional, and leave-position-open mode;
 - operator must copy/paste manually inside `tmux` after preflight and review.
 
@@ -35,6 +40,7 @@ These scripts do not enable live trading by default, do not schedule the live ru
 
 - prints a gated `live_emergency_close` command template only;
 - does not execute the close;
+- prints a Docker Compose command for the `web` container, not a host Ruby command;
 - operator must check current mainnet ETH first.
 
 `bin/vps-production-post-run-check`
@@ -54,11 +60,12 @@ These scripts do not enable live trading by default, do not schedule the live ru
 Before a supervised run:
 
 1. Pull/deploy the intended GitHub revision on the VPS.
-2. Run `bin/vps-production-status`.
-3. Run `bin/vps-production-backup`.
-4. Confirm mainnet ETH state and approved-open state.
-5. Print the command with `bin/vps-production-open-run-template`.
-6. Copy/paste only after manual review and explicit approval.
+2. `cd /opt/delta_neutral`.
+3. Run `bin/vps-production-status`.
+4. Run `bin/vps-production-backup`.
+5. Confirm mainnet ETH state and approved-open state.
+6. Print the command with `bin/vps-production-open-run-template`.
+7. Copy/paste only after manual review and explicit approval.
 
 After a supervised run:
 

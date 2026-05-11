@@ -15,14 +15,20 @@ class VpsDeploymentFoundationTest < ActiveSupport::TestCase
       assert_predicate path, :executable?
     end
 
-    assert_includes readiness.read, "aerodrome:production_supervised_readiness"
-    assert_includes watchdog.read, "bin/aerodrome-watchdog-tick"
+    assert_includes readiness.read, "docker compose -f \"$compose_file\" exec -T web bin/rails aerodrome:production_supervised_readiness"
+    assert_includes readiness.read, "docker-compose.prod.yml"
+    assert_includes watchdog.read, "docker compose -f \"$compose_file\" exec -T web bin/aerodrome-watchdog-tick"
+    assert_includes watchdog.read, "docker-compose.prod.yml"
     assert_includes backup.read, "tar"
+    assert_includes production_status.read, "docker compose -f \"$compose_file\" exec -T web bin/rails"
+    assert_includes production_status.read, "docker-compose.prod.yml"
     assert_includes production_status.read, "aerodrome:production_supervised_readiness"
     assert_includes production_status.read, "aerodrome:production_live_status"
     assert_includes production_status.read, "aerodrome:approved_open_position"
     assert_includes production_status.read, "aerodrome:watchdog_alerts"
     assert_includes production_status.read, "get_position(\"ETH\")"
+    assert_includes post_run.read, "docker compose -f \"$compose_file\" exec -T web bin/rails"
+    assert_includes post_run.read, "docker-compose.prod.yml"
     assert_includes post_run.read, "aerodrome:production_live_status"
     assert_includes post_run.read, "aerodrome:approved_open_position"
     assert_includes post_run.read, "aerodrome:watchdog_alerts"
@@ -37,6 +43,10 @@ class VpsDeploymentFoundationTest < ActiveSupport::TestCase
     refute_includes production_status.read, "live_emergency_close"
     refute_includes post_run.read, "production_live_run"
     refute_includes post_run.read, "live_emergency_close"
+    refute_includes readiness.read, "exec bin/rails"
+    refute_includes watchdog.read, "exec bin/rails"
+    refute_match(/run_step ".*" bin\/rails/, production_status.read)
+    refute_match(/run_step ".*" bin\/rails/, post_run.read)
     refute_includes production_backup.read, "PRIVATE_KEY"
     refute_includes production_backup.read, "SECRET"
   end
@@ -51,12 +61,13 @@ class VpsDeploymentFoundationTest < ActiveSupport::TestCase
       assert_includes path.read, "DO NOT RUN AUTOMATICALLY"
       assert_includes path.read, "copy/paste template only"
       refute_includes path.read, "exec bin/rails"
+      assert_includes path.read, "docker compose -f docker-compose.prod.yml exec -T"
     end
 
-    assert_includes open_template.read, "bin/rails aerodrome:production_live_run"
+    assert_includes open_template.read, "web bin/rails aerodrome:production_live_run"
     assert_includes open_template.read, "<duration_seconds>"
     assert_includes open_template.read, "<max_eth_<=_0.02>"
-    assert_includes close_template.read, "bin/rails aerodrome:live_emergency_close"
+    assert_includes close_template.read, "web bin/rails aerodrome:live_emergency_close"
     assert_includes close_template.read, "check current mainnet ETH"
   end
 

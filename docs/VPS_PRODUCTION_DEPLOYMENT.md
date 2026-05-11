@@ -85,10 +85,10 @@ The production compose file bind-mounts local `./storage` into the container at 
 Create a backup:
 
 ```bash
-bin/vps-backup-storage
+bin/vps-production-backup
 ```
 
-The helper writes to `storage/backups/storage-<timestamp>.tar.gz` and does not print secrets.
+The helper writes to `/root/delta_neutral_backups/storage-<timestamp>.tar.gz` by default, can be overridden with `BACKUP_DIR=/path`, excludes `storage/backups` and macOS AppleDouble files, and does not print secrets. If one previous bad backup exists inside `storage/backups` and is huge, delete it manually only after confirming a good backup exists outside `storage`.
 
 Restore concept:
 
@@ -273,7 +273,7 @@ Production operator wrappers are documented in `docs/AERODROME_PRODUCTION_OPERAT
 - `bin/vps-production-post-run-check` for read-only post-run verification.
 - `bin/vps-production-tail-latest-log` for read-only log tailing.
 
-The VPS is the production runtime and VPS `storage/` is production data. The Mac mini remains a development/operator station. Never run live from Mac and VPS at the same time.
+Run these scripts from `/opt/delta_neutral` on the VPS host. The host does not need Ruby installed; Rails commands run inside Docker with `docker compose -f docker-compose.prod.yml exec -T web ...`. The VPS is the production runtime and VPS `storage/` is production data. The Mac mini remains a development/operator station. Never run live from Mac and VPS at the same time.
 
 The VPS approved-open watchdog retest passed and is documented in `docs/AERODROME_APPROVED_OPEN_WATCHDOG_VPS_RETEST_REPORT.md`. A 360 second production live run left an in-cap ETH short around `-0.0093` open by design. Approved-open monitoring reported `approved`, status reported `PASS`, and watchdog alerts reported `WARN` rather than `BLOCKED` because strict readiness was the only suppressed safe-mode signal. The operator then manually closed ETH through the gated emergency close, and final mainnet readback was nil. Future VPS production live runs remain supervised and require explicit gates; unattended 24/7 operation is not approved.
 

@@ -2,7 +2,16 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-export RAILS_ENV="${RAILS_ENV:-production}"
+
+compose_file="${COMPOSE_FILE:-docker-compose.prod.yml}"
+if [ ! -f "$compose_file" ]; then
+  echo "ERROR: ${compose_file} not found. Run this script from /opt/delta_neutral or set COMPOSE_FILE." >&2
+  exit 1
+fi
+
+docker_rails() {
+  docker compose -f "$compose_file" exec -T web bin/rails "$@"
+}
 
 failures=0
 
@@ -24,10 +33,10 @@ echo "NO ORDERS"
 echo "NO CLOSE"
 echo "NO HYPERLIQUID EXECUTION"
 
-run_step "mainnet ETH readback" bin/rails runner 'require "json"; puts JSON.pretty_generate(mainnet_eth_position: HyperliquidService.new(testnet: false).get_position("ETH"))'
-run_step "production_live_status" bin/rails aerodrome:production_live_status
-run_step "approved_open_position" bin/rails aerodrome:approved_open_position
-run_step "watchdog_alerts" bin/rails aerodrome:watchdog_alerts
-run_step "safe env check" bin/rails runner 'require "json"; keys = %w[AERODROME_HEDGE_ENABLED AERODROME_HEDGE_PAUSED AERODROME_LIVE_APPROVED HYPERLIQUID_TESTNET]; puts JSON.pretty_generate(keys.to_h { |key| [key, ENV[key]] })'
+run_step "mainnet ETH readback" docker_rails runner 'require "json"; puts JSON.pretty_generate(mainnet_eth_position: HyperliquidService.new(testnet: false).get_position("ETH"))'
+run_step "production_live_status" docker_rails aerodrome:production_live_status
+run_step "approved_open_position" docker_rails aerodrome:approved_open_position
+run_step "watchdog_alerts" docker_rails aerodrome:watchdog_alerts
+run_step "safe env check" docker_rails runner 'require "json"; keys = %w[AERODROME_HEDGE_ENABLED AERODROME_HEDGE_PAUSED AERODROME_LIVE_APPROVED HYPERLIQUID_TESTNET]; puts JSON.pretty_generate(keys.to_h { |key| [key, ENV[key]] })'
 
 exit "$failures"
