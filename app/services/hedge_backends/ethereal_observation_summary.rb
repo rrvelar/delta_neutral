@@ -30,6 +30,18 @@ module HedgeBackends
         mark_price_present: mark_price_present?(probe),
         position_readback_proven: result_ok?(probe["position"]),
         account_health_proven: result_ok?(probe["account_health"]),
+        market_metadata_ready: market_metadata_complete?(probe),
+        mark_price_ready: mark_price_present?(probe),
+        position_readback_ready: result_ok?(probe["position"]),
+        account_health_ready: result_ok?(probe["account_health"]),
+        fills_ready: false,
+        order_status_ready: false,
+        reduce_only_close_ready: false,
+        final_zero_readback_ready: false,
+        ready_for_read_only_observation: ready_for_read_only_observation?(probe),
+        ready_for_sandbox_order_proof: false,
+        ready_for_live_adapter: false,
+        live_adapter_allowed: false,
         missing_before_sandbox_order_proof: missing_before_sandbox_order_proof(probe),
         warnings: Array(probe["warnings"]),
         errors: Array(probe["errors"])
@@ -59,6 +71,18 @@ module HedgeBackends
         mark_price_present: false,
         position_readback_proven: false,
         account_health_proven: false,
+        market_metadata_ready: false,
+        mark_price_ready: false,
+        position_readback_ready: false,
+        account_health_ready: false,
+        fills_ready: false,
+        order_status_ready: false,
+        reduce_only_close_ready: false,
+        final_zero_readback_ready: false,
+        ready_for_read_only_observation: false,
+        ready_for_sandbox_order_proof: false,
+        ready_for_live_adapter: false,
+        live_adapter_allowed: false,
         missing_before_sandbox_order_proof: [],
         warnings: [],
         errors: [ message ]
@@ -102,6 +126,10 @@ module HedgeBackends
       missing << "reduce-only close still not implemented"
       missing << "final zero readback still not proven"
       missing
+    end
+
+    def ready_for_read_only_observation?(probe)
+      market_metadata_complete?(probe) && mark_price_present?(probe)
     end
   end
 end

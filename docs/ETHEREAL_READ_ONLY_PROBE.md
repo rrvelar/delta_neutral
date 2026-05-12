@@ -162,6 +162,30 @@ The summary task performs no network calls and cannot place orders. It reports e
 - Reduce-only close still not implemented.
 - Final zero readback still not proven.
 
+## HedgeBackend Contract Gap Matrix
+
+| Capability | Ethereal proof status | Source | Local code status | Next proof needed |
+|---|---|---|---|---|
+| `market_metadata(asset)` | proven_public_read_only | `GET /v1/product`, products docs | Implemented in read-only probe | Confirm real testnet response shape in sanitized observation |
+| `get_mark_price(asset)` | proven_public_read_only | `GET /v1/product/market-price`, products docs | Implemented in read-only probe | Confirm oracle/bid/ask mapping in observation |
+| `get_position(asset, account/subaccount)` | possible_private_read_only | `GET /v1/position/active` OpenAPI | Implemented only with explicit `ETHEREAL_SUBACCOUNT_ID` | Prove zero-position semantics and safe auth model |
+| `account_health(account/subaccount)` | possible_private_read_only | `GET /v1/subaccount/balance` OpenAPI | Implemented only with explicit `ETHEREAL_SUBACCOUNT_ID` | Prove collateral/margin health semantics |
+| `fills(asset, start_time)` | possible_private_read_only | `GET /v1/order/fill`, `GET /v1/position/fill` OpenAPI | Not implemented | Prove fill schema and realized PnL mapping |
+| `order_status(order_id/client_order_id)` | possible_private_read_only | `GET /v1/order`, `GET /v1/order/{id}` OpenAPI | Not implemented | Prove order lifecycle and partial-fill states |
+| `ensure_leverage(asset, leverage)` | unknown | No clear leverage mutation endpoint found in checked OpenAPI | Not implemented | Prove whether leverage is configurable or implicit |
+| `open_short` | dangerous_execution | `POST /v1/order`, order placement docs | Not implemented and forbidden | Separate sandbox order proof only |
+| `rebalance_short` | dangerous_execution | Requires order placement/cancel/readback | Not implemented and forbidden | Separate sandbox rebalance proof only |
+| `close_short reduce-only` | dangerous_execution | `POST /v1/order` has reduce-only fields in order schema | Not implemented and forbidden | Prove reduce-only close cannot increase exposure |
+| final zero/nil readback | unknown | Position APIs | Not implemented | Prove post-close zero/nil semantics after sandbox close |
+| rate limits | possible_private_read_only | `GET /v1/rate-limit/config`, system limits docs | Not implemented | Record limits and runner pacing design |
+| precision/lot size/tick size | proven_public_read_only | `GET /v1/product` | Implemented | Confirm real testnet product values |
+| min order size | proven_public_read_only | `GET /v1/product` `minQuantity` | Implemented as `min_order_size` | Confirm semantics |
+| min notional | unknown | Checked product schema does not prove it | Not implemented | Find official field or keep unknown |
+| collateral/account value | possible_private_read_only | `GET /v1/subaccount/balance` | Implemented as approximate balance readback | Prove full account health semantics |
+| liquidation/margin health | possible_private_read_only | `GET /v1/position/active`, balance APIs | Partial position liquidation price only | Prove margin and liquidation semantics |
+
+See `docs/ETHEREAL_OPENAPI_ENDPOINT_MAP.md` for endpoint categories and dangerous endpoint guardrails.
+
 ## Current Status
 
 The implementation is a read-only probe plus generic inert value objects and error classes. It is suitable for mocked tests and manual read-only exploration only.

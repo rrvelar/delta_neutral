@@ -2,7 +2,7 @@ require "securerandom"
 
 module HedgeBackends
   class EtherealObservationRecorder
-    SENSITIVE_KEY_PATTERN = /private_key|secret|signature|password|token|api_key|authorization/i
+    SENSITIVE_KEY_PATTERN = /private_key|secret|signature|password|token|api_key|authorization|bearer|cookie/i
     DEFAULT_ROOT = Rails.root.join("storage", "hedge_backends", "ethereal_observations")
 
     def initialize(root: DEFAULT_ROOT, clock: -> { Time.current }, id_generator: -> { SecureRandom.hex(4) })

@@ -96,6 +96,15 @@ class HedgeBackendsTaskTest < ActiveSupport::TestCase
     assert_equal true, parsed.fetch("mark_price_present")
     assert_equal true, parsed.fetch("position_readback_proven")
     assert_equal true, parsed.fetch("account_health_proven")
+    assert_equal true, parsed.fetch("market_metadata_ready")
+    assert_equal true, parsed.fetch("mark_price_ready")
+    assert_equal true, parsed.fetch("position_readback_ready")
+    assert_equal true, parsed.fetch("account_health_ready")
+    assert_equal false, parsed.fetch("fills_ready")
+    assert_equal false, parsed.fetch("order_status_ready")
+    assert_equal false, parsed.fetch("reduce_only_close_ready")
+    assert_equal false, parsed.fetch("final_zero_readback_ready")
+    assert_equal false, parsed.fetch("live_adapter_allowed")
     assert_includes parsed.fetch("missing_before_sandbox_order_proof"), "reduce-only close still not implemented"
   end
 

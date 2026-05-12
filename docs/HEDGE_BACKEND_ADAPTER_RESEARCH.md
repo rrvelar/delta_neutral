@@ -37,6 +37,8 @@ Implemented:
 - `hedge_backends:ethereal_probe` rake task with human and JSON output.
 - `hedge_backends:ethereal_probe_record` rake task for manual, sanitized, local observation capture.
 - `hedge_backends:ethereal_observation_summary` rake task for offline observation analysis with no network calls.
+- `docs/ETHEREAL_OPENAPI_ENDPOINT_MAP.md` maps official OpenAPI endpoints into public read-only, private read-only candidate, dangerous execution, and unknown categories.
+- Static tests guard against Ethereal references in production runtime files, dangerous method names on the read-only probe, dangerous endpoint calls in read-only service code, and dangerous Ethereal env vars.
 - Mocked tests only; no real Ethereal API calls in tests.
 - Documentation in `docs/ETHEREAL_READ_ONLY_PROBE.md`.
 
@@ -67,6 +69,28 @@ Remaining unknowns:
 - Recorded observations are operator-local evidence and must not be committed if they contain real account identifiers, balances, positions, or other sensitive operational data.
 
 Live adapter work remains prohibited until read-only proof, sandbox order proof, reduce-only close proof, fills/order-state proof, final zero readback proof, and an operator runbook exist.
+
+### Ethereal HedgeBackend Contract Gap Matrix
+
+| Capability | Current Ethereal proof status | Source URL | Local code status | Next proof needed |
+|---|---|---|---|---|
+| `market_metadata(asset)` | proven_public_read_only | https://docs.ethereal.trade/developer-guides/trading-api/products and https://api.ethereal.trade/openapi.json | Read-only probe implemented | Record real testnet observation |
+| `get_mark_price(asset)` | proven_public_read_only | https://docs.ethereal.trade/developer-guides/trading-api/products and OpenAPI `GET /v1/product/market-price` | Read-only probe implemented | Confirm oracle price as mark equivalent |
+| `get_position(asset, account/subaccount)` | possible_private_read_only | OpenAPI `GET /v1/position/active` | Read-only probe implemented with explicit subaccount id | Prove zero-position semantics and auth model |
+| `account_health(account/subaccount)` | possible_private_read_only | OpenAPI `GET /v1/subaccount/balance` | Read-only probe implemented with explicit subaccount id | Prove margin/account value mapping |
+| `fills(asset, start_time)` | possible_private_read_only | OpenAPI `GET /v1/order/fill`, `GET /v1/position/fill` | Not implemented | Prove fill schema and PnL mapping |
+| `order_status(order_id/client_order_id)` | possible_private_read_only | OpenAPI `GET /v1/order`, `GET /v1/order/{id}` | Not implemented | Prove lifecycle and ambiguous state handling |
+| `ensure_leverage(asset, leverage)` | unknown | No clear leverage endpoint found in checked OpenAPI | Not implemented | Prove leverage/margin model |
+| `open_short` | dangerous_execution | https://docs.ethereal.trade/developer-guides/trading-api/order-placement and OpenAPI `POST /v1/order` | Not implemented and forbidden | Separate sandbox order proof |
+| `rebalance_short` | dangerous_execution | Order placement plus readback APIs | Not implemented and forbidden | Separate sandbox rebalance proof |
+| `close_short reduce-only` | dangerous_execution | Order schema includes reduce-only fields, but close safety is not proven | Not implemented and forbidden | Prove reduce-only close and final readback |
+| final zero/nil readback | unknown | Position APIs | Not implemented | Prove post-close zero/nil behavior |
+| rate limits | possible_private_read_only | https://docs.ethereal.trade/developer-guides/trading-api/system-limits and OpenAPI `GET /v1/rate-limit/config` | Not implemented | Capture official limits and pacing design |
+| precision/lot size/tick size | proven_public_read_only | Product schema | Implemented | Confirm real values |
+| min order size | proven_public_read_only | Product schema `minQuantity` | Implemented | Confirm semantics |
+| min notional | unknown | Not found in checked product schema | Not implemented | Find official field or leave unsupported |
+| collateral/account value | possible_private_read_only | Balance schema | Partially implemented | Prove full account health model |
+| liquidation/margin health | possible_private_read_only | Position and balance schemas | Partially implemented | Prove liquidation/margin semantics |
 
 ## Current Hyperliquid Dependency Map
 

@@ -32,7 +32,9 @@ class HedgeBackendsEtherealObservationRecorderTest < ActiveSupport::TestCase
         "safe" => "kept",
         "tokenAddress" => "0x0000000000000000000000000000000000000000",
         "signature" => "0xsig",
-        "password" => "secret"
+        "password" => "secret",
+        "bearer" => "secret",
+        "cookie" => "secret"
       },
       "array" => [ { "SECRET" => "secret", "status" => "ok" } ]
     )
@@ -43,6 +45,8 @@ class HedgeBackendsEtherealObservationRecorderTest < ActiveSupport::TestCase
     assert_nil sanitized.dig("nested", "tokenAddress")
     assert_nil sanitized.dig("nested", "signature")
     assert_nil sanitized.dig("nested", "password")
+    assert_nil sanitized.dig("nested", "bearer")
+    assert_nil sanitized.dig("nested", "cookie")
     assert_equal "kept", sanitized.dig("nested", "safe")
     assert_equal "ok", sanitized.dig("array", 0, "status")
   end
