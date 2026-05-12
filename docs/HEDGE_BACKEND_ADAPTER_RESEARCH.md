@@ -23,6 +23,48 @@ Feasibility rating:
 
 Do not implement a live Ethereal, Extended, or Nado adapter until the checklist at the end of this document is satisfied.
 
+## Ethereal Read-Only Probe Branch Status
+
+Date checked: 2026-05-12
+
+This branch adds a read-only Ethereal probe and inert hedge backend foundation only. There is no Ethereal live adapter, no Ethereal order placement, no Ethereal close path, no Ethereal emergency close, and no production runner integration. Production remains Hyperliquid-only.
+
+Implemented:
+
+- `HedgeBackends` typed error taxonomy for future adapters.
+- Inert value objects for `PositionSnapshot`, `MarketMetadata`, `AccountHealth`, and `ProbeResult`.
+- `HedgeBackends::EtherealReadOnlyProbe` with documented read-only REST calls for product metadata, market price, active position readback by explicit subaccount id, and subaccount balances.
+- `hedge_backends:ethereal_probe` rake task with human and JSON output.
+- Mocked tests only; no real Ethereal API calls in tests.
+- Documentation in `docs/ETHEREAL_READ_ONLY_PROBE.md`.
+
+Official Ethereal sources checked:
+
+- https://docs.ethereal.trade/
+- https://docs.ethereal.trade/protocol-reference/api-hosts
+- https://docs.ethereal.trade/developer-guides/trading-api/quick-start
+- https://docs.ethereal.trade/developer-guides/trading-api/products
+- https://docs.ethereal.trade/developer-guides/trading-api/order-placement
+- https://docs.ethereal.trade/developer-guides/trading-api/accounts-and-signers
+- https://docs.ethereal.trade/developer-guides/trading-api/message-signing
+- https://docs.ethereal.trade/developer-guides/trading-api/system-limits
+- https://docs.ethereal.trade/developer-guides/trading-api/websockets
+- https://docs.ethereal.trade/developer-guides/trading-api/tradingview-api
+- https://docs.ethereal.trade/developer-guides/sdk/python-sdk
+- https://api.ethereal.trade/openapi.json
+- https://api.ethereal.trade/docs
+- https://api.etherealtest.net/openapi.json
+- https://api.etherealtest.net/docs
+- https://meridianxyz.github.io
+
+Remaining unknowns:
+
+- `min_notional_usd` is not proven from the checked official product metadata/API schema.
+- A safe production read-only authentication design is not proven.
+- Live order placement, reduce-only close, fills/order-state reconciliation, final zero readback, and emergency close behavior are not proven for this application.
+
+Live adapter work remains prohibited until read-only proof, sandbox order proof, reduce-only close proof, fills/order-state proof, final zero readback proof, and an operator runbook exist.
+
 ## Current Hyperliquid Dependency Map
 
 Local code checked:
