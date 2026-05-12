@@ -24,6 +24,7 @@ Related docs:
 - `docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md`
 - `docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md`
 - `docs/ETHEREAL_OPENAPI_ENDPOINT_MAP.md`
+- `docs/ETHEREAL_READ_ONLY_PR_REVIEW.md`
 
 ## What It Does
 
@@ -121,10 +122,26 @@ FORMAT=json bin/rails hedge_backends:ethereal_observation_summary PATH=storage/h
 
 The summary task performs no network calls and cannot place orders. It reports endpoint statuses, whether market metadata appears complete enough for adapter design, whether mark price/position/account health were proven, and what remains before sandbox order proof.
 
+## Static Safety Check
+
+```bash
+bin/rails hedge_backends:ethereal_safety_check
+FORMAT=json bin/rails hedge_backends:ethereal_safety_check
+```
+
+The safety check is static only: no network calls, no database writes, no orders, no close, no signing, no Hyperliquid execution, and no production wiring. Run it before review/merge together with:
+
+```bash
+HOME=/private/tmp XDG_CACHE_HOME=/private/tmp bin/rake
+git diff --name-only | grep -E 'hyperliquid_service|hedge_sync_job|aerodrome_production_live_runner|aerodrome_live_emergency_close|\.env$|\.env.production|schema|migration' || true
+```
+
 ## Official Sources Checked
 
 - Ethereal docs home: https://docs.ethereal.trade/
 - API hosts: https://docs.ethereal.trade/protocol-reference/api-hosts
+- Contracts: https://docs.ethereal.trade/protocol-reference/contracts
+- Ethereal testnet: https://docs.ethereal.trade/trading/perpetual-futures/ethereal-testnet
 - Trading API quick start: https://docs.ethereal.trade/developer-guides/trading-api/quick-start
 - Products and market prices: https://docs.ethereal.trade/developer-guides/trading-api/products
 - Order placement: https://docs.ethereal.trade/developer-guides/trading-api/order-placement
@@ -139,6 +156,8 @@ The summary task performs no network calls and cannot place orders. It reports e
 - Testnet OpenAPI schema: https://api.etherealtest.net/openapi.json
 - Testnet Swagger UI: https://api.etherealtest.net/docs
 - SDK/docs repository linked from docs: https://meridianxyz.github.io
+
+Current official docs note: Ethereal documents mainnet/testnet API hosts and OpenAPI references. Ethereal testnet has dedicated RPC/chain details; public faucet availability is not assumed by this branch. Trading/signing remains outside this branch.
 
 ## Verified Read-Only API Details
 

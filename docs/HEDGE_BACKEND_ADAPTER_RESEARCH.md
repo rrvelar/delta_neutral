@@ -41,11 +41,23 @@ Implemented:
 - `docs/ETHEREAL_TESTNET_READ_ONLY_RUNBOOK.md` documents the manual testnet read-only observation workflow.
 - `docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md` documents merge blockers and required safety checks.
 - `docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md` documents a future-only sandbox order proof plan; sandbox trading is not implemented here.
+- `docs/ETHEREAL_READ_ONLY_PR_REVIEW.md` documents PR review steps, safety greps, rollback, and merge decision criteria.
+- `hedge_backends:ethereal_safety_check` provides a static local safety self-check with JSON output.
 - Static tests guard against Ethereal references in production runtime files, dangerous method names on the read-only probe, dangerous endpoint calls in read-only service code, and dangerous Ethereal env vars.
 - Mocked tests only; no real Ethereal API calls in tests.
 - Documentation in `docs/ETHEREAL_READ_ONLY_PROBE.md`.
 
 Concise status: Ethereal read-only probe exists, observation tooling exists, endpoint safety map exists, and a testnet read-only runbook exists. Sandbox order proof is explicitly separate and not implemented. Production remains Hyperliquid-only.
+
+Pre-merge commands:
+
+```bash
+HOME=/private/tmp XDG_CACHE_HOME=/private/tmp bin/rake
+FORMAT=json bin/rails hedge_backends:ethereal_safety_check
+git diff --name-only | grep -E 'hyperliquid_service|hedge_sync_job|aerodrome_production_live_runner|aerodrome_live_emergency_close|\.env$|\.env.production|schema|migration' || true
+```
+
+Current official docs note: Ethereal documents mainnet/testnet API hosts and OpenAPI references, and the testnet page documents dedicated RPC/chain details. Trading and signing remain outside this branch.
 
 Official Ethereal sources checked:
 

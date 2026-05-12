@@ -113,6 +113,31 @@ namespace :hedge_backends do
       puts "  none" if report.fetch(:errors).empty?
     end
   end
+
+  desc "Run static safety checks for the Ethereal read-only probe"
+  task ethereal_safety_check: :environment do
+    report = HedgeBackends::EtherealSafetyCheck.new.report
+
+    if ENV["FORMAT"].to_s.downcase == "json"
+      puts JSON.pretty_generate(report)
+    else
+      puts report.fetch(:safety_banner)
+      puts "NO NETWORK"
+      puts "NO ORDERS"
+      puts "NO CLOSE"
+      puts "NO SIGNING"
+      puts "NO PRODUCTION WIRING"
+      puts
+      report.fetch(:checks).each do |check|
+        puts "#{check.fetch(:status).upcase}: #{check.fetch(:name)}"
+      end
+      if report.fetch(:blockers).any?
+        puts "blockers:"
+        report.fetch(:blockers).each { |blocker| puts "  #{blocker}" }
+      end
+      puts "final status: #{report.fetch(:status)}"
+    end
+  end
 end
 
 def status_for(result)

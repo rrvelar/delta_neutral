@@ -25,6 +25,7 @@ Production remains Hyperliquid-only after merge.
 ```bash
 git status --short
 HOME=/private/tmp XDG_CACHE_HOME=/private/tmp bin/rake
+FORMAT=json bin/rails hedge_backends:ethereal_safety_check
 git diff --name-only | grep -E 'hyperliquid_service|hedge_sync_job|aerodrome_production_live_runner|aerodrome_live_emergency_close|\.env$|\.env.production|schema|migration' || true
 rg -n 'ETHEREAL_PRIVATE_KEY|ETHEREAL_SIGNING_KEY|ETHEREAL_ORDER_ENABLED|ETHEREAL_CLOSE_ENABLED|ETHEREAL_LIVE_APPROVED' .env.example app lib test docs
 git ls-files storage/hedge_backends/ethereal_observations
@@ -33,6 +34,7 @@ git ls-files storage/hedge_backends/ethereal_observations
 Expected results:
 
 - `bin/rake` passes.
+- `hedge_backends:ethereal_safety_check` returns `PASS`.
 - Safety grep has no output.
 - Forbidden Ethereal env names appear only in safety tests/docs as forbidden examples, never as env assignments.
 - No real observation files are tracked.

@@ -9,6 +9,7 @@ class HedgeBackendsTaskTest < ActiveSupport::TestCase
     Rake::Task["hedge_backends:ethereal_probe"].reenable
     Rake::Task["hedge_backends:ethereal_probe_record"].reenable
     Rake::Task["hedge_backends:ethereal_observation_summary"].reenable
+    Rake::Task["hedge_backends:ethereal_safety_check"].reenable
     @old_env = ENV.to_h.slice(
       "FORMAT",
       "PATH",
@@ -132,6 +133,54 @@ class HedgeBackendsTaskTest < ActiveSupport::TestCase
       assert_equal "BLOCKED", parsed.fetch("status")
       assert_match "invalid JSON", parsed.fetch("errors").first
     end
+  end
+
+  test "safety check human output includes static safety banner" do
+    out, = capture_io { Rake::Task["hedge_backends:ethereal_safety_check"].invoke }
+
+    assert_includes out, "ETHEREAL READ-ONLY SAFETY CHECK - STATIC ONLY"
+    assert_includes out, "NO NETWORK"
+    assert_includes out, "NO ORDERS"
+    assert_includes out, "NO CLOSE"
+    assert_includes out, "NO SIGNING"
+    assert_includes out, "NO PRODUCTION WIRING"
+    assert_includes out, "final status: PASS"
+  end
+
+  test "safety check JSON output parses and includes inert safety fields" do
+    ENV["FORMAT"] = "json"
+
+    out, = capture_io { Rake::Task["hedge_backends:ethereal_safety_check"].invoke }
+    parsed = JSON.parse(out)
+
+    assert_equal "PASS", parsed.fetch("status")
+    assert_equal false, parsed.fetch("network_calls")
+    assert_equal false, parsed.fetch("orders_enabled")
+    assert_equal false, parsed.fetch("close_enabled")
+    assert_equal false, parsed.fetch("signing_enabled")
+    assert_equal false, parsed.fetch("production_wiring")
+    assert_empty parsed.fetch("blockers")
+  end
+
+  test "safety check reports blocked when dangerous method is present" do
+    HedgeBackends::EtherealReadOnlyProbe.class_eval { def open_short; end }
+
+    report = HedgeBackends::EtherealSafetyCheck.new.report
+
+    assert_equal "BLOCKED", report.fetch(:status)
+    assert_includes report.fetch(:blockers).join(" "), "dangerous methods absent"
+  ensure
+    HedgeBackends::EtherealReadOnlyProbe.remove_method(:open_short) if HedgeBackends::EtherealReadOnlyProbe.method_defined?(:open_short)
+  end
+
+  test "safety check performs no external network and no database writes" do
+    before_requests = WebMock::RequestRegistry.instance.requested_signatures.hash.dup
+
+    assert_no_difference -> { ShortRebalance.count } do
+      capture_io { Rake::Task["hedge_backends:ethereal_safety_check"].invoke }
+    end
+
+    assert_equal before_requests, WebMock::RequestRegistry.instance.requested_signatures.hash
   end
 
   private

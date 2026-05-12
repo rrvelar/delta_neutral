@@ -84,6 +84,7 @@ class EtherealProbeSafetyTest < ActiveSupport::TestCase
       docs/ETHEREAL_TESTNET_READ_ONLY_RUNBOOK.md
       docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md
       docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md
+      docs/ETHEREAL_READ_ONLY_PR_REVIEW.md
     ]
 
     docs.each do |path|
