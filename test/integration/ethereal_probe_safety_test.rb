@@ -78,4 +78,24 @@ class EtherealProbeSafetyTest < ActiveSupport::TestCase
       assert_not HedgeBackends::EtherealEndpointPolicy.dangerous?(endpoint)
     end
   end
+
+  test "read-only runbook and merge docs exist with safety language" do
+    docs = %w[
+      docs/ETHEREAL_TESTNET_READ_ONLY_RUNBOOK.md
+      docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md
+      docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md
+    ]
+
+    docs.each do |path|
+      text = Rails.root.join(path).read
+      assert_includes text, "NO ORDERS"
+      assert_match(/Production remains Hyperliquid-only/i, text)
+    end
+  end
+
+  test "no real Ethereal observation files are tracked" do
+    tracked = `git ls-files storage/hedge_backends/ethereal_observations`.split("\n")
+
+    assert_empty tracked
+  end
 end

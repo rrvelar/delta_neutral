@@ -18,6 +18,13 @@ This probe is a backend-interface preparation step for evaluating Ethereal as a 
 
 Production remains Hyperliquid-only.
 
+Related docs:
+
+- `docs/ETHEREAL_TESTNET_READ_ONLY_RUNBOOK.md`
+- `docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md`
+- `docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md`
+- `docs/ETHEREAL_OPENAPI_ENDPOINT_MAP.md`
+
 ## What It Does
 
 - Defines inert hedge backend value objects and typed errors.

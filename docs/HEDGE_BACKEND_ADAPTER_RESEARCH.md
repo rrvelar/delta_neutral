@@ -38,9 +38,14 @@ Implemented:
 - `hedge_backends:ethereal_probe_record` rake task for manual, sanitized, local observation capture.
 - `hedge_backends:ethereal_observation_summary` rake task for offline observation analysis with no network calls.
 - `docs/ETHEREAL_OPENAPI_ENDPOINT_MAP.md` maps official OpenAPI endpoints into public read-only, private read-only candidate, dangerous execution, and unknown categories.
+- `docs/ETHEREAL_TESTNET_READ_ONLY_RUNBOOK.md` documents the manual testnet read-only observation workflow.
+- `docs/ETHEREAL_MERGE_READINESS_CHECKLIST.md` documents merge blockers and required safety checks.
+- `docs/ETHEREAL_SANDBOX_ORDER_PROOF_PLAN.md` documents a future-only sandbox order proof plan; sandbox trading is not implemented here.
 - Static tests guard against Ethereal references in production runtime files, dangerous method names on the read-only probe, dangerous endpoint calls in read-only service code, and dangerous Ethereal env vars.
 - Mocked tests only; no real Ethereal API calls in tests.
 - Documentation in `docs/ETHEREAL_READ_ONLY_PROBE.md`.
+
+Concise status: Ethereal read-only probe exists, observation tooling exists, endpoint safety map exists, and a testnet read-only runbook exists. Sandbox order proof is explicitly separate and not implemented. Production remains Hyperliquid-only.
 
 Official Ethereal sources checked:
 
