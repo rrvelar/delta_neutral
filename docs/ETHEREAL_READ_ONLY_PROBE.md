@@ -26,6 +26,8 @@ Production remains Hyperliquid-only.
 - Reads Ethereal active position data only when `ETHEREAL_SUBACCOUNT_ID` is explicitly configured.
 - Reads Ethereal subaccount balance data only when `ETHEREAL_SUBACCOUNT_ID` is explicitly configured.
 - Returns structured `PASS`, `WARN`, or `BLOCKED` probe output.
+- Can record sanitized local observations under `storage/hedge_backends/ethereal_observations/`.
+- Can summarize a saved observation without network calls.
 
 ## What It Does Not Do
 
@@ -35,6 +37,7 @@ Production remains Hyperliquid-only.
 - No order signing.
 - No private key support.
 - No trading key support.
+- No signing.
 - No Hyperliquid execution.
 - No production runner integration.
 - No HedgeSyncJob integration.
@@ -55,7 +58,7 @@ ETHEREAL_MARKET_SYMBOL=ETH-USD
 
 `ETHEREAL_API_BASE_URL` must be an Ethereal API host such as the official mainnet or testnet REST API base. No private key, trading key, or signing key is supported.
 
-## How To Run
+## How To Run The Probe
 
 Human output:
 
@@ -70,6 +73,46 @@ FORMAT=json ETHEREAL_READ_ONLY_ENABLED=true ETHEREAL_API_BASE_URL=https://api.et
 ```
 
 If `ETHEREAL_READ_ONLY_ENABLED` is not `true`, the task returns `BLOCKED` without network calls.
+
+## How To Record A Sanitized Observation
+
+Use testnet first:
+
+```bash
+ETHEREAL_READ_ONLY_ENABLED=true ETHEREAL_API_BASE_URL=https://api.etherealtest.net ETHEREAL_MARKET_SYMBOL=ETH-USD bin/rails hedge_backends:ethereal_probe_record
+```
+
+JSON task output:
+
+```bash
+FORMAT=json ETHEREAL_READ_ONLY_ENABLED=true ETHEREAL_API_BASE_URL=https://api.etherealtest.net ETHEREAL_MARKET_SYMBOL=ETH-USD bin/rails hedge_backends:ethereal_probe_record
+```
+
+The recorder writes sanitized JSON to:
+
+```text
+storage/hedge_backends/ethereal_observations/YYYYMMDDHHMMSS-<shortid>.json
+```
+
+If the probe result is `BLOCKED`, the record task does not write an observation by default. This avoids storing mostly-empty configuration failure files.
+
+The recorder strips nested keys matching `private_key`, `secret`, `signature`, `password`, `token`, `api_key`, and `authorization` case-insensitively. It still should be treated as operator-local evidence. Do not commit an observation file if it contains real account identifiers, subaccount identifiers, balances, positions, or any other sensitive operational data.
+
+## How To Summarize An Observation
+
+Human output:
+
+```bash
+bin/rails hedge_backends:ethereal_observation_summary PATH=storage/hedge_backends/ethereal_observations/example.json
+```
+
+JSON output:
+
+```bash
+FORMAT=json bin/rails hedge_backends:ethereal_observation_summary PATH=storage/hedge_backends/ethereal_observations/example.json
+```
+
+The summary task performs no network calls and cannot place orders. It reports endpoint statuses, whether market metadata appears complete enough for adapter design, whether mark price/position/account health were proven, and what remains before sandbox order proof.
 
 ## Official Sources Checked
 
@@ -106,6 +149,18 @@ If `ETHEREAL_READ_ONLY_ENABLED` is not `true`, the task returns `BLOCKED` withou
 - Safe read-only authentication semantics for private account access were not proven as a production adapter design.
 - Reduce-only close behavior, final zero readback, fills/order lifecycle reconciliation, sandbox order behavior, and emergency close semantics are not implemented.
 - Rate-limit policy details are documented at a high level, but no runner pacing is implemented because there is no live runner integration.
+- Ethereal trading API uses accounts, subaccounts, signers, and EIP-712 signing according to official docs. This probe intentionally avoids trading and signing.
+
+## Checklist Before Sandbox Order Proof
+
+- Market metadata complete.
+- Mark price proven.
+- Position readback proven.
+- Account health proven.
+- Rate limits understood.
+- Auth/read-only key model understood.
+- Reduce-only close still not implemented.
+- Final zero readback still not proven.
 
 ## Current Status
 

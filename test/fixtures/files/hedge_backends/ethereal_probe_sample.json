@@ -1,0 +1,137 @@
+{
+  "metadata": {
+    "backend": "ethereal",
+    "generated_at": "2026-05-12T12:00:00Z",
+    "market_symbol": "ETH-USD",
+    "api_base_host": "api.etherealtest.net",
+    "account_id_present": true,
+    "subaccount_id_present": true,
+    "read_only": true,
+    "orders_enabled": false,
+    "close_enabled": false,
+    "signing_enabled": false,
+    "hyperliquid_execution": false,
+    "production_wiring": false
+  },
+  "probe_result": {
+    "safety_banner": "ETHEREAL READ-ONLY PROBE - NO ORDERS",
+    "backend": "ethereal",
+    "read_only": true,
+    "orders_enabled": false,
+    "close_enabled": false,
+    "hyperliquid_execution": false,
+    "production_wiring": false,
+    "config": {
+      "enabled": true,
+      "api_base_url": "https://api.etherealtest.net",
+      "ws_url_configured": false,
+      "account_id_configured": true,
+      "subaccount_id_configured": true,
+      "market_symbol": "ETH-USD",
+      "private_key_configured": false,
+      "signing_configured": false
+    },
+    "market_metadata": {
+      "backend": "ethereal",
+      "asset": "ETH",
+      "market": "ETH-USD",
+      "exchange_status": "ACTIVE",
+      "lot_size": "0.001",
+      "tick_size": "0.1",
+      "min_order_size": "0.01",
+      "min_notional_usd": null,
+      "max_leverage": "20",
+      "collateral": "USDe",
+      "raw": {
+        "id": "fake-product-id",
+        "displayTicker": "ETH-USD"
+      },
+      "status": "ok"
+    },
+    "mark_price": {
+      "backend": "ethereal",
+      "asset": "ETH",
+      "market": "ETH-USD",
+      "mark_price": "2500.5",
+      "best_bid_price": "2500.4",
+      "best_ask_price": "2500.6",
+      "raw": {
+        "productId": "fake-product-id"
+      },
+      "status": "ok"
+    },
+    "position": {
+      "backend": "ethereal",
+      "asset": "ETH",
+      "market": "ETH-USD",
+      "signed_size": "-0.42",
+      "short_size": "0.42",
+      "entry_price": null,
+      "mark_price": "2500.5",
+      "position_value": "1050",
+      "margin_used": null,
+      "unrealized_pnl": "12.5",
+      "liquidation_price": "4000",
+      "account": "fake-subaccount-id",
+      "raw": {
+        "id": "fake-position-id",
+        "side": 1
+      },
+      "status": "ok"
+    },
+    "account_health": {
+      "backend": "ethereal",
+      "account": "fake-account-id",
+      "subaccount": "fake-subaccount-id",
+      "collateral": "USDe",
+      "account_value_usd": "1000",
+      "withdrawable_usd": "700",
+      "margin_used_usd": "300",
+      "raw": {
+        "data": [
+          {
+            "subaccountId": "fake-subaccount-id",
+            "tokenName": "USDe",
+            "amount": "1000",
+            "available": "700",
+            "totalUsed": "300"
+          }
+        ]
+      },
+      "status": "ok"
+    },
+    "endpoint_results": [
+      {
+        "endpoint": "GET /v1/product",
+        "status": "ok",
+        "http_status": 200
+      },
+      {
+        "endpoint": "GET /v1/product/market-price",
+        "status": "ok",
+        "http_status": 200
+      },
+      {
+        "endpoint": "GET /v1/position/active",
+        "status": "ok",
+        "http_status": 200
+      },
+      {
+        "endpoint": "GET /v1/subaccount/balance",
+        "status": "ok",
+        "http_status": 200
+      }
+    ],
+    "unsupported": [],
+    "unknown": [
+      "Ethereal min_notional_usd is not exposed in checked product docs/API schema"
+    ],
+    "errors": [],
+    "warnings": [],
+    "sources_checked": [
+      "https://docs.ethereal.trade/",
+      "https://api.etherealtest.net/openapi.json"
+    ],
+    "status": "WARN"
+  }
+}

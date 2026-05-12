@@ -35,6 +35,8 @@ Implemented:
 - Inert value objects for `PositionSnapshot`, `MarketMetadata`, `AccountHealth`, and `ProbeResult`.
 - `HedgeBackends::EtherealReadOnlyProbe` with documented read-only REST calls for product metadata, market price, active position readback by explicit subaccount id, and subaccount balances.
 - `hedge_backends:ethereal_probe` rake task with human and JSON output.
+- `hedge_backends:ethereal_probe_record` rake task for manual, sanitized, local observation capture.
+- `hedge_backends:ethereal_observation_summary` rake task for offline observation analysis with no network calls.
 - Mocked tests only; no real Ethereal API calls in tests.
 - Documentation in `docs/ETHEREAL_READ_ONLY_PROBE.md`.
 
@@ -62,6 +64,7 @@ Remaining unknowns:
 - `min_notional_usd` is not proven from the checked official product metadata/API schema.
 - A safe production read-only authentication design is not proven.
 - Live order placement, reduce-only close, fills/order-state reconciliation, final zero readback, and emergency close behavior are not proven for this application.
+- Recorded observations are operator-local evidence and must not be committed if they contain real account identifiers, balances, positions, or other sensitive operational data.
 
 Live adapter work remains prohibited until read-only proof, sandbox order proof, reduce-only close proof, fills/order-state proof, final zero readback proof, and an operator runbook exist.
 

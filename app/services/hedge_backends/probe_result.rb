@@ -3,12 +3,13 @@ module HedgeBackends
     SAFETY_BANNER = "ETHEREAL READ-ONLY PROBE - NO ORDERS".freeze
 
     attr_reader :backend, :config, :market_metadata, :mark_price, :position,
-      :account_health, :unsupported, :unknown, :errors, :warnings, :sources_checked
+      :account_health, :endpoint_results, :unsupported, :unknown, :errors,
+      :warnings, :sources_checked
 
     def initialize(
       backend:, config:, market_metadata: nil, mark_price: nil, position: nil,
-      account_health: nil, unsupported: [], unknown: [], errors: [], warnings: [],
-      sources_checked: [], status: nil
+      account_health: nil, endpoint_results: [], unsupported: [], unknown: [],
+      errors: [], warnings: [], sources_checked: [], status: nil
     )
       @backend = backend
       @config = config
@@ -16,6 +17,7 @@ module HedgeBackends
       @mark_price = mark_price
       @position = position
       @account_health = account_health
+      @endpoint_results = endpoint_results
       @unsupported = unsupported
       @unknown = unknown
       @errors = errors
@@ -46,6 +48,7 @@ module HedgeBackends
         mark_price: serializable(mark_price),
         position: serializable(position),
         account_health: serializable(account_health),
+        endpoint_results: serializable(endpoint_results),
         unsupported: unsupported,
         unknown: unknown,
         errors: errors,
@@ -62,9 +65,18 @@ module HedgeBackends
     private
 
     def serializable(value)
-      return value.as_json if value.respond_to?(:as_json)
+      case value
+      when BigDecimal
+        value.to_s("F")
+      when Array
+        value.map { |item| serializable(item) }
+      when Hash
+        value.transform_values { |item| serializable(item) }
+      else
+        return value.as_json if value.respond_to?(:as_json)
 
-      value
+        value
+      end
     end
   end
 end

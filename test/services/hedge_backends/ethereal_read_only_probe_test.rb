@@ -23,6 +23,7 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
 
     assert_equal "BLOCKED", result.fetch(:status)
     assert_match "ETHEREAL_API_BASE_URL", result.fetch(:errors).first.fetch(:message)
+    assert_equal "skipped", result.fetch(:endpoint_results).first.fetch(:status)
   end
 
   test "market metadata normalizes documented product fields" do
@@ -131,6 +132,18 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
       .to_return(status: 200, body: "not json")
 
     assert_raises(HedgeBackends::ParseError) { enabled_probe.market_metadata }
+  end
+
+  test "run probe captures parse errors as structured output" do
+    stub_request(:get, "#{API_BASE}/v1/product")
+      .with(query: { ticker: "ETHUSD", limit: "100" })
+      .to_return(status: 200, body: "not json")
+
+    result = enabled_probe("ETHEREAL_SUBACCOUNT_ID" => nil).run_probe.to_h
+
+    assert_equal "BLOCKED", result.fetch(:status)
+    assert_equal "HedgeBackends::ParseError", result.fetch(:errors).first.fetch(:class)
+    assert_equal "error", result.fetch(:endpoint_results).first.fetch(:status)
   end
 
   test "unknown product shape stays unsupported instead of success" do

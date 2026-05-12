@@ -33,6 +33,7 @@ module HedgeBackends
     def initialize(env: ENV, http_get: nil)
       @env = env
       @http_get = http_get || method(:http_get)
+      @endpoint_results = []
     end
 
     def backend_name
@@ -153,6 +154,12 @@ module HedgeBackends
           backend: BACKEND,
           config: config_summary,
           warnings: [ "ETHEREAL_READ_ONLY_ENABLED is not true; no network calls made" ],
+          endpoint_results: [
+            endpoint_result(endpoint: "GET /v1/product", status: "skipped", message: "probe disabled"),
+            endpoint_result(endpoint: "GET /v1/product/market-price", status: "skipped", message: "probe disabled"),
+            endpoint_result(endpoint: "GET /v1/position/active", status: "skipped", message: "probe disabled"),
+            endpoint_result(endpoint: "GET /v1/subaccount/balance", status: "skipped", message: "probe disabled")
+          ],
           unsupported: [ "probe disabled by configuration" ],
           unknown: unknown,
           sources_checked: SOURCES_CHECKED,
@@ -165,6 +172,12 @@ module HedgeBackends
           backend: BACKEND,
           config: config_summary,
           errors: [ error_hash(ConfigurationError.new("ETHEREAL_API_BASE_URL is required when ETHEREAL_READ_ONLY_ENABLED=true")) ],
+          endpoint_results: [
+            endpoint_result(endpoint: "GET /v1/product", status: "skipped", message: "missing ETHEREAL_API_BASE_URL"),
+            endpoint_result(endpoint: "GET /v1/product/market-price", status: "skipped", message: "missing ETHEREAL_API_BASE_URL"),
+            endpoint_result(endpoint: "GET /v1/position/active", status: "skipped", message: "missing ETHEREAL_API_BASE_URL"),
+            endpoint_result(endpoint: "GET /v1/subaccount/balance", status: "skipped", message: "missing ETHEREAL_API_BASE_URL")
+          ],
           unsupported: unsupported,
           unknown: unknown,
           sources_checked: SOURCES_CHECKED,
@@ -186,6 +199,7 @@ module HedgeBackends
         mark_price: mark,
         position: position,
         account_health: health,
+        endpoint_results: @endpoint_results,
         unsupported: unsupported,
         unknown: unknown,
         errors: errors,
@@ -231,11 +245,20 @@ module HedgeBackends
       uri = URI.join("#{api_base_url}/", path.delete_prefix("/"))
       uri.query = URI.encode_www_form(params) if params.any?
       response = @http_get.call(uri)
-      raise RateLimitError, "Ethereal API rate limited: HTTP 429" if response.code.to_i == 429
-      raise NetworkError, "Ethereal API request failed: HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
+      if response.code.to_i == 429
+        record_endpoint(path, "error", http_status: response.code.to_i, error_class: RateLimitError.name, message: "rate limited")
+        raise RateLimitError, "Ethereal API rate limited: HTTP 429"
+      end
+      unless response.is_a?(Net::HTTPSuccess)
+        record_endpoint(path, "error", http_status: response.code.to_i, error_class: NetworkError.name, message: "non-2xx response")
+        raise NetworkError, "Ethereal API request failed: HTTP #{response.code}"
+      end
 
-      JSON.parse(response.body)
+      parsed = JSON.parse(response.body)
+      record_endpoint(path, "ok", http_status: response.code.to_i)
+      parsed
     rescue JSON::ParserError => e
+      record_endpoint(path, "error", error_class: ParseError.name, message: "invalid JSON")
       raise ParseError, "Ethereal API returned invalid JSON: #{e.message}"
     end
 
@@ -243,7 +266,7 @@ module HedgeBackends
       Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: HTTP_TIMEOUT_SECONDS, read_timeout: HTTP_TIMEOUT_SECONDS) do |http|
         http.get(uri.request_uri, "Accept" => "application/json")
       end
-    rescue Timeout::Error, SocketError, Errno::ECONNREFUSED, Net::OpenTimeout, Net::ReadTimeout, OpenSSL::SSL::SSLError => e
+    rescue => e
       raise NetworkError, "Ethereal API network error: #{e.class}: #{e.message}"
     end
 
@@ -255,18 +278,22 @@ module HedgeBackends
     end
 
     def unsupported_metadata(asset, message)
+      record_endpoint("/v1/product", "unsupported", message: message)
       MarketMetadata.new(backend: BACKEND, asset: asset, market: market_symbol, raw: { message: message }, result_status: "unsupported")
     end
 
     def unsupported_position(asset, message)
+      record_endpoint("/v1/position/active", "unsupported", message: message)
       PositionSnapshot.new(backend: BACKEND, asset: asset, market: market_symbol, raw: { message: message }, status: "unsupported")
     end
 
     def unsupported_account_health(message)
+      record_endpoint("/v1/subaccount/balance", "unsupported", message: message)
       AccountHealth.new(backend: BACKEND, raw: { message: message }, status: "unsupported")
     end
 
     def unsupported_result(section, message)
+      record_endpoint(endpoint_path_for_section(section), "unsupported", message: message)
       { backend: BACKEND, section: section, status: "unsupported", message: message }
     end
 
@@ -301,6 +328,40 @@ module HedgeBackends
 
     def error_hash(error, section: nil)
       { section: section, class: error.class.name, message: error.message }.compact
+    end
+
+    def record_endpoint(path, status, http_status: nil, error_class: nil, message: nil)
+      endpoint = path.start_with?("GET ") ? path : "GET #{path}"
+      @endpoint_results << endpoint_result(
+        endpoint: endpoint,
+        status: status,
+        http_status: http_status,
+        error_class: error_class,
+        message: message
+      )
+    end
+
+    def endpoint_result(endpoint:, status:, http_status: nil, error_class: nil, message: nil)
+      {
+        endpoint: endpoint,
+        status: status,
+        http_status: http_status,
+        error_class: error_class,
+        message: message
+      }.compact
+    end
+
+    def endpoint_path_for_section(section)
+      case section.to_s
+      when "mark_price"
+        "/v1/product/market-price"
+      when "position"
+        "/v1/position/active"
+      when "account_health"
+        "/v1/subaccount/balance"
+      else
+        "/v1/product"
+      end
     end
   end
 end
