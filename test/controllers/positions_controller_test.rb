@@ -192,6 +192,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Current Hyperliquid ETH position", response.body
     assert_match "Dashboard Flow", response.body
     assert_match "Dashboard Hedge Actions", response.body
+    assert_match "Auto-Rebalance Status", response.body
+    assert_match "No active hedge configured for this position.", response.body
     assert_match "Open Hedge", response.body
     assert_match "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED must be true", response.body
     assert_match AerodromeDashboardHedgeAction::CONFIRMATION, response.body
@@ -264,6 +266,14 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "PnL baseline starts from first Aerodrome snapshot unless manually set.", response.body
     assert_match "Aerodrome LP Fees", response.body
     assert_match "Collecting fees is not implemented", response.body
+    assert_match "Auto-Rebalance Status", response.body
+    assert_match "Position sync", response.body
+    assert_match "every minute", response.body
+    assert_match "Hedge sync", response.body
+    assert_match "every 5 minutes", response.body
+    assert_match "Rebalance needed now", response.body
+    assert_match "Approximate / low confidence", response.body
+    assert_match "Price thresholds are approximate", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body

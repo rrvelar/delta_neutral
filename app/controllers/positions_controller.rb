@@ -99,6 +99,10 @@ class PositionsController < ApplicationController
         position: @position,
         dashboard_status: @aerodrome_production_dashboard_status
       ).report
+      @aerodrome_auto_rebalance_status = AerodromeAutoRebalanceStatus.new(
+        position: @position,
+        dashboard_status: @aerodrome_production_dashboard_status
+      ).report
     end
   end
 

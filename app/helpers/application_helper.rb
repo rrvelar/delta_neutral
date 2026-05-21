@@ -54,6 +54,17 @@ module ApplicationHelper
     "#{delta.negative? ? '-' : '+'}#{number_with_precision(delta.abs, precision: 6)}"
   end
 
+  def auto_rebalance_status_class(status)
+    case status.to_s
+    when "active"
+      "bg-green-950/60 text-green-300 border-green-800"
+    when "blocked"
+      "bg-red-950/60 text-red-200 border-red-800"
+    else
+      "bg-yellow-950/60 text-yellow-200 border-yellow-800"
+    end
+  end
+
   def aerodrome_hedge_preview_for(position)
     return nil unless aerodrome_position?(position)
 
