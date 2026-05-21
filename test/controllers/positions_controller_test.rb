@@ -313,6 +313,85 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "delta -0.5 ETH", flash[:notice]
   end
 
+  test "show renders rebalance history block with no hedge empty state" do
+    position = create_aerodrome_position
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Hedge Rebalance History", response.body
+    assert_match "No hedge configured for this position.", response.body
+    assert_match "Refresh", response.body
+  end
+
+  test "show renders rebalance history empty state when hedge has no records" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Hedge Rebalance History", response.body
+    assert_match "No rebalance history yet.", response.body
+  end
+
+  test "show renders recent rebalance records for current position hedge only" do
+    position = create_aerodrome_position(external_id: "history-current")
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+    other_position = create_aerodrome_position(external_id: "history-other", pool_address: "0xother")
+    other_hedge = Hedge.create!(position: other_position, target: "1.0", tolerance: "0.05", active: true)
+
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "0.0",
+      new_short_size: "0.3973",
+      realized_pnl: "1.23",
+      status: ShortRebalance::STATUS_SUCCESS,
+      message: nil,
+      rebalanced_at: Time.zone.local(2026, 5, 11, 6, 15, 31)
+    )
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "0.3973",
+      new_short_size: "0.5000",
+      realized_pnl: "-2.50",
+      status: ShortRebalance::STATUS_FAILED,
+      message: "order rejected",
+      rebalanced_at: Time.zone.local(2026, 5, 11, 6, 20, 31)
+    )
+    other_hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "9.0",
+      new_short_size: "9.5",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_SUCCESS,
+      message: "other position record",
+      rebalanced_at: Time.zone.local(2026, 5, 11, 7, 0, 0)
+    )
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Hedge Rebalance History", response.body
+    assert_match "Records shown", response.body
+    assert_match "0.397300", response.body
+    assert_match "+0.397300", response.body
+    assert_match "+0.102700", response.body
+    assert_match "order rejected", response.body
+    assert_match "$1.23", response.body
+    assert_match "-$2.50", response.body
+    assert_match "bg-green-950", response.body
+    assert_match "bg-red-950", response.body
+    assert_no_match "other position record", response.body
+    assert_no_match "9.500000", response.body
+  end
+
   test "show renders read-only AERO rewards section without adding rewards to total pnl" do
     position = create_aerodrome_position
     position.update!(entry_value_usd: BigDecimal("2500"))

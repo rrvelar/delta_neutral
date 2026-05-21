@@ -35,6 +35,25 @@ module ApplicationHelper
     value.nil? ? "Unavailable" : format_usd(value)
   end
 
+  def rebalance_status_class(status)
+    case status.to_s
+    when ShortRebalance::STATUS_SUCCESS
+      "bg-green-950/60 text-green-300 border-green-800"
+    when ShortRebalance::STATUS_FAILED, "error"
+      "bg-red-950/60 text-red-200 border-red-800"
+    when "skipped", "pending"
+      "bg-yellow-950/60 text-yellow-200 border-yellow-800"
+    else
+      "bg-gray-800 text-gray-300 border-gray-700"
+    end
+  end
+
+  def signed_eth_delta(delta)
+    return "—" if delta.nil?
+
+    "#{delta.negative? ? '-' : '+'}#{number_with_precision(delta.abs, precision: 6)}"
+  end
+
   def aerodrome_hedge_preview_for(position)
     return nil unless aerodrome_position?(position)
 

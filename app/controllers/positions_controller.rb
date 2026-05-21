@@ -95,6 +95,10 @@ class PositionsController < ApplicationController
       @aerodrome_rewards_report = aerodrome_rewards_report
       @aerodrome_fees_report = aerodrome_fees_report
       @aerodrome_production_dashboard_status = AerodromeProductionDashboardStatus.new(position: @position).report
+      @aerodrome_rebalance_history_status = AerodromeRebalanceHistoryStatus.new(
+        position: @position,
+        dashboard_status: @aerodrome_production_dashboard_status
+      ).report
     end
   end
 
