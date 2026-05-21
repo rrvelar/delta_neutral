@@ -15,6 +15,9 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
       "AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR" => "true",
       "AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL" => "true",
       "AERODROME_PRODUCTION_LIVE_ADOPT_EXISTING_ETH_SHORT" => "false",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_MAX_LEVERAGE" => "1",
       "AERODROME_MAX_SHORT_ETH" => "0.02",
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "50",
@@ -57,8 +60,8 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
       {
         "AERODROME_PRODUCTION_LIVE_DURATION_SECONDS" => "21601",
         "AERODROME_PRODUCTION_LIVE_INTERVAL_SECONDS" => "179",
-        "AERODROME_MAX_SHORT_ETH" => "0.751",
-        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "2001",
+        "AERODROME_MAX_SHORT_ETH" => "1.501",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4001",
         "AERODROME_MIN_ORDER_NOTIONAL_USD" => "9",
         "AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED" => "false"
       }.each do |key, value|
@@ -86,6 +89,84 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
         assert_equal true, report.fetch(:position_left_open)
         assert_equal "0.55", report.dig(:gates, :max_short_eth)
         assert_equal "1300.0", report.dig(:gates, :max_short_notional_usd)
+      end
+    end
+  end
+
+  test "allows 0.75 ETH cap below configured production hard ceiling" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.40"), eth_position("-0.40") ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge, new_short_size: "0.40") }
+
+      with_env(@env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "0.75",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "2000",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "0.80"
+      )) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_equal "0.75", report.dig(:gates, :max_short_eth)
+      end
+    end
+  end
+
+  test "allows 1.5 ETH cap when production hard ceiling is configured to 1.5" do
+    with_position_and_hedge do |hedge|
+      hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-1.20"), eth_position("-1.20") ])
+      hedge_sync = ->(_) { create_success_rebalance(hedge, new_short_size: "1.20") }
+
+      with_env(@env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "1.5",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6"
+      )) do
+        report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
+
+        assert_equal "success", report.fetch(:status)
+        assert_equal "1.5", report.dig(:gates, :max_short_eth)
+        assert_equal "1.5", report.dig(:gates, :production_hard_max_short_eth)
+      end
+    end
+  end
+
+  test "blocks 1.6 ETH cap when production hard ceiling is 1.5" do
+    with_position_and_hedge do
+      with_env(@env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "1.6",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6"
+      )) do
+        report = build_service.report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "AERODROME_MAX_SHORT_ETH must be configured and <= AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH (1.5)"
+      end
+    end
+  end
+
+  test "blocks emergency close cap below runtime cap or above hard emergency ceiling" do
+    with_position_and_hedge do
+      with_env(@env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "1.5",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.4"
+      )) do
+        report = build_service.report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH must be configured and >= AERODROME_MAX_SHORT_ETH"
+      end
+
+      with_env(@env.merge(
+        "AERODROME_MAX_SHORT_ETH" => "1.5",
+        "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+        "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.7"
+      )) do
+        report = build_service.report
+
+        assert_equal "blocked", report.fetch(:status)
+        assert_includes report.fetch(:errors), "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH must be configured and <= AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH (1.6)"
       end
     end
   end

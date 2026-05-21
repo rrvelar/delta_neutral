@@ -3,8 +3,6 @@ class AerodromeProductionLiveRunner
   CONFIRMATION = AerodromeProductionLiveRuntimeSafetyCheck::CONFIRMATION
   MAX_DURATION_SECONDS = 21_600
   MIN_INTERVAL_SECONDS = 180
-  PRODUCTION_MAX_SHORT_ETH = BigDecimal("0.75")
-  PRODUCTION_MAX_SHORT_NOTIONAL_USD = BigDecimal("2000")
   MIN_ORDER_NOTIONAL_USD = BigDecimal("10")
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
@@ -379,12 +377,14 @@ class AerodromeProductionLiveRunner
     errors << "AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR must be true" unless boolean_env("AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR") == true
     errors << "AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL must be true" unless boolean_env("AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL") == true
     errors << "AERODROME_MAX_LEVERAGE must be 1" unless max_leverage == BigDecimal("1")
-    errors << "AERODROME_MAX_SHORT_ETH must be configured and <= #{PRODUCTION_MAX_SHORT_ETH.to_s('F')}" unless max_short_eth && max_short_eth <= PRODUCTION_MAX_SHORT_ETH
-    errors << "AERODROME_MAX_SHORT_NOTIONAL_USD must be configured and <= #{PRODUCTION_MAX_SHORT_NOTIONAL_USD.to_s('F')}" unless max_short_notional_usd && max_short_notional_usd <= PRODUCTION_MAX_SHORT_NOTIONAL_USD
+    errors.concat(AerodromeProductionRiskLimits.runtime_cap_errors(
+      max_short_eth: max_short_eth,
+      max_short_notional_usd: max_short_notional_usd,
+      emergency_close_max_eth: emergency_close_max_eth
+    ))
     errors << "AERODROME_MIN_ORDER_NOTIONAL_USD must be configured and >= #{MIN_ORDER_NOTIONAL_USD.to_s('F')}" unless min_order_notional_usd && min_order_notional_usd >= MIN_ORDER_NOTIONAL_USD
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED must be true" unless boolean_env("AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED") == true
     errors << "AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM must equal #{AerodromeLiveEmergencyClose::CONFIRMATION}" unless ENV["AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM"].to_s == AerodromeLiveEmergencyClose::CONFIRMATION
-    errors << "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH must be configured and >= AERODROME_MAX_SHORT_ETH" unless emergency_close_max_eth && max_short_eth && emergency_close_max_eth >= max_short_eth
     errors << "No Aerodrome hedge/position found" unless hedge
     errors.concat(history_gate_errors) if hedge
     errors
@@ -567,6 +567,9 @@ class AerodromeProductionLiveRunner
       max_leverage: max_leverage&.to_s("F"),
       max_short_eth: max_short_eth&.to_s("F"),
       max_short_notional_usd: max_short_notional_usd&.to_s("F"),
+      production_hard_max_short_eth: AerodromeProductionRiskLimits.production_hard_max_short_eth&.to_s("F"),
+      production_hard_max_short_notional_usd: AerodromeProductionRiskLimits.production_hard_max_short_notional_usd&.to_s("F"),
+      production_hard_emergency_close_max_eth: AerodromeProductionRiskLimits.production_hard_emergency_close_max_eth&.to_s("F"),
       min_order_notional_usd: min_order_notional_usd&.to_s("F"),
       emergency_close_enabled: boolean_env("AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED"),
       emergency_close_confirmation_valid: ENV["AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM"].to_s == AerodromeLiveEmergencyClose::CONFIRMATION,

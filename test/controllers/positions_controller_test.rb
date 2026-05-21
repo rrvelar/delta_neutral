@@ -60,7 +60,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "span", text: "MONITOR ONLY"
     assert_select "span", text: "NO ORDERS"
     assert_select "span", text: "HEDGE DISABLED"
-    assert_select "span", text: "HYPERLIQUID NOT CALLED"
+    assert_select "span", text: "READ-ONLY HYPERLIQUID"
     assert_select "span", text: "NOT LIVE HEDGE-READY"
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID 315985", response.body
@@ -78,12 +78,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "1.250000", response.body
     assert_match "$2,500.00", response.body
     assert_match "AERODROME_HEDGE_ENABLED must remain false", response.body
+    assert_match "Production Hedge Dashboard", response.body
+    assert_match "Current Hyperliquid ETH position", response.body
+    assert_match "Dashboard Flow", response.body
     assert_no_match "Sync Now", response.body
     assert_no_match "Create Hedge", response.body
-    assert_no_match "Rebalance", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
-    assert_no_match "Approve", response.body
   end
 
   test "show displays read-only Aerodrome hedge status and pnl baseline" do
@@ -121,7 +122,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "5.00%", response.body
     assert_match "Target ETH short", response.body
     assert_match "0.625000", response.body
-    assert_match "readback disabled / not queried", response.body
+    assert_match "Current Hyperliquid ETH position", response.body
+    assert_match "current ETH readback unavailable", response.body
     assert_match "disabled", response.body
     assert_match "paused", response.body
     assert_match "testnet", response.body

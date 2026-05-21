@@ -53,16 +53,18 @@
   <% aerodrome_live_approved = ENV["AERODROME_LIVE_APPROVED"].to_s.downcase == "true" %>
   <% hyperliquid_testnet = ENV["HYPERLIQUID_TESTNET"].to_s.downcase == "true" %>
   <% aerodrome_pool_delta = @position.entry_value_usd ? @position.total_value_usd - @position.entry_value_usd : nil %>
+  <% production_dashboard = @aerodrome_production_dashboard_status || {} %>
+  <% hard_ceiling = production_dashboard[:hard_ceiling] || {} %>
   <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
     <div class="flex flex-wrap gap-2 mb-4">
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">MONITOR ONLY</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NO ORDERS</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HEDGE DISABLED</span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HYPERLIQUID NOT CALLED</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">READ-ONLY HYPERLIQUID</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NOT LIVE HEDGE-READY</span>
     </div>
     <p class="text-yellow-100 font-medium">Aerodrome Slipstream monitor-only position on <%= chain_display_name(@position) %>.</p>
-    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false. This page does not place trades, create orders, approve tokens, or call Hyperliquid.</p>
+    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false outside explicit supervised runs. This page may perform read-only Hyperliquid ETH readback, but it does not place trades, create orders, approve tokens, or close positions.</p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
@@ -95,7 +97,7 @@
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p class="text-gray-400 text-xs uppercase tracking-wide">Aerodrome Hedge Status</p>
-              <p class="text-yellow-200/80 text-xs mt-2">Read-only dashboard status &middot; No Hyperliquid readback &middot; No orders &middot; No execution</p>
+              <p class="text-yellow-200/80 text-xs mt-2">Read-only dashboard status &middot; No orders &middot; No execution</p>
             </div>
             <div class="flex flex-wrap gap-2">
               <% unless aerodrome_hedge_enabled %>
@@ -141,6 +143,80 @@
           </div>
         </div>
       <% end %>
+      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="text-gray-400 text-xs uppercase tracking-wide">Production Hedge Dashboard</p>
+            <p class="text-yellow-200/80 text-xs mt-2">Read-only status &middot; No orders from this panel &middot; Emergency close remains separately gated</p>
+          </div>
+          <% if production_dashboard[:within_caps] %>
+            <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-green-950/50 text-green-300 border border-green-800">within caps</span>
+          <% else %>
+            <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-red-950/50 text-red-200 border border-red-800">blocked</span>
+          <% end %>
+        </div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Configured ETH cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_eth].presence || "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard ETH ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_eth].presence || "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Configured notional cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_configured_hedge_cap_notional_usd])) : "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard notional ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_notional_usd].present? ? format_usd(BigDecimal(hard_ceiling[:hard_max_short_notional_usd])) : "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Emergency close cap</span><span class="text-white"><%= production_dashboard[:configured_emergency_close_max_eth].presence || "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard emergency ceiling</span><span class="text-white"><%= hard_ceiling[:hard_emergency_close_max_eth].presence || "missing" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">LP WETH amount</span><span class="text-white"><%= production_dashboard[:current_aerodrome_lp_weth_amount].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Target hedge</span><span class="text-white"><%= production_dashboard[:target_hedge_eth].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Target notional</span><span class="text-white"><%= production_dashboard[:target_hedge_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:target_hedge_notional_usd])) : "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Current ETH short</span><span class="text-white"><%= production_dashboard[:current_short_eth].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Current ETH notional</span><span class="text-white"><%= production_dashboard[:current_short_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_short_notional_usd])) : "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Drift ETH</span><span class="text-white"><%= production_dashboard[:drift_eth].presence || "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Drift notional</span><span class="text-white"><%= production_dashboard[:drift_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:drift_notional_usd])) : "unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500">Current Hyperliquid ETH position</span><span class="text-white text-right"><%= production_dashboard[:current_hyperliquid_eth_position] ? production_dashboard[:current_hyperliquid_eth_position].inspect : "nil / unavailable" %></span></div>
+        </div>
+        <% if production_dashboard[:blockers].present? %>
+          <div class="mt-4 bg-red-950/30 border border-red-900 rounded-lg p-3">
+            <p class="text-red-200 text-sm font-semibold">Blockers</p>
+            <ul class="mt-2 list-disc list-inside text-red-100/90 text-sm space-y-1">
+              <% production_dashboard[:blockers].each do |blocker| %>
+                <li><%= blocker %></li>
+              <% end %>
+            </ul>
+          </div>
+        <% end %>
+        <% if production_dashboard[:warnings].present? %>
+          <div class="mt-4 bg-yellow-950/30 border border-yellow-900 rounded-lg p-3">
+            <p class="text-yellow-200 text-sm font-semibold">Warnings</p>
+            <ul class="mt-2 list-disc list-inside text-yellow-100/90 text-sm space-y-1">
+              <% production_dashboard[:warnings].each do |warning| %>
+                <li><%= warning %></li>
+              <% end %>
+            </ul>
+          </div>
+        <% end %>
+        <div class="mt-4 border-t border-gray-800 pt-4">
+          <p class="text-gray-400 text-xs uppercase tracking-wide">Dashboard Flow</p>
+          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <p class="text-white font-medium">Refresh / sync</p>
+              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :refresh_sync) %></p>
+            </div>
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <p class="text-white font-medium">Open / approve hedge</p>
+              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :approve_or_edit_hedge) %></p>
+            </div>
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <p class="text-white font-medium">Rebalance hedge</p>
+              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :open_or_rebalance) %></p>
+            </div>
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <p class="text-white font-medium">Close hedge</p>
+              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :close_hedge) %></p>
+            </div>
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3 md:col-span-2">
+              <p class="text-white font-medium">Stop / close plan</p>
+              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :stop_close_plan) %></p>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
         <p class="text-gray-400 text-xs uppercase tracking-wide">PnL Baseline</p>
         <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">

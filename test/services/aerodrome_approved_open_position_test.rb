@@ -6,6 +6,9 @@ class AerodromeApprovedOpenPositionTest < ActiveSupport::TestCase
     @env = {
       "AERODROME_MAX_SHORT_ETH" => "0.02",
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "50",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_APPROVED_OPEN_POSITION_SIZE_TOLERANCE_ETH" => "0.002"
     }
   end
@@ -43,10 +46,25 @@ class AerodromeApprovedOpenPositionTest < ActiveSupport::TestCase
     end
   end
 
+  test "approved 1.5 ETH production cap passes within configurable hard ceiling" do
+    with_position do |position|
+      Dir.mktmpdir do |dir|
+        write_log(dir, final_position: { asset: "ETH", size: "-1.49" }, max_eth: "1.5", max_notional: "4000")
+
+        with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "1.5", "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000")) do
+          report = build_service(log_dir: dir, position: position, current_position: eth_position("-1.49")).report
+
+          assert_equal "approved", report.fetch(:approval_status)
+          assert_equal "PASS", report.fetch(:status)
+        end
+      end
+    end
+  end
+
   test "blocks approved log max ETH over production hard ceiling" do
     with_position do |position|
       Dir.mktmpdir do |dir|
-        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.76", max_notional: "1300")
+        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "1.6", max_notional: "1300")
 
         with_env(@env) do
           report = build_service(log_dir: dir, position: position, current_position: eth_position("-0.40")).report
@@ -61,7 +79,7 @@ class AerodromeApprovedOpenPositionTest < ActiveSupport::TestCase
   test "blocks approved log max notional over production hard ceiling" do
     with_position do |position|
       Dir.mktmpdir do |dir|
-        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.55", max_notional: "2001")
+        write_log(dir, final_position: { asset: "ETH", size: "-0.40" }, max_eth: "0.55", max_notional: "4001")
 
         with_env(@env) do
           report = build_service(log_dir: dir, position: position, current_position: eth_position("-0.40")).report
@@ -130,6 +148,25 @@ class AerodromeApprovedOpenPositionTest < ActiveSupport::TestCase
 
           assert_equal "mismatch", report.fetch(:approval_status)
           assert_includes report.fetch(:blockers), "Current ETH short differs from approved final size beyond tolerance"
+        end
+      end
+    end
+  end
+
+  test "allows current ETH outside default tolerance only when explicit tolerance permits it" do
+    with_position do |position|
+      Dir.mktmpdir do |dir|
+        write_log(dir, final_position: { asset: "ETH", size: "-1.49" }, max_eth: "1.5", max_notional: "4000")
+
+        with_env(@env.merge(
+          "AERODROME_MAX_SHORT_ETH" => "1.5",
+          "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+          "AERODROME_APPROVED_OPEN_POSITION_SIZE_TOLERANCE_ETH" => "0.02"
+        )) do
+          report = build_service(log_dir: dir, position: position, current_position: eth_position("-1.50")).report
+
+          assert_equal "approved", report.fetch(:approval_status)
+          assert_empty report.fetch(:blockers)
         end
       end
     end

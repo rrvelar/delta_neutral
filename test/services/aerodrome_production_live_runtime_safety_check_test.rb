@@ -14,6 +14,9 @@ class AerodromeProductionLiveRuntimeSafetyCheckTest < ActiveSupport::TestCase
       "AERODROME_PRODUCTION_LIVE_CONFIRM" => AerodromeProductionLiveRuntimeSafetyCheck::CONFIRMATION,
       "AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED" => "true",
       "AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM" => AerodromeLiveEmergencyClose::CONFIRMATION,
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_MAX_SHORT_ETH" => "0.55",
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "1300"
     }
@@ -32,22 +35,32 @@ class AerodromeProductionLiveRuntimeSafetyCheckTest < ActiveSupport::TestCase
 
   test "blocks configured max ETH over production hard ceiling" do
     with_position_and_hedge do |hedge|
-      with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "0.751")) do
+      with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "1.501")) do
         report = build_service(hedge: hedge, eth_position: eth_position("-0.40")).report
 
         assert_equal "BLOCKED", report.fetch(:status)
-        assert_includes report.fetch(:blockers), "Configured max ETH <= production hard ceiling: 0.751"
+        assert_includes report.fetch(:blockers), "Configured max ETH <= production hard ceiling: 1.501"
       end
     end
   end
 
   test "blocks configured max notional over production hard ceiling" do
     with_position_and_hedge do |hedge|
-      with_env(@env.merge("AERODROME_MAX_SHORT_NOTIONAL_USD" => "2001")) do
+      with_env(@env.merge("AERODROME_MAX_SHORT_NOTIONAL_USD" => "4001")) do
         report = build_service(hedge: hedge, eth_position: eth_position("-0.40")).report
 
         assert_equal "BLOCKED", report.fetch(:status)
-        assert_includes report.fetch(:blockers), "Configured max notional <= production hard ceiling: 2001.0"
+        assert_includes report.fetch(:blockers), "Configured max notional <= production hard ceiling: 4001.0"
+      end
+    end
+  end
+
+  test "allows 1.5 configured cap under configurable hard ceiling" do
+    with_position_and_hedge do |hedge|
+      with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => "1.5", "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000")) do
+        report = build_service(hedge: hedge, eth_position: eth_position("-1.2")).report
+
+        assert_equal "PASS", report.fetch(:status)
       end
     end
   end

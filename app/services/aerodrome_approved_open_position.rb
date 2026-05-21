@@ -1,8 +1,6 @@
 class AerodromeApprovedOpenPosition
   BANNER = "AERODROME APPROVED OPEN POSITION — READ ONLY"
   DEFAULT_TOLERANCE_ETH = BigDecimal("0.002")
-  PRODUCTION_MAX_SHORT_ETH = BigDecimal("0.75")
-  PRODUCTION_MAX_SHORT_NOTIONAL_USD = BigDecimal("2000")
 
   def initialize(
     current_position: nil,
@@ -59,12 +57,23 @@ class AerodromeApprovedOpenPosition
       return "current_nil"
     end
 
-    if max_short_eth(start) > PRODUCTION_MAX_SHORT_ETH
+    hard_eth = AerodromeProductionRiskLimits.production_hard_max_short_eth
+    hard_notional = AerodromeProductionRiskLimits.production_hard_max_short_notional_usd
+    unless hard_eth&.positive?
+      @blockers << "Production hard max ETH is not configured"
+      return "out_of_bounds"
+    end
+    unless hard_notional&.positive?
+      @blockers << "Production hard max notional is not configured"
+      return "out_of_bounds"
+    end
+
+    if max_short_eth(start) > hard_eth
       @blockers << "Approved max ETH exceeds production hard ceiling"
       return "out_of_bounds"
     end
 
-    if max_short_notional_usd(start) > PRODUCTION_MAX_SHORT_NOTIONAL_USD
+    if max_short_notional_usd(start) > hard_notional
       @blockers << "Approved max notional exceeds production hard ceiling"
       return "out_of_bounds"
     end

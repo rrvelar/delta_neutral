@@ -61,7 +61,9 @@ Any supervised live window still requires explicit one-off live gates:
 
 These gates are temporary for a supervised run. Restore safe defaults immediately after the run.
 
-Cap tiers are task-specific. Live observation, production canary, and target-step test runs remain micro-capped at `0.02` ETH / `$50`. Production live runner V1 has a higher supervised production tier and can accept explicit env caps up to `0.75` ETH / `$2000` at exactly `1x`, with emergency close max ETH covering the configured max short ETH.
+Cap tiers are task-specific. Live observation, production canary, and target-step test runs remain micro-capped at `0.02` ETH / `$50`. Production live runner V1 has a higher supervised production tier controlled by configurable hard ceilings: `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH`, `AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH`. Runtime caps remain separate through `AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH`; they must be configured and stay within the hard ceilings.
+
+For the next larger supervised LP/hedge size, `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH=1.5` is the intended hard ETH ceiling. This does not enable unattended operation or bypass manual gates.
 
 ## Required Preflight Sequence
 

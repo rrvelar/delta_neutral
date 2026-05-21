@@ -20,14 +20,19 @@ The runner refuses unless all production live gates are set:
 - `AERODROME_PRODUCTION_LIVE_CLOSE_ON_ERROR=true`
 - `AERODROME_PRODUCTION_LIVE_CLOSE_ON_SIGNAL=true`
 - `AERODROME_MAX_LEVERAGE=1`
-- `AERODROME_MAX_SHORT_ETH` configured and `<= 0.75`
-- `AERODROME_MAX_SHORT_NOTIONAL_USD` configured and `<= 2000`
+- `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH` configured and positive.
+- `AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD` configured and positive.
+- `AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH` configured and positive.
+- `AERODROME_MAX_SHORT_ETH` configured and `<= AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH`.
+- `AERODROME_MAX_SHORT_NOTIONAL_USD` configured and `<= AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD`.
 - `AERODROME_MIN_ORDER_NOTIONAL_USD >= 10`
 - live emergency close gates present and valid.
 
 Default persistent env must remain disabled, paused, not live-approved, and testnet outside an explicitly approved supervised run.
 
-Production live V1 has a higher supervised cap tier than the micro tools. The production live runner accepts operator-configured caps up to `0.75` ETH and `$2000` notional at exactly `1x` leverage, while `production_canary_run`, `live_observation_window`, and `production_target_step_test` remain micro-capped at `0.02` ETH / `$50` unless a future task explicitly changes them. The current first real direct Slipstream position is intended to use `AERODROME_MAX_SHORT_ETH=0.55`, `AERODROME_MAX_SHORT_NOTIONAL_USD=1300`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH=0.60` for a roughly `$925` 1.0x WETH hedge. Increasing beyond the production hard ceiling requires separate review and code changes.
+Production live V1 has a higher supervised cap tier than the micro tools. The production live runner accepts operator-configured caps only up to the configured production hard ceilings, while `production_canary_run`, `live_observation_window`, and `production_target_step_test` remain micro-capped at `0.02` ETH / `$50` unless a future task explicitly changes them. For the next larger supervised LP/hedge size, configure `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH=1.5`, a matching `AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH` above the runtime short cap; then set runtime caps separately with `AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH`. Increasing beyond the configured production hard ceiling requires separate review and config/code review.
+
+The Aerodrome position dashboard now shows the runtime hedge cap, production hard ceiling, read-only current Hyperliquid ETH position, current LP WETH amount, target hedge, drift, cap status, and blockers. The panel is read-only and does not submit live orders or close positions.
 
 ## Runtime Behavior
 
