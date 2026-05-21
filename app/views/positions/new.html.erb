@@ -1,0 +1,62 @@
+<div class="mb-6">
+  <%= link_to positions_path, class: "text-gray-400 hover:text-white transition text-sm font-medium" do %>
+    &larr; Back to positions
+  <% end %>
+</div>
+
+<h1 class="text-3xl font-bold text-white mb-2">Import Aerodrome LP Position</h1>
+<p class="text-gray-400 mb-8">Create a local Aerodrome Slipstream position and hedge from a token id. Import runs read-only position sync only; it does not place orders or call Hyperliquid write APIs.</p>
+
+<div class="bg-gray-900 border border-gray-800 rounded-xl p-6 max-w-3xl">
+  <%= form_with url: positions_path, scope: :position, method: :post, class: "space-y-6" do |f| %>
+    <div>
+      <%= f.label :external_id, "Token ID", class: "block text-sm font-medium text-gray-300 mb-2" %>
+      <%= f.text_field :external_id, value: @aerodrome_import_defaults[:external_id], required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+    </div>
+
+    <div>
+      <%= f.label :pool_address, "Pool address", class: "block text-sm font-medium text-gray-300 mb-2" %>
+      <%= f.text_field :pool_address, value: @aerodrome_import_defaults[:pool_address], class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      <p class="text-gray-500 text-xs mt-1">Defaults to the latest Aerodrome WETH/USDC pool address when available.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div>
+        <%= f.label :dex_id, "DEX ID", class: "block text-sm font-medium text-gray-300 mb-2" %>
+        <%= f.number_field :dex_id, value: @aerodrome_import_defaults[:dex_id], required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      </div>
+      <div>
+        <%= f.label :user_id, "User ID", class: "block text-sm font-medium text-gray-300 mb-2" %>
+        <%= f.number_field :user_id, value: @aerodrome_import_defaults[:user_id], required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      </div>
+      <div>
+        <%= f.label :wallet_id, "Wallet ID", class: "block text-sm font-medium text-gray-300 mb-2" %>
+        <%= f.number_field :wallet_id, value: @aerodrome_import_defaults[:wallet_id], required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <%= f.label :hedge_target, "Hedge target", class: "block text-sm font-medium text-gray-300 mb-2" %>
+        <%= f.number_field :hedge_target, value: @aerodrome_import_defaults[:hedge_target], step: "0.01", min: "0.01", max: "1", required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      </div>
+      <div>
+        <%= f.label :hedge_tolerance, "Hedge tolerance", class: "block text-sm font-medium text-gray-300 mb-2" %>
+        <%= f.number_field :hedge_tolerance, value: @aerodrome_import_defaults[:hedge_tolerance], step: "0.01", min: "0.01", max: "1", required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>
+      </div>
+    </div>
+
+    <label class="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950/40 p-4">
+      <%= f.check_box :deactivate_existing_aerodrome_positions, checked: ActiveModel::Type::Boolean.new.cast(@aerodrome_import_defaults[:deactivate_existing_aerodrome_positions]), class: "mt-1" %>
+      <span>
+        <span class="block text-sm font-medium text-gray-200">Deactivate existing active Aerodrome positions</span>
+        <span class="block text-xs text-gray-500 mt-1">Use when replacing the closed LP with the newly opened Aerodrome token id.</span>
+      </span>
+    </label>
+
+    <div class="flex flex-wrap gap-3 pt-2">
+      <%= f.submit "Import Aerodrome LP Position", class: "bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded-lg text-sm font-medium transition cursor-pointer" %>
+      <%= link_to "Cancel", positions_path, class: "bg-gray-700 hover:bg-gray-600 text-gray-200 px-5 py-2 rounded-lg text-sm font-medium transition" %>
+    </div>
+  <% end %>
+</div>

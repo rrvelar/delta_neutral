@@ -40,6 +40,116 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "$3,000.00", response.body
   end
 
+  test "index links to Aerodrome LP import form" do
+    get positions_path
+
+    assert_response :success
+    assert_select "a", text: "Import Aerodrome LP Position"
+  end
+
+  test "new page renders Aerodrome LP import form" do
+    create_aerodrome_position(pool_address: "0xlastpool", active: false)
+
+    get new_position_path
+
+    assert_response :success
+    assert_match "Import Aerodrome LP Position", response.body
+    assert_select "input[name='position[external_id]']"
+    assert_select "input[name='position[pool_address]'][value='0xlastpool']"
+    assert_select "input[name='position[hedge_target]'][value='1.0']"
+    assert_select "input[name='position[hedge_tolerance]'][value='0.03']"
+    assert_select "input[name='position[deactivate_existing_aerodrome_positions]']"
+  end
+
+  test "create imports Aerodrome position and hedge with valid token id" do
+    dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    wallet = base_wallet
+
+    HyperliquidService.stub(:new, hyperliquid_write_guard) do
+      PositionSyncJob.stub(:perform_now, ->(_) { }) do
+        assert_difference "Position.count", 1 do
+          assert_difference "Hedge.count", 1 do
+            post positions_path, params: {
+              position: import_params(dex: dex, wallet: wallet, external_id: "70184676")
+            }
+          end
+        end
+      end
+    end
+
+    position = Position.order(:id).last
+    assert_redirected_to position_path(position)
+    assert_equal "70184676", position.external_id
+    assert_equal "WETH", position.asset0
+    assert_equal "USDC", position.asset1
+    assert_predicate position, :active?
+    assert_equal BigDecimal("1.0"), position.hedge.target
+    assert_equal BigDecimal("0.03"), position.hedge.tolerance
+    assert_predicate position.hedge, :active?
+  end
+
+  test "create keeps record and shows warning when read-only sync fails" do
+    dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    wallet = base_wallet
+
+    PositionSyncJob.stub(:perform_now, ->(_) { raise "RPC unavailable" }) do
+      assert_difference "Position.count", 1 do
+        post positions_path, params: {
+          position: import_params(dex: dex, wallet: wallet, external_id: "70184677")
+        }
+      end
+    end
+
+    position = Position.order(:id).last
+    assert_redirected_to position_path(position)
+    assert_match "read-only sync failed: RPC unavailable", flash[:notice]
+  end
+
+  test "duplicate active Aerodrome token id is blocked" do
+    existing = create_aerodrome_position(external_id: "70184676")
+
+    assert_no_difference "Position.count" do
+      post positions_path, params: {
+        position: import_params(dex: existing.dex, wallet: existing.wallet, external_id: "70184676")
+      }
+    end
+
+    assert_response :unprocessable_entity
+    assert_match "already exists", response.body
+  end
+
+  test "create deactivates old active Aerodrome positions only when selected" do
+    old_position = create_aerodrome_position(external_id: "old-active")
+    dex = old_position.dex
+    wallet = old_position.wallet
+
+    PositionSyncJob.stub(:perform_now, ->(_) { }) do
+      post positions_path, params: {
+        position: import_params(
+          dex: dex,
+          wallet: wallet,
+          external_id: "new-without-deactivate",
+          deactivate_existing: "0"
+        )
+      }
+    end
+
+    assert_predicate old_position.reload, :active?
+
+    PositionSyncJob.stub(:perform_now, ->(_) { }) do
+      post positions_path, params: {
+        position: import_params(
+          dex: dex,
+          wallet: wallet,
+          external_id: "new-with-deactivate",
+          deactivate_existing: "1"
+        )
+      }
+    end
+
+    assert_not old_position.reload.active?
+  end
+
   test "show displays Aerodrome monitor-only details and hedge preview" do
     position = create_aerodrome_position
 
@@ -742,7 +852,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
   private
 
-  def create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), asset1_price_usd: BigDecimal("1"))
+  def create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), asset1_price_usd: BigDecimal("1"), external_id: "315985", pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", active: true)
     Position.create!(
       user: users(:one),
       wallet: base_wallet,
@@ -753,10 +863,33 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       asset1_amount: BigDecimal("500"),
       asset0_price_usd: asset0_price_usd,
       asset1_price_usd: asset1_price_usd,
-      external_id: "315985",
-      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
-      active: true
+      external_id: external_id,
+      pool_address: pool_address,
+      active: active
     )
+  end
+
+  def import_params(dex:, wallet:, external_id:, deactivate_existing: "0")
+    {
+      external_id: external_id,
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      dex_id: dex.id,
+      user_id: users(:one).id,
+      wallet_id: wallet.id,
+      hedge_target: "1.0",
+      hedge_tolerance: "0.03",
+      deactivate_existing_aerodrome_positions: deactivate_existing
+    }
+  end
+
+  def hyperliquid_write_guard
+    ->(*) do
+      Object.new.tap do |object|
+        object.define_singleton_method(:open_short) { raise "Hyperliquid open_short must not be called" }
+        object.define_singleton_method(:close_short) { raise "Hyperliquid close_short must not be called" }
+        object.define_singleton_method(:set_leverage) { raise "Hyperliquid set_leverage must not be called" }
+      end
+    end
   end
 
   def base_wallet

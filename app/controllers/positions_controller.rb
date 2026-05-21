@@ -12,6 +12,68 @@ class PositionsController < ApplicationController
     @positions = Current.user.positions.active.includes(:dex, :hedge, wallet: :network)
   end
 
+  def new
+    @aerodrome_import_defaults = aerodrome_import_defaults
+  end
+
+  def create
+    attrs = aerodrome_position_params
+    token_id = attrs[:external_id].to_s.strip
+    @aerodrome_import_defaults = aerodrome_import_defaults.merge(attrs.to_h.symbolize_keys)
+
+    if token_id.blank?
+      flash.now[:alert] = "Token ID is required."
+      return render :new, status: :unprocessable_entity
+    end
+
+    dex = Dex.find(attrs[:dex_id])
+    if Position.active.where(dex: dex, external_id: token_id).exists?
+      flash.now[:alert] = "An active Aerodrome position with token ID #{token_id} already exists."
+      return render :new, status: :unprocessable_entity
+    end
+
+    position = nil
+    hedge = nil
+    ActiveRecord::Base.transaction do
+      if ActiveModel::Type::Boolean.new.cast(attrs[:deactivate_existing_aerodrome_positions])
+        Position.active.where(dex: dex).update_all(active: false, updated_at: Time.current)
+      end
+
+      position = Position.create!(
+        user_id: attrs[:user_id],
+        wallet_id: attrs[:wallet_id],
+        dex: dex,
+        external_id: token_id,
+        pool_address: attrs[:pool_address],
+        asset0: "WETH",
+        asset1: "USDC",
+        asset0_amount: BigDecimal("0"),
+        asset1_amount: BigDecimal("0"),
+        asset0_price_usd: nil,
+        asset1_price_usd: nil,
+        active: true
+      )
+      hedge = position.create_hedge!(
+        target: attrs[:hedge_target],
+        tolerance: attrs[:hedge_tolerance],
+        active: true
+      )
+    end
+
+    sync_warning = nil
+    begin
+      PositionSyncJob.perform_now(position.id)
+    rescue => e
+      Rails.logger.warn("Aerodrome import sync failed for position #{position.id}: #{e.class} #{e.message}")
+      sync_warning = " Position was created with hedge ##{hedge.id}, but read-only sync failed: #{e.message}"
+    end
+
+    redirect_to position_path(position), notice: "Aerodrome LP position imported.#{sync_warning}"
+  rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotFound, ArgumentError => e
+    flash.now[:alert] = "Import failed: #{e.message}"
+    render :new, status: :unprocessable_entity
+  end
+
   # GET /positions/:id
   #
   # Displays a single position along with its most recent 50 P&L snapshots
@@ -116,6 +178,35 @@ class PositionsController < ApplicationController
       fee1_usd: nil,
       total_fees_usd: nil,
       warnings: [ e.message ]
+    }
+  end
+
+  def aerodrome_position_params
+    params.require(:position).permit(
+      :external_id,
+      :pool_address,
+      :dex_id,
+      :user_id,
+      :wallet_id,
+      :hedge_target,
+      :hedge_tolerance,
+      :deactivate_existing_aerodrome_positions
+    )
+  end
+
+  def aerodrome_import_defaults
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    last_aerodrome = Position.where(dex: aerodrome_dex).order(created_at: :desc, id: :desc).first
+
+    {
+      external_id: "",
+      pool_address: last_aerodrome&.pool_address,
+      dex_id: aerodrome_dex.id,
+      user_id: User.find_by(id: 1)&.id || Current.user.id,
+      wallet_id: Wallet.find_by(id: 1)&.id || Current.user.wallets.order(:id).first&.id,
+      hedge_target: "1.0",
+      hedge_tolerance: "0.03",
+      deactivate_existing_aerodrome_positions: "1"
     }
   end
 end

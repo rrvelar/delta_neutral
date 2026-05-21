@@ -8,7 +8,7 @@ Rails.application.routes.draw do
     post :sync_now, on: :member
   end
 
-  resources :positions, only: [ :index, :show ] do
+  resources :positions, only: [ :index, :show, :new, :create ] do
     post :sync_now, on: :member
     resources :aerodrome_hedge_proposals, only: [ :create ] do
       post :regenerate, on: :collection
