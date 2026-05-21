@@ -13,6 +13,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Monitor-only hedge preview is available only for configured WETH/USDC positions and never executes orders.
 - Manual hedge proposals are local database records only. They can suggest a short ETH amount/notional for an Aerodrome WETH/USDC monitor-only position, retain local history/status, and show local safety-limit results, but they do not create `Hedge` records, do not call Hyperliquid, and do not place orders.
 - The Rails UI displays Aerodrome positions as monitor-only, including safety labels and display-only hedge preview status.
+- The Rails UI now includes dashboard-controlled one-shot hedge action controls for Aerodrome WETH/USDC positions. Preview actions are dry-run. Live open/rebalance actions reuse the existing `HedgeSyncJob`/`HyperliquidService` path only when explicit dashboard live gates and typed confirmation are present. Live close uses the existing gated emergency close path.
 - `HedgeSyncJob` skips Aerodrome positions while `AERODROME_HEDGE_ENABLED=false`, which is the default.
 - If `AERODROME_HEDGE_ENABLED=true`, Aerodrome positions may enter the existing `HedgeSyncJob` path only for testnet rehearsal when `HYPERLIQUID_TESTNET=true`, an explicit `Hedge` exists, and persisted asset/amount/price data is complete. The Aerodrome hedge gate supports only the ETH/WETH side; USDC and all other symbols are skipped and never hedged. This reuses `HyperliquidService` unchanged and adds no new execution path.
 
@@ -44,7 +45,7 @@ This runbook is for read-only Aerodrome Slipstream verification on Base. It is n
 - Automatic live emergency close. The live emergency close task is manual-only and blocked by default.
 - Aerodrome hedge execution by default.
 - Any new Aerodrome-specific Hyperliquid order path.
-- Hyperliquid hedge preview execution.
+- Hyperliquid hedge preview execution. Dashboard preview actions compute target/drift/caps and write local JSONL receipts only.
 - Proposal execution. Proposal review is only a local status change and is not order approval.
 - Automatic use of reviewed proposals for any trading workflow.
 - Enforced trading risk management. Proposal safety limits are local review gates only and do not execute, size, or submit trades.
@@ -86,6 +87,8 @@ AERODROME_HEDGE_ENABLED=false
 AERODROME_HEDGE_PAUSED=true
 AERODROME_LIVE_APPROVED=false
 AERODROME_REQUIRE_HYPERLIQUID_TESTNET=true
+AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED=false
+AERODROME_DASHBOARD_HEDGE_CONFIRMATION=
 ```
 
 No private keys are required for Aerodrome dry-run or config verification.

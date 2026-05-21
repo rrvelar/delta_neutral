@@ -191,6 +191,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Production Hedge Dashboard", response.body
     assert_match "Current Hyperliquid ETH position", response.body
     assert_match "Dashboard Flow", response.body
+    assert_match "Dashboard Hedge Actions", response.body
+    assert_match "Open Hedge", response.body
+    assert_match "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED must be true", response.body
     assert_no_match "Sync Now", response.body
     assert_no_match "Create Hedge", response.body
     assert_no_match "Execute", response.body
@@ -260,6 +263,50 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
+  end
+
+  test "hedge open preview redirects with dry-run summary without real Hyperliquid writes" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, HyperliquidReadMock.new([ nil ])) do
+        post hedge_open_preview_position_path(position)
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    assert_match "Open preview", flash[:notice]
+    assert_match "Target 1.25 ETH", flash[:notice]
+  end
+
+  test "hedge open live is blocked without typed confirmation" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, HyperliquidReadMock.new([ nil ])) do
+        post hedge_open_position_path(position), params: { dashboard_hedge_confirmation: "wrong" }
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    assert_match "submitted confirmation must equal #{AerodromeDashboardHedgeAction::CONFIRMATION}", flash[:alert]
+  end
+
+  test "hedge close preview is available and does not call emergency close" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, HyperliquidReadMock.new([ { asset: "ETH", size: BigDecimal("-0.5"), mark_price: BigDecimal("2300") } ])) do
+        post hedge_close_preview_position_path(position)
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    assert_match "Close preview", flash[:notice]
+    assert_match "delta -0.5 ETH", flash[:notice]
   end
 
   test "show renders read-only AERO rewards section without adding rewards to total pnl" do
@@ -890,6 +937,35 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
         object.define_singleton_method(:set_leverage) { raise "Hyperliquid set_leverage must not be called" }
       end
     end
+  end
+
+  class HyperliquidReadMock
+    def initialize(positions)
+      @positions = positions
+    end
+
+    def get_position(asset)
+      raise "USDC must not be read" if asset == "USDC"
+
+      @positions.empty? ? nil : @positions.shift
+    end
+  end
+
+  def with_dashboard_env
+    with_env(
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
+      "AERODROME_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
+      "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED" => "true",
+      "AERODROME_DASHBOARD_HEDGE_CONFIRMATION" => AerodromeDashboardHedgeAction::CONFIRMATION,
+      "AERODROME_LIVE_APPROVED" => "true",
+      "AERODROME_HEDGE_ENABLED" => "true",
+      "AERODROME_HEDGE_PAUSED" => "false",
+      "HYPERLIQUID_TESTNET" => "false"
+    ) { yield }
   end
 
   def base_wallet

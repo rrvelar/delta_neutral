@@ -61,6 +61,8 @@ Any supervised live window still requires explicit one-off live gates:
 
 These gates are temporary for a supervised run. Restore safe defaults immediately after the run.
 
+Dashboard-controlled hedge actions are also supervised-only. Dry-run preview is available from the position page, but live open/rebalance/close buttons remain blocked unless `AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED=true`, `AERODROME_DASHBOARD_HEDGE_CONFIRMATION=I_UNDERSTAND_THIS_SUBMITS_LIVE_HYPERLIQUID_ORDERS`, `AERODROME_LIVE_APPROVED=true`, `AERODROME_HEDGE_ENABLED=true`, `AERODROME_HEDGE_PAUSED=false`, `HYPERLIQUID_TESTNET=false`, and the operator types the same confirmation phrase into the form. Dashboard open/rebalance reuses the existing hedge sync path; dashboard close uses the existing gated emergency close path. It does not add a tmux queue, background daemon, or unattended workflow.
+
 Cap tiers are task-specific. Live observation, production canary, and target-step test runs remain micro-capped at `0.02` ETH / `$50`. Production live runner V1 has a higher supervised production tier controlled by configurable hard ceilings: `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH`, `AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH`. Runtime caps remain separate through `AERODROME_MAX_SHORT_ETH`, `AERODROME_MAX_SHORT_NOTIONAL_USD`, and `AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH`; they must be configured and stay within the hard ceilings.
 
 For the next larger supervised LP/hedge size, `AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH=1.5` is the intended hard ETH ceiling. This does not enable unattended operation or bypass manual gates.

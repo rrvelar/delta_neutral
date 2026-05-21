@@ -35,6 +35,7 @@ class AerodromeProductionDashboardStatus
       within_caps: blockers.empty?,
       blockers: blockers,
       warnings: @errors,
+      dashboard_actions: dashboard_actions(target: target, current_short: current_short, drift: drift),
       action_plan: action_plan
     }
   end
@@ -69,9 +70,34 @@ class AerodromeProductionDashboardStatus
     {
       refresh_sync: "Use the dashboard Refresh Read-only Data action to update Aerodrome LP amounts. It does not call Hyperliquid.",
       approve_or_edit_hedge: @hedge ? "Edit the existing Hedge target/tolerance in the dashboard if the intended target changed." : "Create a Hedge for this position in the dashboard before any production live run.",
-      open_or_rebalance: "Run production_live_run only through the explicitly gated production procedure. The dashboard status here is read-only and does not submit orders.",
-      close_hedge: "Use the separately gated live emergency close procedure after checking current mainnet ETH. The dashboard status here does not close positions.",
+      open_or_rebalance: "Use dashboard preview first. Live open/rebalance requires explicit env gates and typed confirmation.",
+      close_hedge: "Use dashboard close preview first. Live close uses the separately gated emergency close path.",
       stop_close_plan: "Run aerodrome:production_live_stop_plan or the VPS close template for the exact manual stop/close sequence."
+    }
+  end
+
+  def dashboard_actions(target:, current_short:, drift:)
+    tolerance = target && @hedge ? target * @hedge.tolerance : nil
+    gate_blockers = AerodromeDashboardHedgeAction.execution_gate_blockers
+    {
+      open: {
+        visible: current_short.zero? && target&.positive? && tolerance && target > tolerance,
+        live_enabled: gate_blockers.empty?,
+        blockers: gate_blockers,
+        label: "Open Hedge"
+      },
+      rebalance: {
+        visible: drift && tolerance && drift.abs > tolerance,
+        live_enabled: gate_blockers.empty?,
+        blockers: gate_blockers,
+        label: "Rebalance Hedge"
+      },
+      close: {
+        visible: current_short.positive?,
+        live_enabled: gate_blockers.empty?,
+        blockers: gate_blockers,
+        label: "Close Hedge"
+      }
     }
   end
 

@@ -110,7 +110,55 @@ class PositionsController < ApplicationController
     redirect_to position_path(@position), notice: "Position sync queued."
   end
 
+  def hedge_open_preview
+    run_dashboard_hedge_action("open", execute: false)
+  end
+
+  def hedge_open
+    run_dashboard_hedge_action("open", execute: true)
+  end
+
+  def hedge_rebalance_preview
+    run_dashboard_hedge_action("rebalance", execute: false)
+  end
+
+  def hedge_rebalance
+    run_dashboard_hedge_action("rebalance", execute: true)
+  end
+
+  def hedge_close_preview
+    run_dashboard_hedge_action("close", execute: false)
+  end
+
+  def hedge_close
+    run_dashboard_hedge_action("close", execute: true)
+  end
+
   private
+
+  def run_dashboard_hedge_action(action, execute:)
+    position = Current.user.positions.includes(:dex, :hedge).find(params[:id])
+    report = AerodromeDashboardHedgeAction.new(
+      position: position,
+      action: action,
+      execute: execute,
+      confirmation: params[:dashboard_hedge_confirmation]
+    ).report
+    level = report.fetch(:status) == "blocked" || report.fetch(:status) == "failed" ? :alert : :notice
+    redirect_to position_path(position), flash: { level => dashboard_hedge_action_message(report) }
+  end
+
+  def dashboard_hedge_action_message(report)
+    label = report.fetch(:requested_action).to_s.humanize
+    if report.fetch(:blockers).present?
+      "#{label} #{report.fetch(:status)}: #{report.fetch(:blockers).join('; ')}"
+    elsif report.fetch(:errors).present?
+      "#{label} #{report.fetch(:status)}: #{report.fetch(:errors).join('; ')}"
+    else
+      delta = report[:submitted_delta_eth].presence || "0"
+      "#{label} #{report.fetch(:status)}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
+    end
+  end
 
   def aerodrome_rewards_report
     unless ENV["AERODROME_REWARDS_ENABLED"].to_s.downcase == "true"

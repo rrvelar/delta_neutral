@@ -63,8 +63,8 @@
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">READ-ONLY HYPERLIQUID</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NOT LIVE HEDGE-READY</span>
     </div>
-    <p class="text-yellow-100 font-medium">Aerodrome Slipstream monitor-only position on <%= chain_display_name(@position) %>.</p>
-    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false outside explicit supervised runs. This page may perform read-only Hyperliquid ETH readback, but it does not place trades, create orders, approve tokens, or close positions.</p>
+    <p class="text-yellow-100 font-medium">Aerodrome Slipstream supervised position on <%= chain_display_name(@position) %>.</p>
+    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false outside explicit supervised dashboard submits. Dashboard hedge actions are blocked unless explicit live gates and typed confirmation are present. Preview actions are dry-run only. Close uses the separately gated emergency close path.</p>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
@@ -97,7 +97,7 @@
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p class="text-gray-400 text-xs uppercase tracking-wide">Aerodrome Hedge Status</p>
-              <p class="text-yellow-200/80 text-xs mt-2">Read-only dashboard status &middot; No orders &middot; No execution</p>
+            <p class="text-yellow-200/80 text-xs mt-2">Dashboard status and gated one-shot controls &middot; No background queues &middot; No tmux workflow</p>
             </div>
             <div class="flex flex-wrap gap-2">
               <% unless aerodrome_hedge_enabled %>
@@ -147,7 +147,7 @@
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p class="text-gray-400 text-xs uppercase tracking-wide">Production Hedge Dashboard</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Read-only status &middot; No orders from this panel &middot; Emergency close remains separately gated</p>
+            <p class="text-yellow-200/80 text-xs mt-2">Preview first &middot; Live submit requires env gates plus typed confirmation &middot; Close uses emergency close</p>
           </div>
           <% if production_dashboard[:within_caps] %>
             <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-green-950/50 text-green-300 border border-green-800">within caps</span>
@@ -193,6 +193,8 @@
         <% end %>
         <div class="mt-4 border-t border-gray-800 pt-4">
           <p class="text-gray-400 text-xs uppercase tracking-wide">Dashboard Flow</p>
+          <% dashboard_actions = production_dashboard[:dashboard_actions] || {} %>
+          <% dashboard_confirmation = AerodromeDashboardHedgeAction::CONFIRMATION %>
           <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-white font-medium">Refresh / sync</p>
@@ -213,6 +215,46 @@
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3 md:col-span-2">
               <p class="text-white font-medium">Stop / close plan</p>
               <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :stop_close_plan) %></p>
+            </div>
+          </div>
+          <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-4">
+            <p class="text-white font-medium">Dashboard Hedge Actions</p>
+            <p class="text-gray-400 text-xs mt-1">Preview buttons are dry-run. Live buttons submit only one explicit action and remain blocked unless all dashboard live gates are configured.</p>
+            <div class="mt-3">
+              <label class="block text-xs font-medium text-gray-400 mb-1" for="dashboard_hedge_confirmation">Live submit confirmation</label>
+              <input form="dashboard-hedge-confirmation-holder" id="dashboard_hedge_confirmation_placeholder" type="text" value="" placeholder="<%= dashboard_confirmation %>" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600" disabled>
+              <p class="text-gray-500 text-xs mt-1">Type this exact phrase in the live action field below before submitting: <span class="text-gray-300"><%= dashboard_confirmation %></span></p>
+            </div>
+            <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
+              <% [
+                [ :open, hedge_open_preview_position_path(@position), hedge_open_position_path(@position), "Open Hedge" ],
+                [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge" ],
+                [ :close, hedge_close_preview_position_path(@position), hedge_close_position_path(@position), "Close Hedge" ]
+              ].each do |key, preview_path, live_path, label| %>
+                <% action_state = dashboard_actions[key] || {} %>
+                <% action_visible = action_state[:visible] %>
+                <% live_enabled = action_state[:live_enabled] %>
+                <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <p class="text-white font-medium"><%= label %></p>
+                    <% if action_visible %>
+                      <span class="text-green-300 text-xs">available</span>
+                    <% else %>
+                      <span class="text-gray-500 text-xs">not needed</span>
+                    <% end %>
+                  </div>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <%= button_to "#{label} Preview", preview_path, method: :post, disabled: !action_visible, class: "bg-gray-700 hover:bg-gray-600 disabled:bg-gray-900 disabled:text-gray-600 text-gray-100 px-3 py-2 rounded-lg text-xs font-medium transition" %>
+                  </div>
+                  <%= form_with url: live_path, method: :post, class: "mt-3" do |form| %>
+                    <%= form.text_field :dashboard_hedge_confirmation, placeholder: dashboard_confirmation, disabled: !action_visible || !live_enabled, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
+                    <%= form.submit "#{label} Live", disabled: !action_visible || !live_enabled, class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
+                  <% end %>
+                  <% if action_state[:blockers].present? %>
+                    <p class="text-yellow-200 text-xs mt-2"><%= action_state[:blockers].join("; ") %></p>
+                  <% end %>
+                </div>
+              <% end %>
             </div>
           </div>
         </div>
