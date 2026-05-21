@@ -100,7 +100,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
         position: position,
         action: "close",
         execute: true,
-        confirmation: AerodromeDashboardHedgeAction::CONFIRMATION,
+        confirmation: AerodromeLiveEmergencyClose::CONFIRMATION,
         positions: [ eth_position("-0.5"), nil ],
         emergency_close_factory: -> { emergency }
       ).report

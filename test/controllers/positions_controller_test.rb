@@ -194,6 +194,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Dashboard Hedge Actions", response.body
     assert_match "Open Hedge", response.body
     assert_match "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED must be true", response.body
+    assert_match AerodromeDashboardHedgeAction::CONFIRMATION, response.body
+    assert_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
+    assert_match "Paste this exact phrase to enable live submit.", response.body
+    assert_select "button", text: "Copy", count: 3
     assert_no_match "Sync Now", response.body
     assert_no_match "Create Hedge", response.body
     assert_no_match "Execute", response.body

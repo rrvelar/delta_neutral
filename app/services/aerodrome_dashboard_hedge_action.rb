@@ -44,11 +44,13 @@ class AerodromeDashboardHedgeAction
     result
   end
 
-  def self.execution_gate_blockers(submitted_confirmation: nil, require_submitted_confirmation: false)
+  def self.execution_gate_blockers(action: nil, submitted_confirmation: nil, require_submitted_confirmation: false)
     blockers = []
     blockers << "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED must be true" unless bool_env("AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED")
     blockers << "AERODROME_DASHBOARD_HEDGE_CONFIRMATION must equal #{CONFIRMATION}" unless ENV["AERODROME_DASHBOARD_HEDGE_CONFIRMATION"].to_s == CONFIRMATION
-    blockers << "submitted confirmation must equal #{CONFIRMATION}" if require_submitted_confirmation && submitted_confirmation.to_s != CONFIRMATION
+    if require_submitted_confirmation && submitted_confirmation.to_s != submitted_confirmation_phrase(action)
+      blockers << "submitted confirmation must equal #{submitted_confirmation_phrase(action)}"
+    end
     blockers << "AERODROME_LIVE_APPROVED must be true" unless bool_env("AERODROME_LIVE_APPROVED")
     blockers << "AERODROME_HEDGE_ENABLED must be true" unless bool_env("AERODROME_HEDGE_ENABLED")
     blockers << "AERODROME_HEDGE_PAUSED must be false" if bool_env("AERODROME_HEDGE_PAUSED", default: true)
@@ -58,6 +60,10 @@ class AerodromeDashboardHedgeAction
 
   def self.bool_env(key, default: false)
     ActiveModel::Type::Boolean.new.cast(ENV.fetch(key, default.to_s))
+  end
+
+  def self.submitted_confirmation_phrase(action)
+    action.to_s == "close" ? AerodromeLiveEmergencyClose::CONFIRMATION : CONFIRMATION
   end
 
   private
@@ -173,7 +179,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def execution_gate_blockers
-    self.class.execution_gate_blockers(submitted_confirmation: @confirmation, require_submitted_confirmation: true)
+    self.class.execution_gate_blockers(action: @action, submitted_confirmation: @confirmation, require_submitted_confirmation: true)
   end
 
   def run_emergency_close
