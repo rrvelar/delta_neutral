@@ -26,11 +26,15 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
         {
           vault_name: "Mellow WETH/USDC Autopilot",
           vault_identifier: "vault-1",
+          position_type: "direct_lp_nft",
+          strategy_token_id: "71141789",
           vault_address: "0xvault",
           receipt_share_amount: "12.5",
+          total_shares: nil,
           weth_amount: "0.42",
           usdc_amount: "234.56",
-          total_value_usd: "1234.56"
+          total_value_usd: "1234.56",
+          hedgeable: true
         }
       ]
     }
@@ -49,6 +53,9 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_match "234.56", response.body
     assert_match "$1,234.56", response.body
     assert_match "hedge target computable", response.body
+    assert_match "Direct LP token IDs can be hedged", response.body
+    assert_match "Autopilot/Mellow shared strategy token IDs require user share accounting", response.body
+    assert_match "direct_lp_nft", response.body
   end
 
   private

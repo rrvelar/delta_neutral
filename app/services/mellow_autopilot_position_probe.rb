@@ -24,7 +24,10 @@ class MellowAutopilotPositionProbe
     positions = positions.select { |position| same_address?(position[:vault_address], @vault_address) } if @vault_address
     blockers = []
     blockers << "No Mellow/Autopilot positions detected for wallet." if positions.empty?
-    blockers << "Cannot hedge: underlying WETH exposure unavailable." if positions.none? { |position| position[:weth_amount].present? }
+    if positions.any? { |position| position[:position_type] == "shared_strategy" && !position[:hedgeable] }
+      blockers << "Cannot hedge: token_id appears to be a shared Autopilot/Mellow strategy position; user pro-rata WETH exposure is unknown."
+    end
+    blockers << "Cannot hedge: underlying WETH exposure unavailable." if positions.none? { |position| position[:hedgeable] }
 
     {
       database_write: false,
@@ -35,7 +38,7 @@ class MellowAutopilotPositionProbe
       vault_address: @vault_address,
       positions: positions,
       total_positions: positions.size,
-      hedge_target_computable: blockers.none? && positions.any? { |position| position[:weth_amount].present? },
+      hedge_target_computable: blockers.none? && positions.any? { |position| position[:hedgeable] },
       blockers: blockers,
       warnings: @warnings,
       raw: {
@@ -88,18 +91,33 @@ class MellowAutopilotPositionProbe
 
   def normalize_position(entry)
     tokens = token_entries(entry)
-    weth = amount_for(tokens, WETH_SYMBOLS) || decimal_field(entry, "weth_amount", "wethAmount", "eth_amount", "ethAmount")
-    usdc = amount_for(tokens, USDC_SYMBOLS) || decimal_field(entry, "usdc_amount", "usdcAmount")
+    position_type = position_type(entry)
+    direct_weth = amount_for(tokens, WETH_SYMBOLS) || decimal_field(entry, "weth_amount", "wethAmount", "eth_amount", "ethAmount")
+    direct_usdc = amount_for(tokens, USDC_SYMBOLS) || decimal_field(entry, "usdc_amount", "usdcAmount")
+    user_shares = decimal_share_amount(entry)
+    total_shares = decimal_field(entry, "total_shares", "totalShares", "total_supply", "totalSupply", "share_total", "shareTotal")
+    strategy_weth = decimal_field(entry, "strategy_weth", "strategyWeth", "strategy_weth_amount", "strategyWethAmount", "total_weth", "totalWeth", "underlying_weth", "underlyingWeth") || direct_weth
+    strategy_usdc = decimal_field(entry, "strategy_usdc", "strategyUsdc", "strategy_usdc_amount", "strategyUsdcAmount", "total_usdc", "totalUsdc", "underlying_usdc", "underlyingUsdc") || direct_usdc
+    weth = position_type == "shared_strategy" ? pro_rata_amount(strategy_weth, user_shares, total_shares) : direct_weth
+    usdc = position_type == "shared_strategy" ? pro_rata_amount(strategy_usdc, user_shares, total_shares) : direct_usdc
+    hedgeable = weth.present?
     @warnings << "Only vault/share balance is available; underlying token exposure is missing." if weth.nil? && share_amount(entry).present?
 
     {
+      position_type: position_type,
       vault_identifier: string_field(entry, "vault_id", "vaultId", "id", "identifier"),
       vault_address: address_field(entry, "vault_address", "vaultAddress", "address", "vault"),
+      manager_address: address_field(entry, "manager_address", "managerAddress", "router_address", "routerAddress", "autopilot_address", "autopilotAddress"),
       vault_name: string_field(entry, "vault_name", "vaultName", "name", "title"),
-      receipt_share_amount: share_amount(entry),
+      receipt_share_amount: user_shares&.to_s("F"),
+      total_shares: total_shares&.to_s("F"),
+      strategy_token_id: string_field(entry, "strategy_token_id", "strategyTokenId", "token_id", "tokenId", "nft_token_id", "nftTokenId"),
+      strategy_weth_amount: strategy_weth&.to_s("F"),
+      strategy_usdc_amount: strategy_usdc&.to_s("F"),
       total_value_usd: decimal_field(entry, "total_value_usd", "totalValueUsd", "value_usd", "valueUsd", "usd_value", "usdValue", "balance_usd", "balanceUsd")&.to_s("F"),
       weth_amount: weth&.to_s("F"),
       usdc_amount: usdc&.to_s("F"),
+      hedgeable: hedgeable,
       underlying_tokens: tokens
     }
   end
@@ -125,7 +143,29 @@ class MellowAutopilotPositionProbe
   end
 
   def share_amount(entry)
-    decimal_field(entry, "shares", "share_amount", "shareAmount", "receipt_share_amount", "receiptShareAmount", "balance", "amount")&.to_s("F")
+    decimal_share_amount(entry)&.to_s("F")
+  end
+
+  def decimal_share_amount(entry)
+    decimal_field(entry, "shares", "user_shares", "userShares", "share_amount", "shareAmount", "receipt_share_amount", "receiptShareAmount", "balance", "amount")
+  end
+
+  def pro_rata_amount(strategy_amount, user_shares, total_shares)
+    return nil unless strategy_amount&.positive? && user_shares&.positive? && total_shares&.positive?
+
+    strategy_amount * user_shares / total_shares
+  end
+
+  def position_type(entry)
+    explicit = string_field(entry, "position_type", "positionType", "type")
+    return "shared_strategy" if explicit.to_s.match?(/autopilot|mellow|shared|strategy|vault/i)
+
+    direct_owner = string_field(entry, "owner", "owner_address", "ownerAddress")
+    return "direct_lp_nft" if same_address?(direct_owner, @wallet_address)
+    return "shared_strategy" if string_field(entry, "manager_address", "managerAddress", "router_address", "routerAddress", "autopilot_address", "autopilotAddress").present?
+    return "shared_strategy" if string_field(entry, "strategy_token_id", "strategyTokenId").present?
+
+    "unknown"
   end
 
   def fetch_json(path)

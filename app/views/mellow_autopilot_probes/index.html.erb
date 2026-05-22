@@ -7,6 +7,10 @@
 </div>
 
 <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-8">
+  <div class="mb-4 bg-yellow-950/30 border border-yellow-900 rounded-lg p-3 text-sm">
+    <p class="text-yellow-100 font-medium">Model note</p>
+    <p class="text-yellow-100/80 mt-1">Direct LP token IDs can be hedged from the token WETH amount. Autopilot/Mellow shared strategy token IDs require user share accounting; a shared strategy NFT is not treated as fully owned by the user.</p>
+  </div>
   <%= form_with url: mellow_autopilot_probe_path, method: :get, local: true, class: "grid grid-cols-1 md:grid-cols-4 gap-4" do |form| %>
     <div class="md:col-span-2">
       <%= form.label :wallet_address, "Wallet address", class: "block text-sm font-medium text-gray-300 mb-1" %>
@@ -67,8 +71,11 @@
         <thead class="bg-gray-950">
           <tr class="border-b border-gray-800 text-left text-gray-400">
             <th class="px-3 py-3 font-medium">Vault</th>
+            <th class="px-3 py-3 font-medium">Type</th>
+            <th class="px-3 py-3 font-medium">Strategy token ID</th>
             <th class="px-3 py-3 font-medium">Address</th>
             <th class="px-3 py-3 font-medium text-right">Shares</th>
+            <th class="px-3 py-3 font-medium text-right">Total shares</th>
             <th class="px-3 py-3 font-medium text-right">WETH</th>
             <th class="px-3 py-3 font-medium text-right">USDC</th>
             <th class="px-3 py-3 font-medium text-right">Total value</th>
@@ -79,17 +86,20 @@
           <% @probe_report[:positions].each do |position| %>
             <tr class="hover:bg-gray-800/30">
               <td class="px-3 py-3 text-white"><%= position[:vault_name].presence || position[:vault_identifier].presence || "unknown" %></td>
+              <td class="px-3 py-3 text-gray-300"><%= position[:position_type].presence || "unknown" %></td>
+              <td class="px-3 py-3 text-gray-300"><%= position[:strategy_token_id].presence || "—" %></td>
               <td class="px-3 py-3 text-gray-300 break-all"><%= position[:vault_address].presence || "unknown" %></td>
               <td class="px-3 py-3 text-right text-gray-300"><%= position[:receipt_share_amount].presence || "unavailable" %></td>
+              <td class="px-3 py-3 text-right text-gray-300"><%= position[:total_shares].presence || "unavailable" %></td>
               <td class="px-3 py-3 text-right text-white"><%= position[:weth_amount].presence || "unavailable" %></td>
               <td class="px-3 py-3 text-right text-white"><%= position[:usdc_amount].presence || "unavailable" %></td>
               <td class="px-3 py-3 text-right text-white"><%= position[:total_value_usd].present? ? format_usd(BigDecimal(position[:total_value_usd])) : "unavailable" %></td>
-              <td class="px-3 py-3 <%= position[:weth_amount].present? ? 'text-green-300' : 'text-red-300' %>"><%= position[:weth_amount].present? ? "computable from WETH" : "not computable" %></td>
+              <td class="px-3 py-3 <%= position[:hedgeable] ? 'text-green-300' : 'text-red-300' %>"><%= position[:hedgeable] ? "computable from user WETH" : "not computable" %></td>
             </tr>
           <% end %>
           <% if @probe_report[:positions].empty? %>
             <tr>
-              <td colspan="7" class="px-3 py-8 text-center text-gray-500">No Mellow/Autopilot positions detected.</td>
+              <td colspan="10" class="px-3 py-8 text-center text-gray-500">No Mellow/Autopilot positions detected.</td>
             </tr>
           <% end %>
         </tbody>

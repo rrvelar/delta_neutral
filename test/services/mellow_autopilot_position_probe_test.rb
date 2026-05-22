@@ -1,11 +1,14 @@
 require "test_helper"
 
 class MellowAutopilotPositionProbeTest < ActiveSupport::TestCase
-  test "handles successful api response with WETH and USDC amounts" do
+  test "direct token id remains hedgeable with WETH and USDC amounts" do
     client = HttpMock.new(
       "/users/0xabc" => {
         positions: [
           {
+            type: "direct_lp_nft",
+            owner: "0xabc",
+            tokenId: "71141789",
             vaultAddress: "0xvault",
             vaultName: "Mellow WETH/USDC Autopilot",
             shareAmount: "12.5",
@@ -28,10 +31,76 @@ class MellowAutopilotPositionProbeTest < ActiveSupport::TestCase
       assert_empty report.fetch(:blockers)
       assert_equal true, report.fetch(:hedge_target_computable)
       position = report.fetch(:positions).first
+      assert_equal "direct_lp_nft", position.fetch(:position_type)
+      assert_equal true, position.fetch(:hedgeable)
       assert_equal "0.42", position.fetch(:weth_amount)
       assert_equal "234.56", position.fetch(:usdc_amount)
       assert_equal "1234.56", position.fetch(:total_value_usd)
     end
+  end
+
+  test "shared strategy token id is not hedgeable without shares" do
+    client = HttpMock.new(
+      "/users/0xabc" => {
+        positions: [
+          {
+            type: "autopilot_strategy",
+            strategyTokenId: "70927538",
+            managerAddress: "0xmanager",
+            vaultAddress: "0xvault",
+            vaultName: "Shared Autopilot Strategy",
+            underlyingTokens: [
+              { symbol: "WETH", amount: "10.0" },
+              { symbol: "USDC", amount: "5000.0" }
+            ]
+          }
+        ]
+      },
+      "/defi/users/0xabc" => { positions: [] }
+    )
+
+    report = MellowAutopilotPositionProbe.new(wallet_address: "0xabc", http_client: client, api_base_url: "").report
+
+    assert_equal false, report.fetch(:hedge_target_computable)
+    assert_includes report.fetch(:blockers), "Cannot hedge: token_id appears to be a shared Autopilot/Mellow strategy position; user pro-rata WETH exposure is unknown."
+    position = report.fetch(:positions).first
+    assert_equal "shared_strategy", position.fetch(:position_type)
+    assert_equal "70927538", position.fetch(:strategy_token_id)
+    assert_equal false, position.fetch(:hedgeable)
+    assert_nil position.fetch(:weth_amount)
+  end
+
+  test "shared strategy token id is hedgeable with pro rata shares and underlying WETH" do
+    client = HttpMock.new(
+      "/users/0xabc" => {
+        positions: [
+          {
+            type: "autopilot_strategy",
+            strategyTokenId: "70927538",
+            managerAddress: "0xmanager",
+            vaultAddress: "0xvault",
+            vaultName: "Shared Autopilot Strategy",
+            userShares: "25",
+            totalShares: "100",
+            strategyWethAmount: "4.0",
+            strategyUsdcAmount: "2000.0"
+          }
+        ]
+      },
+      "/defi/users/0xabc" => { positions: [] }
+    )
+
+    report = MellowAutopilotPositionProbe.new(wallet_address: "0xabc", http_client: client, api_base_url: "").report
+
+    assert_empty report.fetch(:blockers)
+    assert_equal true, report.fetch(:hedge_target_computable)
+    position = report.fetch(:positions).first
+    assert_equal "shared_strategy", position.fetch(:position_type)
+    assert_equal true, position.fetch(:hedgeable)
+    assert_equal "1.0", position.fetch(:weth_amount)
+    assert_equal "500.0", position.fetch(:usdc_amount)
+    assert_equal "25.0", position.fetch(:receipt_share_amount)
+    assert_equal "100.0", position.fetch(:total_shares)
   end
 
   test "blocks when only shares are available" do
