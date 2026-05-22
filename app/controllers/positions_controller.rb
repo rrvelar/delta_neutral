@@ -86,6 +86,9 @@ class PositionsController < ApplicationController
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
     if @position.dex.name == "aerodrome_slipstream"
+      @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue])
+      @hedge_venue_options = HedgeVenues.options
+      @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @latest_aerodrome_weth_rebalance = @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first
       @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
@@ -151,21 +154,24 @@ class PositionsController < ApplicationController
       position: position,
       action: action,
       execute: execute,
-      confirmation: params[:dashboard_hedge_confirmation]
+      confirmation: params[:dashboard_hedge_confirmation],
+      venue: params[:hedge_venue]
     ).report
     level = report.fetch(:status) == "blocked" || report.fetch(:status) == "failed" ? :alert : :notice
-    redirect_to position_path(position), flash: { level => dashboard_hedge_action_message(report) }
+    redirect_params = report.fetch(:hedge_venue) == HedgeVenues::DEFAULT ? {} : { hedge_venue: report.fetch(:hedge_venue) }
+    redirect_to position_path(position, redirect_params), flash: { level => dashboard_hedge_action_message(report) }
   end
 
   def dashboard_hedge_action_message(report)
     label = report.fetch(:requested_action).to_s.humanize
+    venue = report.fetch(:hedge_venue_name)
     if report.fetch(:blockers).present?
-      "#{label} #{report.fetch(:status)}: #{report.fetch(:blockers).join('; ')}"
+      "#{label} #{report.fetch(:status)} on #{venue}: #{report.fetch(:blockers).join('; ')}"
     elsif report.fetch(:errors).present?
-      "#{label} #{report.fetch(:status)}: #{report.fetch(:errors).join('; ')}"
+      "#{label} #{report.fetch(:status)} on #{venue}: #{report.fetch(:errors).join('; ')}"
     else
       delta = report[:submitted_delta_eth].presence || "0"
-      "#{label} #{report.fetch(:status)}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
+      "#{label} #{report.fetch(:status)} on #{venue}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
     end
   end
 

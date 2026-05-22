@@ -243,6 +243,30 @@
           <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-4">
             <p class="text-white font-medium">Dashboard Hedge Actions</p>
             <p class="text-gray-400 text-xs mt-1">Preview buttons are dry-run. Live buttons submit only one explicit action and remain blocked unless all dashboard live gates are configured.</p>
+            <% selected_venue = @selected_hedge_venue || HedgeVenues::DEFAULT %>
+            <% selected_adapter = @selected_hedge_venue_adapter || HedgeVenues.build(selected_venue) %>
+            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT %>
+            <div class="mt-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+              <%= form_with url: position_path(@position), method: :get, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
+                <div class="flex-1">
+                  <%= form.label :hedge_venue, "Hedge venue", class: "block text-gray-500 text-xs uppercase tracking-wide" %>
+                  <%= form.select :hedge_venue, options_for_select(@hedge_venue_options || HedgeVenues.options, selected_venue), {}, class: "mt-1 w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" %>
+                </div>
+                <%= form.submit "Apply", class: "bg-gray-700 hover:bg-gray-600 text-gray-100 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+              <% end %>
+              <div class="mt-3 flex flex-wrap gap-2 text-xs">
+                <span class="inline-block px-2 py-1 rounded-full border border-gray-700 text-gray-200"><%= selected_adapter.venue_name %></span>
+                <span class="inline-block px-2 py-1 rounded-full border border-gray-700 text-gray-200"><%= selected_adapter.mode.humanize %></span>
+                <% if selected_adapter.live_supported? && selected_adapter.live_enabled? %>
+                  <span class="inline-block px-2 py-1 rounded-full border border-green-800 bg-green-950/40 text-green-200">live enabled</span>
+                <% else %>
+                  <span class="inline-block px-2 py-1 rounded-full border border-yellow-800 bg-yellow-950/40 text-yellow-200">dry-run/read-only</span>
+                <% end %>
+              </div>
+              <% if selected_adapter.blockers.present? %>
+                <p class="mt-2 text-yellow-200 text-xs"><%= selected_adapter.blockers.join("; ") %></p>
+              <% end %>
+            </div>
             <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
               <% [
                 [ :open, hedge_open_preview_position_path(@position), hedge_open_position_path(@position), "Open Hedge", dashboard_confirmation ],
@@ -262,7 +286,7 @@
                     <% end %>
                   </div>
                   <div class="mt-3 flex flex-wrap gap-2">
-                    <%= button_to "#{label} Preview", preview_path, method: :post, disabled: !action_visible, class: "bg-gray-700 hover:bg-gray-600 disabled:bg-gray-900 disabled:text-gray-600 text-gray-100 px-3 py-2 rounded-lg text-xs font-medium transition" %>
+                    <%= button_to "#{label} Preview", preview_path, method: :post, params: { hedge_venue: selected_venue }, disabled: !action_visible, class: "bg-gray-700 hover:bg-gray-600 disabled:bg-gray-900 disabled:text-gray-600 text-gray-100 px-3 py-2 rounded-lg text-xs font-medium transition" %>
                   </div>
                   <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/60 p-2">
                     <p class="text-gray-500 text-xs">Required phrase</p>
@@ -273,8 +297,12 @@
                     <p class="text-gray-500 text-xs mt-2">Paste this exact phrase to enable live submit.</p>
                   </div>
                   <%= form_with url: live_path, method: :post, class: "mt-3" do |form| %>
-                    <%= form.text_field :dashboard_hedge_confirmation, placeholder: required_phrase, value: "", autocomplete: "off", disabled: !action_visible || !live_enabled, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
-                    <%= form.submit "#{label} Live", disabled: !action_visible || !live_enabled, class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
+                    <%= form.hidden_field :hedge_venue, value: selected_venue %>
+                    <%= form.text_field :dashboard_hedge_confirmation, placeholder: required_phrase, value: "", autocomplete: "off", disabled: !action_visible || !live_enabled || !venue_live_actions_enabled, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
+                    <%= form.submit "#{label} Live", disabled: !action_visible || !live_enabled || !venue_live_actions_enabled, class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
+                  <% end %>
+                  <% unless venue_live_actions_enabled %>
+                    <p class="text-yellow-200 text-xs mt-2">Live submit is disabled for <%= selected_adapter.venue_name %>; previews do not create orders.</p>
                   <% end %>
                   <% if action_state[:blockers].present? %>
                     <p class="text-yellow-200 text-xs mt-2"><%= action_state[:blockers].join("; ") %></p>
