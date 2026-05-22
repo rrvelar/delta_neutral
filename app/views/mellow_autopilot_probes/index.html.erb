@@ -36,9 +36,13 @@
     <p class="text-gray-400 mt-1">Read-only Base receipt/log parser. It labels user deposits as transaction inputs, not current exposure, and does not create positions or hedges.</p>
   </div>
   <%= form_with url: mellow_autopilot_probe_path, method: :get, local: true, class: "grid grid-cols-1 md:grid-cols-4 gap-4" do |form| %>
-    <div class="md:col-span-3">
+    <div class="md:col-span-2">
       <%= form.label :tx_hash, "Base transaction hash", class: "block text-sm font-medium text-gray-300 mb-1" %>
       <%= form.text_field :tx_hash, value: @tx_hash, placeholder: "0x35512ec38b2b7320ab143727daaefa314b52896cb5137ac2410b40f90505d85f", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
+    </div>
+    <div>
+      <%= form.label :wallet_address, "Wallet address", class: "block text-sm font-medium text-gray-300 mb-1" %>
+      <%= form.text_field :wallet_address, value: @wallet_address, placeholder: "0x...", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
     </div>
     <div>
       <%= form.label :network, "Network", class: "block text-sm font-medium text-gray-300 mb-1" %>
@@ -121,6 +125,65 @@
                 <td class="px-3 py-3 text-right text-white"><%= token[:total_supply].presence || "unavailable" %></td>
                 <td class="px-3 py-3 <%= token[:looks_like_share_token] ? 'text-green-300' : 'text-yellow-300' %>"><%= token[:looks_like_share_token] ? "yes" : "unknown" %></td>
               </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-5 overflow-x-auto rounded-lg border border-gray-800">
+        <table class="w-full min-w-[980px] text-sm">
+          <thead class="bg-gray-950">
+            <tr class="border-b border-gray-800 text-left text-gray-400">
+              <th class="px-3 py-3 font-medium">Share token</th>
+              <th class="px-3 py-3 font-medium">From</th>
+              <th class="px-3 py-3 font-medium">To</th>
+              <th class="px-3 py-3 font-medium text-right">Amount</th>
+              <th class="px-3 py-3 font-medium">Flags</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-900">
+            <% @transaction_probe_report[:candidate_share_tokens].each do |token| %>
+              <% token.fetch(:transfers, []).each do |transfer| %>
+                <% flags = [] %>
+                <% flags << "mint" if transfer[:mint] %>
+                <% flags << "submitted wallet" if transfer[:involves_submitted_wallet] %>
+                <% flags << "router/manager" if transfer[:involves_router_or_manager] %>
+                <% flags << "intermediate" if transfer[:involves_intermediate] %>
+                <tr>
+                  <td class="px-3 py-3 text-gray-300 break-all"><%= token[:token_address] %></td>
+                  <td class="px-3 py-3 text-gray-300 break-all"><%= transfer[:from] %></td>
+                  <td class="px-3 py-3 text-gray-300 break-all"><%= transfer[:to] %></td>
+                  <td class="px-3 py-3 text-right text-white"><%= transfer[:amount] %></td>
+                  <td class="px-3 py-3 text-yellow-200"><%= flags.presence&.join(", ") || "none" %></td>
+                </tr>
+              <% end %>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-5 overflow-x-auto rounded-lg border border-gray-800">
+        <table class="w-full min-w-[980px] text-sm">
+          <thead class="bg-gray-950">
+            <tr class="border-b border-gray-800 text-left text-gray-400">
+              <th class="px-3 py-3 font-medium">Share token</th>
+              <th class="px-3 py-3 font-medium">Address</th>
+              <th class="px-3 py-3 font-medium">Why candidate</th>
+              <th class="px-3 py-3 font-medium text-right">Balance</th>
+              <th class="px-3 py-3 font-medium text-right">Share %</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-900">
+            <% @transaction_probe_report[:candidate_share_tokens].each do |token| %>
+              <% token.fetch(:candidate_share_holders, []).each do |holder| %>
+                <tr>
+                  <td class="px-3 py-3 text-gray-300 break-all"><%= token[:token_address] %></td>
+                  <td class="px-3 py-3 text-gray-300 break-all"><%= holder[:address] %></td>
+                  <td class="px-3 py-3 text-white"><%= holder[:why_candidate].join(", ") %></td>
+                  <td class="px-3 py-3 text-right text-white"><%= holder[:balance].presence || "unavailable" %></td>
+                  <td class="px-3 py-3 text-right text-white"><%= holder[:share_percentage].presence || "unavailable" %></td>
+                </tr>
+              <% end %>
             <% end %>
           </tbody>
         </table>

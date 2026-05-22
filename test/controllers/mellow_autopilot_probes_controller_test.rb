@@ -73,7 +73,35 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
       pool_or_gauge_contracts: [ "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59" ],
       user_deposit_amounts: { "WETH" => "1.2", "USDC" => "3000.0" },
       candidate_share_tokens: [
-        { token_address: "0xshare", symbol: "SHARE", name: "Autopilot Share", transfer_amount: "25.0", user_balance: "25.0", total_supply: "100.0", looks_like_share_token: true }
+        {
+          token_address: "0xshare",
+          symbol: "SHARE",
+          name: "Autopilot Share",
+          transfer_amount: "25.0",
+          user_balance: "25.0",
+          total_supply: "100.0",
+          looks_like_share_token: true,
+          ownership_directly_attributable_to_user: true,
+          transfers: [
+            {
+              from: "0xcd975e6a5f55137755487f0918b8ca74acce7925",
+              to: "0x1111111111111111111111111111111111111111",
+              amount: "25.0",
+              mint: false,
+              involves_submitted_wallet: true,
+              involves_router_or_manager: true,
+              involves_intermediate: false
+            }
+          ],
+          candidate_share_holders: [
+            {
+              address: "0x1111111111111111111111111111111111111111",
+              why_candidate: [ "submitted_wallet", "transfer_recipient" ],
+              balance: "25.0",
+              share_percentage: "25.0"
+            }
+          ]
+        }
       ],
       strategy_contract_reads: [
         { address: "0x0000000c00000000000000000000000000000001", total_supply: nil, token0: nil, token1: nil, pool: nil, get_total_amounts: nil }
@@ -104,9 +132,46 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_match "Detected depositor wallet", response.body
     assert_match "70927538", response.body
     assert_match "Candidate share token", response.body
+    assert_match "Share %", response.body
+    assert_match "submitted_wallet", response.body
     assert_match "User WETH exposure", response.body
     assert_match "Cannot hedge: user pro-rata WETH exposure is unknown", response.body
     assert_match "Deposit amounts are transaction inputs", response.body
+  end
+
+  test "passes submitted wallet to transaction probe" do
+    captured_kwargs = nil
+    report = {
+      network: "base",
+      tx_hash: "0xtx",
+      classification: "unknown",
+      hedgeable: false,
+      submitted_wallet: "0xabc",
+      detected_depositor_wallet: nil,
+      pool_address: nil,
+      strategy_token_ids: [],
+      router_or_manager_contracts: [],
+      intermediate_contracts: [],
+      pool_or_gauge_contracts: [],
+      user_deposit_amounts: {},
+      candidate_share_tokens: [],
+      strategy_contract_reads: [],
+      pro_rata_exposure: { user_weth_exposure: nil, user_usdc_exposure: nil, confidence: "unavailable" },
+      erc20_transfers: [],
+      slipstream_nft_transfers: [],
+      blockers: [],
+      warnings: []
+    }
+
+    MellowAutopilotPositionProbe.stub(:new, ->(**) { ProbeMock.new({ source: "stub", network: "base", hedge_target_computable: false, blockers: [], warnings: [], positions: [] }) }) do
+      AerodromeAutopilotTransactionProbe.stub(:new, ->(**kwargs) { captured_kwargs = kwargs; ProbeMock.new(report) }) do
+        get mellow_autopilot_probe_path, params: { tx_hash: "0xtx", wallet_address: "0xabc" }
+      end
+    end
+
+    assert_response :success
+    assert_equal "0xabc", captured_kwargs.fetch(:wallet_address)
+    assert_match "0xabc", response.body
   end
 
   private

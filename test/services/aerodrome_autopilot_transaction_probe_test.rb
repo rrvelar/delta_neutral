@@ -62,6 +62,12 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     assert_equal "25.0", token.fetch(:user_balance)
     assert_equal "100.0", token.fetch(:total_supply)
     assert_equal true, token.fetch(:looks_like_share_token)
+    assert_equal true, token.fetch(:ownership_directly_attributable_to_user)
+    assert_equal USER, token.fetch(:candidate_share_holders).find { |holder| holder.fetch(:why_candidate).include?("submitted_wallet") }.fetch(:address)
+    assert_equal "25.0", token.fetch(:candidate_share_holders).find { |holder| holder.fetch(:address) == USER }.fetch(:share_percentage)
+    assert_equal ROUTER, token.fetch(:transfers).first.fetch(:from)
+    assert_equal USER, token.fetch(:transfers).first.fetch(:to)
+    assert_equal true, token.fetch(:transfers).first.fetch(:involves_submitted_wallet)
   end
 
   test "computes pro rata exposure only when shares supply and strategy weth are available" do
@@ -92,6 +98,43 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     assert_equal "high", report.dig(:pro_rata_exposure, :confidence)
     assert_equal "1.0", report.dig(:pro_rata_exposure, :user_weth_exposure)
     assert_equal "500.0", report.dig(:pro_rata_exposure, :user_usdc_exposure)
+  end
+
+  test "shares held by intermediate contract remain non hedgeable" do
+    receipt = {
+      "logs" => [
+        erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
+        erc20_transfer(SHARE, "0x0000000000000000000000000000000000000000", INTERMEDIATE, 25, 18),
+        nft_transfer(GAUGE, INTERMEDIATE, "70927538"),
+        nft_transfer(INTERMEDIATE, GAUGE, "70927538")
+      ]
+    }
+    calls = {
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(0),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + INTERMEDIATE.delete_prefix("0x").rjust(64, "0") ] => word(25 * 10**18),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18),
+      [ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ] => "0x#{word(4 * 10**18).delete_prefix('0x')}#{word(2_000 * 10**6).delete_prefix('0x')}"
+    }
+
+    report = AerodromeAutopilotTransactionProbe.new(
+      tx_hash: "0xtx",
+      wallet_address: USER,
+      receipt: receipt,
+      eth_call_results: calls
+    ).report
+
+    token = report.fetch(:candidate_share_tokens).first
+    submitted_holder = token.fetch(:candidate_share_holders).find { |holder| holder.fetch(:address) == USER }
+    intermediate_holder = token.fetch(:candidate_share_holders).find { |holder| holder.fetch(:address) == INTERMEDIATE }
+
+    assert_equal false, report.fetch(:hedgeable)
+    assert_equal "0.0", submitted_holder.fetch(:balance)
+    assert_equal "25.0", intermediate_holder.fetch(:balance)
+    assert_equal "25.0", intermediate_holder.fetch(:share_percentage)
+    assert_equal false, token.fetch(:ownership_directly_attributable_to_user)
+    assert_includes token.fetch(:contract_holders), INTERMEDIATE
+    assert_includes report.fetch(:blockers), "Shares appear held by contract #{INTERMEDIATE}; user ownership mapping still unknown."
+    assert_nil report.dig(:pro_rata_exposure, :user_weth_exposure)
   end
 
   test "classifies direct lp nft when nft does not return through intermediate" do

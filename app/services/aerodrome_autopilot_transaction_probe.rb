@@ -44,14 +44,19 @@ class AerodromeAutopilotTransactionProbe
     user_wallet = @submitted_wallet || depositor
     intermediate = intermediate_contracts(nft_transfers)
     pools = pool_contracts(erc20_transfers, user_wallet)
-    share_tokens = candidate_share_tokens(erc20_transfers, user_wallet)
+    routers = detected_contracts(erc20_transfers, nft_transfers, user_wallet)
+    share_tokens = candidate_share_tokens(erc20_transfers, user_wallet, intermediate, routers)
     strategy_reads = strategy_contract_reads(intermediate + detected_contracts(erc20_transfers, nft_transfers, user_wallet))
     exposure = pro_rata_exposure(share_tokens, strategy_reads)
     blockers = []
+    contract_held_share = share_tokens.any? { |token| token[:ownership_directly_attributable_to_user] == false && token[:contract_holders].present? }
     if classification == "autopilot_shared_strategy" && exposure[:user_weth_exposure].nil?
       blockers << "Cannot hedge: user pro-rata WETH exposure is unknown."
     elsif erc20_transfers.none? { |transfer| transfer[:symbol] == "WETH" }
       blockers << "Cannot hedge: user WETH deposit amount unavailable."
+    end
+    if classification == "autopilot_shared_strategy" && contract_held_share
+      blockers << "Shares appear held by contract #{share_tokens.flat_map { |token| token[:contract_holders] }.first}; user ownership mapping still unknown."
     end
 
     {
@@ -63,7 +68,7 @@ class AerodromeAutopilotTransactionProbe
       hedgeable: blockers.empty? && (classification == "direct_lp_nft" || exposure[:user_weth_exposure].present?),
       submitted_wallet: @submitted_wallet,
       detected_depositor_wallet: depositor,
-      router_or_manager_contracts: detected_contracts(erc20_transfers, nft_transfers, user_wallet),
+      router_or_manager_contracts: routers,
       intermediate_contracts: intermediate,
       pool_or_gauge_contracts: pools,
       pool_address: pools.first,
@@ -214,29 +219,96 @@ class AerodromeAutopilotTransactionProbe
     end.transform_values { |amount| amount.to_s("F") }
   end
 
-  def candidate_share_tokens(transfers, user_wallet)
-    return [] unless user_wallet
+  def candidate_share_tokens(transfers, user_wallet, intermediate_contracts, router_contracts)
+    candidate_addresses = transfers
+      .reject { |transfer| transfer[:known_token] }
+      .select { |transfer| candidate_share_transfer?(transfer, user_wallet, intermediate_contracts, router_contracts) }
+      .map { |transfer| transfer[:token_address] }
+      .uniq
 
-    transfers.select do |transfer|
-      !transfer[:known_token] &&
-        (same_address?(transfer[:to], user_wallet) || same_address?(transfer[:from], ZERO_ADDRESS))
-    end.map do |transfer|
-      token_address = transfer[:token_address]
-      user_balance = read_balance_of(token_address, user_wallet, transfer[:decimals])
-      total_supply = read_total_supply(token_address, transfer[:decimals])
+    candidate_addresses.map do |token_address|
+      token_transfers = transfers.select { |transfer| same_address?(transfer[:token_address], token_address) }
+      sample = token_transfers.first
+      total_supply = read_total_supply(token_address, sample[:decimals])
+      holders = candidate_share_holders(token_address, sample[:decimals], total_supply, token_transfers, user_wallet, intermediate_contracts, router_contracts)
+      submitted_holder = holders.find { |holder| same_address?(holder[:address], user_wallet) } if user_wallet
+      contract_holders = holders
+        .select { |holder| holder[:balance].present? && BigDecimal(holder[:balance]).positive? }
+        .reject { |holder| user_wallet && same_address?(holder[:address], user_wallet) }
+        .select { |holder| holder[:why_candidate].include?("intermediate_contract") || holder[:why_candidate].include?("router_contract") }
       {
         token_address: token_address,
-        symbol: read_symbol(token_address) || transfer[:symbol],
+        symbol: read_symbol(token_address) || sample[:symbol],
         name: read_name(token_address),
-        decimals: transfer[:decimals],
-        transfer_amount: transfer[:amount],
-        transfer_from: transfer[:from],
-        transfer_to: transfer[:to],
-        user_balance: user_balance&.to_s("F"),
+        decimals: sample[:decimals],
+        transfer_amount: token_transfers.sum { |transfer| BigDecimal(transfer[:amount]) }.to_s("F"),
+        transfer_from: token_transfers.first[:from],
+        transfer_to: token_transfers.first[:to],
+        transfers: candidate_share_token_transfers(token_transfers, user_wallet, intermediate_contracts, router_contracts),
+        user_balance: submitted_holder&.dig(:balance),
         total_supply: total_supply&.to_s("F"),
-        looks_like_share_token: user_balance.present? && total_supply.present?
+        candidate_share_holders: holders,
+        contract_holders: contract_holders.map { |holder| holder[:address] },
+        ownership_directly_attributable_to_user: submitted_holder.present? && BigDecimal(submitted_holder[:balance].presence || "0").positive?,
+        looks_like_share_token: holders.any? { |holder| holder[:balance].present? } && total_supply.present?
       }
     end
+  end
+
+  def candidate_share_transfer?(transfer, user_wallet, intermediate_contracts, router_contracts)
+    return true if same_address?(transfer[:from], ZERO_ADDRESS)
+    return true if user_wallet && (same_address?(transfer[:to], user_wallet) || same_address?(transfer[:from], user_wallet))
+
+    related_addresses = intermediate_contracts + router_contracts
+    related_addresses.any? { |address| same_address?(transfer[:to], address) || same_address?(transfer[:from], address) }
+  end
+
+  def candidate_share_token_transfers(transfers, user_wallet, intermediate_contracts, router_contracts)
+    transfers.map do |transfer|
+      {
+        from: transfer[:from],
+        to: transfer[:to],
+        amount: transfer[:amount],
+        mint: same_address?(transfer[:from], ZERO_ADDRESS),
+        involves_submitted_wallet: user_wallet && (same_address?(transfer[:from], user_wallet) || same_address?(transfer[:to], user_wallet)),
+        involves_router_or_manager: router_contracts.any? { |address| same_address?(transfer[:from], address) || same_address?(transfer[:to], address) },
+        involves_intermediate: intermediate_contracts.any? { |address| same_address?(transfer[:from], address) || same_address?(transfer[:to], address) }
+      }
+    end
+  end
+
+  def candidate_share_holders(token_address, decimals, total_supply, transfers, user_wallet, intermediate_contracts, router_contracts)
+    holder_reasons = {}
+    add_holder_reason(holder_reasons, user_wallet, "submitted_wallet") if user_wallet
+    transfers.each { |transfer| add_holder_reason(holder_reasons, transfer[:to], "transfer_recipient") }
+    intermediate_contracts.each { |address| add_holder_reason(holder_reasons, address, "intermediate_contract") }
+    router_contracts.each { |address| add_holder_reason(holder_reasons, address, "router_contract") }
+
+    holder_reasons.filter_map do |address, reasons|
+      next if same_address?(address, ZERO_ADDRESS)
+
+      balance = read_balance_of(token_address, address, decimals)
+      balance_string = balance&.to_s("F")
+      {
+        address: address,
+        why_candidate: reasons.sort,
+        balance: balance_string,
+        share_percentage: share_percentage(balance, total_supply)
+      }
+    end
+  end
+
+  def add_holder_reason(holder_reasons, address, reason)
+    return if address.blank?
+
+    holder_reasons[normalize_address(address)] ||= []
+    holder_reasons[normalize_address(address)] << reason
+  end
+
+  def share_percentage(balance, total_supply)
+    return nil unless balance && total_supply&.positive?
+
+    ((balance / total_supply) * 100).to_s("F")
   end
 
   def strategy_contract_reads(addresses)
@@ -257,7 +329,11 @@ class AerodromeAutopilotTransactionProbe
   end
 
   def pro_rata_exposure(share_tokens, strategy_reads)
-    share = share_tokens.find { |token| token[:user_balance].present? && token[:total_supply].present? }
+    share = share_tokens.find do |token|
+      token[:ownership_directly_attributable_to_user] &&
+        token[:user_balance].present? &&
+        token[:total_supply].present?
+    end
     amounts_source = strategy_reads.find { |read| read[:get_total_amounts].present? }
     return { user_weth_exposure: nil, user_usdc_exposure: nil, confidence: "unavailable" } unless share && amounts_source
 
