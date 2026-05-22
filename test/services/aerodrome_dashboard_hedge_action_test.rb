@@ -122,6 +122,27 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "live dashboard actions block when multiple active hedgeable positions exist" do
+    position = create_position
+    other = create_position(asset0_amount: "0.5")
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::CONFIRMATION,
+        positions: [ nil ],
+        hedge_sync_runner: CallRecorder.new
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE
+    end
+  ensure
+    other&.destroy
+  end
+
   private
 
   class HyperliquidReadMock

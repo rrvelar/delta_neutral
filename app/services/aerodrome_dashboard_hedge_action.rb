@@ -159,6 +159,8 @@ class AerodromeDashboardHedgeAction
     blockers << "position must be Aerodrome Slipstream" unless @position.dex.name == "aerodrome_slipstream"
     blockers << "position is inactive" unless @position.active?
     blockers << "active hedge is required" unless @hedge&.active?
+    blockers << Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE if @execute && Position.active_hedgeable.count > 1
+    blockers << "Mellow Autopilot pro-rata exposure is not hedge-ready" if @position.mellow_autopilot? && !@position.hedge_ready?
     blockers << "WETH/ETH LP exposure is unavailable" unless weth_amount
     blockers << "WETH/ETH price is unavailable" unless eth_price
     blockers.concat(AerodromeProductionRiskLimits.runtime_cap_errors(

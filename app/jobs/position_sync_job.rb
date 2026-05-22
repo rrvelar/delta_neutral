@@ -26,7 +26,7 @@ class PositionSyncJob < ApplicationJob
 
     positions.includes(:dex, :hedge, wallet: :network).find_each do |position|
       if aerodrome_position?(position)
-        sync_aerodrome_position(position)
+        position.mellow_autopilot? ? sync_mellow_autopilot_position(position) : sync_aerodrome_position(position)
         next
       end
 
@@ -173,6 +173,17 @@ class PositionSyncJob < ApplicationJob
     )
     create_aerodrome_pnl_snapshot(position)
     Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; hedge integration remains disabled" }
+  end
+
+  def sync_mellow_autopilot_position(position)
+    result = MellowAutopilotPositionSync.new(position: position).sync
+    if result.fetch(:status) == "blocked"
+      Rails.logger.warn("PositionSyncJob: Mellow Autopilot position #{position.id} is not hedge-ready: #{result.fetch(:blockers).join(', ')}")
+      return
+    end
+
+    create_aerodrome_pnl_snapshot(position)
+    Rails.logger.debug { "[PositionSyncJob] refreshed Mellow Autopilot position #{position.id} from read-only pro-rata exposure" }
   end
 
   def create_aerodrome_pnl_snapshot(position)

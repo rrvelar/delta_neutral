@@ -6,9 +6,11 @@
 
 <h1 class="text-3xl font-bold text-white mb-2">Import Aerodrome LP Position</h1>
 <p class="text-gray-400 mb-8">Create a local Aerodrome Slipstream position and hedge from a token id. Import runs read-only position sync only; it does not place orders or call Hyperliquid write APIs.</p>
+<p class="text-gray-500 mb-8 text-sm">Direct LP token IDs can be imported normally. Mellow Autopilot positions must come from a hedgeable probe result because shared strategy token IDs require pro-rata share accounting.</p>
 
 <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 max-w-3xl">
   <%= form_with url: positions_path, scope: :position, method: :post, class: "space-y-6" do |f| %>
+    <%= f.hidden_field :source, value: Position::SOURCE_AERODROME_DIRECT %>
     <div>
       <%= f.label :external_id, "Token ID", class: "block text-sm font-medium text-gray-300 mb-2" %>
       <%= f.text_field :external_id, value: @aerodrome_import_defaults[:external_id], required: true, class: "w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" %>

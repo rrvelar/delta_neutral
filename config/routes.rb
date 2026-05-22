@@ -28,6 +28,7 @@ Rails.application.routes.draw do
 
   resource :settings, only: [ :edit, :update ]
   get "mellow_autopilot_probe", to: "mellow_autopilot_probes#index"
+  post "mellow_autopilot_probe/create_position", to: "mellow_autopilot_probes#create_position", as: :create_mellow_autopilot_position
 
   resources :hedges, except: [ :index ] do
     post :sync_now, on: :member

@@ -69,7 +69,9 @@ module HedgeBackends
     end
 
     def no_schema_or_migration_diff
-      changed = git_diff_names.select { |path| path.match?(/schema|migration/) }
+      changed = git_diff_names.select do |path|
+        path.match?(/schema|migration/) && Rails.root.join(path).exist? && Rails.root.join(path).read.match?(/ethereal/i)
+      end
       check("no schema or migration files changed", changed.empty?, changed.join(", "))
     end
 

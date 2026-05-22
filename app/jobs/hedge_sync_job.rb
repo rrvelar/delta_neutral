@@ -39,6 +39,11 @@ class HedgeSyncJob < ApplicationJob
 
     hedges.includes(position: :dex).find_each do |hedge|
       if aerodrome_position?(hedge.position)
+        if Position.active_hedgeable.count > 1
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — #{Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE}")
+          next
+        end
+
         unless aerodrome_hedge_enabled?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
           next
@@ -429,6 +434,7 @@ class HedgeSyncJob < ApplicationJob
     errors << "asset0 price missing" if position.asset0_price_usd.nil?
     errors << "asset1 price missing" if position.asset1_price_usd.nil?
     errors << "hedge missing" unless hedge.persisted?
+    errors << "Mellow Autopilot pro-rata exposure is not hedge-ready" if position.mellow_autopilot? && !position.hedge_ready?
 
     errors
   end

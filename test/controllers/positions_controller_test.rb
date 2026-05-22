@@ -80,6 +80,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = Position.order(:id).last
     assert_redirected_to position_path(position)
     assert_equal "70184676", position.external_id
+    assert_equal Position::SOURCE_AERODROME_DIRECT, position.source
     assert_equal "WETH", position.asset0
     assert_equal "USDC", position.asset1
     assert_predicate position, :active?

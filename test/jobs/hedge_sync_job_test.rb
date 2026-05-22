@@ -1054,6 +1054,26 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     position&.destroy
   end
 
+  test "blocks Aerodrome live sync when multiple active hedgeable positions exist" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.03", active: true)
+    other_position = aerodrome_position(external_id: "315986")
+    other_hedge = Hedge.create!(position: other_position, target: "1.0", tolerance: "0.03", active: true)
+
+    with_env("AERODROME_HEDGE_ENABLED" => "true", "AERODROME_HEDGE_PAUSED" => "false", "HYPERLIQUID_TESTNET" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  ensure
+    other_hedge&.destroy
+    other_position&.destroy
+    hedge&.destroy
+    position&.destroy
+  end
+
   test "does not process Aerodrome hedge proposals" do
     position = Position.create!(
       user: users(:one),

@@ -252,6 +252,30 @@
       </div>
     <% end %>
 
+    <% if @transaction_probe_report[:hedgeable] && @transaction_probe_report[:classification] == "autopilot_shared_strategy" && @transaction_probe_report[:submitted_wallet].present? && @transaction_probe_report[:strategy_token_id].present? && @transaction_probe_report.dig(:pro_rata_exposure, :share_token).present? && @transaction_probe_report[:user_weth_exposure].present? %>
+      <div class="mt-4 bg-green-950/30 border border-green-900 rounded-lg p-4">
+        <p class="text-green-200 text-sm font-semibold">Create Mellow Autopilot Position</p>
+        <p class="text-green-100/80 text-sm mt-1">Direct LP token IDs can be imported normally. Mellow Autopilot positions must come from a hedgeable probe result because shared strategy token IDs require pro-rata share accounting.</p>
+        <%= form_with url: create_mellow_autopilot_position_path, scope: :mellow_position, method: :post, class: "mt-3 space-y-3" do |form| %>
+          <%= form.hidden_field :tx_hash, value: @transaction_probe_report[:tx_hash] %>
+          <%= form.hidden_field :wallet_address, value: @transaction_probe_report[:submitted_wallet] %>
+          <%= form.hidden_field :network, value: @transaction_probe_report[:network] %>
+          <label class="flex items-start gap-3 rounded-lg border border-green-900/60 bg-gray-950/40 p-3">
+            <%= form.check_box :deactivate_existing_positions, class: "mt-1" %>
+            <span>
+              <span class="block text-sm font-medium text-gray-200">Deactivate existing active hedgeable positions</span>
+              <span class="block text-xs text-gray-500 mt-1">Required unless no other active Position with an active Hedge exists. This app supports one active hedge target at a time.</span>
+            </span>
+          </label>
+          <%= form.submit "Create Mellow Autopilot Position", class: "bg-green-700 hover:bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer" %>
+        <% end %>
+      </div>
+    <% elsif @transaction_probe_report[:classification] == "autopilot_shared_strategy" %>
+      <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-3 text-sm text-gray-400">
+        Create Mellow Autopilot Position is available only after the transaction probe is hedgeable and has submitted wallet, strategy token ID, share token, and user WETH exposure.
+      </div>
+    <% end %>
+
     <div class="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="overflow-x-auto rounded-lg border border-gray-800">
         <table class="w-full min-w-[620px] text-sm">

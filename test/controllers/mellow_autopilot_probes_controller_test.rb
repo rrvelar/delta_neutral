@@ -174,6 +174,61 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_match "0xabc", response.body
   end
 
+  test "hedgeable transaction probe can create mellow autopilot position and hedge" do
+    report = hedgeable_transaction_report
+
+    AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        assert_difference "Position.count", 1 do
+          assert_difference "Hedge.count", 1 do
+            post create_mellow_autopilot_position_path, params: {
+              mellow_position: {
+                tx_hash: "0xtx",
+                wallet_address: report.fetch(:submitted_wallet),
+                network: "base",
+                deactivate_existing_positions: "1"
+              }
+            }
+          end
+        end
+      end
+    end
+
+    position = Position.order(:id).last
+    assert_redirected_to position_path(position)
+    assert_equal Position::SOURCE_MELLOW_AUTOPILOT, position.source
+    assert_equal "mellow:70927538", position.external_id
+    assert_equal BigDecimal("0.25"), position.asset0_amount
+    assert_equal BigDecimal("125.0"), position.asset1_amount
+    assert_equal true, position.hedge.active?
+    assert_equal "0xshare", position.mellow_metadata_hash.fetch("share_token")
+    assert_equal true, position.mellow_metadata_hash.fetch("hedge_ready")
+  end
+
+  test "non hedgeable transaction probe cannot create mellow position" do
+    report = hedgeable_transaction_report.merge(
+      hedgeable: false,
+      user_weth_exposure: nil,
+      blockers: [ "Cannot hedge: current shared strategy WETH exposure is unavailable." ],
+      pro_rata_exposure: hedgeable_transaction_report.fetch(:pro_rata_exposure).merge(user_weth_exposure: nil)
+    )
+
+    AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
+      assert_no_difference [ "Position.count", "Hedge.count" ] do
+        post create_mellow_autopilot_position_path, params: {
+          mellow_position: {
+            tx_hash: "0xtx",
+            wallet_address: report.fetch(:submitted_wallet),
+            network: "base"
+          }
+        }
+      end
+    end
+
+    assert_redirected_to mellow_autopilot_probe_path(tx_hash: "0xtx", wallet_address: report.fetch(:submitted_wallet))
+    assert_match "Probe result is not hedgeable", flash[:alert]
+  end
+
   private
 
   class ProbeMock
@@ -184,5 +239,60 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     def report
       @report
     end
+  end
+
+  def hedgeable_transaction_report
+    {
+      network: "base",
+      tx_hash: "0xtx",
+      classification: "autopilot_shared_strategy",
+      hedgeable: true,
+      submitted_wallet: "0xe8a204e487a026c353cb1438c8d43aaf1e47d644",
+      detected_depositor_wallet: "0xe8a204e487a026c353cb1438c8d43aaf1e47d644",
+      pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+      strategy_token_id: "70927538",
+      strategy_pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+      strategy_total_weth: "4.0",
+      strategy_total_usdc: "2000.0",
+      strategy_total_value_usd: "12000.0",
+      user_share_balance: "0.0005",
+      total_shares: "0.008",
+      user_share_percent: "6.25",
+      user_weth_exposure: "0.25",
+      user_usdc_exposure: "125.0",
+      user_total_value_usd: "750.0",
+      exposure_confidence: "high",
+      strategy_token_ids: [ "70927538" ],
+      router_or_manager_contracts: [ "0xcd975e6a5f55137755487f0918b8ca74acce7925" ],
+      intermediate_contracts: [ "0x0000000c00000000000000000000000000000001" ],
+      pool_or_gauge_contracts: [ "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59" ],
+      user_deposit_amounts: { "WETH" => "0.48", "USDC" => "329" },
+      candidate_share_tokens: [],
+      strategy_contract_reads: [],
+      strategy_nft_exposure: {
+        token0_address: AerodromeAutopilotTransactionProbe::WETH_ADDRESS,
+        token1_address: AerodromeAutopilotTransactionProbe::USDC_ADDRESS
+      },
+      pro_rata_exposure: {
+        strategy_token_id: "70927538",
+        strategy_pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+        strategy_total_weth: "4.0",
+        strategy_total_usdc: "2000.0",
+        strategy_total_value_usd: "12000.0",
+        user_share_balance: "0.0005",
+        total_shares: "0.008",
+        user_share_percent: "6.25",
+        user_weth_exposure: "0.25",
+        user_usdc_exposure: "125.0",
+        user_total_value_usd: "750.0",
+        confidence: "high",
+        exposure_confidence: "high",
+        share_token: "0xshare"
+      },
+      erc20_transfers: [],
+      slipstream_nft_transfers: [],
+      blockers: [],
+      warnings: []
+    }
   end
 end

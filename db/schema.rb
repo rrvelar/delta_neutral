@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_08_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_22_000000) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -92,12 +92,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_08_000000) do
     t.integer "dex_id", null: false
     t.decimal "entry_value_usd", precision: 20, scale: 8
     t.string "external_id"
+    t.text "mellow_metadata"
     t.string "pool_address"
+    t.string "source"
     t.datetime "updated_at", null: false
     t.integer "user_id", null: false
     t.integer "wallet_id", null: false
     t.index ["dex_id"], name: "index_positions_on_dex_id"
     t.index ["external_id"], name: "index_positions_on_external_id"
+    t.index ["source"], name: "index_positions_on_source"
     t.index ["user_id"], name: "index_positions_on_user_id"
     t.index ["wallet_id"], name: "index_positions_on_wallet_id"
   end

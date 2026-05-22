@@ -43,6 +43,7 @@ class PositionsController < ApplicationController
         user_id: attrs[:user_id],
         wallet_id: attrs[:wallet_id],
         dex: dex,
+        source: Position::SOURCE_AERODROME_DIRECT,
         external_id: token_id,
         pool_address: attrs[:pool_address],
         asset0: "WETH",
@@ -262,6 +263,7 @@ class PositionsController < ApplicationController
       wallet_id: Wallet.find_by(id: 1)&.id || Current.user.wallets.order(:id).first&.id,
       hedge_target: "1.0",
       hedge_tolerance: "0.03",
+      source: Position::SOURCE_AERODROME_DIRECT,
       deactivate_existing_aerodrome_positions: "1"
     }
   end
