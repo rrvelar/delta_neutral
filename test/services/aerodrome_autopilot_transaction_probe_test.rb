@@ -6,6 +6,7 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
   GAUGE = "0x2222222222222222222222222222222222222222"
   INTERMEDIATE = "0x0000000c00000000000000000000000000000001"
   POOL = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+  SHARE = "0x3333333333333333333333333333333333333333"
 
   test "classifies shared strategy when nft moves gauge to intermediate and back" do
     receipt = {
@@ -26,13 +27,71 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
       assert_equal false, report.fetch(:external_api)
       assert_equal "autopilot_shared_strategy", report.fetch(:classification)
       assert_equal false, report.fetch(:hedgeable)
-      assert_equal USER, report.fetch(:user_wallet)
+      assert_equal USER, report.fetch(:detected_depositor_wallet)
       assert_includes report.fetch(:strategy_token_ids), "70927538"
       assert_includes report.fetch(:intermediate_contracts), INTERMEDIATE
       assert_equal "1.2", report.dig(:user_deposit_amounts, "WETH")
       assert_equal "3000.0", report.dig(:user_deposit_amounts, "USDC")
-      assert_includes report.fetch(:blockers), "Cannot hedge: transaction appears to use a shared Autopilot strategy NFT; user pro-rata WETH exposure is unknown."
+      assert_includes report.fetch(:blockers), "Cannot hedge: user pro-rata WETH exposure is unknown."
     end
+  end
+
+  test "detects candidate share token transfer" do
+    receipt = {
+      "logs" => [
+        erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
+        erc20_transfer(SHARE, ROUTER, USER, 25, 18),
+        nft_transfer(GAUGE, INTERMEDIATE, "70927538"),
+        nft_transfer(INTERMEDIATE, GAUGE, "70927538")
+      ]
+    }
+
+    report = AerodromeAutopilotTransactionProbe.new(
+      tx_hash: "0xtx",
+      wallet_address: USER,
+      receipt: receipt,
+      eth_call_results: {
+        [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(25 * 10**18),
+        [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18)
+      }
+    ).report
+
+    token = report.fetch(:candidate_share_tokens).first
+    assert_equal SHARE, token.fetch(:token_address)
+    assert_equal "25.0", token.fetch(:transfer_amount)
+    assert_equal "25.0", token.fetch(:user_balance)
+    assert_equal "100.0", token.fetch(:total_supply)
+    assert_equal true, token.fetch(:looks_like_share_token)
+  end
+
+  test "computes pro rata exposure only when shares supply and strategy weth are available" do
+    receipt = {
+      "logs" => [
+        erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
+        erc20_transfer(SHARE, ROUTER, USER, 25, 18),
+        nft_transfer(GAUGE, INTERMEDIATE, "70927538"),
+        nft_transfer(INTERMEDIATE, GAUGE, "70927538")
+      ]
+    }
+    calls = {
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(25 * 10**18),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18),
+      [ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ] => word(4 * 10**18).delete_prefix("0x") + word(2_000 * 10**6).delete_prefix("0x")
+    }
+    calls[[ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ]] = "0x#{calls.fetch([ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ])}"
+
+    report = AerodromeAutopilotTransactionProbe.new(
+      tx_hash: "0xtx",
+      wallet_address: USER,
+      receipt: receipt,
+      eth_call_results: calls
+    ).report
+
+    assert_equal true, report.fetch(:hedgeable)
+    assert_empty report.fetch(:blockers)
+    assert_equal "high", report.dig(:pro_rata_exposure, :confidence)
+    assert_equal "1.0", report.dig(:pro_rata_exposure, :user_weth_exposure)
+    assert_equal "500.0", report.dig(:pro_rata_exposure, :user_usdc_exposure)
   end
 
   test "classifies direct lp nft when nft does not return through intermediate" do
@@ -90,6 +149,10 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
 
   def address_topic(address)
     "0x#{address.delete_prefix('0x').rjust(64, '0')}"
+  end
+
+  def word(value)
+    "0x#{value.to_i.to_s(16).rjust(64, '0')}"
   end
 
   def with_env(values)

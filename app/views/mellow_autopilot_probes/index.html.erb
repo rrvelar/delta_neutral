@@ -66,7 +66,8 @@
 
     <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
       <div class="flex justify-between gap-4"><span class="text-gray-500">Classification</span><span class="text-white"><%= @transaction_probe_report[:classification] %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Detected user wallet</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:user_wallet].presence || "unknown" %></span></div>
+      <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted wallet</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:submitted_wallet].presence || "not provided" %></span></div>
+      <div class="flex justify-between gap-4"><span class="text-gray-500">Detected depositor wallet</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:detected_depositor_wallet].presence || "unknown" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Pool / most common recipient</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:pool_address].presence || "unknown" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy token IDs</span><span class="text-white"><%= @transaction_probe_report[:strategy_token_ids].presence&.join(", ") || "none" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Router/manager contracts</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:router_or_manager_contracts].presence&.join(", ") || "unknown" %></span></div>
@@ -82,6 +83,76 @@
             <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= symbol %></dt><dd class="text-white"><%= amount %></dd></div>
           <% end %>
         </dl>
+      </div>
+    <% end %>
+
+    <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-3">
+      <p class="text-gray-400 text-xs uppercase tracking-wide">Pro-rata exposure check</p>
+      <% exposure = @transaction_probe_report[:pro_rata_exposure] || {} %>
+      <div class="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= exposure[:confidence].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white"><%= exposure[:user_weth_exposure].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= exposure[:user_usdc_exposure].presence || "unavailable" %></span></div>
+      </div>
+    </div>
+
+    <% if @transaction_probe_report[:candidate_share_tokens].present? %>
+      <div class="mt-5 overflow-x-auto rounded-lg border border-gray-800">
+        <table class="w-full min-w-[920px] text-sm">
+          <thead class="bg-gray-950">
+            <tr class="border-b border-gray-800 text-left text-gray-400">
+              <th class="px-3 py-3 font-medium">Candidate share token</th>
+              <th class="px-3 py-3 font-medium">Symbol</th>
+              <th class="px-3 py-3 font-medium">Name</th>
+              <th class="px-3 py-3 font-medium text-right">Transfer amount</th>
+              <th class="px-3 py-3 font-medium text-right">User balance</th>
+              <th class="px-3 py-3 font-medium text-right">Total shares</th>
+              <th class="px-3 py-3 font-medium">Looks like receipt/share</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-900">
+            <% @transaction_probe_report[:candidate_share_tokens].each do |token| %>
+              <tr>
+                <td class="px-3 py-3 text-gray-300 break-all"><%= token[:token_address] %></td>
+                <td class="px-3 py-3 text-white"><%= token[:symbol].presence || "unknown" %></td>
+                <td class="px-3 py-3 text-gray-300"><%= token[:name].presence || "unknown" %></td>
+                <td class="px-3 py-3 text-right text-white"><%= token[:transfer_amount] %></td>
+                <td class="px-3 py-3 text-right text-white"><%= token[:user_balance].presence || "unavailable" %></td>
+                <td class="px-3 py-3 text-right text-white"><%= token[:total_supply].presence || "unavailable" %></td>
+                <td class="px-3 py-3 <%= token[:looks_like_share_token] ? 'text-green-300' : 'text-yellow-300' %>"><%= token[:looks_like_share_token] ? "yes" : "unknown" %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </div>
+    <% end %>
+
+    <% if @transaction_probe_report[:strategy_contract_reads].present? %>
+      <div class="mt-5 overflow-x-auto rounded-lg border border-gray-800">
+        <table class="w-full min-w-[980px] text-sm">
+          <thead class="bg-gray-950">
+            <tr class="border-b border-gray-800 text-left text-gray-400">
+              <th class="px-3 py-3 font-medium">Strategy/intermediate</th>
+              <th class="px-3 py-3 font-medium">Total supply</th>
+              <th class="px-3 py-3 font-medium">token0</th>
+              <th class="px-3 py-3 font-medium">token1</th>
+              <th class="px-3 py-3 font-medium">pool</th>
+              <th class="px-3 py-3 font-medium">getTotalAmounts</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-900">
+            <% @transaction_probe_report[:strategy_contract_reads].each do |read| %>
+              <tr>
+                <td class="px-3 py-3 text-gray-300 break-all"><%= read[:address] %></td>
+                <td class="px-3 py-3 text-white"><%= read[:total_supply].presence || "unavailable" %></td>
+                <td class="px-3 py-3 text-gray-300 break-all"><%= read[:token0].presence || "unavailable" %></td>
+                <td class="px-3 py-3 text-gray-300 break-all"><%= read[:token1].presence || "unavailable" %></td>
+                <td class="px-3 py-3 text-gray-300 break-all"><%= read[:pool].presence || "unavailable" %></td>
+                <td class="px-3 py-3 text-white"><%= read[:get_total_amounts].present? ? read[:get_total_amounts].values.join(" / ") : "unavailable" %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
       </div>
     <% end %>
 

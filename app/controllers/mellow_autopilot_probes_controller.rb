@@ -12,7 +12,7 @@ class MellowAutopilotProbesController < ApplicationController
       ).report
     end
     @transaction_probe_report = if @tx_hash.present?
-      AerodromeAutopilotTransactionProbe.new(tx_hash: @tx_hash, network: @network).report
+      AerodromeAutopilotTransactionProbe.new(tx_hash: @tx_hash, network: @network, wallet_address: @wallet_address.presence).report
     end
   end
 end
