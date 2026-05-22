@@ -295,6 +295,82 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Target 1.25 ETH", flash[:notice]
   end
 
+  test "show defaults dashboard hedge venue to Hyperliquid and renders selector" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_select "select[name='hedge_venue']"
+    assert_select "option[selected='selected']", text: "Hyperliquid"
+    assert_match "Ethereal", response.body
+    assert_match "Nado", response.body
+  end
+
+  test "show selected Ethereal venue renders read-only dry-run mode and disabled live actions" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position, hedge_venue: "ethereal")
+    end
+
+    assert_response :success
+    assert_select "option[selected='selected']", text: "Ethereal"
+    assert_match "Dry-run/read-only only; live submit not enabled for Ethereal.", response.body
+    assert_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
+    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
+  test "show selected Nado venue renders read-only dry-run mode and disabled live actions" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position, hedge_venue: "nado")
+    end
+
+    assert_response :success
+    assert_select "option[selected='selected']", text: "Nado"
+    assert_match "Dry-run/read-only only; live submit not enabled for Nado.", response.body
+    assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
+    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
+  test "ethereal preview does not call Hyperliquid writes and redirects with dry-run mode" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        post hedge_open_preview_position_path(position), params: { hedge_venue: "ethereal" }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_match "Open preview on Ethereal", flash[:notice]
+  end
+
+  test "nado live post is server-side blocked and does not call Hyperliquid writes" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        post hedge_open_position_path(position), params: {
+          hedge_venue: "nado",
+          dashboard_hedge_confirmation: AerodromeDashboardHedgeAction::CONFIRMATION
+        }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado")
+    assert_match "Nado is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid", flash[:alert]
+  end
+
   test "hedge open live is blocked without typed confirmation" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)

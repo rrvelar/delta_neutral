@@ -3,12 +3,13 @@ class AerodromeDashboardHedgeAction
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
-  def initialize(position:, action:, execute: false, confirmation: nil, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, log_dir: nil)
+  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, log_dir: nil)
     @position = position
     @hedge = position.hedge
     @action = action.to_s
     @execute = execute
     @confirmation = confirmation.to_s
+    @venue_key = HedgeVenues.normalize(venue)
     @hyperliquid_service = hyperliquid_service
     @hedge_sync_runner = hedge_sync_runner || ->(hedge_id) { HedgeSyncJob.perform_now(hedge_id) }
     @emergency_close_factory = emergency_close_factory || method(:default_emergency_close)
@@ -24,6 +25,7 @@ class AerodromeDashboardHedgeAction
     target = target_short
     drift = target ? target - current_short : nil
     blockers = action_blockers(target: target, current_short: current_short, drift: drift)
+    blockers.concat(non_hyperliquid_live_blockers) if @execute
     blockers.concat(execution_gate_blockers) if @execute
     result = blockers.any? ? blocked(blockers, target: target, current_short: current_short, drift: drift, before_position: before_position) : run_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
 
@@ -117,8 +119,15 @@ class AerodromeDashboardHedgeAction
       dry_run: !@execute,
       database_write: false,
       orders_enabled: @execute && blockers.empty?,
-      hyperliquid_execution: @execute && blockers.empty?,
-      live_order_capable: @execute,
+      hyperliquid_execution: @venue_key == "hyperliquid" && @execute && blockers.empty?,
+      live_order_capable: venue.live_supported?,
+      hedge_venue: @venue_key,
+      hedge_venue_name: venue.venue_name,
+      hedge_venue_mode: venue.mode,
+      hedge_venue_live_supported: venue.live_supported?,
+      hedge_venue_live_enabled: venue.live_enabled?,
+      hedge_venue_preview: venue_preview(target: target, drift: drift, current_short: current_short),
+      hedge_venue_account_state: venue.account_state,
       target_short_eth: target&.to_s("F"),
       target_notional_usd: target && eth_price ? (target * eth_price).to_s("F") : nil,
       current_short_eth: current_short&.to_s("F"),
@@ -184,6 +193,12 @@ class AerodromeDashboardHedgeAction
     self.class.execution_gate_blockers(action: @action, submitted_confirmation: @confirmation, require_submitted_confirmation: true)
   end
 
+  def non_hyperliquid_live_blockers
+    return [] if @venue_key == "hyperliquid"
+
+    [ "#{venue.venue_name} is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid" ]
+  end
+
   def run_emergency_close
     old_paused = ENV["AERODROME_HEDGE_PAUSED"]
     ENV["AERODROME_HEDGE_PAUSED"] = "true"
@@ -197,14 +212,35 @@ class AerodromeDashboardHedgeAction
   end
 
   def current_eth_position
-    hyperliquid.get_position("ETH")
+    venue.read_position(symbol: "ETH")
   rescue => e
-    @warnings << "current ETH readback unavailable: #{e.class}: #{e.message}"
+    @warnings << "current #{venue.venue_name} ETH readback unavailable: #{e.class}: #{e.message}"
     nil
   end
 
   def hyperliquid
     @hyperliquid_service ||= HyperliquidService.new(testnet: false)
+  end
+
+  def venue
+    @venue ||= HedgeVenues.build(@venue_key, hyperliquid_service: @hyperliquid_service)
+  end
+
+  def venue_preview(target:, drift:, current_short:)
+    return nil unless target && current_short
+
+    case @action
+    when "open"
+      venue.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: max_slippage)
+    when "rebalance"
+      venue.rebalance_preview(symbol: "ETH", delta_eth: drift || BigDecimal("0"), max_slippage: max_slippage)
+    when "close"
+      venue.close_preview(symbol: "ETH", size_eth: current_short)
+    end
+  end
+
+  def max_slippage
+    ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
   end
 
   def target_short
@@ -248,6 +284,7 @@ class AerodromeDashboardHedgeAction
 
   def short_size(position)
     return BigDecimal("0") unless position
+    return position.short_size || BigDecimal("0") if position.respond_to?(:short_size)
 
     size = BigDecimal(position.fetch(:size).to_s)
     size.negative? ? size.abs : BigDecimal("0")
@@ -255,6 +292,7 @@ class AerodromeDashboardHedgeAction
 
   def serialize_position(position)
     return nil unless position
+    return position.as_json if position.respond_to?(:as_json) && !position.is_a?(Hash)
 
     position.merge(size: BigDecimal(position.fetch(:size).to_s).to_s("F"))
   end

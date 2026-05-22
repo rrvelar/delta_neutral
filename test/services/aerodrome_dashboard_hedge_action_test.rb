@@ -77,6 +77,51 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "ethereal live action is blocked before any Hyperliquid write path" do
+    position = create_position
+    runner = CallRecorder.new
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::CONFIRMATION,
+        positions: [],
+        hedge_sync_runner: runner,
+        venue: "ethereal"
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_equal "ethereal", report.fetch(:hedge_venue)
+      assert_includes report.fetch(:blockers), "Ethereal is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid"
+      assert_empty runner.calls
+      assert_equal false, report.fetch(:hyperliquid_execution)
+      assert_equal "ethereal_eip712_trade_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+    end
+  end
+
+  test "nado dry-run preview returns structured payload without Hyperliquid writes" do
+    position = create_position
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: false,
+        positions: [],
+        venue: "nado"
+      ).report
+
+      assert_equal "preview", report.fetch(:status)
+      assert_equal "nado", report.fetch(:hedge_venue)
+      assert_equal false, report.fetch(:orders_enabled)
+      assert_equal false, report.fetch(:hyperliquid_execution)
+      assert_equal false, report.fetch(:hedge_venue_preview).fetch(:order_submission)
+      assert_equal "nado_eip712_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+    end
+  end
+
   test "rebalance blocks when drift is within tolerance" do
     position = create_position(asset0_amount: "1.25", target: "1.0", tolerance: "0.05")
 
@@ -203,12 +248,13 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
-  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil)
+  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil, venue: "hyperliquid")
     AerodromeDashboardHedgeAction.new(
       position: position,
       action: action,
       execute: execute,
       confirmation: confirmation,
+      venue: venue,
       hyperliquid_service: HyperliquidReadMock.new(positions),
       hedge_sync_runner: hedge_sync_runner,
       emergency_close_factory: emergency_close_factory,
