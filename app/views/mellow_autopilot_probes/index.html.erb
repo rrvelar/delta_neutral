@@ -38,15 +38,15 @@
   <%= form_with url: mellow_autopilot_probe_path, method: :get, local: true, class: "grid grid-cols-1 md:grid-cols-4 gap-4" do |form| %>
     <div class="md:col-span-2">
       <%= form.label :tx_hash, "Base transaction hash", class: "block text-sm font-medium text-gray-300 mb-1" %>
-      <%= form.text_field :tx_hash, value: @tx_hash, placeholder: "0x35512ec38b2b7320ab143727daaefa314b52896cb5137ac2410b40f90505d85f", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
+      <%= form.text_field :tx_hash, value: @tx_hash, placeholder: "0x...", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
     </div>
     <div>
-      <%= form.label :wallet_address, "Wallet address", class: "block text-sm font-medium text-gray-300 mb-1" %>
-      <%= form.text_field :wallet_address, value: @wallet_address, placeholder: "0x...", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
+      <%= form.label :tx_wallet_address, "Wallet address", class: "block text-sm font-medium text-gray-300 mb-1" %>
+      <%= form.text_field :tx_wallet_address, value: @tx_wallet_address, placeholder: "0x...", class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-600" %>
     </div>
     <div>
-      <%= form.label :network, "Network", class: "block text-sm font-medium text-gray-300 mb-1" %>
-      <%= form.text_field :network, value: @network, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white" %>
+      <%= form.label :tx_network, "Network", class: "block text-sm font-medium text-gray-300 mb-1" %>
+      <%= form.text_field :tx_network, value: @tx_network, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-white" %>
     </div>
     <div class="md:col-span-4">
       <%= form.submit "Analyze Transaction", class: "bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition" %>
@@ -70,6 +70,8 @@
 
     <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
       <div class="flex justify-between gap-4"><span class="text-gray-500">Classification</span><span class="text-white"><%= @transaction_probe_report[:classification] %></span></div>
+      <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted transaction hash</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:tx_hash].presence || "not provided" %></span></div>
+      <div class="flex justify-between gap-4"><span class="text-gray-500">Network</span><span class="text-white"><%= @transaction_probe_report[:network].presence || "base" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted wallet</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:submitted_wallet].presence || "not provided" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Detected depositor wallet</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:detected_depositor_wallet].presence || "unknown" %></span></div>
       <div class="flex justify-between gap-4"><span class="text-gray-500">Pool / most common recipient</span><span class="text-white text-right break-all"><%= @transaction_probe_report[:pool_address].presence || "unknown" %></span></div>

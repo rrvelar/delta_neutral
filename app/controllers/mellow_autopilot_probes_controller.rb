@@ -1,9 +1,13 @@
 class MellowAutopilotProbesController < ApplicationController
+  TX_HASH_PATTERN = /\A0x[0-9a-fA-F]{64}\z/
+
   def index
     @wallet_address = params[:wallet_address].to_s.strip
     @vault_address = params[:vault_address].to_s.strip
     @tx_hash = params[:tx_hash].to_s.strip
-    @network = params[:network].presence || "base"
+    @tx_wallet_address = params[:tx_wallet_address].to_s.strip
+    @network = params[:network].to_s.presence || "base"
+    @tx_network = params[:tx_network].to_s.presence || "base"
     @probe_report = if @wallet_address.present?
       MellowAutopilotPositionProbe.new(
         wallet_address: @wallet_address,
@@ -12,7 +16,11 @@ class MellowAutopilotProbesController < ApplicationController
       ).report
     end
     @transaction_probe_report = if @tx_hash.present?
-      AerodromeAutopilotTransactionProbe.new(tx_hash: @tx_hash, network: @network, wallet_address: @wallet_address.presence).report
+      if invalid_tx_hash?
+        invalid_transaction_hash_report
+      else
+        AerodromeAutopilotTransactionProbe.new(tx_hash: @tx_hash, network: @tx_network, wallet_address: @tx_wallet_address.presence).report
+      end
     end
   end
 
@@ -25,7 +33,7 @@ class MellowAutopilotProbesController < ApplicationController
 
     blockers = mellow_create_blockers(report)
     if blockers.any?
-      redirect_to mellow_autopilot_probe_path(tx_hash: mellow_position_params[:tx_hash], wallet_address: mellow_position_params[:wallet_address]), alert: blockers.join("; ")
+      redirect_to mellow_autopilot_probe_path(tx_hash: mellow_position_params[:tx_hash], tx_wallet_address: mellow_position_params[:wallet_address]), alert: blockers.join("; ")
       return
     end
 
@@ -44,6 +52,37 @@ class MellowAutopilotProbesController < ApplicationController
   end
 
   private
+
+  def invalid_tx_hash?
+    !@tx_hash.match?(TX_HASH_PATTERN)
+  end
+
+  def invalid_transaction_hash_report
+    {
+      database_write: false,
+      external_api: false,
+      network: @tx_network,
+      tx_hash: @tx_hash,
+      classification: "unknown",
+      hedgeable: false,
+      submitted_wallet: @tx_wallet_address.presence,
+      detected_depositor_wallet: nil,
+      pool_address: nil,
+      strategy_token_ids: [],
+      router_or_manager_contracts: [],
+      intermediate_contracts: [],
+      pool_or_gauge_contracts: [],
+      user_deposit_amounts: {},
+      candidate_share_tokens: [],
+      strategy_contract_reads: [],
+      strategy_nft_exposure: {},
+      pro_rata_exposure: {},
+      erc20_transfers: [],
+      slipstream_nft_transfers: [],
+      blockers: [ "Invalid transaction hash format." ],
+      warnings: []
+    }
+  end
 
   def mellow_create_blockers(report)
     blockers = []

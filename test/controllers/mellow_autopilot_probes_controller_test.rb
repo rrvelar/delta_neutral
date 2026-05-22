@@ -1,6 +1,8 @@
 require "test_helper"
 
 class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
+  VALID_TX_HASH = "0x35512ec38b2b7320ab143727daaefa314b52896cb5137ac2410b40f90505d85f"
+
   setup do
     sign_in_as(users(:one))
   end
@@ -13,6 +15,55 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[name='wallet_address']"
     assert_select "input[name='vault_address']"
     assert_select "input[name='network']"
+    assert_select "input[name='tx_hash']"
+    assert_select "input[name='tx_wallet_address']"
+    assert_select "input[name='tx_network'][value='base']"
+    assert_no_match "0x35512ec38b2b7320ab143727daaefa314b52896cb5137ac2410b40f90505d85f", response.body
+  end
+
+  test "transaction form submission does not populate mellow api form" do
+    report = hedgeable_transaction_report
+
+    MellowAutopilotPositionProbe.stub(:new, ->(**) { raise "Mellow API probe should not be called" }) do
+      AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
+        get mellow_autopilot_probe_path, params: {
+          tx_hash: VALID_TX_HASH,
+          tx_wallet_address: report.fetch(:submitted_wallet),
+          tx_network: "base"
+        }
+      end
+    end
+
+    assert_response :success
+    assert_no_match %(name="wallet_address" value="#{VALID_TX_HASH}"), response.body
+    assert_no_match %(name="wallet_address" value="#{report.fetch(:submitted_wallet)}"), response.body
+    assert_select "input[name='wallet_address'][value='']"
+    assert_select "input[name='tx_hash'][value='#{VALID_TX_HASH}']"
+    assert_select "input[name='tx_wallet_address'][value='#{report.fetch(:submitted_wallet)}']"
+  end
+
+  test "mellow api form submission does not populate transaction form" do
+    report = {
+      source: "Mellow official points API",
+      network: "base",
+      hedge_target_computable: false,
+      blockers: [],
+      warnings: [],
+      positions: []
+    }
+
+    MellowAutopilotPositionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
+      AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { raise "Transaction probe should not be called" }) do
+        get mellow_autopilot_probe_path, params: { wallet_address: "0xabc", vault_address: "0xvault", network: "base" }
+      end
+    end
+
+    assert_response :success
+    assert_select "input[name='wallet_address'][value='0xabc']"
+    assert_select "input[name='tx_hash'][value='']"
+    assert_select "input[name='tx_wallet_address'][value='']"
+    assert_no_match %(name="tx_hash" value="0xabc"), response.body
+    assert_no_match %(name="tx_wallet_address" value="0xabc"), response.body
   end
 
   test "renders probe results" do
@@ -61,7 +112,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
   test "renders transaction probe results" do
     report = {
       network: "base",
-      tx_hash: "0xtx",
+      tx_hash: VALID_TX_HASH,
       classification: "autopilot_shared_strategy",
       hedgeable: false,
       submitted_wallet: "0x1111111111111111111111111111111111111111",
@@ -120,7 +171,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
       HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
         assert_no_difference [ "Position.count", "Hedge.count", "ShortRebalance.count" ] do
-          get mellow_autopilot_probe_path, params: { tx_hash: "0xtx" }
+          get mellow_autopilot_probe_path, params: { tx_hash: VALID_TX_HASH }
         end
       end
     end
@@ -143,7 +194,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     captured_kwargs = nil
     report = {
       network: "base",
-      tx_hash: "0xtx",
+      tx_hash: VALID_TX_HASH,
       classification: "unknown",
       hedgeable: false,
       submitted_wallet: "0xabc",
@@ -165,13 +216,27 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
 
     MellowAutopilotPositionProbe.stub(:new, ->(**) { ProbeMock.new({ source: "stub", network: "base", hedge_target_computable: false, blockers: [], warnings: [], positions: [] }) }) do
       AerodromeAutopilotTransactionProbe.stub(:new, ->(**kwargs) { captured_kwargs = kwargs; ProbeMock.new(report) }) do
-        get mellow_autopilot_probe_path, params: { tx_hash: "0xtx", wallet_address: "0xabc" }
+        get mellow_autopilot_probe_path, params: { tx_hash: VALID_TX_HASH, tx_wallet_address: "0xabc" }
       end
     end
 
     assert_response :success
     assert_equal "0xabc", captured_kwargs.fetch(:wallet_address)
+    assert_equal VALID_TX_HASH, captured_kwargs.fetch(:tx_hash)
+    assert_equal "base", captured_kwargs.fetch(:network)
     assert_match "0xabc", response.body
+    assert_match VALID_TX_HASH, response.body
+  end
+
+  test "invalid transaction hash blocks before transaction probe" do
+    AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { raise "Transaction probe should not be called" }) do
+      get mellow_autopilot_probe_path, params: { tx_hash: "0xtx", tx_wallet_address: "0xabc", tx_network: "base" }
+    end
+
+    assert_response :success
+    assert_match "Invalid transaction hash format.", response.body
+    assert_match "Submitted transaction hash", response.body
+    assert_match "0xtx", response.body
   end
 
   test "transaction probe formats pro rata exposure values for display" do
@@ -191,7 +256,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
 
     MellowAutopilotPositionProbe.stub(:new, ->(**) { ProbeMock.new({ source: "stub", network: "base", hedge_target_computable: false, blockers: [], warnings: [], positions: [] }) }) do
       AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
-        get mellow_autopilot_probe_path, params: { tx_hash: "0xtx", wallet_address: report.fetch(:submitted_wallet) }
+        get mellow_autopilot_probe_path, params: { tx_hash: VALID_TX_HASH, tx_wallet_address: report.fetch(:submitted_wallet) }
       end
     end
 
@@ -216,7 +281,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
           assert_difference "Hedge.count", 1 do
             post create_mellow_autopilot_position_path, params: {
               mellow_position: {
-                tx_hash: "0xtx",
+                tx_hash: VALID_TX_HASH,
                 wallet_address: report.fetch(:submitted_wallet),
                 network: "base",
                 deactivate_existing_positions: "1"
@@ -250,7 +315,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
       assert_no_difference [ "Position.count", "Hedge.count" ] do
         post create_mellow_autopilot_position_path, params: {
           mellow_position: {
-            tx_hash: "0xtx",
+            tx_hash: VALID_TX_HASH,
             wallet_address: report.fetch(:submitted_wallet),
             network: "base"
           }
@@ -258,7 +323,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
       end
     end
 
-    assert_redirected_to mellow_autopilot_probe_path(tx_hash: "0xtx", wallet_address: report.fetch(:submitted_wallet))
+    assert_redirected_to mellow_autopilot_probe_path(tx_hash: VALID_TX_HASH, tx_wallet_address: report.fetch(:submitted_wallet))
     assert_match "Probe result is not hedgeable", flash[:alert]
   end
 
@@ -277,7 +342,7 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
   def hedgeable_transaction_report
     {
       network: "base",
-      tx_hash: "0xtx",
+      tx_hash: VALID_TX_HASH,
       classification: "autopilot_shared_strategy",
       hedgeable: true,
       submitted_wallet: "0xe8a204e487a026c353cb1438c8d43aaf1e47d644",
