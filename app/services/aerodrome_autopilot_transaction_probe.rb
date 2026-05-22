@@ -24,13 +24,14 @@ class AerodromeAutopilotTransactionProbe
     pool: "0x16f0115b"
   }.freeze
 
-  def initialize(tx_hash:, network: "base", wallet_address: nil, rpc_url: nil, receipt: nil, eth_call_results: {})
+  def initialize(tx_hash:, network: "base", wallet_address: nil, rpc_url: nil, receipt: nil, eth_call_results: {}, slipstream_service: nil)
     @tx_hash = tx_hash.to_s.strip
     @network = network.to_s.presence || "base"
     @submitted_wallet = wallet_address.to_s.strip.presence
     @rpc_url = rpc_url
     @receipt = receipt
     @eth_call_results = eth_call_results
+    @slipstream_service = slipstream_service
   end
 
   def report
@@ -47,11 +48,17 @@ class AerodromeAutopilotTransactionProbe
     routers = detected_contracts(erc20_transfers, nft_transfers, user_wallet)
     share_tokens = candidate_share_tokens(erc20_transfers, user_wallet, intermediate, routers)
     strategy_reads = strategy_contract_reads(intermediate + detected_contracts(erc20_transfers, nft_transfers, user_wallet))
-    exposure = pro_rata_exposure(share_tokens, strategy_reads)
+    strategy_nft = strategy_nft_exposure(nft_transfers, classification)
+    exposure = pro_rata_exposure(share_tokens, strategy_nft)
+    deposits = user_deposit_amounts(erc20_transfers, user_wallet)
     blockers = []
     contract_held_share = share_tokens.any? { |token| token[:ownership_directly_attributable_to_user] == false && token[:contract_holders].present? }
     if classification == "autopilot_shared_strategy" && exposure[:user_weth_exposure].nil?
-      blockers << "Cannot hedge: user pro-rata WETH exposure is unknown."
+      blockers << if strategy_nft[:strategy_total_weth].nil?
+        "Cannot hedge: current shared strategy WETH exposure is unavailable."
+      else
+        "Cannot hedge: user pro-rata WETH exposure is unknown."
+      end
     elsif erc20_transfers.none? { |transfer| transfer[:symbol] == "WETH" }
       blockers << "Cannot hedge: user WETH deposit amount unavailable."
     end
@@ -73,14 +80,27 @@ class AerodromeAutopilotTransactionProbe
       pool_or_gauge_contracts: pools,
       pool_address: pools.first,
       strategy_token_ids: nft_transfers.map { |transfer| transfer[:token_id] }.uniq,
-      user_deposit_amounts: user_deposit_amounts(erc20_transfers, user_wallet),
+      user_deposit_amounts: deposits,
       candidate_share_tokens: share_tokens,
       strategy_contract_reads: strategy_reads,
+      strategy_nft_exposure: strategy_nft,
       pro_rata_exposure: exposure,
+      strategy_token_id: exposure[:strategy_token_id] || strategy_nft[:strategy_token_id],
+      strategy_pool_address: exposure[:strategy_pool_address] || strategy_nft[:strategy_pool_address],
+      strategy_total_weth: exposure[:strategy_total_weth] || strategy_nft[:strategy_total_weth],
+      strategy_total_usdc: exposure[:strategy_total_usdc] || strategy_nft[:strategy_total_usdc],
+      strategy_total_value_usd: exposure[:strategy_total_value_usd] || strategy_nft[:strategy_total_value_usd],
+      user_share_balance: exposure[:user_share_balance],
+      total_shares: exposure[:total_shares],
+      user_share_percent: exposure[:user_share_percent],
+      user_weth_exposure: exposure[:user_weth_exposure],
+      user_usdc_exposure: exposure[:user_usdc_exposure],
+      user_total_value_usd: exposure[:user_total_value_usd],
+      exposure_confidence: exposure[:exposure_confidence] || exposure[:confidence],
       erc20_transfers: erc20_transfers,
       slipstream_nft_transfers: nft_transfers,
       blockers: blockers,
-      warnings: warnings(classification)
+      warnings: warnings(classification, deposits, exposure)
     }
   rescue => e
     blank_report(blockers: [ "Aerodrome Autopilot transaction probe failed: #{e.class}: #{e.message}" ])
@@ -106,7 +126,20 @@ class AerodromeAutopilotTransactionProbe
       user_deposit_amounts: {},
       candidate_share_tokens: [],
       strategy_contract_reads: [],
-      pro_rata_exposure: { user_weth_exposure: nil, user_usdc_exposure: nil, confidence: "unavailable" },
+      strategy_nft_exposure: blank_strategy_nft_exposure,
+      pro_rata_exposure: blank_pro_rata_exposure,
+      strategy_token_id: nil,
+      strategy_pool_address: nil,
+      strategy_total_weth: nil,
+      strategy_total_usdc: nil,
+      strategy_total_value_usd: nil,
+      user_share_balance: nil,
+      total_shares: nil,
+      user_share_percent: nil,
+      user_weth_exposure: nil,
+      user_usdc_exposure: nil,
+      user_total_value_usd: nil,
+      exposure_confidence: "unavailable",
       erc20_transfers: [],
       slipstream_nft_transfers: [],
       blockers: blockers,
@@ -328,38 +361,146 @@ class AerodromeAutopilotTransactionProbe
     end
   end
 
-  def pro_rata_exposure(share_tokens, strategy_reads)
+  def strategy_nft_exposure(nft_transfers, classification)
+    token_id = strategy_token_id(nft_transfers, classification)
+    return blank_strategy_nft_exposure unless token_id
+    return blank_strategy_nft_exposure.merge(strategy_token_id: token_id, error: "Slipstream strategy NFT read skipped for injected receipt") if @receipt && @slipstream_service.nil?
+
+    position_data = slipstream_service.fetch_position(token_id)
+    amounts = strategy_token_amounts(position_data)
+    {
+      strategy_token_id: token_id,
+      strategy_pool_address: position_data.pool_address,
+      strategy_total_weth: amounts[:weth]&.to_s("F"),
+      strategy_total_usdc: amounts[:usdc]&.to_s("F"),
+      strategy_total_value_usd: position_data.total_value_usd&.to_s("F"),
+      token0_symbol: position_data.token0_symbol,
+      token1_symbol: position_data.token1_symbol,
+      token0_address: position_data.token0_address,
+      token1_address: position_data.token1_address,
+      source: "AerodromeSlipstreamService.fetch_position",
+      confidence: amounts[:weth].present? ? "high" : "unavailable",
+      error: nil
+    }
+  rescue => e
+    blank_strategy_nft_exposure.merge(strategy_token_id: token_id, error: "#{e.class}: #{e.message}")
+  end
+
+  def strategy_token_id(nft_transfers, classification)
+    return nil unless classification == "autopilot_shared_strategy"
+
+    nft_transfers.group_by { |transfer| transfer[:token_id] }.find do |_token_id, transfers|
+      transfers.any? { |transfer| gauge_like?(transfer[:from]) && intermediate_like?(transfer[:to]) } &&
+        transfers.any? { |transfer| intermediate_like?(transfer[:from]) && gauge_like?(transfer[:to]) }
+    end&.first
+  end
+
+  def strategy_token_amounts(position_data)
+    amount0 = AerodromeSlipstreamMath.decimal_amount(position_data.amount0_raw, position_data.token0_decimals) if position_data.amount0_raw
+    amount1 = AerodromeSlipstreamMath.decimal_amount(position_data.amount1_raw, position_data.token1_decimals) if position_data.amount1_raw
+    {
+      weth: weth_token?(position_data.token0_address, position_data.token0_symbol) ? amount0 : (weth_token?(position_data.token1_address, position_data.token1_symbol) ? amount1 : nil),
+      usdc: usdc_token?(position_data.token0_address, position_data.token0_symbol) ? amount0 : (usdc_token?(position_data.token1_address, position_data.token1_symbol) ? amount1 : nil)
+    }
+  end
+
+  def pro_rata_exposure(share_tokens, strategy_nft)
     share = share_tokens.find do |token|
       token[:ownership_directly_attributable_to_user] &&
         token[:user_balance].present? &&
         token[:total_supply].present?
     end
-    amounts_source = strategy_reads.find { |read| read[:get_total_amounts].present? }
-    return { user_weth_exposure: nil, user_usdc_exposure: nil, confidence: "unavailable" } unless share && amounts_source
+    return blank_pro_rata_exposure(strategy_nft) unless share && strategy_nft[:strategy_total_weth].present?
 
     user_shares = BigDecimal(share[:user_balance])
     total_shares = BigDecimal(share[:total_supply])
-    amounts = amounts_source[:get_total_amounts]
-    weth_amount = BigDecimal(amounts.fetch(:amount0)) / BigDecimal(10**18)
-    usdc_amount = BigDecimal(amounts.fetch(:amount1)) / BigDecimal(10**6)
+    return blank_pro_rata_exposure(strategy_nft) unless user_shares.positive? && total_shares.positive?
+
+    share_fraction = user_shares / total_shares
+    strategy_weth = BigDecimal(strategy_nft[:strategy_total_weth])
+    strategy_usdc = BigDecimal(strategy_nft[:strategy_total_usdc].presence || "0")
+    strategy_value = BigDecimal(strategy_nft[:strategy_total_value_usd].presence || "0")
     {
-      user_weth_exposure: (weth_amount * user_shares / total_shares).to_s("F"),
-      user_usdc_exposure: (usdc_amount * user_shares / total_shares).to_s("F"),
+      strategy_token_id: strategy_nft[:strategy_token_id],
+      strategy_pool_address: strategy_nft[:strategy_pool_address],
+      strategy_total_weth: strategy_nft[:strategy_total_weth],
+      strategy_total_usdc: strategy_nft[:strategy_total_usdc],
+      strategy_total_value_usd: strategy_nft[:strategy_total_value_usd],
+      user_share_balance: user_shares.to_s("F"),
+      total_shares: total_shares.to_s("F"),
+      user_share_percent: (share_fraction * 100).to_s("F"),
+      user_weth_exposure: (strategy_weth * share_fraction).to_s("F"),
+      user_usdc_exposure: (strategy_usdc * share_fraction).to_s("F"),
+      user_total_value_usd: strategy_value.positive? ? (strategy_value * share_fraction).to_s("F") : nil,
       confidence: "high",
       share_token: share[:token_address],
-      strategy_contract: amounts_source[:address]
+      exposure_confidence: "high",
+      source: "shared strategy Slipstream NFT"
     }
   rescue
-    { user_weth_exposure: nil, user_usdc_exposure: nil, confidence: "low" }
+    blank_pro_rata_exposure(strategy_nft).merge(confidence: "low", exposure_confidence: "low")
   end
 
-  def warnings(classification)
-    return [ "Deposit amounts are transaction inputs, not current hedge exposure." ] unless classification == "autopilot_shared_strategy"
+  def blank_strategy_nft_exposure
+    {
+      strategy_token_id: nil,
+      strategy_pool_address: nil,
+      strategy_total_weth: nil,
+      strategy_total_usdc: nil,
+      strategy_total_value_usd: nil,
+      token0_symbol: nil,
+      token1_symbol: nil,
+      token0_address: nil,
+      token1_address: nil,
+      source: nil,
+      confidence: "unavailable",
+      error: nil
+    }
+  end
+
+  def blank_pro_rata_exposure(strategy_nft = nil)
+    strategy_nft ||= blank_strategy_nft_exposure
+    {
+      strategy_token_id: strategy_nft[:strategy_token_id],
+      strategy_pool_address: strategy_nft[:strategy_pool_address],
+      strategy_total_weth: strategy_nft[:strategy_total_weth],
+      strategy_total_usdc: strategy_nft[:strategy_total_usdc],
+      strategy_total_value_usd: strategy_nft[:strategy_total_value_usd],
+      user_share_balance: nil,
+      total_shares: nil,
+      user_share_percent: nil,
+      user_weth_exposure: nil,
+      user_usdc_exposure: nil,
+      user_total_value_usd: nil,
+      confidence: "unavailable",
+      exposure_confidence: "unavailable"
+    }
+  end
+
+  def warnings(classification, deposits, exposure)
+    base = [
+      deposit_weth_warning(deposits, exposure)
+    ].compact
+    return [ "Deposit amounts are transaction inputs, not current hedge exposure.", *base ] unless classification == "autopilot_shared_strategy"
 
     [
       "Deposit amounts are transaction inputs, not current hedge exposure.",
-      "Shared strategy NFT exposure requires user shares, total shares, and current strategy WETH before hedging."
+      "Shared strategy NFT exposure requires user shares, total shares, and current strategy WETH before hedging.",
+      *base
     ]
+  end
+
+  def deposit_weth_warning(deposits, exposure)
+    return nil unless deposits["WETH"].present? && exposure[:user_weth_exposure].present?
+
+    deposit_weth = BigDecimal(deposits.fetch("WETH"))
+    user_weth = BigDecimal(exposure.fetch(:user_weth_exposure))
+    return nil unless deposit_weth.positive?
+
+    relative_difference = (deposit_weth - user_weth).abs / deposit_weth
+    return nil unless relative_difference > BigDecimal("0.05")
+
+    "User pro-rata WETH exposure differs materially from transaction WETH input; deposit WETH is historical input, not current exposure."
   end
 
   def logs(receipt)
@@ -375,6 +516,18 @@ class AerodromeAutopilotTransactionProbe
 
   def token_decimals(symbol)
     symbol == "USDC" ? 6 : 18
+  end
+
+  def weth_token?(address, symbol)
+    same_address?(address, WETH_ADDRESS) || symbol.to_s.casecmp?("WETH")
+  end
+
+  def usdc_token?(address, symbol)
+    same_address?(address, USDC_ADDRESS) || symbol.to_s.casecmp?("USDC")
+  end
+
+  def slipstream_service
+    @slipstream_service ||= AerodromeSlipstreamService.new
   end
 
   def read_balance_of(address, user_wallet, decimals)

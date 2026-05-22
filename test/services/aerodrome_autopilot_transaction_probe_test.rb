@@ -32,7 +32,7 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
       assert_includes report.fetch(:intermediate_contracts), INTERMEDIATE
       assert_equal "1.2", report.dig(:user_deposit_amounts, "WETH")
       assert_equal "3000.0", report.dig(:user_deposit_amounts, "USDC")
-      assert_includes report.fetch(:blockers), "Cannot hedge: user pro-rata WETH exposure is unknown."
+      assert_includes report.fetch(:blockers), "Cannot hedge: current shared strategy WETH exposure is unavailable."
     end
   end
 
@@ -70,7 +70,7 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     assert_equal true, token.fetch(:transfers).first.fetch(:involves_submitted_wallet)
   end
 
-  test "computes pro rata exposure only when shares supply and strategy weth are available" do
+  test "computes pro rata exposure from shared strategy nft data" do
     receipt = {
       "logs" => [
         erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
@@ -81,23 +81,60 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     }
     calls = {
       [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(25 * 10**18),
-      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18),
-      [ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ] => word(4 * 10**18).delete_prefix("0x") + word(2_000 * 10**6).delete_prefix("0x")
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18)
     }
-    calls[[ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ]] = "0x#{calls.fetch([ INTERMEDIATE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ])}"
+    slipstream = SlipstreamMock.new(strategy_position(amount0_raw: 4 * 10**18, amount1_raw: 2_000 * 10**6))
 
     report = AerodromeAutopilotTransactionProbe.new(
       tx_hash: "0xtx",
       wallet_address: USER,
       receipt: receipt,
-      eth_call_results: calls
+      eth_call_results: calls,
+      slipstream_service: slipstream
     ).report
 
     assert_equal true, report.fetch(:hedgeable)
     assert_empty report.fetch(:blockers)
+    assert_equal [ "70927538" ], slipstream.fetches
+    assert_equal "70927538", report.dig(:pro_rata_exposure, :strategy_token_id)
+    assert_equal "70927538", report.fetch(:strategy_token_id)
+    assert_equal POOL, report.dig(:pro_rata_exposure, :strategy_pool_address)
+    assert_equal "4.0", report.dig(:pro_rata_exposure, :strategy_total_weth)
+    assert_equal "4.0", report.fetch(:strategy_total_weth)
+    assert_equal "2000.0", report.dig(:pro_rata_exposure, :strategy_total_usdc)
+    assert_equal "25.0", report.dig(:pro_rata_exposure, :user_share_percent)
+    assert_equal "25.0", report.fetch(:user_share_percent)
     assert_equal "high", report.dig(:pro_rata_exposure, :confidence)
     assert_equal "1.0", report.dig(:pro_rata_exposure, :user_weth_exposure)
+    assert_equal "1.0", report.fetch(:user_weth_exposure)
     assert_equal "500.0", report.dig(:pro_rata_exposure, :user_usdc_exposure)
+    assert_equal "shared strategy Slipstream NFT", report.dig(:pro_rata_exposure, :source)
+  end
+
+  test "remains non hedgeable when strategy nft weth is unavailable" do
+    receipt = {
+      "logs" => [
+        erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
+        erc20_transfer(SHARE, ROUTER, USER, 25, 18),
+        nft_transfer(GAUGE, INTERMEDIATE, "70927538"),
+        nft_transfer(INTERMEDIATE, GAUGE, "70927538")
+      ]
+    }
+
+    report = AerodromeAutopilotTransactionProbe.new(
+      tx_hash: "0xtx",
+      wallet_address: USER,
+      receipt: receipt,
+      eth_call_results: {
+        [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(25 * 10**18),
+        [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(100 * 10**18)
+      },
+      slipstream_service: SlipstreamMock.new(strategy_position(amount0_raw: nil, amount1_raw: 2_000 * 10**6))
+    ).report
+
+    assert_equal false, report.fetch(:hedgeable)
+    assert_includes report.fetch(:blockers), "Cannot hedge: current shared strategy WETH exposure is unavailable."
+    assert_nil report.dig(:pro_rata_exposure, :user_weth_exposure)
   end
 
   test "shares held by intermediate contract remain non hedgeable" do
@@ -164,6 +201,54 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
   end
 
   private
+
+  class SlipstreamMock
+    attr_reader :fetches
+
+    def initialize(position_data)
+      @position_data = position_data
+      @fetches = []
+    end
+
+    def fetch_position(token_id)
+      @fetches << token_id.to_s
+      @position_data
+    end
+  end
+
+  def strategy_position(amount0_raw:, amount1_raw:)
+    AerodromeSlipstreamService::PositionData.new(
+      token_id: "70927538",
+      owner_address: INTERMEDIATE,
+      position_manager_address: AerodromeAutopilotTransactionProbe::SLIPSTREAM_POSITION_MANAGER,
+      factory_address: "0x4444444444444444444444444444444444444444",
+      pool_address: POOL,
+      token0_address: AerodromeAutopilotTransactionProbe::WETH_ADDRESS,
+      token1_address: AerodromeAutopilotTransactionProbe::USDC_ADDRESS,
+      token0_decimals: 18,
+      token1_decimals: 6,
+      token0_symbol: "WETH",
+      token1_symbol: "USDC",
+      tick_spacing: 100,
+      tick_lower: -1,
+      tick_upper: 1,
+      liquidity: 1,
+      sqrt_price_x96: 1,
+      current_tick: 0,
+      tokens_owed0_raw: 0,
+      tokens_owed1_raw: 0,
+      amount0_raw: amount0_raw,
+      amount1_raw: amount1_raw,
+      partial_data_reason: nil,
+      verification_status: "verified_math",
+      token0_price_usd: BigDecimal("2500"),
+      token1_price_usd: BigDecimal("1"),
+      total_value_usd: BigDecimal("12000"),
+      valuation_status: "supported",
+      valuation_source: "test",
+      valuation_reason: nil
+    )
+  end
 
   def erc20_transfer(token, from, to, amount, decimals)
     {

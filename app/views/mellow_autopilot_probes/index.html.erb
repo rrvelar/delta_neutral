@@ -93,10 +93,21 @@
     <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-3">
       <p class="text-gray-400 text-xs uppercase tracking-wide">Pro-rata exposure check</p>
       <% exposure = @transaction_probe_report[:pro_rata_exposure] || {} %>
+      <% strategy_nft = @transaction_probe_report[:strategy_nft_exposure] || {} %>
+      <% if exposure[:strategy_token_id].present? && exposure[:user_weth_exposure].present? %>
+        <p class="text-green-200/90 text-xs mt-1">This is pro-rata exposure derived from shared strategy NFT tokenId <%= exposure[:strategy_token_id] %>.</p>
+        <p class="text-yellow-200/90 text-xs mt-1">Do not hedge the full strategy NFT; only hedge the user pro-rata WETH exposure.</p>
+      <% end %>
       <div class="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= exposure[:confidence].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy token ID</span><span class="text-white"><%= exposure[:strategy_token_id].presence || strategy_nft[:strategy_token_id].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy pool</span><span class="text-white text-right break-all"><%= exposure[:strategy_pool_address].presence || strategy_nft[:strategy_pool_address].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= exposure[:exposure_confidence].presence || exposure[:confidence].presence || strategy_nft[:confidence].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white"><%= exposure[:strategy_total_weth].presence || strategy_nft[:strategy_total_weth].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= exposure[:strategy_total_usdc].presence || strategy_nft[:strategy_total_usdc].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white"><%= exposure[:user_share_percent].presence || "unavailable" %></span></div>
         <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white"><%= exposure[:user_weth_exposure].presence || "unavailable" %></span></div>
         <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= exposure[:user_usdc_exposure].presence || "unavailable" %></span></div>
+        <div class="flex justify-between gap-4"><span class="text-gray-500">Hedge target ETH</span><span class="text-white"><%= exposure[:user_weth_exposure].presence || "unavailable" %></span></div>
       </div>
     </div>
 
