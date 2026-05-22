@@ -98,16 +98,29 @@
         <p class="text-green-200/90 text-xs mt-1">This is pro-rata exposure derived from shared strategy NFT tokenId <%= exposure[:strategy_token_id] %>.</p>
         <p class="text-yellow-200/90 text-xs mt-1">Do not hedge the full strategy NFT; only hedge the user pro-rata WETH exposure.</p>
       <% end %>
-      <div class="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy token ID</span><span class="text-white"><%= exposure[:strategy_token_id].presence || strategy_nft[:strategy_token_id].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy pool</span><span class="text-white text-right break-all"><%= exposure[:strategy_pool_address].presence || strategy_nft[:strategy_pool_address].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= exposure[:exposure_confidence].presence || exposure[:confidence].presence || strategy_nft[:confidence].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white"><%= exposure[:strategy_total_weth].presence || strategy_nft[:strategy_total_weth].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= exposure[:strategy_total_usdc].presence || strategy_nft[:strategy_total_usdc].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white"><%= exposure[:user_share_percent].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white"><%= exposure[:user_weth_exposure].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= exposure[:user_usdc_exposure].presence || "unavailable" %></span></div>
-        <div class="flex justify-between gap-4"><span class="text-gray-500">Hedge target ETH</span><span class="text-white"><%= exposure[:user_weth_exposure].presence || "unavailable" %></span></div>
+      <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 text-sm">
+        <% [
+          [ "Strategy token ID", exposure[:strategy_token_id].presence || strategy_nft[:strategy_token_id], :raw ],
+          [ "Strategy pool", exposure[:strategy_pool_address].presence || strategy_nft[:strategy_pool_address], :address ],
+          [ "Confidence", exposure[:exposure_confidence].presence || exposure[:confidence].presence || strategy_nft[:confidence], :raw ],
+          [ "Strategy total WETH", exposure[:strategy_total_weth].presence || strategy_nft[:strategy_total_weth], :eth ],
+          [ "Strategy total USDC", exposure[:strategy_total_usdc].presence || strategy_nft[:strategy_total_usdc], :usd ],
+          [ "User share %", exposure[:user_share_percent], :percent ],
+          [ "User WETH exposure", exposure[:user_weth_exposure], :eth ],
+          [ "User USDC exposure", exposure[:user_usdc_exposure], :usd ],
+          [ "Hedge target ETH", exposure[:user_weth_exposure], :eth ]
+        ].each do |label, raw_value, kind| %>
+          <% display_value = case kind
+            when :eth then format_token_amount(raw_value, decimals: 6)
+            when :usd then format_usd_amount(raw_value)
+            when :percent then format_percent_amount(raw_value)
+            else raw_value.presence || "unavailable"
+          end %>
+          <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+            <p class="text-gray-500 text-xs"><%= label %></p>
+            <p class="mt-1 text-white font-mono text-xs leading-5 <%= kind == :address ? 'break-all' : 'truncate' %>" title="<%= raw_value.presence || 'unavailable' %>"><%= display_value %></p>
+          </div>
+        <% end %>
       </div>
     </div>
 

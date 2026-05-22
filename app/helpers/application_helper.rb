@@ -20,6 +20,38 @@ module ApplicationHelper
     amount.nil? ? "Unavailable" : number_with_precision(amount, precision: precision)
   end
 
+  def format_token_amount(value, decimals: 6)
+    return "unavailable" if value.blank?
+
+    number_with_precision(BigDecimal(value.to_s), precision: decimals, strip_insignificant_zeros: true, delimiter: ",")
+  rescue ArgumentError
+    value.to_s
+  end
+
+  def format_usd_amount(value)
+    return "unavailable" if value.blank?
+
+    number_with_precision(BigDecimal(value.to_s), precision: 2, strip_insignificant_zeros: false, delimiter: ",")
+  rescue ArgumentError
+    value.to_s
+  end
+
+  def format_percent_amount(value)
+    return "unavailable" if value.blank?
+
+    "#{number_with_precision(BigDecimal(value.to_s), precision: 6, strip_insignificant_zeros: true, delimiter: ',')}%"
+  rescue ArgumentError
+    "#{value}%"
+  end
+
+  def format_share_balance(value)
+    return "unavailable" if value.blank?
+
+    number_with_precision(BigDecimal(value.to_s), precision: 12, strip_insignificant_zeros: true, delimiter: ",")
+  rescue ArgumentError
+    value.to_s
+  end
+
   def price_display(price)
     price.nil? ? "Unavailable" : "#{format_usd(price)}/unit"
   end

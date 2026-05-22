@@ -174,6 +174,39 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_match "0xabc", response.body
   end
 
+  test "transaction probe formats pro rata exposure values for display" do
+    report = hedgeable_transaction_report
+    report[:pro_rata_exposure] = report.fetch(:pro_rata_exposure).merge(
+      strategy_total_weth: "123.123456789123456789",
+      strategy_total_usdc: "456789.987654321",
+      user_share_percent: "0.066652589123456789",
+      user_weth_exposure: "0.000533219260472093",
+      user_usdc_exposure: "123.987654321"
+    )
+    report[:strategy_total_weth] = "123.123456789123456789"
+    report[:strategy_total_usdc] = "456789.987654321"
+    report[:user_share_percent] = "0.066652589123456789"
+    report[:user_weth_exposure] = "0.000533219260472093"
+    report[:user_usdc_exposure] = "123.987654321"
+
+    MellowAutopilotPositionProbe.stub(:new, ->(**) { ProbeMock.new({ source: "stub", network: "base", hedge_target_computable: false, blockers: [], warnings: [], positions: [] }) }) do
+      AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(report) }) do
+        get mellow_autopilot_probe_path, params: { tx_hash: "0xtx", wallet_address: report.fetch(:submitted_wallet) }
+      end
+    end
+
+    assert_response :success
+    assert_match "123.123457", response.body
+    assert_match "456,789.99", response.body
+    assert_match "0.066653%", response.body
+    assert_match "0.000533", response.body
+    assert_match "123.99", response.body
+    assert_match 'title="123.123456789123456789"', response.body
+    assert_match 'title="0.000533219260472093"', response.body
+    assert_no_match ">123.123456789123456789<", response.body
+    assert_no_match ">0.000533219260472093<", response.body
+  end
+
   test "hedgeable transaction probe can create mellow autopilot position and hedge" do
     report = hedgeable_transaction_report
 
