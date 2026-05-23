@@ -110,7 +110,7 @@ class NadoHedgeExecutionService
       product: product,
       now: now,
       isolated_margin_x6: margin[:isolated_margin_x6],
-      sender: order_sender(current_position)
+      sender: subaccount
     )
     typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
     timing = order_timing_summary(order_fields, local_time: now)
@@ -129,6 +129,7 @@ class NadoHedgeExecutionService
         estimated_notional_usd: decimal_string(rounded_size * rounded_price),
         amount_x18: amount_x18.to_s,
         sender: order_fields[:sender],
+        current_position_subaccount: isolated_position_subaccount(current_position),
         appendix: order_fields[:appendix],
         order_type: "ioc",
         isolated: appendix_isolated?(order_fields[:appendix].to_i),
@@ -794,11 +795,11 @@ class NadoHedgeExecutionService
     nil
   end
 
-  def order_sender(position)
+  def isolated_position_subaccount(position)
     raw = position_value(position, :subaccount) || position_value(position, :sender)
     raw = position.dig(:metadata, :raw, "subaccount") if raw.blank? && position.is_a?(Hash)
     raw = position.dig(:metadata, :raw, "sender") if raw.blank? && position.is_a?(Hash)
-    raw.presence || subaccount
+    raw.presence
   end
 
   def position_value(position, key)

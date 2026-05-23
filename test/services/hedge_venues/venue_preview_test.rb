@@ -478,7 +478,8 @@ module HedgeVenues
       order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       summary = signer_payloads.first.fetch(:payload_preview)
       decoded = summary.fetch(:appendix_decoded)
-      assert_equal isolated_sender, order.fetch(:sender)
+      assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), order.fetch(:sender)
+      assert_equal isolated_sender, summary.fetch(:current_position_subaccount)
       assert_equal "91000000000000000", order.fetch(:amount)
       assert_equal "buy", summary.fetch(:side)
       assert_equal true, summary.fetch(:reduce_only)
@@ -648,6 +649,36 @@ module HedgeVenues
       assert_match "Reduce only order increases position", classification.fetch(:message)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
     end
+
+    test "nado isolated subaccount sender rejection records exchange reason" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, _payload) {
+          {
+            status: "failure",
+            data: [ { error_code: 2081, error: "An isolated subaccount cannot place order." } ],
+            request_type: "execute_place_orders"
+          }
+        }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.091"),
+        current_position: { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated", isolated_margin_usd: BigDecimal("1909") },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      classification = result.receipt.fetch(:submit_response_classification)
+      assert_equal "failed_before_submit", result.status
+      assert_equal "rejected", classification.fetch(:status)
+      assert_match "error_code=2081", classification.fetch(:message)
+      assert_match "isolated subaccount cannot place order", classification.fetch(:message)
+      assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), result.receipt.fetch(:submitted_order_summary).fetch(:sender)
+    end
+
 
     test "nado live submit http error surfaces endpoint failure" do
       service = NadoHedgeExecutionService.new(
