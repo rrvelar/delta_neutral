@@ -53,7 +53,11 @@ module HedgeVenues
         subaccount_preview: short_hex(subaccount),
         query_base_url: query_base_url,
         positions_count: positions.size,
-        raw_positions_count: raw_position_rows.size,
+        raw_positions_count: raw_position_like_rows.size,
+        raw_slots_count: raw_slot_rows.size,
+        raw_products_count: raw_product_rows.size,
+        raw_position_like_count: raw_position_like_rows.size,
+        unresolved_position_like_count: unresolved_position_like_rows.size,
         normalized_positions_count: positions.size,
         hedge_positions_count: eth_perp_positions.size,
         current_short_eth: current_eth_perp_short&.dig(:short_size)&.to_s("F"),
@@ -81,7 +85,7 @@ module HedgeVenues
     def raw_positions_present_but_unnormalized?
       return false if config_blockers.any?
 
-      raw_position_rows.any? && positions.empty?
+      unresolved_position_like_rows.any?
     rescue
       false
     end
@@ -155,6 +159,23 @@ module HedgeVenues
       raw_cross_margin_position_rows + isolated_position_rows
     end
 
+    def raw_slot_rows
+      raw_position_rows
+    end
+
+    def raw_product_rows
+      data = subaccount_info
+      Array(data["perp_products"] || data["products"]).select { |row| row.is_a?(Hash) }
+    end
+
+    def raw_position_like_rows
+      raw_position_rows.select { |row| position_like_row?(row) }
+    end
+
+    def unresolved_position_like_rows
+      raw_position_like_rows.reject { |row| positions.any? { |position| position.dig(:metadata, :raw) == row } }
+    end
+
     def raw_cross_margin_position_rows
       data = subaccount_info
       Array(data["perp_balances"] || data["perp_positions"] || data["positions"]).select { |row| row.is_a?(Hash) }
@@ -176,7 +197,7 @@ module HedgeVenues
       return [] if config_blockers.any?
 
       warnings = []
-      if raw_position_rows.any? && positions.empty?
+      if unresolved_position_like_rows.any?
         warnings << "Nado raw positions are present but no ETH-PERP position was normalized."
       end
       warnings << current_margin_warning if current_margin_warning
@@ -243,6 +264,7 @@ module HedgeVenues
         isolated_margin_usd: isolated_margin,
         metadata: {
           raw_product_id: product_id.presence,
+          raw: row,
           source: margin_mode == "cross" ? "subaccount_info" : "isolated_positions"
         },
         status: "ok"
@@ -338,6 +360,21 @@ module HedgeVenues
 
       side = (row["side"] || row["direction"]).to_s.downcase
       side == "short" || side == "sell" ? -unsigned : unsigned
+    end
+
+    def position_like_row?(row)
+      amount = position_amount(row)
+      return false if amount.nil? || amount.zero?
+
+      product_id = product_id_from(row)
+      product = product_map(subaccount_info).fetch(product_id, {})
+      return true if eth_perp_position?(position_symbol(row, product, product_id), product_id)
+
+      product_id.blank? && ambiguous_position_row?(row)
+    end
+
+    def ambiguous_position_row?(row)
+      row.key?("balance") || row.key?("size") || row.key?("size_base") || row.key?("amount") || row.key?("base_balance")
     end
 
     def price_from_product(product)

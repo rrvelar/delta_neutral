@@ -118,6 +118,8 @@ module HedgeVenues
       assert_equal BigDecimal("2061"), eth.fetch(:entry_price)
       assert_includes state.fetch(:warnings), "Current Nado hedge is cross-margin; target mode is isolated 1x. Close and reopen isolated after confirmation."
       assert_equal 1, state.fetch(:raw_positions_count)
+      assert_equal 1, state.fetch(:raw_position_like_count)
+      assert_equal 0, state.fetch(:unresolved_position_like_count)
       assert_equal 1, state.fetch(:normalized_positions_count)
       assert_equal "0.955", state.fetch(:current_short_eth)
       assert_equal "short", state.fetch(:current_side)
@@ -164,6 +166,29 @@ module HedgeVenues
       assert_equal 0, venue.account_state.fetch(:raw_positions_count)
     end
 
+    test "nado product slots and zero ETH-PERP balances do not block flat account" do
+      rows = Array.new(58) { |index| { product_id: index + 1, balance: { amount: "0" } } }
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true"), http_get: ->(_uri) {
+        {
+          data: {
+            perp_products: rows.map { |row| { product_id: row[:product_id], symbol: row[:product_id] == 4 ? "ETH-PERP" : "PERP-#{row[:product_id]}" } },
+            perp_balances: rows
+          }
+        }.to_json
+      })
+
+      assert_nil venue.read_position(symbol: "ETH")
+      state = venue.account_state
+      assert_equal 58, state.fetch(:raw_slots_count)
+      assert_equal 58, state.fetch(:raw_products_count)
+      assert_equal 0, state.fetch(:raw_positions_count)
+      assert_equal 0, state.fetch(:raw_position_like_count)
+      assert_equal 0, state.fetch(:unresolved_position_like_count)
+      assert_equal 0, state.fetch(:normalized_positions_count)
+      assert_not_includes state.fetch(:blockers), "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order."
+      assert_not_includes state.fetch(:warnings), "Nado raw positions are present but no ETH-PERP position was normalized."
+    end
+
     test "nado read position classifies ETH-PERP long as conflicting long" do
       venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(_uri) { nado_cross_margin_response(amount: "955000000000000000").to_json })
 
@@ -178,8 +203,8 @@ module HedgeVenues
       venue = HedgeVenues::Nado.new(env: nado_readonly_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true"), http_get: ->(_uri) {
         {
           data: {
-            positions: [ { product_id: 99, balance: { amount: "1000000000000000000" } } ],
-            perp_products: [ { product_id: 99, symbol: "DOGE-PERP" } ]
+            positions: [ { balance: { amount: "1000000000000000000" } } ],
+            perp_products: []
           }
         }.to_json
       })
@@ -187,6 +212,8 @@ module HedgeVenues
       assert_nil venue.read_position(symbol: "ETH")
       state = venue.account_state
       assert_equal 1, state.fetch(:raw_positions_count)
+      assert_equal 1, state.fetch(:raw_position_like_count)
+      assert_equal 1, state.fetch(:unresolved_position_like_count)
       assert_equal 0, state.fetch(:normalized_positions_count)
       assert_includes state.fetch(:warnings), "Nado raw positions are present but no ETH-PERP position was normalized."
       assert_includes state.fetch(:blockers), "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order."
