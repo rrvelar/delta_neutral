@@ -187,11 +187,19 @@ class HedgeSyncJob < ApplicationJob
       return
     end
 
-    preview = service.build_order_preview(position: hedge.position, action: "rebalance", size_eth: delta, max_slippage: nado_max_slippage)
-    rounded_size = BigDecimal(preview.dig(:summary, :rounded_size_eth).to_s)
-    if rounded_size.zero?
-      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — rounded order size is zero")
+    plan = service.plan_rebalance(target_size_eth: target_short, current_position: current_position, tolerance_eth: tolerance)
+    if plan[:action] == "no_op"
+      Rails.logger.debug { "[HedgeSyncJob] Nado hedge #{hedge.id}: within tolerance, no rebalance needed" }
       return
+    end
+
+    unless plan[:action] == "isolated_full_close_then_reopen"
+      preview = service.build_order_preview(position: hedge.position, action: "rebalance", size_eth: delta, max_slippage: nado_max_slippage, current_position: current_position)
+      rounded_size = BigDecimal(preview.dig(:summary, :rounded_size_eth).to_s)
+      if rounded_size.zero?
+        Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — rounded order size is zero")
+        return
+      end
     end
 
     result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
@@ -204,8 +212,8 @@ class HedgeSyncJob < ApplicationJob
       new_short: after_short,
       status: status,
       message: nado_rebalance_message(result),
-      order_side: result.receipt.dig(:submitted_order_summary, :side),
-      reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
+      order_side: nado_receipt_order_side(result.receipt),
+      reduce_only: nado_receipt_reduce_only(result.receipt),
       exchange_order_id: result.receipt[:exchange_order_id],
       receipt_path: receipt_path
     )
@@ -568,6 +576,17 @@ class HedgeSyncJob < ApplicationJob
       result.receipt[:final_message].presence ||
       result.receipt.dig(:submit_response_classification, :message).presence ||
       result.receipt[:final_status]
+  end
+
+  def nado_receipt_order_side(receipt)
+    receipt.dig(:submitted_order_summary, :side) ||
+      [ receipt.dig(:close_leg, :submitted_order_summary, :side), receipt.dig(:reopen_leg, :submitted_order_summary, :side) ].compact.join(",").presence
+  end
+
+  def nado_receipt_reduce_only(receipt)
+    return receipt.dig(:submitted_order_summary, :reduce_only) if receipt.dig(:submitted_order_summary, :reduce_only).in?([ true, false ])
+
+    nil
   end
 
   def write_nado_receipt(receipt)

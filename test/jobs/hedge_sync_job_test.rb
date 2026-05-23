@@ -24,7 +24,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       @current_position
     end
 
-    def build_order_preview(position:, action:, size_eth:, max_slippage:)
+    def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
       {
         summary: {
           rounded_size_eth: BigDecimal(size_eth.to_s).abs.to_s("F"),
@@ -34,6 +34,22 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
         },
         warnings: []
       }
+    end
+
+    def plan_rebalance(target_size_eth:, current_position:, tolerance_eth:)
+      current = current_short
+      target = BigDecimal(target_size_eth.to_s)
+      delta = target - current
+      action = if delta.abs <= BigDecimal(tolerance_eth.to_s)
+        "no_op"
+      elsif delta.positive?
+        "isolated_increase"
+      elsif current_position[:margin_mode] == "isolated"
+        "isolated_full_close_then_reopen"
+      else
+        "isolated_decrease"
+      end
+      { action: action, target_size_eth: target.to_s("F"), current_size_eth: current.to_s("F"), delta_eth: delta.to_s("F") }
     end
 
     def auto_rebalance_short(**kwargs)
@@ -228,6 +244,53 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     rebalance = hedge.short_rebalances.order(:id).last
     assert_equal "buy", rebalance.order_side
     assert_equal true, rebalance.reduce_only
+  end
+
+  test "nado hedge sync records isolated close reopen strategy for target decrease" do
+    hedge = nado_mellow_hedge(weth_exposure: "0.8")
+    result = NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
+      final_status: "submitted_and_confirmed",
+      final_message: "Nado execute_place_orders accepted order.",
+      action_plan: {
+        action: "isolated_full_close_then_reopen",
+        current_size_eth: "0.936",
+        target_size_eth: "0.8",
+        delta_eth: "-0.136"
+      },
+      full_close_reopen: true,
+      close_leg: {
+        submitted_order_summary: { side: "buy", reduce_only: true, full_close: true, appendix: "2817" },
+        exchange_order_id: "0x#{"11" * 32}",
+        post_submit_readback: nil
+      },
+      reopen_leg: {
+        submitted_order_summary: { side: "sell", reduce_only: false, rounded_size_eth: "0.8" },
+        exchange_order_id: "0x#{"22" * 32}",
+        post_submit_readback: { size: BigDecimal("-0.8") }
+      },
+      exchange_order_id: "0x#{"11" * 32},0x#{"22" * 32}",
+      post_submit_readback: { size: BigDecimal("-0.8") }
+    })
+    service = NadoAutoServiceStub.new(
+      current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
+      result: result
+    )
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_difference "ShortRebalance.count", 1 do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
+    assert_equal "buy,sell", rebalance.order_side
+    assert_nil rebalance.reduce_only
+    assert_equal BigDecimal("0.8"), rebalance.new_short_size
+    assert_equal "0x#{"11" * 32},0x#{"22" * 32}", rebalance.exchange_order_id
+    assert_equal BigDecimal("-0.136"), service.rebalance_calls.first.fetch(:delta_eth)
   end
 
   test "nado hedge sync skips within tolerance" do

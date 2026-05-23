@@ -327,6 +327,31 @@ module HedgeVenues
       assert_includes preflight.fetch(:blockers), "current Nado position already exists; use close/readback before opening"
     end
 
+    test "nado isolated planner chooses no op increase and full close reopen" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env)
+
+      no_op = service.plan_rebalance(
+        target_size_eth: BigDecimal("0.9361"),
+        current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
+        tolerance_eth: BigDecimal("0.001")
+      )
+      increase = service.plan_rebalance(
+        target_size_eth: BigDecimal("1.1"),
+        current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
+        tolerance_eth: BigDecimal("0.001")
+      )
+      decrease = service.plan_rebalance(
+        target_size_eth: BigDecimal("0.794"),
+        current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
+        tolerance_eth: BigDecimal("0.001")
+      )
+
+      assert_equal "no_op", no_op.fetch(:action)
+      assert_equal "isolated_increase", increase.fetch(:action)
+      assert_equal "isolated_full_close_then_reopen", decrease.fetch(:action)
+      assert_equal false, decrease.fetch(:partial_isolated_reduce_supported)
+    end
+
     test "nado live open submits single signed short with rounded size" do
       submitted = []
       fixed_now = Time.utc(2026, 5, 23, 12, 0, 0)
@@ -443,15 +468,18 @@ module HedgeVenues
       assert_equal "955000000000000000", order.fetch(:amount)
     end
 
-    test "nado live rebalance partial decrease isolated short is blocked before submit" do
+    test "nado live rebalance partial decrease isolated short uses full close then reopen" do
       submitted = []
+      venue = NadoPollingVenue.new([ nil, { size: BigDecimal("-0.845"), short_size: BigDecimal("0.845"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" } ], env: nado_live_env)
       service = NadoHedgeExecutionService.new(
         env: nado_live_env,
-        signer_post: ->(*) { raise "signer should not be called" },
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
         http_post: ->(_uri, payload) {
           submitted << payload
           { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
-        }
+        },
+        sleeper: ->(_seconds) { }
       )
 
       result = service.rebalance_short(
@@ -469,12 +497,100 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
-      assert_empty submitted
-      assert_equal "blocked_before_submit", result.status
-      assert_includes result.blockers, "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
+      assert_equal 2, submitted.size
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal "isolated_full_close_then_reopen", result.receipt.fetch(:action_plan).fetch(:action)
+      assert_equal true, result.receipt.fetch(:full_close_reopen)
+      close_order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      reopen_order = submitted.second.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      assert_equal "936000000000000000", close_order.fetch(:amount)
+      assert_equal "2817", close_order.fetch(:appendix)
+      assert_equal "-845000000000000000", reopen_order.fetch(:amount)
     end
 
-    test "nado live close isolated short uses isolated reduce only appendix" do
+    test "nado close reopen stops before reopen when close readback does not confirm flat" do
+      submitted = []
+      venue = NadoPollingVenue.new(
+        [
+          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
+          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
+          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" }
+        ],
+        env: nado_live_env
+      )
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.091"),
+        current_position: {
+          size: BigDecimal("-0.936"),
+          short_size: BigDecimal("0.936"),
+          symbol: "ETH-PERP",
+          side: "short",
+          margin_mode: "isolated",
+          isolated_margin_usd: BigDecimal("1909")
+        },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal 1, submitted.size
+      assert_equal "submitted_but_not_confirmed", result.status
+      assert_nil result.receipt.fetch(:reopen_leg)
+      assert_match "reopen was not submitted", result.receipt.fetch(:final_message)
+    end
+
+    test "nado close reopen records reopen rejection after confirmed close" do
+      submitted = []
+      venue = NadoPollingVenue.new([ nil ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          if submitted.size == 1
+            { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+          else
+            { status: "failure", data: [ { error_code: 2006, error: "Insufficient account health." } ] }
+          end
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.091"),
+        current_position: {
+          size: BigDecimal("-0.936"),
+          short_size: BigDecimal("0.936"),
+          symbol: "ETH-PERP",
+          side: "short",
+          margin_mode: "isolated",
+          isolated_margin_usd: BigDecimal("1909")
+        },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal 2, submitted.size
+      assert_equal "failed_before_submit", result.status
+      assert_equal "rejected", result.receipt.fetch(:reopen_leg).fetch(:submit_response_classification).fetch(:status)
+      assert_match "error_code=2006", result.receipt.fetch(:final_message)
+      assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado live close isolated short uses ui equivalent isolated reduce only appendix" do
       submitted = []
       signer_payloads = []
       isolated_sender = "0x#{"02" * 32}"
@@ -510,21 +626,26 @@ module HedgeVenues
       summary = signer_payloads.first.fetch(:payload_preview)
       decoded = summary.fetch(:appendix_decoded)
       appendix = order.fetch(:appendix).to_i
-      assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), order.fetch(:sender)
+      assert_equal "0x#{"11" * 20}64656661756c745f31000000", order.fetch(:sender)
       assert_equal isolated_sender, summary.fetch(:current_position_subaccount)
       assert_equal true, summary.fetch(:full_close)
+      assert_equal "ui_market_close_position_equivalent", summary.fetch(:close_strategy)
+      assert_equal "default_1", summary.fetch(:order_sender_kind)
       assert_equal "0.936", summary.fetch(:current_short_size_eth)
       assert_equal "0.936", summary.fetch(:rounded_size_eth)
       assert_equal "936000000000000000", order.fetch(:amount)
       assert_equal "buy", summary.fetch(:side)
       assert_equal true, summary.fetch(:reduce_only)
-      assert_equal "isolated_reduce_only", summary.fetch(:margin_mode)
+      assert_equal "isolated_ui_equivalent_close", summary.fetch(:margin_mode)
       assert_equal "1909.0", summary.fetch(:isolated_margin_usd)
-      assert_equal 1_909_000_000, summary.fetch(:isolated_margin_x6)
+      assert_nil summary.fetch(:isolated_margin_x6)
+      assert_equal 1_909_000_000, summary.fetch(:current_position_isolated_margin_x6)
       assert_equal true, decoded.fetch(:isolated)
       assert_equal true, decoded.fetch(:reduce_only)
       assert_equal "ioc", decoded.fetch(:order_type)
-      assert_equal 1_909_000_000, appendix >> 64
+      assert_equal 0, appendix >> 64
+      assert_equal 2817, appendix
+      assert_equal 13, order.fetch(:expiration).length
     end
 
     test "nado live close isolated short blocks instead of rounding full close into partial close" do
@@ -552,23 +673,28 @@ module HedgeVenues
       assert_includes result.blockers, "Nado isolated full close size is not divisible by size increment; refusing partial close."
     end
 
-    test "nado isolated reduce only blocks when isolated margin readback is missing" do
+    test "nado isolated ui equivalent close does not require isolated margin readback" do
+      submitted = []
       service = NadoHedgeExecutionService.new(
         env: nado_live_env,
-        signer_post: ->(*) { raise "signer should not be called" }
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
+        }
       )
 
-      result = service.rebalance_short(
+      result = service.close_short(
         position: mellow_position,
-        delta_eth: BigDecimal("-0.091"),
+        size_eth: BigDecimal("0.936"),
         current_position: { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
         confirmation: "CONFIRM_NADO",
         max_slippage: "0.01"
       )
 
-      assert_equal "blocked_before_submit", result.status
-      assert_includes result.blockers, "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
-      assert_includes result.blockers, "Nado isolated reduce-only close requires isolated margin readback."
+      assert_equal "submitted_and_confirmed", result.status
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      assert_equal "2817", order.fetch(:appendix)
     end
 
     test "nado accepted submit polls until readback confirms short" do
@@ -704,7 +830,7 @@ module HedgeVenues
       assert_equal "rejected", classification.fetch(:status)
       assert_match "error_code=2081", classification.fetch(:message)
       assert_match "isolated subaccount cannot place order", classification.fetch(:message)
-      assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), result.receipt.fetch(:submitted_order_summary).fetch(:sender)
+      assert_equal "0x#{"11" * 20}64656661756c745f31000000", result.receipt.fetch(:submitted_order_summary).fetch(:sender)
     end
 
     test "nado insufficient account health rejection records exchange reason" do
@@ -841,6 +967,7 @@ module HedgeVenues
         "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
         "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO",
         "NADO_API_BASE_URL" => "https://nado.example/v1",
+        "NADO_ACCOUNT_ADDRESS" => "0x#{"11" * 20}",
         "NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}",
         "EXECUTION_SIGNER_URL" => "http://127.0.0.1:9123",
         "NADO_ETH_PERP_PRODUCT_METADATA_JSON" => {

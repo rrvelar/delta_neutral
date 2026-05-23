@@ -12,6 +12,7 @@ class NadoHedgeExecutionService
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
   DEFAULT_MARGIN_MODE = "isolated".freeze
   DEFAULT_REQUESTED_LEVERAGE = BigDecimal("1")
+  UI_EQUIVALENT_ISOLATED_CLOSE_APPENDIX = 2817
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
@@ -26,6 +27,15 @@ class NadoHedgeExecutionService
   end
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
+    if action.to_s == "rebalance"
+      plan = plan_rebalance(
+        target_size_eth: short_size(current_position) + BigDecimal(size_eth.to_s),
+        current_position: current_position,
+        tolerance_eth: BigDecimal("0")
+      )
+      return close_reopen_preflight(position: position, plan: plan, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage) if plan[:action] == "isolated_full_close_then_reopen"
+    end
+
     order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
     blockers = live_blockers(
       position: position,
@@ -41,6 +51,7 @@ class NadoHedgeExecutionService
       live_supported: true,
       live_enabled: @venue.live_enabled?,
       action: action,
+      action_plan: action.to_s == "rebalance" ? plan_rebalance(target_size_eth: short_size(current_position) + BigDecimal(size_eth.to_s), current_position: current_position, tolerance_eth: BigDecimal("0")) : nil,
       target_hedge_size_eth: decimal_string(size_eth),
       rounded_order_size_eth: order.dig(:summary, :rounded_size_eth),
       estimated_notional_usd: order.dig(:summary, :estimated_notional_usd),
@@ -68,26 +79,47 @@ class NadoHedgeExecutionService
   end
 
   def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:)
-    execute(
-      position: position,
-      action: "rebalance",
-      size_eth: BigDecimal(delta_eth.to_s),
-      current_position: current_position,
-      confirmation: confirmation,
-      max_slippage: max_slippage
-    )
+    execute_rebalance(position: position, delta_eth: BigDecimal(delta_eth.to_s), current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  end
+
+  def plan_rebalance(target_size_eth:, current_position:, tolerance_eth:)
+    current_short = short_size(current_position)
+    target_short = BigDecimal(target_size_eth.to_s)
+    tolerance = BigDecimal(tolerance_eth.to_s)
+    delta = target_short - current_short
+    action = if current_position == :unavailable
+      "blocked"
+    elsif position_size(current_position).positive?
+      "blocked"
+    elsif delta.abs <= tolerance
+      "no_op"
+    elsif target_short.zero? && current_short.positive?
+      "isolated_full_close"
+    elsif delta.positive?
+      "isolated_increase"
+    elsif margin_mode(current_position) == "isolated"
+      "isolated_full_close_then_reopen"
+    elsif delta.negative?
+      "isolated_decrease"
+    else
+      "blocked"
+    end
+
+    {
+      action: action,
+      current_size_eth: decimal_string(current_short),
+      target_size_eth: decimal_string(target_short),
+      delta_eth: decimal_string(delta),
+      tolerance_eth: decimal_string(tolerance),
+      current_margin_mode: margin_mode(current_position),
+      desired_margin_mode: desired_margin_mode,
+      partial_isolated_reduce_supported: false,
+      strategy: action == "isolated_full_close_then_reopen" ? "full_close_then_reopen" : action
+    }
   end
 
   def auto_rebalance_short(position:, delta_eth:, current_position:, max_slippage:)
-    execute(
-      position: position,
-      action: "rebalance",
-      size_eth: BigDecimal(delta_eth.to_s),
-      current_position: current_position,
-      confirmation: nil,
-      max_slippage: max_slippage,
-      require_confirmation: false
-    )
+    execute_rebalance(position: position, delta_eth: BigDecimal(delta_eth.to_s), current_position: current_position, confirmation: nil, max_slippage: max_slippage, require_confirmation: false)
   end
 
   def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
@@ -102,7 +134,8 @@ class NadoHedgeExecutionService
     amount_x18 = decimal_to_x18(rounded_size)
     amount_x18 = -amount_x18 if side == "sell"
     now = @now.call
-    margin = margin_plan(action: action, reduce_only: reduce_only, rounded_size: rounded_size, rounded_price: rounded_price, current_position: current_position)
+    ui_equivalent_full_close = full_close && use_ui_equivalent_isolated_close?(current_position)
+    margin = margin_plan(action: action, reduce_only: reduce_only, rounded_size: rounded_size, rounded_price: rounded_price, current_position: current_position, ui_equivalent_full_close: ui_equivalent_full_close)
     order_fields = nado_order_fields(
       side: side,
       reduce_only: reduce_only,
@@ -111,7 +144,9 @@ class NadoHedgeExecutionService
       product: product,
       now: now,
       isolated_margin_x6: margin[:isolated_margin_x6],
-      sender: subaccount
+      sender: ui_equivalent_full_close ? nado_default_1_sender : subaccount,
+      appendix_override: ui_equivalent_full_close ? UI_EQUIVALENT_ISOLATED_CLOSE_APPENDIX : nil,
+      expiration_milliseconds: ui_equivalent_full_close
     )
     typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
     timing = order_timing_summary(order_fields, local_time: now)
@@ -125,6 +160,7 @@ class NadoHedgeExecutionService
         side: side,
         reduce_only: reduce_only,
         full_close: full_close,
+        close_strategy: ui_equivalent_full_close ? "ui_market_close_position_equivalent" : nil,
         current_short_size_eth: full_close ? decimal_string(short_size(current_position)) : nil,
         product_id: product[:product_id],
         rounded_size_eth: decimal_string(rounded_size),
@@ -133,6 +169,7 @@ class NadoHedgeExecutionService
         amount_x18: amount_x18.to_s,
         sender: order_fields[:sender],
         current_position_subaccount: isolated_position_subaccount(current_position),
+        order_sender_kind: ui_equivalent_full_close ? "default_1" : "configured_subaccount",
         appendix: order_fields[:appendix],
         order_type: "ioc",
         isolated: appendix_isolated?(order_fields[:appendix].to_i),
@@ -140,6 +177,7 @@ class NadoHedgeExecutionService
         requested_leverage: margin[:requested_leverage]&.to_s("F"),
         isolated_margin_usd: margin[:isolated_margin_usd]&.to_s("F"),
         isolated_margin_x6: margin[:isolated_margin_x6],
+        current_position_isolated_margin_x6: isolated_margin_x6_from_position(current_position),
         appendix_decoded: decode_appendix(order_fields[:appendix]),
         recv_time_ms: timing.dig(:diagnostics, :recv_time_ms),
         seconds_until_recv_time: timing.dig(:diagnostics, :seconds_until_recv_time),
@@ -160,6 +198,145 @@ class NadoHedgeExecutionService
 
   private
 
+  def execute_rebalance(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
+    target_size = short_size(current_position) + BigDecimal(delta_eth.to_s)
+    plan = plan_rebalance(target_size_eth: target_size, current_position: current_position, tolerance_eth: BigDecimal("0"))
+    return no_op_result(position: position, plan: plan, current_position: current_position) if plan[:action] == "no_op"
+    return execute_close_then_reopen(position: position, target_size: target_size, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, plan: plan) if plan[:action] == "isolated_full_close_then_reopen"
+    return execute(position: position, action: "close", size_eth: short_size(current_position), current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation) if plan[:action] == "isolated_full_close"
+
+    execute(
+      position: position,
+      action: "rebalance",
+      size_eth: delta_eth,
+      current_position: current_position,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      require_confirmation: require_confirmation
+    )
+  end
+
+  def close_reopen_preflight(position:, plan:, current_position:, confirmation:, max_slippage:)
+    close_order = build_order_preview(position: position, action: "close", size_eth: short_size(current_position), max_slippage: max_slippage, current_position: current_position)
+    close_blockers = live_blockers(position: position, action: "close", size_eth: short_size(current_position), current_position: current_position, confirmation: confirmation, order: close_order)
+    reopen_order = nil
+    reopen_blockers = []
+    target_size = BigDecimal(plan.fetch(:target_size_eth))
+    if close_blockers.empty? && target_size.positive?
+      reopen_order = build_order_preview(position: position, action: "open", size_eth: target_size, max_slippage: max_slippage, current_position: nil)
+      reopen_blockers = live_blockers(position: position, action: "open", size_eth: target_size, current_position: nil, confirmation: confirmation, order: reopen_order)
+    end
+
+    {
+      venue: "Nado",
+      mode: @venue.live_mode_state,
+      live_supported: true,
+      live_enabled: @venue.live_enabled?,
+      action: "rebalance",
+      action_plan: plan,
+      target_hedge_size_eth: plan.fetch(:target_size_eth),
+      rounded_order_size_eth: reopen_order&.dig(:summary, :rounded_size_eth),
+      estimated_notional_usd: reopen_order&.dig(:summary, :estimated_notional_usd),
+      intended_side: "close_then_sell",
+      symbol: DEFAULT_SYMBOL,
+      reduce_only_close_available: true,
+      current_venue_position: serialize_position(current_position),
+      current_venue_open_orders: "not_available",
+      order_summary: {
+        strategy: "full_close_then_reopen",
+        close_leg: sanitized_order_summary(close_order),
+        reopen_leg: reopen_order ? sanitized_order_summary(reopen_order) : nil
+      },
+      max_slippage: max_slippage.to_s,
+      submitted: false,
+      manual_action_required: (close_blockers + reopen_blockers).any?,
+      next_action: (close_blockers + reopen_blockers).any? ? "Resolve Nado live blockers before submitting." : "Nado isolated rebalance will close current isolated short and reopen target size.",
+      blockers: (close_blockers + reopen_blockers).uniq,
+      warnings: (close_order.fetch(:warnings) + (reopen_order&.fetch(:warnings) || [])).uniq
+    }
+  end
+
+  def execute_close_then_reopen(position:, target_size:, current_position:, confirmation:, max_slippage:, require_confirmation:, plan:)
+    close_result = execute(
+      position: position,
+      action: "close",
+      size_eth: short_size(current_position),
+      current_position: current_position,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      require_confirmation: require_confirmation
+    )
+    return combined_rebalance_result(position: position, plan: plan, current_position: current_position, close_result: close_result, reopen_result: nil, status: close_result.status) unless close_result.status == "submitted_and_confirmed"
+
+    reopen_result = execute(
+      position: position,
+      action: "open",
+      size_eth: target_size,
+      current_position: nil,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      require_confirmation: require_confirmation
+    )
+    combined_rebalance_result(position: position, plan: plan, current_position: current_position, close_result: close_result, reopen_result: reopen_result, status: reopen_result.status)
+  end
+
+  def combined_rebalance_result(position:, plan:, current_position:, close_result:, reopen_result:, status:)
+    final_readback = reopen_result&.receipt&.dig(:post_submit_readback) || close_result.receipt[:post_submit_readback]
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "rebalance",
+      venue: "nado",
+      position_id: position.id,
+      source: position.position_source,
+      source_external_id: position.external_id,
+      action_plan: plan,
+      full_close_reopen: true,
+      current_size_eth: plan[:current_size_eth],
+      target_size_eth: plan[:target_size_eth],
+      delta_eth: plan[:delta_eth],
+      pre_submit_readback: serialize_position(current_position),
+      close_leg: close_result.receipt,
+      reopen_leg: reopen_result&.receipt,
+      post_submit_readback: final_readback,
+      final_status: status,
+      final_message: combined_rebalance_message(close_result: close_result, reopen_result: reopen_result),
+      exchange_order_id: [ close_result.receipt[:exchange_order_id], reopen_result&.receipt&.dig(:exchange_order_id) ].compact.join(",").presence,
+      manual_action_required: manual_action_required?(status),
+      next_manual_instruction: manual_instruction(status),
+      blockers: close_result.blockers + (reopen_result&.blockers || []),
+      warnings: close_result.warnings + (reopen_result&.warnings || [])
+    }
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def combined_rebalance_message(close_result:, reopen_result:)
+    return "Nado close leg did not confirm flat; reopen was not submitted." unless close_result.status == "submitted_and_confirmed"
+    return reopen_result.receipt[:final_message] if reopen_result
+
+    close_result.receipt[:final_message]
+  end
+
+  def no_op_result(position:, plan:, current_position:)
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "rebalance",
+      venue: "nado",
+      position_id: position.id,
+      source: position.position_source,
+      source_external_id: position.external_id,
+      action_plan: plan,
+      submitted: false,
+      pre_submit_readback: serialize_position(current_position),
+      post_submit_readback: serialize_position(current_position),
+      final_status: "no_op",
+      final_message: "Nado isolated short is within tolerance; no order submitted.",
+      manual_action_required: false,
+      blockers: [],
+      warnings: []
+    }
+    Result.new("no_op", [], [], receipt)
+  end
+
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
     blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
@@ -173,9 +350,10 @@ class NadoHedgeExecutionService
     payload = submit_payload(order: order, signature: signing.fetch(:signature))
     response = post_execute(payload)
     parsed = parse_submit_response(response)
-    readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: action) : { attempts: [], position: nil }
+    expected_short = expected_short_after(action: action, size_eth: size_eth, current_position: current_position)
+    readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: action, expected_short: expected_short) : { attempts: [], position: nil }
     post_position = readback_poll.fetch(:position)
-    status = final_status(parsed, post_position: post_position, action: action)
+    status = final_status(parsed, post_position: post_position, action: action, expected_short: expected_short, confirmed: readback_poll[:confirmed])
     result(status, [], order, position, action, current_position, parsed, post_position, readback_poll)
   rescue => e
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
@@ -365,14 +543,22 @@ class NadoHedgeExecutionService
     (BigDecimal(size_eth.to_s) / increment).floor * increment
   end
 
-  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:, isolated_margin_x6:, sender:)
+  def product_size_increment
+    BigDecimal(product_metadata[:size_increment_x18].to_s) / BigDecimal(10**18)
+  rescue
+    BigDecimal("0.001")
+  end
+
+  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:, isolated_margin_x6:, sender:, appendix_override: nil, expiration_milliseconds: false)
+    expiration = now.to_i + DEFAULT_ORDER_TTL_SECONDS
+    expiration = ((now.to_f + DEFAULT_ORDER_TTL_SECONDS) * 1000).to_i if expiration_milliseconds
     {
       sender: sender,
       priceX18: decimal_to_x18(price).to_s,
       amount: amount_x18.to_s,
-      expiration: (now.to_i + DEFAULT_ORDER_TTL_SECONDS).to_s,
+      expiration: expiration.to_s,
       nonce: nado_receive_time_nonce(seed: "#{side}:#{amount_x18}:#{now.to_f}", now: now).to_s,
-      appendix: build_appendix(reduce_only: reduce_only, isolated_margin_x6: isolated_margin_x6).to_s
+      appendix: (appendix_override || build_appendix(reduce_only: reduce_only, isolated_margin_x6: isolated_margin_x6)).to_s
     }
   end
 
@@ -486,18 +672,19 @@ class NadoHedgeExecutionService
     submit_parse_result("unknown", nil, "Nado execute_place_orders returned status=#{data[:status].inspect}.", response_summary)
   end
 
-  def final_status(parsed, post_position:, action:)
+  def final_status(parsed, post_position:, action:, expected_short:, confirmed:)
     return "failed_before_submit" unless parsed[:status] == "submitted"
+    return action.to_s == "close" ? "submitted_but_not_confirmed" : "submitted_but_readback_pending" unless confirmed
 
     current_short = short_size(post_position)
     if action.to_s.in?(%w[open rebalance])
-      current_short.positive? ? "submitted_and_confirmed" : "submitted_but_readback_pending"
+      expected_short_confirmed?(current_short: current_short, expected_short: expected_short) ? "submitted_and_confirmed" : "submitted_but_readback_pending"
     else
       current_short.zero? ? "submitted_and_confirmed" : "submitted_but_not_confirmed"
     end
   end
 
-  def poll_post_submit_readback(action:)
+  def poll_post_submit_readback(action:, expected_short:)
     attempts = []
     POST_SUBMIT_READBACK_ATTEMPTS.times do |index|
       @sleeper.call(POST_SUBMIT_READBACK_DELAY_SECONDS) if index.positive?
@@ -506,19 +693,37 @@ class NadoHedgeExecutionService
       attempts << {
         attempt: index + 1,
         position_present: serialized.present?,
-        confirmed: readback_confirms_action?(position, action),
+        confirmed: readback_confirms_action?(position, action, expected_short: expected_short),
         readback: serialized
       }
-      return { attempts: attempts, position: position } if attempts.last.fetch(:confirmed)
+      return { attempts: attempts, position: position, confirmed: true } if attempts.last.fetch(:confirmed)
     end
-    { attempts: attempts, position: nil }
+    { attempts: attempts, position: nil, confirmed: false }
   end
 
-  def readback_confirms_action?(position, action)
+  def readback_confirms_action?(position, action, expected_short:)
     return false if position == :unavailable
 
     current_short = short_size(position)
-    action.to_s == "close" ? current_short.zero? : current_short.positive?
+    action.to_s == "close" ? current_short.zero? : expected_short_confirmed?(current_short: current_short, expected_short: expected_short)
+  end
+
+  def expected_short_after(action:, size_eth:, current_position:)
+    case action.to_s
+    when "open"
+      order_size(size_eth)
+    when "rebalance"
+      short_size(current_position) + BigDecimal(size_eth.to_s)
+    else
+      BigDecimal("0")
+    end
+  end
+
+  def expected_short_confirmed?(current_short:, expected_short:)
+    expected = BigDecimal(expected_short.to_s)
+    return current_short.zero? if expected.zero?
+
+    (current_short - expected).abs <= product_size_increment
   end
 
   def safe_read_position
@@ -750,8 +955,10 @@ class NadoHedgeExecutionService
     (appendix & (1 << 8)).positive?
   end
 
-  def margin_plan(action:, reduce_only:, rounded_size:, rounded_price:, current_position:)
+  def margin_plan(action:, reduce_only:, rounded_size:, rounded_price:, current_position:, ui_equivalent_full_close: false)
     if reduce_only
+      return ui_equivalent_close_margin_plan(current_position) if ui_equivalent_full_close
+
       return reduce_only_margin_plan(current_position)
     end
 
@@ -785,6 +992,17 @@ class NadoHedgeExecutionService
       isolated_margin_usd: margin_x6 ? BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000) : nil,
       isolated_margin_x6: margin_x6,
       blockers: blockers
+    }
+  end
+
+  def ui_equivalent_close_margin_plan(current_position)
+    margin_x6 = isolated_margin_x6_from_position(current_position)
+    {
+      margin_mode: "isolated_ui_equivalent_close",
+      requested_leverage: nil,
+      isolated_margin_usd: margin_x6 ? BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000) : nil,
+      isolated_margin_x6: nil,
+      blockers: []
     }
   end
 
@@ -822,6 +1040,10 @@ class NadoHedgeExecutionService
     (BigDecimal(raw.to_s) * BigDecimal(1_000_000)).round(0).to_i
   rescue ArgumentError
     nil
+  end
+
+  def use_ui_equivalent_isolated_close?(current_position)
+    margin_mode(current_position) == "isolated"
   end
 
   def isolated_position_subaccount(position)
@@ -970,6 +1192,13 @@ class NadoHedgeExecutionService
 
   def subaccount
     @env["NADO_ACCOUNT_SUBACCOUNT"].presence || @venue.send(:derive_sender)
+  end
+
+  def nado_default_1_sender
+    account = @env["NADO_ACCOUNT_ADDRESS"].to_s.downcase
+    return "0x#{account.delete_prefix('0x')}64656661756c745f31000000" if account.match?(/\A0x[0-9a-f]{40}\z/)
+
+    subaccount
   end
 
   def decimal_string(value)
