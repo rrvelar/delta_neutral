@@ -26,7 +26,7 @@ class NadoHedgeExecutionService
   end
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
-    order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage)
+    order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
     blockers = live_blockers(
       position: position,
       action: action,
@@ -49,6 +49,7 @@ class NadoHedgeExecutionService
       reduce_only_close_available: true,
       current_venue_position: serialize_position(current_position),
       current_venue_open_orders: "not_available",
+      order_summary: sanitized_order_summary(order),
       max_slippage: max_slippage.to_s,
       submitted: false,
       manual_action_required: blockers.any?,
@@ -89,7 +90,7 @@ class NadoHedgeExecutionService
     )
   end
 
-  def build_order_preview(position:, action:, size_eth:, max_slippage:)
+  def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
     side = order_side(action: action, size_eth: size_eth)
     reduce_only = reduce_only_order?(action: action, size_eth: size_eth)
     order_size = order_size(size_eth)
@@ -100,7 +101,7 @@ class NadoHedgeExecutionService
     amount_x18 = decimal_to_x18(rounded_size)
     amount_x18 = -amount_x18 if side == "sell"
     now = @now.call
-    margin = margin_plan(action: action, reduce_only: reduce_only, rounded_size: rounded_size, rounded_price: rounded_price)
+    margin = margin_plan(action: action, reduce_only: reduce_only, rounded_size: rounded_size, rounded_price: rounded_price, current_position: current_position)
     order_fields = nado_order_fields(
       side: side,
       reduce_only: reduce_only,
@@ -108,7 +109,8 @@ class NadoHedgeExecutionService
       amount_x18: amount_x18,
       product: product,
       now: now,
-      isolated_margin_x6: margin[:isolated_margin_x6]
+      isolated_margin_x6: margin[:isolated_margin_x6],
+      sender: order_sender(current_position)
     )
     typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
     timing = order_timing_summary(order_fields, local_time: now)
@@ -126,6 +128,7 @@ class NadoHedgeExecutionService
         rounded_price: decimal_string(rounded_price),
         estimated_notional_usd: decimal_string(rounded_size * rounded_price),
         amount_x18: amount_x18.to_s,
+        sender: order_fields[:sender],
         appendix: order_fields[:appendix],
         order_type: "ioc",
         isolated: appendix_isolated?(order_fields[:appendix].to_i),
@@ -154,7 +157,7 @@ class NadoHedgeExecutionService
   private
 
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
-    order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage)
+    order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
     blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
     return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil) if blockers.any?
 
@@ -356,9 +359,9 @@ class NadoHedgeExecutionService
     (BigDecimal(size_eth.to_s) / increment).floor * increment
   end
 
-  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:, isolated_margin_x6:)
+  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:, isolated_margin_x6:, sender:)
     {
-      sender: subaccount,
+      sender: sender,
       priceX18: decimal_to_x18(price).to_s,
       amount: amount_x18.to_s,
       expiration: (now.to_i + DEFAULT_ORDER_TTL_SECONDS).to_s,
@@ -408,8 +411,8 @@ class NadoHedgeExecutionService
       notional_usd: order.dig(:summary, :estimated_notional_usd),
       order_type: "protected_taker",
       price: order.dig(:summary, :rounded_price),
-      reduce_only: action.to_s == "close",
-      subaccount_id: subaccount,
+      reduce_only: order.dig(:summary, :reduce_only),
+      subaccount_id: order.dig(:summary, :sender) || subaccount,
       typed_data: typed_data,
       typed_data_hash: typed_data_hash(typed_data),
       expected_signer_address: @env["NADO_LINKED_SIGNER_ADDRESS"],
@@ -717,8 +720,10 @@ class NadoHedgeExecutionService
     (appendix & (1 << 8)).positive?
   end
 
-  def margin_plan(action:, reduce_only:, rounded_size:, rounded_price:)
-    return { margin_mode: "reduce_only", requested_leverage: nil, isolated_margin_usd: nil, isolated_margin_x6: nil, blockers: [] } if reduce_only
+  def margin_plan(action:, reduce_only:, rounded_size:, rounded_price:, current_position:)
+    if reduce_only
+      return reduce_only_margin_plan(current_position)
+    end
 
     blockers = []
     mode = desired_margin_mode
@@ -734,6 +739,21 @@ class NadoHedgeExecutionService
       requested_leverage: leverage,
       isolated_margin_usd: margin ? BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000) : nil,
       isolated_margin_x6: blockers.empty? ? margin_x6 : nil,
+      blockers: blockers
+    }
+  end
+
+  def reduce_only_margin_plan(current_position)
+    return { margin_mode: "reduce_only", requested_leverage: nil, isolated_margin_usd: nil, isolated_margin_x6: nil, blockers: [] } unless margin_mode(current_position) == "isolated"
+
+    margin_x6 = isolated_margin_x6_from_position(current_position)
+    blockers = []
+    blockers << "Nado isolated reduce-only close requires isolated margin readback." unless margin_x6
+    {
+      margin_mode: "isolated_reduce_only",
+      requested_leverage: nil,
+      isolated_margin_usd: margin_x6 ? BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000) : nil,
+      isolated_margin_x6: margin_x6,
       blockers: blockers
     }
   end
@@ -763,6 +783,28 @@ class NadoHedgeExecutionService
       isolated_margin_x6: isolated ? margin_x6 : nil,
       isolated_margin_usd: isolated ? (BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000)).to_s("F") : nil
     }
+  end
+
+  def isolated_margin_x6_from_position(position)
+    raw = position_value(position, :isolated_margin_usd)
+    return nil if raw.blank?
+
+    (BigDecimal(raw.to_s) * BigDecimal(1_000_000)).round(0).to_i
+  rescue ArgumentError
+    nil
+  end
+
+  def order_sender(position)
+    raw = position_value(position, :subaccount) || position_value(position, :sender)
+    raw = position.dig(:metadata, :raw, "subaccount") if raw.blank? && position.is_a?(Hash)
+    raw = position.dig(:metadata, :raw, "sender") if raw.blank? && position.is_a?(Hash)
+    raw.presence || subaccount
+  end
+
+  def position_value(position, key)
+    return nil unless position && position != :unavailable
+
+    position[key] || position[key.to_s]
   end
 
   def isolated_increase?(action, size_eth)
