@@ -93,7 +93,8 @@ class NadoHedgeExecutionService
   def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
     side = order_side(action: action, size_eth: size_eth)
     reduce_only = reduce_only_order?(action: action, size_eth: size_eth)
-    order_size = order_size(size_eth)
+    full_close = isolated_full_close?(action: action, current_position: current_position)
+    order_size = full_close ? short_size(current_position) : order_size(size_eth)
     product = product_metadata
     price = order_price(position: position, side: side, max_slippage: max_slippage, product: product)
     rounded_price = round_price(price, side: side, product: product)
@@ -123,6 +124,8 @@ class NadoHedgeExecutionService
         action: action,
         side: side,
         reduce_only: reduce_only,
+        full_close: full_close,
+        current_short_size_eth: full_close ? decimal_string(short_size(current_position)) : nil,
         product_id: product[:product_id],
         rounded_size_eth: decimal_string(rounded_size),
         rounded_price: decimal_string(rounded_price),
@@ -146,7 +149,7 @@ class NadoHedgeExecutionService
       typed_data: typed_data,
       order_fields: order_fields,
       product: product,
-      blockers: product.fetch(:blockers) + timing.fetch(:blockers) + margin.fetch(:blockers),
+      blockers: product.fetch(:blockers) + timing.fetch(:blockers) + margin.fetch(:blockers) + full_close_size_blockers(full_close: full_close, order_size: order_size, rounded_size: rounded_size),
       warnings: product.fetch(:warnings)
     }
   end
@@ -179,15 +182,16 @@ class NadoHedgeExecutionService
   end
 
   def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
-    order_size = order_size(size_eth)
+    requested_order_size = order_size(size_eth)
+    preview_order_size = decimal_or_nil(order.dig(:summary, :rounded_size_eth)) || requested_order_size
     blockers = []
     blockers << "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" unless @venue.live_flag_enabled?
     blockers << "submitted confirmation must equal #{@venue.live_confirmation_phrase}" if require_confirmation && !(confirmation.to_s == @venue.live_confirmation_phrase && @venue.live_confirmation_phrase.present?)
     blockers << "position must be active" unless position.active?
     blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
-    blockers << "target hedge size must be positive" if action.to_s == "open" && !order_size.positive?
-    blockers << "rebalance delta must be non-zero" if action.to_s == "rebalance" && order_size.zero?
-    blockers << "close size must be positive" if action.to_s == "close" && !order_size.positive?
+    blockers << "target hedge size must be positive" if action.to_s == "open" && !requested_order_size.positive?
+    blockers << "rebalance delta must be non-zero" if action.to_s == "rebalance" && requested_order_size.zero?
+    blockers << "close size must be positive" if action.to_s == "close" && !preview_order_size.positive?
     blockers << "Nado signer service is not configured" if signer_url.blank?
     blockers << "Nado signer service is unavailable" if signer_url.present? && !signer_available?
     blockers << "Nado submit URL is not configured" if submit_base_url.blank?
@@ -200,7 +204,7 @@ class NadoHedgeExecutionService
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
     blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
-    blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: order_size, current_position: current_position)
+    blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: preview_order_size, current_position: current_position)
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
   end
@@ -721,6 +725,17 @@ class NadoHedgeExecutionService
     return false unless short_size(current_position).positive?
 
     BigDecimal(order_size.to_s) < short_size(current_position)
+  end
+
+  def isolated_full_close?(action:, current_position:)
+    action.to_s == "close" && margin_mode(current_position) == "isolated" && short_size(current_position).positive?
+  end
+
+  def full_close_size_blockers(full_close:, order_size:, rounded_size:)
+    return [] unless full_close
+    return [] if BigDecimal(rounded_size.to_s) == BigDecimal(order_size.to_s)
+
+    [ "Nado isolated full close size is not divisible by size increment; refusing partial close." ]
   end
 
   def isolated_partial_reduce_blocker

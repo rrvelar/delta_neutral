@@ -492,7 +492,7 @@ module HedgeVenues
 
       service.close_short(
         position: mellow_position,
-        size_eth: BigDecimal("0.936"),
+        size_eth: BigDecimal("0.1"),
         current_position: {
           size: BigDecimal("-0.936"),
           short_size: BigDecimal("0.936"),
@@ -512,6 +512,9 @@ module HedgeVenues
       appendix = order.fetch(:appendix).to_i
       assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), order.fetch(:sender)
       assert_equal isolated_sender, summary.fetch(:current_position_subaccount)
+      assert_equal true, summary.fetch(:full_close)
+      assert_equal "0.936", summary.fetch(:current_short_size_eth)
+      assert_equal "0.936", summary.fetch(:rounded_size_eth)
       assert_equal "936000000000000000", order.fetch(:amount)
       assert_equal "buy", summary.fetch(:side)
       assert_equal true, summary.fetch(:reduce_only)
@@ -522,6 +525,31 @@ module HedgeVenues
       assert_equal true, decoded.fetch(:reduce_only)
       assert_equal "ioc", decoded.fetch(:order_type)
       assert_equal 1_909_000_000, appendix >> 64
+    end
+
+    test "nado live close isolated short blocks instead of rounding full close into partial close" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(*) { raise "signer should not be called" }
+      )
+
+      result = service.close_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.1"),
+        current_position: {
+          size: BigDecimal("-0.9365"),
+          short_size: BigDecimal("0.9365"),
+          symbol: "ETH-PERP",
+          side: "short",
+          margin_mode: "isolated",
+          isolated_margin_usd: BigDecimal("1909")
+        },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Nado isolated full close size is not divisible by size increment; refusing partial close."
     end
 
     test "nado isolated reduce only blocks when isolated margin readback is missing" do
