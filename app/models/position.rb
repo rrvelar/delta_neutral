@@ -53,13 +53,51 @@ class Position < ApplicationRecord
   end
 
   def mellow_metadata_hash
-    JSON.parse(mellow_metadata.presence || "{}")
-  rescue JSON::ParserError
+    case mellow_metadata
+    when Hash
+      mellow_metadata
+    when String
+      return {} if mellow_metadata.blank?
+
+      parsed = JSON.parse(mellow_metadata)
+      parsed.is_a?(Hash) ? parsed : {}
+    else
+      {}
+    end
+  rescue JSON::ParserError, TypeError
     {}
   end
 
   def mellow_metadata_hash=(value)
     self.mellow_metadata = JSON.generate(value || {})
+  end
+
+  def mellow_current_value_usd
+    mellow_metadata_decimal("user_total_value_usd") if mellow_metadata_usable?
+  end
+
+  def mellow_weth_exposure
+    mellow_metadata_decimal("user_weth_exposure") if mellow_metadata_usable?
+  end
+
+  def mellow_usdc_exposure
+    mellow_metadata_decimal("user_usdc_exposure") if mellow_metadata_usable?
+  end
+
+  def mellow_metadata_usable?
+    return false unless mellow_autopilot?
+
+    metadata = mellow_metadata_hash
+    metadata["hedge_ready"] == true && metadata["last_probe_confidence"].to_s == "high"
+  end
+
+  def mellow_metadata_decimal(key)
+    value = mellow_metadata_hash[key]
+    return nil if value.blank?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError
+    nil
   end
 
   def hedge_ready?

@@ -11,7 +11,7 @@
     <p class="text-gray-400 mt-1 flex items-center gap-2">
       <%= dex_display_name(@position) %> &middot;
       <%= chain_display_name(@position) %> &middot;
-      Token ID <%= @position.external_id %> &middot;
+      <%= @position.mellow_autopilot? ? "Observed token ID" : "Token ID" %> <%= @position.external_id %> &middot;
       <span id="copy-address" class="cursor-pointer hover:text-white transition inline-flex items-center gap-1" title="<%= @position.pool_address %>" onclick="navigator.clipboard.writeText('<%= @position.pool_address %>'); var icon=this.querySelector('.copy-icon'); icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M4.5 12.75l6 6 9-13.5\' />'; icon.classList.add('text-green-400'); setTimeout(function(){ icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75\' />'; icon.classList.remove('text-green-400'); }, 1500)">
         <%= @position.pool_address.to_s[0..5] %>&hellip;<%= @position.pool_address.to_s[-4..] %>
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 copy-icon">
@@ -44,6 +44,7 @@
 </div>
 
 <% if aerodrome_position?(@position) %>
+  <% position_valuation = @position_valuation || PositionValuation.current(@position) %>
   <% hedge_preview = aerodrome_hedge_preview_for(@position) %>
   <% aerodrome_hedge = @position.hedge %>
   <% weth_amount = @position.asset0.to_s.upcase == "WETH" || @position.asset0.to_s.upcase == "ETH" ? @position.asset0_amount : @position.asset1_amount %>
@@ -52,7 +53,7 @@
   <% aerodrome_hedge_paused = ENV["AERODROME_HEDGE_PAUSED"].nil? ? true : ENV["AERODROME_HEDGE_PAUSED"].to_s.downcase == "true" %>
   <% aerodrome_live_approved = ENV["AERODROME_LIVE_APPROVED"].to_s.downcase == "true" %>
   <% hyperliquid_testnet = ENV["HYPERLIQUID_TESTNET"].to_s.downcase == "true" %>
-  <% aerodrome_pool_delta = @position.entry_value_usd ? @position.total_value_usd - @position.entry_value_usd : nil %>
+  <% aerodrome_pool_delta = position_valuation.pool_delta_usd %>
   <% production_dashboard = @aerodrome_production_dashboard_status || {} %>
   <% hard_ceiling = production_dashboard[:hard_ceiling] || {} %>
   <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
@@ -73,7 +74,7 @@
           <div class="flex justify-between gap-4"><dt class="text-gray-500">DEX</dt><dd class="text-white"><%= dex_display_name(@position) %></dd></div>
           <div class="flex justify-between gap-4"><dt class="text-gray-500">Source</dt><dd class="text-white"><%= @position.source_label %></dd></div>
           <div class="flex justify-between gap-4"><dt class="text-gray-500">Chain</dt><dd class="text-white"><%= chain_display_name(@position) %></dd></div>
-          <div class="flex justify-between gap-4"><dt class="text-gray-500">Token ID</dt><dd class="text-white"><%= @position.external_id %></dd></div>
+          <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= @position.mellow_autopilot? ? "Observed strategy token ID" : "Token ID" %></dt><dd class="text-white"><%= @position.external_id %></dd></div>
           <div class="flex justify-between gap-4"><dt class="text-gray-500">Pool</dt><dd class="text-white text-right break-all"><%= @position.pool_address %></dd></div>
         </dl>
       </div>
@@ -86,9 +87,11 @@
             <div class="flex justify-between gap-4"><span class="text-gray-500">Tx hash</span><span class="text-white text-right break-all"><%= mellow["tx_hash"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted wallet</span><span class="text-white text-right break-all"><%= mellow["submitted_wallet"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Share token</span><span class="text-white text-right break-all"><%= mellow["share_token"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy token ID</span><span class="text-white"><%= mellow["strategy_token_id"].presence || @position.external_id %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Observed strategy token ID</span><span class="text-white"><%= mellow["strategy_token_id"].presence || @position.external_id %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white"><%= mellow["user_share_percent"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= mellow["last_probe_confidence"].presence || "unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Last probe at</span><span class="text-white"><%= mellow["last_probe_at"].presence || "unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">User total value USD</span><span class="text-white"><%= optional_usd_display(mellow["user_total_value_usd"]) %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white"><%= mellow["strategy_total_weth"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= mellow["strategy_total_usdc"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white"><%= mellow["user_weth_exposure"].presence || @position.asset0_amount %></span></div>
@@ -142,7 +145,7 @@
             <div class="flex justify-between gap-4"><span class="text-gray-500">Active</span><span class="text-white"><%= aerodrome_hedge.active? ? "yes" : "no" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Target percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.target * 100, precision: 2) %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Tolerance percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.tolerance * 100, precision: 2) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Target ETH short</span><span class="text-white"><%= target_eth_short ? number_with_precision(target_eth_short, precision: 6) : "Unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.hedge_target_label %></span><span class="text-white"><%= target_eth_short ? number_with_precision(target_eth_short, precision: 6) : "Unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Actual ETH short</span><span class="text-yellow-300">readback disabled / not queried</span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_ENABLED</span><span class="text-white"><%= aerodrome_hedge_enabled %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_PAUSED</span><span class="text-white"><%= aerodrome_hedge_paused %><%= " (default)" if ENV["AERODROME_HEDGE_PAUSED"].nil? %></span></div>
@@ -493,10 +496,13 @@
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
         <p class="text-gray-400 text-xs uppercase tracking-wide">PnL Baseline</p>
         <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Entry value</span><span class="text-white"><%= @position.entry_value_usd ? format_usd(@position.entry_value_usd) : "Unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Current pooled value</span><span class="text-white"><%= format_usd(@position.total_value_usd) %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Pool delta from entry</span><span class="<%= (aerodrome_pool_delta || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= aerodrome_pool_delta ? format_usd(aerodrome_pool_delta) : "Unavailable" %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.entry_value_label %></span><span class="text-white"><%= valuation_value_display(position_valuation.entry_value_usd) %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.current_value_label %></span><span class="text-white"><%= valuation_value_display(position_valuation.current_value_usd) %></span></div>
+          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.pool_delta_label %></span><span class="<%= (aerodrome_pool_delta || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= aerodrome_pool_delta ? format_usd(aerodrome_pool_delta) : "Unavailable" %></span></div>
         </div>
+        <% if position_valuation.warnings.present? %>
+          <p class="text-yellow-200 text-xs mt-3"><%= position_valuation.warnings.join("; ") %></p>
+        <% end %>
         <p class="text-gray-500 text-xs mt-3">PnL baseline starts from first Aerodrome snapshot unless manually set.</p>
       </div>
       <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
@@ -649,7 +655,8 @@
   </div>
 <% end %>
 
-<% pool_unrealized = @position.entry_value_usd ? @position.total_value_usd - @position.entry_value_usd : nil %>
+<% position_valuation = @position_valuation || PositionValuation.current(@position) %>
+<% pool_unrealized = position_valuation.pool_delta_usd %>
 <% latest_snap = @pnl_snapshots.first %>
 <% hedge_unrealized = (latest_snap&.hedge_unrealized || 0).to_d %>
 <% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
@@ -657,28 +664,31 @@
 <% total_fees = latest_snap&.total_fees_usd || 0 %>
 <% aerodrome_fees_pnl = @aerodrome_fees_report&.fetch(:total_fees_usd, nil).presence %>
 <% aerodrome_fees_pnl = BigDecimal(aerodrome_fees_pnl.to_s) if aerodrome_fees_pnl %>
-<% total_pnl = total_unrealized + hedge_realized + (aerodrome_position?(@position) ? 0 : total_fees) %>
+<% total_pnl_available = pool_unrealized.present? || !@position.mellow_autopilot? %>
+<% total_pnl = total_pnl_available ? total_unrealized + hedge_realized + (aerodrome_position?(@position) ? 0 : total_fees) : nil %>
 <% rewards_pnl = @aerodrome_rewards_report&.fetch(:claimable_aero_usd, nil).presence %>
 <% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
-<% total_pnl_with_rewards = rewards_pnl ? total_pnl + rewards_pnl : nil %>
+<% total_pnl_with_rewards = total_pnl && rewards_pnl ? total_pnl + rewards_pnl : nil %>
 <% total_pnl_with_rewards_and_fees = total_pnl_with_rewards && aerodrome_fees_pnl ? total_pnl_with_rewards + aerodrome_fees_pnl : nil %>
+<% mellow_asset0_value = @position.mellow_autopilot? && position_valuation.current_value_usd && position_valuation.usdc_exposure ? position_valuation.current_value_usd - position_valuation.usdc_exposure : nil %>
+<% mellow_asset1_value = @position.mellow_autopilot? ? position_valuation.usdc_exposure : nil %>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset0 %></p>
-    <p class="text-xl font-bold text-white"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %></p>
+    <p class="text-xl font-bold text-white"><%= @position.mellow_autopilot? ? valuation_value_display(mellow_asset0_value) : asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %></p>
     <p class="text-gray-500 text-sm"><%= amount_display(@position.asset0_amount, precision: 6) %> &middot; <%= price_display(@position.asset0_price_usd) %></p>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset1 %></p>
-    <p class="text-xl font-bold text-white"><%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
+    <p class="text-xl font-bold text-white"><%= @position.mellow_autopilot? ? valuation_value_display(mellow_asset1_value) : asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
     <p class="text-gray-500 text-sm"><%= amount_display(@position.asset1_amount, precision: 2) %> &middot; <%= price_display(@position.asset1_price_usd) %></p>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
-    <p class="text-gray-400 text-xs uppercase tracking-wide">Total Pooled Value</p>
-    <p class="text-xl font-bold text-white"><%= format_usd(@position.total_value_usd) %></p>
-    <% if @position.entry_value_usd %>
-      <p class="text-gray-500 text-sm">Entry: <%= format_usd(@position.entry_value_usd) %></p>
+    <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.mellow_autopilot? ? "Mellow Pro-Rata Value" : "Total Pooled Value" %></p>
+    <p class="text-xl font-bold text-white"><%= valuation_value_display(position_valuation.current_value_usd) %></p>
+    <% if position_valuation.entry_value_usd %>
+      <p class="text-gray-500 text-sm">Entry: <%= format_usd(position_valuation.entry_value_usd) %></p>
     <% else %>
       <p class="text-gray-500 text-sm"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %> &middot; <%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
     <% end %>
@@ -686,9 +696,9 @@
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge</p>
     <% if @position.hedge %>
-      <% hedge_value = @position.total_value_usd * @position.hedge.target %>
+      <% hedge_value = position_valuation.current_value_usd ? position_valuation.current_value_usd * @position.hedge.target : nil %>
       <p class="text-xl font-bold <%= @position.hedge.active? ? 'text-white' : 'text-gray-500' %>">
-        <%= format_usd(hedge_value) %>
+        <%= valuation_value_display(hedge_value) %>
       </p>
       <p class="text-gray-500 text-sm">Target: <%= number_to_percentage(@position.hedge.target * 100, precision: 0) %> &middot; Tolerance: <%= number_to_percentage(@position.hedge.tolerance * 100, precision: 0) %></p>
     <% else %>
@@ -701,11 +711,11 @@
 <div class="grid grid-cols-3 gap-4 mb-6">
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL</p>
-    <p class="text-2xl font-bold mt-2 <%= total_pnl >= 0 ? 'text-green-400' : 'text-red-400' %>">
-      <%= format_usd(total_pnl) %>
+    <p class="text-2xl font-bold mt-2 <%= (total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
+      <%= total_pnl ? format_usd(total_pnl) : "Unavailable" %>
     </p>
     <p class="text-gray-500 text-sm mt-1">
-      Unrealized: <span class="<%= total_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_unrealized) %></span>
+      Unrealized: <span class="<%= total_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %></span>
       &middot; Realized: <span class="<%= hedge_realized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(hedge_realized) %></span>
       &middot; Fees: <span class="text-green-400"><%= aerodrome_position?(@position) ? "see Aerodrome LP Fees" : format_usd(total_fees) %></span>
     </p>
@@ -713,10 +723,10 @@
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Total Unrealized</p>
     <p class="text-2xl font-bold mt-2 <%= total_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>">
-      <%= format_usd(total_unrealized) %>
+      <%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %>
     </p>
     <p class="text-gray-500 text-sm mt-1">
-      Pool: <span class="<%= (pool_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(pool_unrealized || 0) %></span>
+      Pool: <span class="<%= (pool_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %></span>
       &middot; Hedge: <span class="<%= hedge_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(hedge_unrealized) %></span>
     </p>
   </div>
@@ -731,7 +741,7 @@
   <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
     <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
       <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Excluding Rewards / Fees</p>
-      <p class="text-2xl font-bold mt-2 <%= total_pnl >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_pnl) %></p>
+      <p class="text-2xl font-bold mt-2 <%= (total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p>
       <p class="text-gray-500 text-sm mt-1">Pool and hedge only. Unclaimed AERO rewards and LP fee estimates excluded.</p>
     </div>
     <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">

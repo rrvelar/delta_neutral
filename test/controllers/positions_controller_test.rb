@@ -566,6 +566,72 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Claim rewards", response.body
   end
 
+  test "show displays Mellow pro rata pnl instead of direct lp valuation" do
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:71261528",
+      entry_value_usd: BigDecimal("2611.87311081"),
+      asset0_amount: BigDecimal("1.16492319796791"),
+      asset1_amount: BigDecimal("240.9127633559829"),
+      asset0_price_usd: BigDecimal("0"),
+      asset1_price_usd: BigDecimal("0.77208"),
+      mellow_metadata: JSON.generate(
+        "submitted_wallet" => position.wallet.address,
+        "share_token" => "0xshare",
+        "strategy_token_id" => "71261528",
+        "strategy_pool_address" => position.pool_address,
+        "user_share_percent" => "1.23",
+        "user_weth_exposure" => "1.16492319796791",
+        "user_usdc_exposure" => "240.9127633559829",
+        "user_total_value_usd" => "2611.873110814818",
+        "last_probe_at" => "2026-05-23T00:00:00Z",
+        "last_probe_confidence" => "high",
+        "hedge_ready" => true
+      )
+    )
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Mellow pro-rata current value", response.body
+    assert_match "Mellow entry value", response.body
+    assert_match "Mellow pro-rata delta from entry", response.body
+    assert_match "Mellow WETH pro-rata exposure", response.body
+    assert_match "Observed strategy token ID", response.body
+    assert_match "$2,611.87", response.body
+    assert_no_match "$186.00", response.body
+    assert_no_match "-$2,422", response.body
+  end
+
+  test "show displays unavailable Mellow pnl when pro rata value is not usable" do
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      entry_value_usd: BigDecimal("2611.87311081"),
+      asset0_price_usd: BigDecimal("0"),
+      asset1_price_usd: BigDecimal("0.372"),
+      mellow_metadata: JSON.generate(
+        "hedge_ready" => false,
+        "last_probe_confidence" => "low",
+        "user_total_value_usd" => "2611.873110814818"
+      )
+    )
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Mellow pro-rata current value", response.body
+    assert_match "Mellow pro-rata value is stale or unavailable.", response.body
+    assert_match "Unavailable", response.body
+    assert_no_match "-$2,422", response.body
+  end
+
   test "show displays mocked read-only Aerodrome LP fees and combined estimate" do
     position = create_aerodrome_position
     position.update!(entry_value_usd: BigDecimal("2500"))

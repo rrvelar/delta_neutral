@@ -142,6 +142,38 @@ class WalletSyncJobTest < ActiveSupport::TestCase
     assert_nil position.asset1_price_usd
   end
 
+  test "Aerodrome wallet sync does not deactivate Mellow Autopilot positions" do
+    wallet = base_wallet
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    mellow = wallet.positions.create!(
+      user: wallet.user,
+      dex: aerodrome_dex,
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:old-observed-token",
+      pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+      asset0: "WETH",
+      asset1: "USDC",
+      active: true,
+      mellow_metadata: JSON.generate("share_token" => "0xshare", "strategy_pool_address" => "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59")
+    )
+
+    stub_uniswap_positions(wallet.address, [])
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(wallet), [ "5016" ])
+
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "5016"
+    ) do
+      AerodromeSlipstreamService.stub(:new, service) do
+        WalletSyncJob.perform_now(wallet.id)
+      end
+    end
+
+    service.verify
+    assert_predicate mellow.reload, :active?
+  end
+
   test "Aerodrome missing config fails safely only when read-only is enabled" do
     wallet = base_wallet
 

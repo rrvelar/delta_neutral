@@ -303,6 +303,54 @@ class MellowAutopilotProbesControllerTest < ActionDispatch::IntegrationTest
     assert_equal true, position.mellow_metadata_hash.fetch("hedge_ready")
   end
 
+  test "same mellow share token and pool updates existing active position when strategy token id changes" do
+    first_report = hedgeable_transaction_report
+    second_report = hedgeable_transaction_report.merge(
+      strategy_token_id: "80000001",
+      user_weth_exposure: "0.33",
+      user_total_value_usd: "900.0",
+      pro_rata_exposure: hedgeable_transaction_report.fetch(:pro_rata_exposure).merge(
+        strategy_token_id: "80000001",
+        user_weth_exposure: "0.33",
+        user_total_value_usd: "900.0"
+      )
+    )
+
+    AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(first_report) }) do
+      post create_mellow_autopilot_position_path, params: {
+        mellow_position: {
+          tx_hash: VALID_TX_HASH,
+          wallet_address: first_report.fetch(:submitted_wallet),
+          network: "base",
+          deactivate_existing_positions: "1"
+        }
+      }
+    end
+    position = Position.order(:id).last
+
+    AerodromeAutopilotTransactionProbe.stub(:new, ->(**) { ProbeMock.new(second_report) }) do
+      assert_no_difference "Position.count" do
+        assert_no_difference "Hedge.count" do
+          post create_mellow_autopilot_position_path, params: {
+            mellow_position: {
+              tx_hash: VALID_TX_HASH,
+              wallet_address: second_report.fetch(:submitted_wallet),
+              network: "base"
+            }
+          }
+        end
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    position.reload
+    assert_equal "mellow:70927538", position.external_id
+    assert_equal BigDecimal("0.33"), position.asset0_amount
+    assert_equal BigDecimal("750.0"), position.entry_value_usd
+    assert_equal "80000001", position.mellow_metadata_hash.fetch("strategy_token_id")
+    assert_includes position.mellow_metadata_hash.fetch("observed_strategy_token_id_history"), "70927538"
+  end
+
   test "non hedgeable transaction probe cannot create mellow position" do
     report = hedgeable_transaction_report.merge(
       hedgeable: false,

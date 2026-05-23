@@ -296,6 +296,43 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_equal BigDecimal("0"), snapshot.total_fees_usd
   end
 
+  test "Mellow position sync does not call direct Aerodrome token id service" do
+    position = aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:70927538",
+      entry_value_usd: BigDecimal("750"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("0.25"),
+      asset1_amount: BigDecimal("125"),
+      asset0_price_usd: BigDecimal("2500"),
+      asset1_price_usd: BigDecimal("1"),
+      mellow_metadata: JSON.generate(
+        "hedge_ready" => true,
+        "last_probe_confidence" => "high",
+        "user_total_value_usd" => "750",
+        "user_weth_exposure" => "0.25",
+        "user_usdc_exposure" => "125"
+      )
+    )
+    sync = Object.new
+    sync.define_singleton_method(:sync) { { status: "synced", blockers: [] } }
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      AerodromeSlipstreamService.stub(:new, -> { raise "direct Aerodrome token-id sync should not be called" }) do
+        MellowAutopilotPositionSync.stub(:new, ->(position:) { sync }) do
+          assert_difference "PnlSnapshot.count", 1 do
+            PositionSyncJob.perform_now(position.id)
+          end
+        end
+      end
+    end
+
+    assert_equal BigDecimal("750"), position.reload.entry_value_usd
+    assert_equal BigDecimal("0"), position.pnl_snapshots.order(captured_at: :desc).first.pool_unrealized
+  end
+
   test "Aerodrome read-only position sync leaves amounts nil when amount math is partial" do
     position = aerodrome_position
     service = Minitest::Mock.new

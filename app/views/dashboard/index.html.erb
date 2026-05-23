@@ -30,6 +30,7 @@
     </thead>
     <tbody>
       <% @positions.each do |position| %>
+        <% valuation = PositionValuation.current(position) %>
         <% snapshot = position.pnl_snapshots.max_by(&:captured_at) %>
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
           <td class="p-4">
@@ -45,16 +46,16 @@
               </div>
             <% end %>
           </td>
-          <td class="p-4 text-right text-white"><%= format_usd(position.total_value_usd) %></td>
-          <% if snapshot %>
-            <td class="p-4 text-right <%= (snapshot.pool_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
-              <%= format_usd(snapshot.pool_unrealized || 0) %>
+          <td class="p-4 text-right text-white"><%= valuation_value_display(valuation.current_value_usd) %></td>
+          <% if snapshot || valuation.pool_delta_usd %>
+            <td class="p-4 text-right <%= (valuation.pool_delta_usd || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
+              <%= valuation.pool_delta_usd ? format_usd(valuation.pool_delta_usd) : "Unavailable" %>
             </td>
-            <td class="p-4 text-right <%= ((snapshot.hedge_unrealized || 0) + (snapshot.hedge_realized || 0)) >= 0 ? 'text-green-400' : 'text-red-400' %>">
-              <%= format_usd((snapshot.hedge_unrealized || 0) + (snapshot.hedge_realized || 0)) %>
+            <td class="p-4 text-right <%= ((snapshot&.hedge_unrealized || 0) + (snapshot&.hedge_realized || 0)) >= 0 ? 'text-green-400' : 'text-red-400' %>">
+              <%= snapshot ? format_usd((snapshot.hedge_unrealized || 0) + (snapshot.hedge_realized || 0)) : "Unavailable" %>
             </td>
             <td class="p-4 text-right text-green-400">
-              <%= format_usd(snapshot.total_fees_usd) %>
+              <%= snapshot ? format_usd(snapshot.total_fees_usd) : "Unavailable" %>
             </td>
           <% else %>
             <td class="p-4 text-right text-gray-500">-</td>

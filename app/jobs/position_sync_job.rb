@@ -192,10 +192,17 @@ class PositionSyncJob < ApplicationJob
       return
     end
 
+    valuation = PositionValuation.current(position)
+    if valuation.current_value_usd.nil?
+      Rails.logger.warn("PositionSyncJob: skipping Aerodrome PnL snapshot for position #{position.id} — normalized current value is unavailable")
+      return
+    end
+
     if position.entry_value_usd.nil?
-      position.update!(entry_value_usd: position.total_value_usd)
+      position.update!(entry_value_usd: valuation.current_value_usd)
       Rails.logger.debug { "[PositionSyncJob] Aerodrome position #{position.id} entry_value_usd set to #{position.entry_value_usd}" }
     end
+    valuation = PositionValuation.current(position)
 
     PnlSnapshot.create!(
       position: position,
@@ -206,7 +213,7 @@ class PositionSyncJob < ApplicationJob
       asset1_price_usd: position.asset1_price_usd,
       hedge_unrealized: BigDecimal("0"),
       hedge_realized: BigDecimal("0"),
-      pool_unrealized: position.total_value_usd - position.entry_value_usd,
+      pool_unrealized: valuation.pool_delta_usd || BigDecimal("0"),
       collected_fees0: BigDecimal("0"),
       collected_fees1: BigDecimal("0"),
       uncollected_fees0: BigDecimal("0"),

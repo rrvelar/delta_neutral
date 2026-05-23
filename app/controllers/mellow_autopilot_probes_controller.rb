@@ -92,7 +92,7 @@ class MellowAutopilotProbesController < ApplicationController
     blockers << "strategy token ID is required" if report[:strategy_token_id].blank?
     blockers << "share token is required" if report.dig(:pro_rata_exposure, :share_token).blank?
     blockers << "user WETH exposure is required" if report[:user_weth_exposure].blank?
-    if Position.active_hedgeable.exists? && !ActiveModel::Type::Boolean.new.cast(mellow_position_params[:deactivate_existing_positions])
+    if Position.active_hedgeable.exists? && existing_mellow_position_for(report).nil? && !ActiveModel::Type::Boolean.new.cast(mellow_position_params[:deactivate_existing_positions])
       blockers << "Only one active hedgeable position is supported. Deactivate the existing position first or select deactivate existing."
     end
     blockers.concat(report.fetch(:blockers, []))
@@ -107,11 +107,17 @@ class MellowAutopilotProbesController < ApplicationController
       address: report.fetch(:submitted_wallet)
     )
     metadata = mellow_metadata_from_report(report)
-    position = Current.user.positions.create!(
+    position = existing_mellow_position_for(report)
+    previous_token_id = position&.mellow_metadata_hash&.fetch("strategy_token_id", nil)
+    if previous_token_id.present? && previous_token_id != metadata["strategy_token_id"]
+      metadata["observed_strategy_token_id_history"] = Array(position.mellow_metadata_hash["observed_strategy_token_id_history"]) | [ previous_token_id ]
+    end
+
+    attributes = {
       dex: dex,
       wallet: wallet,
       source: Position::SOURCE_MELLOW_AUTOPILOT,
-      external_id: "mellow:#{report.fetch(:strategy_token_id)}",
+      external_id: position&.external_id || "mellow:#{report.fetch(:strategy_token_id)}",
       pool_address: report.fetch(:strategy_pool_address),
       asset0: "WETH",
       asset1: "USDC",
@@ -119,12 +125,31 @@ class MellowAutopilotProbesController < ApplicationController
       asset1_amount: report[:user_usdc_exposure].present? ? BigDecimal(report.fetch(:user_usdc_exposure)) : nil,
       asset0_price_usd: nil,
       asset1_price_usd: BigDecimal("1"),
-      entry_value_usd: report[:user_total_value_usd].present? ? BigDecimal(report.fetch(:user_total_value_usd)) : nil,
       active: true,
       mellow_metadata: JSON.generate(metadata)
-    )
-    position.create_hedge!(active: true, target: BigDecimal("1.0"), tolerance: BigDecimal("0.03"))
+    }
+    if position.nil? || position.entry_value_usd.nil?
+      attributes[:entry_value_usd] = report[:user_total_value_usd].present? ? BigDecimal(report.fetch(:user_total_value_usd)) : nil
+    end
+
+    position ||= Current.user.positions.build
+    position.update!(attributes)
+    position.create_hedge!(active: true, target: BigDecimal("1.0"), tolerance: BigDecimal("0.03")) unless position.hedge
     position
+  end
+
+  def existing_mellow_position_for(report)
+    exposure = report.fetch(:pro_rata_exposure)
+    submitted_wallet = report.fetch(:submitted_wallet).to_s.downcase
+    share_token = exposure[:share_token].to_s.downcase
+    strategy_pool = exposure[:strategy_pool_address].to_s.downcase
+    Current.user.positions.includes(:wallet).active.where(source: Position::SOURCE_MELLOW_AUTOPILOT).detect do |position|
+      metadata = position.mellow_metadata_hash
+      wallet_match = position.wallet.address.to_s.downcase == submitted_wallet || metadata["submitted_wallet"].to_s.downcase == submitted_wallet
+      wallet_match &&
+        metadata["share_token"].to_s.downcase == share_token &&
+        (metadata["strategy_pool_address"].to_s.downcase == strategy_pool || position.pool_address.to_s.downcase == strategy_pool)
+    end
   end
 
   def mellow_metadata_from_report(report)

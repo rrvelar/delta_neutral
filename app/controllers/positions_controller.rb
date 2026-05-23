@@ -83,6 +83,7 @@ class PositionsController < ApplicationController
   # @return [void]
   def show
     @position = Current.user.positions.includes(:dex, :hedge, wallet: :network).find(params[:id])
+    @position_valuation = PositionValuation.current(@position)
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
     if @position.dex.name == "aerodrome_slipstream"

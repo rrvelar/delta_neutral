@@ -102,10 +102,11 @@ class WalletSyncJob < ApplicationJob
       active_external_ids << position_data.token_id
       amount_attributes = aerodrome_amount_attributes(position_data)
       price_attributes = aerodrome_price_attributes(position_data)
-      position = wallet.positions.where(dex: aerodrome_dex).find_or_initialize_by(external_id: position_data.token_id)
+      position = wallet.positions.where(dex: aerodrome_dex, source: [ nil, Position::SOURCE_AERODROME_DIRECT ]).find_or_initialize_by(external_id: position_data.token_id)
       position.assign_attributes(
         user: wallet.user,
         dex: aerodrome_dex,
+        source: Position::SOURCE_AERODROME_DIRECT,
         asset0: position_data.token0_symbol,
         asset1: position_data.token1_symbol,
         asset0_amount: amount_attributes.fetch(:asset0_amount),
@@ -118,7 +119,7 @@ class WalletSyncJob < ApplicationJob
       position.save!
     end
 
-    wallet.positions.active.where(dex: aerodrome_dex).where.not(external_id: active_external_ids).update_all(active: false)
+    wallet.positions.active.where(dex: aerodrome_dex, source: [ nil, Position::SOURCE_AERODROME_DIRECT ]).where.not(external_id: active_external_ids).update_all(active: false)
   end
 
   def aerodrome_read_only_enabled?

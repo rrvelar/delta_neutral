@@ -67,6 +67,16 @@ module ApplicationHelper
     value.nil? ? "Unavailable" : format_usd(value)
   end
 
+  def valuation_value_display(value)
+    value.nil? ? "Unavailable" : format_usd(value)
+  end
+
+  def optional_usd_display(value)
+    value.blank? ? "unavailable" : format_usd(BigDecimal(value.to_s))
+  rescue ArgumentError
+    "unavailable"
+  end
+
   def rebalance_status_class(status)
     case status.to_s
     when ShortRebalance::STATUS_SUCCESS
@@ -119,7 +129,7 @@ module ApplicationHelper
       amount1_decimal: position.asset1_amount,
       token0_price_usd: position.asset0_price_usd,
       token1_price_usd: position.asset1_price_usd,
-      total_value_usd: position.total_value_usd,
+      total_value_usd: PositionValuation.current(position).current_value_usd,
       amount_verified: true,
       valuation_supported: true
     )

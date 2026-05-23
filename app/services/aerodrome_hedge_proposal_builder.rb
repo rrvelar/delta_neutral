@@ -32,7 +32,7 @@ class AerodromeHedgeProposalBuilder
       amount1_decimal: position.asset1_amount,
       token0_price_usd: position.asset0_price_usd,
       token1_price_usd: position.asset1_price_usd,
-      total_value_usd: position.total_value_usd,
+      total_value_usd: PositionValuation.current(position).current_value_usd,
       amount_verified: true,
       valuation_supported: true
     )

@@ -78,7 +78,7 @@ class AerodromeRewardsCheck
       asset1: position.asset1,
       asset0_amount: position.asset0_amount,
       asset1_amount: position.asset1_amount,
-      current_pooled_value_usd: position.total_value_usd
+      current_pooled_value_usd: PositionValuation.current(position).current_value_usd
     }
   end
 

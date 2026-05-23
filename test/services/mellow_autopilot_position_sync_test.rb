@@ -19,6 +19,21 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
     assert_equal "high", position.mellow_metadata_hash.fetch("last_probe_confidence")
   end
 
+  test "sync does not reset existing entry value and records changed observed token id history" do
+    position = create_mellow_position
+    position.update!(entry_value_usd: BigDecimal("777.0"))
+    report = hedgeable_report(user_weth: "0.333")
+    report[:pro_rata_exposure] = report.fetch(:pro_rata_exposure).merge(strategy_token_id: "80000001", user_total_value_usd: "999.0")
+
+    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+
+    assert_equal "synced", result.fetch(:status)
+    position.reload
+    assert_equal BigDecimal("777.0"), position.entry_value_usd
+    assert_equal "80000001", position.mellow_metadata_hash.fetch("strategy_token_id")
+    assert_includes position.mellow_metadata_hash.fetch("observed_strategy_token_id_history"), "70927538"
+  end
+
   test "sync marks mellow position not hedge ready when strategy weth unavailable" do
     position = create_mellow_position
     report = hedgeable_report(user_weth: nil).merge(
@@ -64,7 +79,7 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
       asset0_price_usd: BigDecimal("2500"),
       asset1_price_usd: BigDecimal("1"),
       active: true,
-      mellow_metadata: JSON.generate("tx_hash" => "0xtx", "submitted_wallet" => wallet.address)
+      mellow_metadata: JSON.generate("tx_hash" => "0xtx", "submitted_wallet" => wallet.address, "strategy_token_id" => "70927538")
     )
     position.create_hedge!(target: BigDecimal("1.0"), tolerance: BigDecimal("0.03"), active: true)
     position

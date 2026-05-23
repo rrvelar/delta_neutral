@@ -20,6 +20,7 @@
     </thead>
     <tbody>
       <% @positions.each do |position| %>
+        <% valuation = PositionValuation.current(position) %>
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
           <td class="p-4">
             <%= link_to position_path(position), class: "text-blue-400 hover:text-blue-300 font-medium" do %>
@@ -27,7 +28,7 @@
             <% end %>
             <% if aerodrome_position?(position) %>
               <div class="mt-2 space-y-1">
-                <p class="text-gray-500 text-xs">Chain: <%= chain_display_name(position) %> &middot; Token ID: <%= position.external_id %></p>
+                <p class="text-gray-500 text-xs">Chain: <%= chain_display_name(position) %> &middot; <%= position.mellow_autopilot? ? "Observed token ID" : "Token ID" %>: <%= position.external_id %></p>
                 <p class="text-gray-500 text-xs">Pool: <%= position.pool_address %></p>
                 <div class="flex flex-wrap gap-1">
                   <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900/40 text-yellow-300 border border-yellow-800">Monitor-only</span>
@@ -40,7 +41,7 @@
           <td class="p-4 text-gray-300"><%= dex_display_name(position) %></td>
           <td class="p-4 text-right text-white"><%= amount_display(position.asset0_amount, precision: 6) %></td>
           <td class="p-4 text-right text-white"><%= amount_display(position.asset1_amount, precision: 2) %></td>
-          <td class="p-4 text-right text-white font-medium"><%= format_usd(position.total_value_usd) %></td>
+          <td class="p-4 text-right text-white font-medium"><%= valuation_value_display(valuation.current_value_usd) %></td>
           <td class="p-4 text-center">
             <% if aerodrome_position?(position) %>
               <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-yellow-900/50 text-yellow-300 border border-yellow-800">Hedge disabled</span>

@@ -280,6 +280,8 @@ class AerodromeDashboardHedgeAction
   end
 
   def weth_amount
+    return @position.mellow_weth_exposure if @position.mellow_autopilot? && @position.mellow_weth_exposure
+
     if HEDGEABLE_SYMBOLS.include?(@position.asset0.to_s.upcase)
       @position.asset0_amount
     elsif HEDGEABLE_SYMBOLS.include?(@position.asset1.to_s.upcase)
@@ -288,6 +290,11 @@ class AerodromeDashboardHedgeAction
   end
 
   def eth_price
+    if @position.mellow_autopilot? && @position.mellow_weth_exposure&.positive? && @position.mellow_current_value_usd
+      usdc = @position.mellow_usdc_exposure || BigDecimal("0")
+      return (@position.mellow_current_value_usd - usdc) / @position.mellow_weth_exposure
+    end
+
     if HEDGEABLE_SYMBOLS.include?(@position.asset0.to_s.upcase)
       @position.asset0_price_usd
     elsif HEDGEABLE_SYMBOLS.include?(@position.asset1.to_s.upcase)
