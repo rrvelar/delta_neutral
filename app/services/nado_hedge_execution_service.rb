@@ -5,6 +5,7 @@ class NadoHedgeExecutionService
   DEFAULT_SYMBOL = "ETH-PERP".freeze
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   DEFAULT_ORDER_TTL_SECONDS = 3600
+  EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
@@ -187,6 +188,8 @@ class NadoHedgeExecutionService
       estimated_notional_usd: order.dig(:summary, :estimated_notional_usd),
       pre_submit_readback: serialize_position(pre_position),
       submitted_order_summary: sanitized_order_summary(order),
+      submit_response_classification: submit_result,
+      raw_submit_response_summary: submit_result&.dig(:response_summary),
       exchange_order_id: submit_result&.dig(:exchange_order_id),
       post_submit_readback: serialize_position(post_position),
       final_status: status,
@@ -395,28 +398,53 @@ class NadoHedgeExecutionService
 
   def submit_payload(order:, signature:)
     {
-      place_order: {
-        product_id: order.dig(:product, :product_id),
-        order: order.fetch(:order_fields),
-        signature: signature
+      place_orders: {
+        orders: [
+          {
+            product_id: order.dig(:product, :product_id),
+            order: order.fetch(:order_fields),
+            signature: signature
+          }
+        ],
+        stop_on_failure: nil
       }
     }
   end
 
   def post_execute(payload)
-    @http_post.call(URI.join(submit_base_url.end_with?("/") ? submit_base_url : "#{submit_base_url}/", "execute"), payload)
+    uri = URI.join(submit_base_url.end_with?("/") ? submit_base_url : "#{submit_base_url}/", "execute")
+    response = @http_post.call(uri, payload)
+    response.is_a?(Hash) ? response.merge("_endpoint" => "POST #{uri.path}") : response
+  rescue => e
+    {
+      "_http_error" => true,
+      "_endpoint" => "POST #{uri.path}",
+      "error" => "#{e.class}: #{e.message}"
+    }
   end
 
   def parse_submit_response(response)
     data = response.is_a?(Hash) ? response.with_indifferent_access : {}
-    payload = data[:data].is_a?(Array) ? data[:data].first : data[:data]
-    payload = payload.with_indifferent_access if payload.is_a?(Hash)
-    digest = payload&.dig(:digest) || data[:digest]
-    if data[:status].to_s.downcase.in?(%w[success submitted accepted]) && digest.to_s.match?(/\A0x[0-9a-fA-F]{64}\z/)
-      { status: "submitted", exchange_order_id: digest, message: data[:status].to_s }
-    else
-      { status: "failed", exchange_order_id: nil, message: (payload&.dig(:error) || data[:error] || data[:message] || data[:status]).to_s }
+    response_summary = sanitized_submit_response_summary(data)
+    return submit_parse_result("http_error", nil, http_error_message(data), response_summary) if data[:_http_error]
+
+    return submit_parse_result("unknown", nil, "Nado execute_place_orders response was not an object.", response_summary) unless response.is_a?(Hash)
+
+    status_text = data[:status].to_s.downcase
+    row = place_orders_response_rows(data).find { |candidate| candidate[:error].present? || candidate[:error_code].present? }
+    return submit_parse_result("rejected", nil, nado_place_orders_error_message(row || data), response_summary) if status_text.in?(%w[failure failed error rejected])
+    return submit_parse_result("rejected", nil, nado_place_orders_error_message(row), response_summary) if row
+
+    digest = accepted_digest(data)
+    if status_text.in?(%w[success submitted accepted])
+      if valid_digest?(digest)
+        return submit_parse_result("submitted", digest, "Nado execute_place_orders accepted order.", response_summary)
+      end
+
+      return submit_parse_result("unknown", nil, "Nado execute_place_orders response missing digest: #{compact_response_text(response_summary)}", response_summary)
     end
+
+    submit_parse_result("unknown", nil, "Nado execute_place_orders returned status=#{data[:status].inspect}.", response_summary)
   end
 
   def final_status(parsed, post_position:, action:)
@@ -439,9 +467,72 @@ class NadoHedgeExecutionService
   def sanitized_order_summary(order)
     order.fetch(:summary).merge(
       endpoint: "POST /execute",
+      body_shape: EXECUTE_BODY_SHAPE,
+      request_type: "place_orders",
       signature: "<redacted>",
       typed_data_hash: typed_data_hash(order[:typed_data])
     )
+  end
+
+  def submit_parse_result(status, exchange_order_id, message, response_summary)
+    {
+      status: status,
+      exchange_order_id: exchange_order_id,
+      message: message,
+      response_summary: response_summary
+    }
+  end
+
+  def place_orders_response_rows(data)
+    rows = data[:data].is_a?(Array) ? data[:data] : []
+    rows.filter_map { |row| row.is_a?(Hash) ? row.with_indifferent_access : nil }
+  end
+
+  def accepted_digest(data)
+    place_orders_response_rows(data).each do |row|
+      return row[:digest] if row[:digest].present?
+    end
+
+    payload = data[:data].is_a?(Hash) ? data[:data].with_indifferent_access : nil
+    payload&.dig(:digest) || data[:digest]
+  end
+
+  def valid_digest?(digest)
+    digest.to_s.match?(/\A0x[0-9a-fA-F]{64}\z/)
+  end
+
+  def nado_place_orders_error_message(payload)
+    code = payload[:error_code]
+    error = (payload[:error] || payload[:message] || "unknown error").to_s
+    error = "recv_time expired" if code.to_i == 2011 && error.include?("recv_time")
+    code_text = code.present? ? "error_code=#{code} " : ""
+    "Nado execute_place_orders rejected order: #{code_text}#{error}."
+  end
+
+  def http_error_message(data)
+    raw = data[:error].presence || data[:message].presence || data[:body].presence || "unknown error"
+    "#{data[:_endpoint] || "POST /execute"} HTTP error: #{raw}"
+  end
+
+  def compact_response_text(value)
+    JSON.generate(value).truncate(300)
+  end
+
+  def sanitized_submit_response_summary(value)
+    case value
+    when Hash
+      value.each_with_object({}) do |(key, nested), sanitized|
+        sanitized[key] = sensitive_key?(key) ? "<redacted>" : sanitized_submit_response_summary(nested)
+      end
+    when Array
+      value.map { |nested| sanitized_submit_response_summary(nested) }
+    else
+      value
+    end
+  end
+
+  def sensitive_key?(key)
+    key.to_s.downcase.in?(%w[signature private_key privatekey authorization cookie auth_header])
   end
 
   def manual_action_required?(status)

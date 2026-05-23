@@ -203,7 +203,7 @@ class HedgeSyncJob < ApplicationJob
       old_short: current_short,
       new_short: after_short,
       status: status,
-      message: result.blockers.presence&.join("; ") || result.receipt[:final_status],
+      message: nado_rebalance_message(result),
       order_side: result.receipt.dig(:submitted_order_summary, :side),
       reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
       exchange_order_id: result.receipt[:exchange_order_id],
@@ -561,6 +561,12 @@ class HedgeSyncJob < ApplicationJob
       exchange_order_id: exchange_order_id,
       receipt_path: receipt_path
     )
+  end
+
+  def nado_rebalance_message(result)
+    result.blockers.presence&.join("; ") ||
+      result.receipt.dig(:submit_response_classification, :message).presence ||
+      result.receipt[:final_status]
   end
 
   def write_nado_receipt(receipt)

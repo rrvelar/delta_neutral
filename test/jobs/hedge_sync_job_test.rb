@@ -14,9 +14,10 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
   class NadoAutoServiceStub
     attr_reader :rebalance_calls
 
-    def initialize(current_position:)
+    def initialize(current_position:, result: nil)
       @current_position = current_position
       @rebalance_calls = []
+      @result = result
     end
 
     def read_position
@@ -37,6 +38,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
     def auto_rebalance_short(**kwargs)
       @rebalance_calls << kwargs
+      return @result if @result
+
       delta = BigDecimal(kwargs.fetch(:delta_eth).to_s)
       old_short = current_short
       new_short = old_short + delta
@@ -258,6 +261,50 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
     assert_match "current Nado position is long", rebalance.message
     assert_empty service.rebalance_calls
+  end
+
+  test "nado hedge sync records rejected exchange response message" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    result = NadoHedgeExecutionService::Result.new("failed_before_submit", [], [], {
+      final_status: "failed_before_submit",
+      submitted_order_summary: {
+        side: "sell",
+        reduce_only: false,
+        rounded_size_eth: "0.7",
+        estimated_notional_usd: "100",
+        signature: "<redacted>"
+      },
+      submit_response_classification: {
+        status: "rejected",
+        message: "Nado execute_place_orders rejected order: error_code=2011 recv_time expired.",
+        response_summary: {
+          status: "failure",
+          data: [ { error_code: 2011, error: "recv_time expired" } ]
+        }
+      },
+      raw_submit_response_summary: {
+        status: "failure",
+        data: [ { error_code: 2011, error: "recv_time expired" } ]
+      },
+      exchange_order_id: nil,
+      post_submit_readback: nil
+    })
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" }, result: result)
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_difference "ShortRebalance.count", 1 do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_match "Nado execute_place_orders rejected order", rebalance.message
+    assert_match "error_code=2011", rebalance.message
+    assert_nil rebalance.exchange_order_id
+    assert_no_match(/signature|private/i, rebalance.message)
   end
 
   test "creates rebalance records with realized PnL from fills" do

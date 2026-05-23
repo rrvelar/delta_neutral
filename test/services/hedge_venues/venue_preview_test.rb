@@ -188,7 +188,7 @@ module HedgeVenues
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
         http_post: ->(_uri, payload) {
           submitted << payload
-          { status: "success", data: { digest: "0x#{"cd" * 32}" } }
+          { status: "success", data: [ { digest: "0x#{"cd" * 32}" } ] }
         }
       )
 
@@ -201,12 +201,72 @@ module HedgeVenues
       )
 
       assert_equal "submitted_but_readback_pending", result.status
-      order = submitted.first.fetch(:place_order).fetch(:order)
+      assert submitted.first.key?(:place_orders)
+      assert_not submitted.first.key?(:place_order)
+      assert_nil submitted.first.fetch(:place_orders).fetch(:stop_on_failure)
+      assert_equal 1, submitted.first.fetch(:place_orders).fetch(:orders).size
+      row = submitted.first.fetch(:place_orders).fetch(:orders).first
+      order = row.fetch(:order)
+      assert_equal 4, row.fetch(:product_id)
       assert_equal "-1093000000000000000", order.fetch(:amount)
-      assert_equal "0x#{"ab" * 65}", submitted.first.fetch(:place_order).fetch(:signature)
+      assert_equal "0x#{"ab" * 65}", row.fetch(:signature)
       assert_equal "1.093", result.receipt.fetch(:rounded_size_eth)
+      assert_equal "execute_place_orders_batch", result.receipt.fetch(:submitted_order_summary).fetch(:body_shape)
+      assert_equal "0x#{"cd" * 32}", result.receipt.fetch(:exchange_order_id)
+      assert_equal "submitted", result.receipt.fetch(:submit_response_classification).fetch(:status)
       assert_equal "<redacted>", result.receipt.fetch(:submitted_order_summary).fetch(:signature)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado live submit rejection records useful sanitized response message" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, _payload) {
+          {
+            status: "failure",
+            data: [ { error_code: 2011, error: "recv_time expired" } ],
+            request_type: "execute_place_orders"
+          }
+        }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("1.0934"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      classification = result.receipt.fetch(:submit_response_classification)
+      assert_equal "failed_before_submit", result.status
+      assert_equal "rejected", classification.fetch(:status)
+      assert_match "error_code=2011 recv_time expired", classification.fetch(:message)
+      assert_nil result.receipt.fetch(:exchange_order_id)
+      assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado live submit http error surfaces endpoint failure" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, _payload) { raise "POST /execute failed with HTTP 404: not found" }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("1.0934"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      classification = result.receipt.fetch(:submit_response_classification)
+      assert_equal "failed_before_submit", result.status
+      assert_equal "http_error", classification.fetch(:status)
+      assert_match "POST /execute", classification.fetch(:message)
+      assert_match "HTTP 404", classification.fetch(:message)
     end
 
     test "nado live close submits reduce only buy" do
@@ -216,7 +276,7 @@ module HedgeVenues
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ef" * 65}" } },
         http_post: ->(_uri, payload) {
           submitted << payload
-          { status: "success", data: { digest: "0x#{"12" * 32}" } }
+          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
         }
       )
 
@@ -228,7 +288,7 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
-      order = submitted.first.fetch(:place_order).fetch(:order)
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       assert_equal "500000000000000000", order.fetch(:amount)
       assert_equal true, (order.fetch(:appendix).to_i & (1 << 11)).positive?
       assert_equal "submitted_and_confirmed", result.status
@@ -241,7 +301,7 @@ module HedgeVenues
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"34" * 65}" } },
         http_post: ->(_uri, payload) {
           submitted << payload
-          { status: "success", data: { digest: "0x#{"56" * 32}" } }
+          { status: "success", data: [ { digest: "0x#{"56" * 32}" } ] }
         }
       )
 
@@ -253,7 +313,7 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
-      order = submitted.first.fetch(:place_order).fetch(:order)
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       assert_equal "-250000000000000000", order.fetch(:amount)
       assert_equal false, (order.fetch(:appendix).to_i & (1 << 11)).positive?
     end
@@ -265,7 +325,7 @@ module HedgeVenues
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"78" * 65}" } },
         http_post: ->(_uri, payload) {
           submitted << payload
-          { status: "success", data: { digest: "0x#{"90" * 32}" } }
+          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
         }
       )
 
@@ -277,7 +337,7 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
-      order = submitted.first.fetch(:place_order).fetch(:order)
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       assert_equal "250000000000000000", order.fetch(:amount)
       assert_equal true, (order.fetch(:appendix).to_i & (1 << 11)).positive?
     end
