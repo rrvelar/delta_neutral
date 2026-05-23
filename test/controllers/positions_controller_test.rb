@@ -383,7 +383,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to position_path(position, hedge_venue: "nado")
-    assert_match "Nado is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid", flash[:alert]
+    assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true", flash[:alert]
+    assert_match "Nado signer service is not configured", flash[:alert]
   end
 
   test "hedge open live is blocked without typed confirmation" do

@@ -194,14 +194,7 @@ class PositionsController < ApplicationController
       account_state: @selected_hedge_venue_adapter.account_state,
       open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
-      live_preflight: target ? @selected_hedge_venue_adapter.single_venue_preflight(
-        position: @position,
-        action: "open",
-        target_size_eth: target,
-        current_position: current_position,
-        confirmation: nil,
-        max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
-      ) : nil
+      live_preflight: target ? selected_venue_live_preflight(target: target, current_position: current_position) : nil
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
@@ -214,6 +207,29 @@ class PositionsController < ApplicationController
     size.negative? ? size.abs : BigDecimal("0")
   rescue ArgumentError
     BigDecimal("0")
+  end
+
+  def selected_venue_live_preflight(target:, current_position:)
+    max_slippage = ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
+    if @selected_hedge_venue == "nado"
+      return NadoHedgeExecutionService.new(venue: @selected_hedge_venue_adapter).preflight(
+        position: @position,
+        action: "open",
+        size_eth: target,
+        current_position: current_position,
+        confirmation: nil,
+        max_slippage: max_slippage
+      )
+    end
+
+    @selected_hedge_venue_adapter.single_venue_preflight(
+      position: @position,
+      action: "open",
+      target_size_eth: target,
+      current_position: current_position,
+      confirmation: nil,
+      max_slippage: max_slippage
+    )
   end
 
   def aerodrome_rewards_report

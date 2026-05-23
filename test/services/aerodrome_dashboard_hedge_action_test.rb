@@ -183,7 +183,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
 
       assert_equal "blocked", report.fetch(:status)
       assert_includes report.fetch(:blockers), "position is inactive"
-      assert_includes report.fetch(:blockers), "Nado is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid"
+      assert_includes report.fetch(:blockers), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true"
       assert_empty runner.calls
       assert_equal false, report.fetch(:hyperliquid_execution)
     end
@@ -208,8 +208,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       ).report
 
       assert_equal "blocked", report.fetch(:status)
-      assert_includes report.fetch(:blockers), "Nado live env flag is not true"
-      assert_includes report.fetch(:blockers), "Nado live submit adapter is not wired in delta_neutral"
+      assert_includes report.fetch(:blockers), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true"
       assert_empty runner.calls
       assert_equal false, report.fetch(:hyperliquid_execution)
     end
@@ -256,6 +255,30 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       assert_equal "1.102", report.fetch(:target_short_eth)
       assert_equal "1.102", report.fetch(:hedge_venue_live_preflight).fetch(:target_hedge_size_eth)
       assert_equal "1.102", report.fetch(:hedge_venue_preview).fetch(:requested_size_eth)
+    end
+  end
+
+  test "nado live action calls Nado service with Mellow target exposure" do
+    position = create_mellow_position(weth_exposure: "1.0934")
+    service = NadoServiceStub.new(status: "submitted_but_readback_pending")
+
+    with_env(@env.merge(
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO"
+    )) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: "CONFIRM_NADO",
+        positions: [],
+        venue: "nado",
+        nado_service_factory: -> { service }
+      ).report
+
+      assert_equal "submitted", report.fetch(:status)
+      assert_equal BigDecimal("1.0934"), service.open_calls.first.fetch(:size_eth)
+      assert_equal false, report.fetch(:hyperliquid_execution)
     end
   end
 
@@ -403,7 +426,33 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
-  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil, venue: "hyperliquid")
+  class NadoServiceStub
+    attr_reader :open_calls
+
+    def initialize(status:)
+      @status = status
+      @open_calls = []
+    end
+
+    def preflight(*)
+      { blockers: [], warnings: [] }
+    end
+
+    def open_short(**kwargs)
+      @open_calls << kwargs
+      NadoHedgeExecutionService::Result.new(@status, [], [], {
+        final_status: @status,
+        rounded_size_eth: kwargs.fetch(:size_eth).to_s("F"),
+        submitted_order_summary: { signature: "<redacted>" }
+      })
+    end
+
+    def close_short(**)
+      raise "close_short not expected"
+    end
+  end
+
+  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil, nado_service_factory: nil, venue: "hyperliquid")
     AerodromeDashboardHedgeAction.new(
       position: position,
       action: action,
@@ -413,6 +462,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       hyperliquid_service: HyperliquidReadMock.new(positions),
       hedge_sync_runner: hedge_sync_runner,
       emergency_close_factory: emergency_close_factory,
+      nado_service_factory: nado_service_factory,
       log_dir: @log_dir
     )
   end

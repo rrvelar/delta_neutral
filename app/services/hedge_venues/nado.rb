@@ -15,6 +15,14 @@ module HedgeVenues
       "Nado"
     end
 
+    def live_supported?
+      true
+    end
+
+    def live_enabled?
+      live_flag_enabled?
+    end
+
     def live_flag_enabled?
       bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")
     end

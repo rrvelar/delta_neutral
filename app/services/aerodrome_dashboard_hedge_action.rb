@@ -3,7 +3,7 @@ class AerodromeDashboardHedgeAction
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
-  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, log_dir: nil)
+  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, nado_service_factory: nil, log_dir: nil)
     @position = position
     @hedge = position.hedge
     @action = action.to_s
@@ -13,6 +13,7 @@ class AerodromeDashboardHedgeAction
     @hyperliquid_service = hyperliquid_service
     @hedge_sync_runner = hedge_sync_runner || ->(hedge_id) { HedgeSyncJob.perform_now(hedge_id) }
     @emergency_close_factory = emergency_close_factory || method(:default_emergency_close)
+    @nado_service_factory = nado_service_factory
     @log_dir = log_dir || Rails.root.join("storage", "aerodrome_dashboard_hedge_actions")
     @warnings = []
   end
@@ -26,7 +27,7 @@ class AerodromeDashboardHedgeAction
     target = target_short
     drift = target ? target - current_short : nil
     blockers = action_blockers(target: target, current_short: current_short, drift: drift)
-    blockers.concat(non_hyperliquid_live_blockers(target: target, current_short: current_short, before_position: before_position)) if @execute
+    blockers.concat(non_hyperliquid_live_blockers(target: target, drift: drift, current_short: current_short, before_position: before_position)) if @execute
     blockers.concat(execution_gate_blockers) if @execute
     result = blockers.any? ? blocked(blockers, target: target, current_short: current_short, drift: drift, before_position: before_position) : run_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
 
@@ -76,7 +77,9 @@ class AerodromeDashboardHedgeAction
     execution_result = nil
 
     if @execute
-      execution_result = if @action == "close"
+      execution_result = if @venue_key == "nado"
+        run_nado_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
+      elsif @action == "close"
         run_emergency_close
       else
         @hedge_sync_runner.call(@hedge.id)
@@ -86,7 +89,7 @@ class AerodromeDashboardHedgeAction
     end
 
     base_result(
-      status: @execute ? "submitted" : "preview",
+      status: @execute ? execution_status(execution_result) : "preview",
       target: target,
       current_short: current_short,
       drift: drift,
@@ -204,11 +207,23 @@ class AerodromeDashboardHedgeAction
   end
 
   def execution_gate_blockers
-    self.class.execution_gate_blockers(action: @action, submitted_confirmation: @confirmation, require_submitted_confirmation: true)
+    self.class.execution_gate_blockers(
+      action: @action,
+      submitted_confirmation: @confirmation,
+      require_submitted_confirmation: @venue_key == "hyperliquid"
+    )
   end
 
-  def non_hyperliquid_live_blockers(target:, current_short:, before_position:)
+  def non_hyperliquid_live_blockers(target:, drift:, current_short:, before_position:)
     return [] if @venue_key == "hyperliquid"
+    return nado_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ).fetch(:blockers) if @venue_key == "nado"
 
     [
       "#{venue.venue_name} is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid",
@@ -222,6 +237,32 @@ class AerodromeDashboardHedgeAction
     @emergency_close_factory.call.report
   ensure
     old_paused.nil? ? ENV.delete("AERODROME_HEDGE_PAUSED") : ENV["AERODROME_HEDGE_PAUSED"] = old_paused
+  end
+
+  def run_nado_action(target:, current_short:, drift:, before_position:)
+    size = preflight_target_size(target: target, drift: drift, current_short: current_short)
+    result = if @action == "close"
+      nado_service.close_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "open"
+      nado_service.open_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    else
+      NadoHedgeExecutionService::Result.new("blocked_before_submit", [ "Nado live rebalance is not implemented; use open or close" ], [], {})
+    end
+    result.receipt
+  end
+
+  def execution_status(execution_result)
+    return "submitted" unless execution_result.is_a?(Hash)
+    return "submitted" unless execution_result.key?(:final_status)
+
+    case execution_result[:final_status].to_s
+    when "submitted_and_confirmed", "submitted_but_readback_pending", "submitted_but_not_confirmed"
+      "submitted"
+    when "blocked_before_submit"
+      "blocked"
+    else
+      "failed"
+    end
   end
 
   def default_emergency_close
@@ -260,6 +301,15 @@ class AerodromeDashboardHedgeAction
     return nil if @venue_key == "hyperliquid"
     return nil unless target && current_short
 
+    return nado_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ) if @venue_key == "nado"
+
     single_venue_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position)
   end
 
@@ -289,6 +339,10 @@ class AerodromeDashboardHedgeAction
 
   def max_slippage
     ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
+  end
+
+  def nado_service
+    @nado_service ||= @nado_service_factory ? @nado_service_factory.call : NadoHedgeExecutionService.new(venue: venue)
   end
 
   def target_short

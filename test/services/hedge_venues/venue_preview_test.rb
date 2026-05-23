@@ -152,7 +152,106 @@ module HedgeVenues
       assert_equal "sell_short", preflight.fetch(:intended_side)
     end
 
+    test "nado live service blocks when signer is unavailable" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env.except("EXECUTION_SIGNER_URL"))
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("1.09"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Nado signer service is not configured"
+    end
+
+    test "nado live service blocks open when venue readback has existing position" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env, signer_post: ->(*) { raise "signer should not be called" })
+
+      preflight = service.preflight(
+        position: mellow_position,
+        action: "open",
+        size_eth: BigDecimal("1.09"),
+        current_position: { size: BigDecimal("0.2"), symbol: "ETH-PERP" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_includes preflight.fetch(:blockers), "current Nado position already exists; use close/readback before opening"
+    end
+
+    test "nado live open submits single signed short with rounded size" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: { digest: "0x#{"cd" * 32}" } }
+        }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("1.0934"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "submitted_but_readback_pending", result.status
+      order = submitted.first.fetch(:place_order).fetch(:order)
+      assert_equal "-1093000000000000000", order.fetch(:amount)
+      assert_equal "0x#{"ab" * 65}", submitted.first.fetch(:place_order).fetch(:signature)
+      assert_equal "1.093", result.receipt.fetch(:rounded_size_eth)
+      assert_equal "<redacted>", result.receipt.fetch(:submitted_order_summary).fetch(:signature)
+      assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado live close submits reduce only buy" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ef" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: { digest: "0x#{"12" * 32}" } }
+        }
+      )
+
+      result = service.close_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.5"),
+        current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      order = submitted.first.fetch(:place_order).fetch(:order)
+      assert_equal "500000000000000000", order.fetch(:amount)
+      assert_equal true, (order.fetch(:appendix).to_i & (1 << 11)).positive?
+      assert_equal "submitted_and_confirmed", result.status
+    end
+
     private
+
+    def nado_live_env
+      {
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO",
+        "NADO_API_BASE_URL" => "https://nado.example/v1",
+        "NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}",
+        "EXECUTION_SIGNER_URL" => "http://127.0.0.1:9123",
+        "NADO_ETH_PERP_PRODUCT_METADATA_JSON" => {
+          product_id: 4,
+          chain_id: 1,
+          price_increment_x18: "1000000000000000000",
+          size_increment: "1000000000000000",
+          market_price: "2300"
+        }.to_json
+      }
+    end
 
     def mellow_position
       dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
