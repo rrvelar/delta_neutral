@@ -354,6 +354,21 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Open preview on Ethereal", flash[:notice]
   end
 
+  test "ethereal preview on inactive position shows informational warning" do
+    position = create_aerodrome_position(active: false)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    with_dashboard_env do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        post hedge_open_preview_position_path(position), params: { hedge_venue: "ethereal" }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_match "Open preview on Ethereal", flash[:notice]
+    assert_match "Position is inactive; preview is informational only.", flash[:notice]
+  end
+
   test "nado live post is server-side blocked and does not call Hyperliquid writes" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)

@@ -1,5 +1,10 @@
 module HedgeVenues
   class Ethereal < Base
+    def initialize(probe: nil, **kwargs)
+      super(**kwargs)
+      @probe = probe
+    end
+
     def venue_name
       "Ethereal"
     end
@@ -19,7 +24,7 @@ module HedgeVenues
     def account_state
       return super if config_blockers.any?
 
-      probe.account_health
+      normalize_account_state(probe.account_health)
     rescue => e
       { venue: venue_name, mode: mode, status: "unavailable", blockers: blockers, warnings: warnings + [ e.message ] }
     end
@@ -60,6 +65,36 @@ module HedgeVenues
 
     def probe
       @probe ||= HedgeBackends::EtherealReadOnlyProbe.new(env: env)
+    end
+
+    def normalize_account_state(value)
+      source = if value.respond_to?(:to_h)
+        value.to_h
+      elsif value.respond_to?(:as_json)
+        value.as_json
+      else
+        {}
+      end
+      source = source.to_h.with_indifferent_access
+
+      {
+        venue: venue_name,
+        mode: mode,
+        live_supported: live_supported?,
+        live_enabled: live_enabled?,
+        status: source[:status],
+        backend: source[:backend],
+        collateral: source[:collateral],
+        account_value_usd: decimal_string_or_value(source[:account_value_usd]),
+        withdrawable_usd: decimal_string_or_value(source[:withdrawable_usd]),
+        margin_used_usd: decimal_string_or_value(source[:margin_used_usd]),
+        blockers: blockers,
+        warnings: warnings
+      }.compact
+    end
+
+    def decimal_string_or_value(value)
+      value.is_a?(BigDecimal) ? value.to_s("F") : value
     end
 
     def normalize_symbol(symbol)

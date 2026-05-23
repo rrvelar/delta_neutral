@@ -22,6 +22,43 @@ module HedgeVenues
       assert_includes preview.fetch(:blockers), "ETHEREAL_SUBACCOUNT_ID is required for Ethereal position readback"
     end
 
+    test "ethereal account state normalizes account health object to dashboard hash" do
+      env = {
+        "ETHEREAL_READ_ONLY_ENABLED" => "true",
+        "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+        "ETHEREAL_SUBACCOUNT_ID" => "raw-subaccount"
+      }
+      account_health = HedgeBackends::AccountHealth.new(
+        backend: "ethereal",
+        account: "raw-account",
+        subaccount: "raw-subaccount",
+        collateral: "USD",
+        account_value_usd: "100.25",
+        withdrawable_usd: "80.5",
+        margin_used_usd: "19.75",
+        status: "ok"
+      )
+      probe = Object.new
+      probe.define_singleton_method(:account_health) { account_health }
+      venue = HedgeVenues::Ethereal.new(env: env, probe: probe)
+
+      state = venue.account_state
+
+      assert_equal Hash, state.class
+      assert_equal "Ethereal", state.fetch(:venue)
+      assert_equal "read_only_dry_run", state.fetch(:mode)
+      assert_equal false, state.fetch(:live_supported)
+      assert_equal false, state.fetch(:live_enabled)
+      assert_equal "ok", state.fetch(:status)
+      assert_equal "USD", state.fetch(:collateral)
+      assert_equal "100.25", state.fetch(:account_value_usd)
+      assert_equal "80.5", state.fetch(:withdrawable_usd)
+      assert_equal "19.75", state.fetch(:margin_used_usd)
+      assert_not state.key?(:account)
+      assert_not state.key?(:subaccount)
+      assert_not state.key?(:raw)
+    end
+
     test "nado preview is dry run only and rounds size to increment" do
       venue = HedgeVenues::Nado.new(env: { "NADO_SIZE_INCREMENT" => "0.01" })
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")

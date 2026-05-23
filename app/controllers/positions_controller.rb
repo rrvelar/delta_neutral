@@ -171,7 +171,8 @@ class PositionsController < ApplicationController
       "#{label} #{report.fetch(:status)} on #{venue}: #{report.fetch(:errors).join('; ')}"
     else
       delta = report[:submitted_delta_eth].presence || "0"
-      "#{label} #{report.fetch(:status)} on #{venue}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
+      message = "#{label} #{report.fetch(:status)} on #{venue}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
+      report.fetch(:warnings).present? ? "#{message} #{report.fetch(:warnings).join('; ')}" : message
     end
   end
 

@@ -20,6 +20,7 @@ class AerodromeDashboardHedgeAction
   def report
     return blocked([ "unsupported dashboard hedge action" ]) unless ACTIONS.include?(@action)
 
+    append_informational_preview_warnings
     before_position = current_eth_position
     current_short = short_size(before_position)
     target = target_short
@@ -148,6 +149,7 @@ class AerodromeDashboardHedgeAction
   def action_blockers(target:, current_short:, drift:)
     blockers = base_blockers(target: target, current_short: current_short)
     return blockers if blockers.any?
+    return [] if read_only_venue_preview?
 
     tolerance = tolerance_eth(target)
     case @action
@@ -166,8 +168,8 @@ class AerodromeDashboardHedgeAction
   def base_blockers(target:, current_short:)
     blockers = []
     blockers << "position must be Aerodrome Slipstream" unless @position.dex.name == "aerodrome_slipstream"
-    blockers << "position is inactive" unless @position.active?
-    blockers << "active hedge is required" unless @hedge&.active?
+    blockers << "position is inactive" unless @position.active? || read_only_venue_preview?
+    blockers << "active hedge is required" unless @hedge&.active? || read_only_venue_preview?
     blockers << Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE if @execute && Position.active_hedgeable.count > 1
     blockers << "Mellow Autopilot pro-rata exposure is not hedge-ready" if @position.mellow_autopilot? && !@position.hedge_ready?
     blockers << "WETH/ETH LP exposure is unavailable" unless weth_amount
@@ -187,6 +189,17 @@ class AerodromeDashboardHedgeAction
       blockers << "current ETH short exceeds AERODROME_MAX_SHORT_ETH"
     end
     blockers.uniq
+  end
+
+  def read_only_venue_preview?
+    !@execute && %w[ethereal nado].include?(@venue_key)
+  end
+
+  def append_informational_preview_warnings
+    return unless read_only_venue_preview?
+
+    @warnings << "Position is inactive; preview is informational only." unless @position.active?
+    @warnings << "Active hedge is missing; preview is informational only." unless @hedge&.active?
   end
 
   def execution_gate_blockers

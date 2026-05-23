@@ -122,6 +122,91 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "ethereal preview on inactive position is informational and allowed" do
+    position = create_position(active: false)
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: false,
+        positions: [],
+        venue: "ethereal"
+      ).report
+
+      assert_equal "preview", report.fetch(:status)
+      assert_equal "ethereal", report.fetch(:hedge_venue)
+      assert_empty report.fetch(:blockers)
+      assert_includes report.fetch(:warnings), "Position is inactive; preview is informational only."
+      assert_equal false, report.fetch(:orders_enabled)
+      assert_equal false, report.fetch(:hyperliquid_execution)
+      assert_equal "ethereal_eip712_trade_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+    end
+  end
+
+  test "nado preview on inactive position is informational and allowed" do
+    position = create_position(active: false)
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: false,
+        positions: [],
+        venue: "nado"
+      ).report
+
+      assert_equal "preview", report.fetch(:status)
+      assert_equal "nado", report.fetch(:hedge_venue)
+      assert_empty report.fetch(:blockers)
+      assert_includes report.fetch(:warnings), "Position is inactive; preview is informational only."
+      assert_equal false, report.fetch(:orders_enabled)
+      assert_equal false, report.fetch(:hyperliquid_execution)
+      assert_equal "nado_eip712_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+    end
+  end
+
+  test "nado live action remains blocked for read only venue" do
+    position = create_position(active: false)
+    runner = CallRecorder.new
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::CONFIRMATION,
+        positions: [],
+        hedge_sync_runner: runner,
+        venue: "nado"
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "position is inactive"
+      assert_includes report.fetch(:blockers), "Nado is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid"
+      assert_empty runner.calls
+      assert_equal false, report.fetch(:hyperliquid_execution)
+    end
+  end
+
+  test "hyperliquid preview still blocks inactive position" do
+    position = create_position(active: false)
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: false,
+        positions: [ nil ],
+        venue: "hyperliquid"
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "position is inactive"
+      assert_equal "hyperliquid", report.fetch(:hedge_venue)
+    end
+  end
+
   test "rebalance blocks when drift is within tolerance" do
     position = create_position(asset0_amount: "1.25", target: "1.0", tolerance: "0.05")
 
@@ -262,7 +347,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     )
   end
 
-  def create_position(asset0_amount: "1.25", target: "1.0", tolerance: "0.05")
+  def create_position(asset0_amount: "1.25", target: "1.0", tolerance: "0.05", active: true)
     dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
     wallet = Wallet.find_or_create_by!(
       user: users(:one),
@@ -281,7 +366,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       asset1_price_usd: "1.0",
       external_id: SecureRandom.hex(4),
       pool_address: "0xpool",
-      active: true
+      active: active
     )
     Hedge.create!(position: position, target: target, tolerance: tolerance, active: true)
     position
