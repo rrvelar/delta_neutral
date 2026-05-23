@@ -28,6 +28,22 @@ module ApplicationHelper
     value.to_s
   end
 
+  def format_venue_eth_amount(value)
+    return "Unavailable" if value.blank?
+
+    number_with_precision(BigDecimal(value.to_s), precision: 6, strip_insignificant_zeros: false, delimiter: ",")
+  rescue ArgumentError
+    value.to_s
+  end
+
+  def format_venue_usd_amount(value)
+    return "Unavailable" if value.blank?
+
+    format_usd(BigDecimal(value.to_s), precision: 2)
+  rescue ArgumentError
+    value.to_s
+  end
+
   def format_usd_amount(value)
     return "unavailable" if value.blank?
 

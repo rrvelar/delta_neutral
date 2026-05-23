@@ -267,42 +267,97 @@
                 <% end %>
               </div>
               <% if selected_adapter.blockers.present? %>
-                <p class="mt-2 text-yellow-200 text-xs"><%= selected_adapter.blockers.join("; ") %></p>
+                <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+                  <p class="font-medium text-yellow-200">Venue blockers</p>
+                  <ul class="mt-2 space-y-1">
+                    <% selected_adapter.blockers.each do |blocker| %>
+                      <li class="break-words whitespace-normal">- <%= blocker %></li>
+                    <% end %>
+                  </ul>
+                </div>
               <% end %>
               <% if @selected_hedge_venue_dashboard.present? %>
                 <% venue_dashboard = @selected_hedge_venue_dashboard %>
-                <div class="mt-3 grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
-                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                <% preflight = venue_dashboard[:live_preflight] || {} %>
+                <% live_blockers = preflight[:blockers] || [] %>
+                <%
+                  live_status, live_detail =
+                    if selected_adapter.venue_name == "Ethereal"
+                      [ "Read-only dry run", "Live submit is not implemented for Ethereal." ]
+                    elsif selected_adapter.live_supported? && selected_adapter.live_enabled? && live_blockers.blank?
+                      [ "Live ready", "Nado submit path is wired and required gates are satisfied." ]
+                    elsif selected_adapter.live_supported?
+                      [ "Live gated", "#{selected_adapter.venue_name} submit path is wired, but required gates are not satisfied." ]
+                    else
+                      [ "Unavailable", "Live submit is not available for this venue." ]
+                    end
+                %>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Target hedge ETH</p>
-                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:target_hedge_eth] || "Unavailable" %></p>
+                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:target_hedge_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:target_hedge_eth]) %></p>
                   </div>
-                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Venue short ETH</p>
-                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:current_short_eth] || "Unavailable" %></p>
+                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:current_short_eth]) %></p>
                   </div>
-                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Delta to target</p>
-                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:drift_eth] || "Unavailable" %></p>
+                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:drift_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:drift_eth]) %></p>
                   </div>
-                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Live availability</p>
-                    <p class="text-gray-100 font-medium"><%= selected_adapter.live_mode_state.humanize %></p>
+                    <span class="mt-1 inline-flex max-w-full rounded-full border border-gray-700 px-2 py-1 text-gray-100"><%= live_status %></span>
+                    <p class="mt-2 text-gray-400 break-words whitespace-normal"><%= live_detail %></p>
                   </div>
                 </div>
                 <% if venue_dashboard.dig(:open_preview, :payload).present? %>
-                  <p class="mt-2 text-gray-400 text-xs">
-                    Open preview: rounded <%= venue_dashboard.dig(:open_preview, :rounded_size_eth) %> ETH,
-                    schema <%= venue_dashboard.dig(:open_preview, :payload, :schema) %>. Dry-run/read-only; creates no orders.
-                  </p>
+                  <% open_preview = venue_dashboard[:open_preview] %>
+                  <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs">
+                    <p class="font-medium text-gray-200">Open preview</p>
+                    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      <div class="min-w-0">
+                        <p class="text-gray-500">Rounded size</p>
+                        <p class="truncate text-gray-100" title="<%= open_preview[:rounded_size_eth] %>"><%= format_venue_eth_amount(open_preview[:rounded_size_eth]) %> ETH</p>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="text-gray-500">Notional</p>
+                        <p class="truncate text-gray-100" title="<%= preflight[:estimated_notional_usd] %>"><%= format_venue_usd_amount(preflight[:estimated_notional_usd]) %></p>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="text-gray-500">Schema</p>
+                        <p class="break-words text-gray-100"><%= open_preview.dig(:payload, :schema) %></p>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="text-gray-500">Mode / Orders</p>
+                        <p class="break-words text-gray-100">Dry-run/read-only / none</p>
+                      </div>
+                    </div>
+                  </div>
                 <% end %>
-                <% if venue_dashboard[:live_preflight].present? %>
-                  <% preflight = venue_dashboard[:live_preflight] %>
-                  <p class="mt-2 text-yellow-200 text-xs">
-                    Live preflight: <%= preflight[:blockers].presence&.join("; ") || "blocked until a separately audited submit adapter is wired." %>
-                  </p>
+                <% if preflight.present? %>
+                  <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs">
+                    <p class="font-medium text-yellow-200">Live preflight</p>
+                    <% if live_blockers.present? %>
+                      <ul class="mt-2 space-y-1 text-yellow-100">
+                        <% live_blockers.each do |blocker| %>
+                          <li class="break-words whitespace-normal">- <%= blocker %></li>
+                        <% end %>
+                      </ul>
+                    <% else %>
+                      <p class="mt-2 text-green-200 break-words whitespace-normal">No live preflight blockers reported.</p>
+                    <% end %>
+                  </div>
                 <% end %>
                 <% if venue_dashboard[:warnings].present? %>
-                  <p class="mt-2 text-yellow-200 text-xs"><%= venue_dashboard[:warnings].join("; ") %></p>
+                  <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+                    <p class="font-medium text-yellow-200">Warnings</p>
+                    <ul class="mt-2 space-y-1">
+                      <% venue_dashboard[:warnings].each do |warning| %>
+                        <li class="break-words whitespace-normal">- <%= warning %></li>
+                      <% end %>
+                    </ul>
+                  </div>
                 <% end %>
               <% end %>
             </div>
