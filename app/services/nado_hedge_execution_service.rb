@@ -200,6 +200,7 @@ class NadoHedgeExecutionService
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
     blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
+    blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: order_size, current_position: current_position)
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
   end
@@ -711,6 +712,19 @@ class NadoHedgeExecutionService
 
   def reduce_only_order?(action:, size_eth:)
     action.to_s == "close" || (action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative?)
+  end
+
+  def isolated_partial_reduce?(action:, size_eth:, order_size:, current_position:)
+    return false unless %w[close rebalance].include?(action.to_s)
+    return false if action.to_s == "rebalance" && !BigDecimal(size_eth.to_s).negative?
+    return false unless margin_mode(current_position) == "isolated"
+    return false unless short_size(current_position).positive?
+
+    BigDecimal(order_size.to_s) < short_size(current_position)
+  end
+
+  def isolated_partial_reduce_blocker
+    "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
   end
 
   def order_size(size_eth)

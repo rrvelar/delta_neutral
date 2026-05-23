@@ -443,7 +443,38 @@ module HedgeVenues
       assert_equal "955000000000000000", order.fetch(:amount)
     end
 
-    test "nado live rebalance decrease isolated short uses isolated reduce only appendix" do
+    test "nado live rebalance partial decrease isolated short is blocked before submit" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(*) { raise "signer should not be called" },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+        }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.091"),
+        current_position: {
+          size: BigDecimal("-0.936"),
+          short_size: BigDecimal("0.936"),
+          symbol: "ETH-PERP",
+          side: "short",
+          margin_mode: "isolated",
+          isolated_margin_usd: BigDecimal("1909")
+        },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_empty submitted
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
+    end
+
+    test "nado live close isolated short uses isolated reduce only appendix" do
       submitted = []
       signer_payloads = []
       isolated_sender = "0x#{"02" * 32}"
@@ -451,17 +482,17 @@ module HedgeVenues
         env: nado_live_env,
         signer_post: ->(_uri, payload) {
           signer_payloads << payload
-          { status: "signed", signature: "0x#{"78" * 65}" }
+          { status: "signed", signature: "0x#{"ef" * 65}" }
         },
         http_post: ->(_uri, payload) {
           submitted << payload
-          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
         }
       )
 
-      service.rebalance_short(
+      service.close_short(
         position: mellow_position,
-        delta_eth: BigDecimal("-0.091"),
+        size_eth: BigDecimal("0.936"),
         current_position: {
           size: BigDecimal("-0.936"),
           short_size: BigDecimal("0.936"),
@@ -478,9 +509,10 @@ module HedgeVenues
       order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       summary = signer_payloads.first.fetch(:payload_preview)
       decoded = summary.fetch(:appendix_decoded)
+      appendix = order.fetch(:appendix).to_i
       assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), order.fetch(:sender)
       assert_equal isolated_sender, summary.fetch(:current_position_subaccount)
-      assert_equal "91000000000000000", order.fetch(:amount)
+      assert_equal "936000000000000000", order.fetch(:amount)
       assert_equal "buy", summary.fetch(:side)
       assert_equal true, summary.fetch(:reduce_only)
       assert_equal "isolated_reduce_only", summary.fetch(:margin_mode)
@@ -489,39 +521,6 @@ module HedgeVenues
       assert_equal true, decoded.fetch(:isolated)
       assert_equal true, decoded.fetch(:reduce_only)
       assert_equal "ioc", decoded.fetch(:order_type)
-    end
-
-    test "nado live close isolated short uses isolated reduce only appendix" do
-      submitted = []
-      service = NadoHedgeExecutionService.new(
-        env: nado_live_env,
-        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ef" * 65}" } },
-        http_post: ->(_uri, payload) {
-          submitted << payload
-          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
-        }
-      )
-
-      service.close_short(
-        position: mellow_position,
-        size_eth: BigDecimal("0.936"),
-        current_position: {
-          size: BigDecimal("-0.936"),
-          short_size: BigDecimal("0.936"),
-          symbol: "ETH-PERP",
-          side: "short",
-          margin_mode: "isolated",
-          isolated_margin_usd: BigDecimal("1909")
-        },
-        confirmation: "CONFIRM_NADO",
-        max_slippage: "0.01"
-      )
-
-      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
-      appendix = order.fetch(:appendix).to_i
-      assert_equal "936000000000000000", order.fetch(:amount)
-      assert_equal true, (appendix & (1 << 8)).positive?
-      assert_equal true, (appendix & (1 << 11)).positive?
       assert_equal 1_909_000_000, appendix >> 64
     end
 
@@ -540,6 +539,7 @@ module HedgeVenues
       )
 
       assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
       assert_includes result.blockers, "Nado isolated reduce-only close requires isolated margin readback."
     end
 
@@ -635,9 +635,9 @@ module HedgeVenues
         }
       )
 
-      result = service.rebalance_short(
+      result = service.close_short(
         position: mellow_position,
-        delta_eth: BigDecimal("-0.091"),
+        size_eth: BigDecimal("0.936"),
         current_position: { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated", isolated_margin_usd: BigDecimal("1909") },
         confirmation: "CONFIRM_NADO",
         max_slippage: "0.01"
@@ -663,9 +663,9 @@ module HedgeVenues
         }
       )
 
-      result = service.rebalance_short(
+      result = service.close_short(
         position: mellow_position,
-        delta_eth: BigDecimal("-0.091"),
+        size_eth: BigDecimal("0.936"),
         current_position: { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated", isolated_margin_usd: BigDecimal("1909") },
         confirmation: "CONFIRM_NADO",
         max_slippage: "0.01"
@@ -677,6 +677,35 @@ module HedgeVenues
       assert_match "error_code=2081", classification.fetch(:message)
       assert_match "isolated subaccount cannot place order", classification.fetch(:message)
       assert_equal nado_live_env.fetch("NADO_ACCOUNT_SUBACCOUNT"), result.receipt.fetch(:submitted_order_summary).fetch(:sender)
+    end
+
+    test "nado insufficient account health rejection records exchange reason" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, _payload) {
+          {
+            status: "failure",
+            data: [ { error_code: 2006, error: "Insufficient account health. The execution of this order would lower your account health below the required threshold." } ],
+            request_type: "execute_place_orders"
+          }
+        }
+      )
+
+      result = service.close_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.936"),
+        current_position: { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated", isolated_margin_usd: BigDecimal("1909") },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      classification = result.receipt.fetch(:submit_response_classification)
+      assert_equal "failed_before_submit", result.status
+      assert_equal "rejected", classification.fetch(:status)
+      assert_match "error_code=2006", classification.fetch(:message)
+      assert_match "Insufficient account health", classification.fetch(:message)
+      assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
     end
 
 
@@ -738,7 +767,7 @@ module HedgeVenues
         }
       )
 
-      service.rebalance_short(
+      result = service.rebalance_short(
         position: mellow_position,
         delta_eth: BigDecimal("0.25"),
         current_position: { size: BigDecimal("-0.75"), symbol: "ETH-PERP", margin_mode: "isolated" },
@@ -746,6 +775,7 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
+      assert_empty result.blockers
       order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
       assert_equal "-250000000000000000", order.fetch(:amount)
       assert_equal false, (order.fetch(:appendix).to_i & (1 << 11)).positive?
