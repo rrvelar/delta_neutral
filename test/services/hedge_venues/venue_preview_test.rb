@@ -149,7 +149,36 @@ module HedgeVenues
       assert_equal "isolated", position.fetch(:margin_mode)
       assert_equal "short", position.fetch(:side)
       assert_equal BigDecimal("0.955"), position.fetch(:short_size)
+      assert_equal BigDecimal("2061"), position.fetch(:entry_price)
+      assert_equal BigDecimal("2061"), position.fetch(:mark_price)
       assert_equal BigDecimal("1968.255"), position.fetch(:isolated_margin_usd)
+    end
+
+    test "nado isolated ETH-PERP readback leaves entry price nil without v quote balance" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        if uri.query.include?("isolated_positions")
+          {
+            data: {
+              isolated_positions: [
+                {
+                  base_product: { product_id: 4, symbol: "ETH-PERP", risk: { price_x18: "2061000000000000000000" } },
+                  base_balance: { balance: { amount: "-955000000000000000" } },
+                  quote_balance: { balance: { amount: "1968255000000000000000" } }
+                }
+              ]
+            }
+          }.to_json
+        else
+          { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+        end
+      })
+
+      position = venue.read_position(symbol: "ETH")
+
+      assert_equal "isolated", position.fetch(:margin_mode)
+      assert_equal BigDecimal("0.955"), position.fetch(:short_size)
+      assert_nil position.fetch(:entry_price)
+      assert_equal BigDecimal("2061"), position.fetch(:mark_price)
     end
 
     test "nado read position ignores spot collateral only rows" do

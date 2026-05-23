@@ -128,6 +128,50 @@ class AerodromeProductionDashboardStatusTest < ActiveSupport::TestCase
     position&.destroy
   end
 
+  test "computes Nado PnL from isolated readback derived entry price" do
+    position = create_mellow_position(
+      user_weth_exposure: "0.936162",
+      user_usdc_exposure: "100",
+      user_total_value_usd: "2029.0"
+    )
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.001", active: true, execution_venue: "nado")
+    adapter = HedgeVenues::Nado.new(
+      env: {
+        "NADO_READ_ONLY_ENABLED" => "true",
+        "NADO_GATEWAY_QUERY_BASE_URL" => "https://nado.example/v1",
+        "NADO_ACCOUNT_SUBACCOUNT" => "0xsubaccount"
+      },
+      http_get: ->(uri) {
+        if uri.query.include?("isolated_positions")
+          {
+            data: {
+              isolated_positions: [
+                {
+                  base_product: { product_id: 4, symbol: "ETH-PERP", risk: { price_x18: "2050000000000000000000" } },
+                  base_balance: { balance: { amount: "-936000000000000000", v_quote_balance: "1929096000000000000000" } },
+                  quote_balance: { balance: { amount: "1909000000000000000000" } }
+                }
+              ]
+            }
+          }.to_json
+        else
+          { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+        end
+      }
+    )
+
+    with_env(@env) do
+      report = AerodromeProductionDashboardStatus.new(position: position, hedge_venue_adapter: adapter).report
+
+      assert_equal "2061.0", report.fetch(:entry_price)
+      assert_equal "2050.0", report.fetch(:mark_price)
+      assert_equal "10.296", report.fetch(:venue_hedge_unrealized_pnl_usd)
+      assert_nil report.fetch(:venue_hedge_pnl_message)
+    end
+  ensure
+    position&.destroy
+  end
+
   private
 
   class HyperliquidReadMock

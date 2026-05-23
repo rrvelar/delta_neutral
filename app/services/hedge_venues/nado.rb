@@ -243,8 +243,8 @@ module HedgeVenues
     def build_position(row:, product:, product_id:, symbol:, amount:, margin_mode:)
       symbol = "ETH-PERP" if product_id.to_i == 4
       mark_price = price_from_product(product) || decimal_or_nil(row["mark_price"] || row["markPrice"])
-      raw_v_quote = row.dig("balance", "v_quote_balance") || row["v_quote_balance"] || row["vQuoteBalance"]
-      entry_price = entry_price(amount: amount, raw_v_quote: raw_v_quote) || decimal_or_nil(row["entry_price"] || row["entryPrice"])
+      raw_v_quote = raw_v_quote_balance(row)
+      entry_price = decimal_or_nil(row["entry_price"] || row["entryPrice"]) || entry_price(amount: amount, raw_v_quote: raw_v_quote)
       notional = mark_price ? amount.abs * mark_price : decimal_or_nil(row["notional_usd"] || row["notional"])
       isolated_margin = isolated_margin(row, amount: amount)
       {
@@ -381,6 +381,14 @@ module HedgeVenues
       risk = product["risk"].is_a?(Hash) ? product["risk"] : {}
       decimal_or_nil(risk["price_x18"] || risk["oracle_price_x18"] || product["price_x18"] || product["oracle_price_x18"]) ||
         decimal_or_nil(product["mark_price"] || product["markPrice"])
+    end
+
+    def raw_v_quote_balance(row)
+      row.dig("base_balance", "balance", "v_quote_balance") ||
+        row.dig("base_balance", "v_quote_balance") ||
+        row.dig("balance", "v_quote_balance") ||
+        row["v_quote_balance"] ||
+        row["vQuoteBalance"]
     end
 
     def entry_price(amount:, raw_v_quote:)

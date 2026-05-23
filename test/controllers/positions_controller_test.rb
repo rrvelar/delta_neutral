@@ -671,6 +671,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "within tolerance / no-op", response.body
     assert_match "Isolated 1.0x", response.body
     assert_match "$1,909.00", response.body
+    assert_match "$2,061.00", response.body
+    assert_match "$2,050.00", response.body
     assert_match "Nado short PnL uses readback entry price minus mark price times short size.", response.body
     assert_no_match "Current Hyperliquid ETH position", response.body
   end

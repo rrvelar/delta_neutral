@@ -211,6 +211,12 @@
           <% if production_dashboard[:isolated_margin_usd].present? %>
             <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Isolated margin</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:isolated_margin_usd]) %></span></div>
           <% end %>
+          <% if production_dashboard[:entry_price].present? %>
+            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Entry price</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:entry_price]) %></span></div>
+          <% end %>
+          <% if production_dashboard[:mark_price].present? %>
+            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Mark price</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:mark_price]) %></span></div>
+          <% end %>
           <div class="min-w-0 md:col-span-2 xl:col-span-3 flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white text-right break-words"><%= production_dashboard[:current_venue_position] ? production_dashboard[:current_venue_position].except(:venue).inspect : "nil / unavailable" %></span></div>
         </div>
         <% if production_dashboard[:blockers].present? %>
@@ -346,6 +352,18 @@
                     <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                       <p class="text-gray-500">Venue notional</p>
                       <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :notional_usd) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :notional_usd)) %></p>
+                    </div>
+                  <% end %>
+                  <% if venue_dashboard.dig(:current_venue_position, :entry_price).present? %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Entry price</p>
+                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :entry_price) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :entry_price)) %></p>
+                    </div>
+                  <% end %>
+                  <% if venue_dashboard.dig(:current_venue_position, :mark_price).present? %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Mark price</p>
+                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :mark_price) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :mark_price)) %></p>
                     </div>
                   <% end %>
                 </div>
