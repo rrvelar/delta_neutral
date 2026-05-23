@@ -47,7 +47,7 @@
   <% position_valuation = @position_valuation || PositionValuation.current(@position) %>
   <% hedge_preview = aerodrome_hedge_preview_for(@position) %>
   <% aerodrome_hedge = @position.hedge %>
-  <% weth_amount = @position.asset0.to_s.upcase == "WETH" || @position.asset0.to_s.upcase == "ETH" ? @position.asset0_amount : @position.asset1_amount %>
+  <% weth_amount = position_valuation.weth_exposure || (@position.asset0.to_s.upcase == "WETH" || @position.asset0.to_s.upcase == "ETH" ? @position.asset0_amount : @position.asset1_amount) %>
   <% target_eth_short = aerodrome_hedge && weth_amount ? weth_amount * aerodrome_hedge.target : nil %>
   <% aerodrome_hedge_enabled = ENV["AERODROME_HEDGE_ENABLED"].to_s.downcase == "true" %>
   <% aerodrome_hedge_paused = ENV["AERODROME_HEDGE_PAUSED"].nil? ? true : ENV["AERODROME_HEDGE_PAUSED"].to_s.downcase == "true" %>
@@ -56,12 +56,16 @@
   <% aerodrome_pool_delta = position_valuation.pool_delta_usd %>
   <% production_dashboard = @aerodrome_production_dashboard_status || {} %>
   <% hard_ceiling = production_dashboard[:hard_ceiling] || {} %>
+  <% production_venue = production_dashboard[:execution_venue] || @selected_hedge_venue || HedgeVenues::DEFAULT %>
+  <% production_venue_name = production_dashboard[:execution_venue_name] || HedgeVenues.label(production_venue) %>
+  <% current_short_label = production_dashboard[:current_short_label] || "Current ETH short" %>
+  <% current_position_label = production_dashboard[:current_position_label] || "Current Hyperliquid ETH position" %>
   <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
     <div class="flex flex-wrap gap-2 mb-4">
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">MONITOR ONLY</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NO ORDERS</span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HEDGE DISABLED</span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">READ-ONLY HYPERLIQUID</span>
+      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">SELECTED VENUE: <%= production_venue_name.upcase %></span>
       <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NOT LIVE HEDGE-READY</span>
     </div>
     <p class="text-yellow-100 font-medium">Aerodrome Slipstream supervised position on <%= chain_display_name(@position) %>.</p>
@@ -88,14 +92,14 @@
             <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted wallet</span><span class="text-white text-right break-all"><%= mellow["submitted_wallet"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Share token</span><span class="text-white text-right break-all"><%= mellow["share_token"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Observed strategy token ID</span><span class="text-white"><%= mellow["strategy_token_id"].presence || @position.external_id %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white"><%= mellow["user_share_percent"].presence || "unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white" title="<%= mellow["user_share_percent"] %>"><%= format_percent_amount(mellow["user_share_percent"]) %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= mellow["last_probe_confidence"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Last probe at</span><span class="text-white"><%= mellow["last_probe_at"].presence || "unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">User total value USD</span><span class="text-white"><%= optional_usd_display(mellow["user_total_value_usd"]) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white"><%= mellow["strategy_total_weth"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= mellow["strategy_total_usdc"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white"><%= mellow["user_weth_exposure"].presence || @position.asset0_amount %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= mellow["user_usdc_exposure"].presence || @position.asset1_amount %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white" title="<%= mellow["strategy_total_weth"] %>"><%= format_venue_eth_amount(mellow["strategy_total_weth"]) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= format_token_amount(mellow["strategy_total_usdc"], decimals: 2) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white" title="<%= mellow["user_weth_exposure"].presence || @position.asset0_amount %>"><%= format_venue_eth_amount(mellow["user_weth_exposure"].presence || @position.asset0_amount) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= format_token_amount(mellow["user_usdc_exposure"].presence || @position.asset1_amount, decimals: 2) %></span></div>
           </div>
           <% if !@position.hedge_ready? %>
             <p class="mt-3 text-red-200 text-sm">Mellow pro-rata exposure is not hedge-ready. Refresh read-only data and inspect blockers before using live hedge controls.</p>
@@ -145,8 +149,12 @@
             <div class="flex justify-between gap-4"><span class="text-gray-500">Active</span><span class="text-white"><%= aerodrome_hedge.active? ? "yes" : "no" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Target percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.target * 100, precision: 2) %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Tolerance percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.tolerance * 100, precision: 2) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.hedge_target_label %></span><span class="text-white"><%= target_eth_short ? number_with_precision(target_eth_short, precision: 6) : "Unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Actual ETH short</span><span class="text-yellow-300">readback disabled / not queried</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.hedge_target_label %></span><span class="text-white" title="<%= target_eth_short %>"><%= target_eth_short ? format_venue_eth_amount(target_eth_short) : "Unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution venue</span><span class="text-white"><%= production_venue_name %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="text-white" title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %></span></div>
+            <% if production_dashboard[:margin_mode].present? %>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></span></div>
+            <% end %>
             <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_ENABLED</span><span class="text-white"><%= aerodrome_hedge_enabled %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_PAUSED</span><span class="text-white"><%= aerodrome_hedge_paused %><%= " (default)" if ENV["AERODROME_HEDGE_PAUSED"].nil? %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_LIVE_APPROVED</span><span class="text-white"><%= aerodrome_live_approved %></span></div>
@@ -181,21 +189,29 @@
             <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-red-950/50 text-red-200 border border-red-800">blocked</span>
           <% end %>
         </div>
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Configured ETH cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_eth].presence || "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard ETH ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_eth].presence || "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Configured notional cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_configured_hedge_cap_notional_usd])) : "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard notional ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_notional_usd].present? ? format_usd(BigDecimal(hard_ceiling[:hard_max_short_notional_usd])) : "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Emergency close cap</span><span class="text-white"><%= production_dashboard[:configured_emergency_close_max_eth].presence || "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Hard emergency ceiling</span><span class="text-white"><%= hard_ceiling[:hard_emergency_close_max_eth].presence || "missing" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">LP WETH amount</span><span class="text-white"><%= production_dashboard[:current_aerodrome_lp_weth_amount].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Target hedge</span><span class="text-white"><%= production_dashboard[:target_hedge_eth].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Target notional</span><span class="text-white"><%= production_dashboard[:target_hedge_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:target_hedge_notional_usd])) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Current ETH short</span><span class="text-white"><%= production_dashboard[:current_short_eth].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Current ETH notional</span><span class="text-white"><%= production_dashboard[:current_short_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_short_notional_usd])) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Drift ETH</span><span class="text-white"><%= production_dashboard[:drift_eth].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Drift notional</span><span class="text-white"><%= production_dashboard[:drift_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:drift_notional_usd])) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Current Hyperliquid ETH position</span><span class="text-white text-right"><%= production_dashboard[:current_hyperliquid_eth_position] ? production_dashboard[:current_hyperliquid_eth_position].inspect : "nil / unavailable" %></span></div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 text-sm">
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Execution venue</span><span class="text-white"><%= production_venue_name %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Configured ETH cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_eth].present? ? format_venue_eth_amount(production_dashboard[:current_configured_hedge_cap_eth]) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard ETH ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_eth].present? ? format_venue_eth_amount(hard_ceiling[:hard_max_short_eth]) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Configured notional cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_configured_hedge_cap_notional_usd])) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard notional ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_notional_usd].present? ? format_usd(BigDecimal(hard_ceiling[:hard_max_short_notional_usd])) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Emergency close cap</span><span class="text-white"><%= production_dashboard[:configured_emergency_close_max_eth].present? ? format_venue_eth_amount(production_dashboard[:configured_emergency_close_max_eth]) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard emergency ceiling</span><span class="text-white"><%= hard_ceiling[:hard_emergency_close_max_eth].present? ? format_venue_eth_amount(hard_ceiling[:hard_emergency_close_max_eth]) : "missing" %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Mellow WETH exposure</span><span class="text-white truncate" title="<%= production_dashboard[:current_aerodrome_lp_weth_amount] %>"><%= format_venue_eth_amount(production_dashboard[:current_aerodrome_lp_weth_amount]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Target hedge</span><span class="text-white truncate" title="<%= production_dashboard[:target_hedge_eth] %>"><%= format_venue_eth_amount(production_dashboard[:target_hedge_eth]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Target notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:target_hedge_notional_usd]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="text-white truncate" title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Current venue notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:current_venue_notional_usd]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Drift ETH</span><span class="text-white truncate" title="<%= production_dashboard[:drift_eth] %>"><%= format_venue_eth_amount(production_dashboard[:drift_eth]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Drift notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:drift_notional_usd]) %></span></div>
+          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Tolerance state</span><span class="<%= production_dashboard[:rebalance_needed_now] ? 'text-red-300' : 'text-green-300' %>"><%= production_dashboard[:rebalance_needed_now] ? "needs rebalance" : "within tolerance / no-op" %></span></div>
+          <% if production_dashboard[:margin_mode].present? %>
+            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></span></div>
+          <% end %>
+          <% if production_dashboard[:isolated_margin_usd].present? %>
+            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Isolated margin</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:isolated_margin_usd]) %></span></div>
+          <% end %>
+          <div class="min-w-0 md:col-span-2 xl:col-span-3 flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white text-right break-words"><%= production_dashboard[:current_venue_position] ? production_dashboard[:current_venue_position].except(:venue).inspect : "nil / unavailable" %></span></div>
         </div>
         <% if production_dashboard[:blockers].present? %>
           <div class="mt-4 bg-red-950/30 border border-red-900 rounded-lg p-3">
@@ -312,6 +328,26 @@
                     <p class="mt-2 text-gray-400 break-words whitespace-normal"><%= live_detail %></p>
                     <p class="mt-2 text-gray-500">Next action: <span class="text-gray-200"><%= venue_dashboard[:next_action] || "unavailable" %></span></p>
                   </div>
+                  <% if venue_dashboard.dig(:current_venue_position, :margin_mode).present? %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Margin mode</p>
+                      <% mode = venue_dashboard.dig(:current_venue_position, :margin_mode).to_s %>
+                      <p class="mt-1 truncate text-gray-100 font-medium"><%= mode.humanize %><%= mode == "isolated" ? " 1.0x" : "" %></p>
+                      <p class="mt-1 text-gray-500">Desired: isolated 1.0x</p>
+                    </div>
+                  <% end %>
+                  <% if venue_dashboard.dig(:current_venue_position, :isolated_margin_usd).present? %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Isolated margin</p>
+                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :isolated_margin_usd) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :isolated_margin_usd)) %></p>
+                    </div>
+                  <% end %>
+                  <% if venue_dashboard.dig(:current_venue_position, :notional_usd).present? %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Venue notional</p>
+                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :notional_usd) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :notional_usd)) %></p>
+                    </div>
+                  <% end %>
                 </div>
                 <% if venue_dashboard.dig(:open_preview, :payload).present? %>
                   <% open_preview = venue_dashboard[:open_preview] %>
@@ -426,7 +462,11 @@
                     <p class="text-yellow-200 text-xs mt-2">Live submit is disabled for <%= selected_adapter.venue_name %>; previews do not create orders.</p>
                   <% end %>
                   <% if action_state[:blockers].present? %>
-                    <p class="text-yellow-200 text-xs mt-2"><%= action_state[:blockers].join("; ") %></p>
+                    <ul class="text-yellow-200 text-xs mt-2 space-y-1">
+                      <% action_state[:blockers].each do |blocker| %>
+                        <li class="break-words whitespace-normal">- <%= blocker %></li>
+                      <% end %>
+                    </ul>
                   <% end %>
                 </div>
               <% end %>
@@ -439,10 +479,15 @@
         <% auto_hedge = auto_status[:hedge] %>
         <% scheduler = auto_status[:scheduler] || {} %>
         <% auto_state = auto_status[:auto_rebalance_status] || "blocked" %>
+        <% auto_venue_name = auto_status[:execution_venue_name] || production_venue_name %>
+        <% auto_short_label = auto_status[:current_short_label] || "Current short" %>
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p class="text-gray-400 text-xs uppercase tracking-wide">Auto-Rebalance Status</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Read-only estimate. HedgeSyncJob triggers on drift, not a fixed ETH price.</p>
+            <p class="text-yellow-200/80 text-xs mt-2">Read-only estimate. HedgeSyncJob triggers on selected-venue drift, not a fixed ETH price.</p>
+            <% if auto_status[:auto_rebalance_message].present? %>
+              <p class="text-gray-400 text-xs mt-2"><%= auto_status[:auto_rebalance_message] %></p>
+            <% end %>
           </div>
           <span class="inline-block px-2 py-1 rounded-full border text-xs font-semibold <%= auto_rebalance_status_class(auto_state) %>"><%= auto_state == "active" ? "Active" : auto_state.capitalize %></span>
         </div>
@@ -459,27 +504,31 @@
               <p class="text-white font-medium mt-1"><%= scheduler[:hedge_sync_schedule].presence || "unknown" %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <p class="text-gray-500 text-xs uppercase tracking-wide">Execution venue</p>
+              <p class="text-white font-medium mt-1"><%= auto_venue_name %></p>
+            </div>
+            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Rebalance needed now</p>
               <p class="<%= auto_status[:rebalance_needed] ? 'text-red-300' : 'text-green-300' %> font-medium mt-1"><%= auto_status[:rebalance_needed] ? "yes" : "no" %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Current target</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:current_target_hedge_eth].presence || "unavailable" %></p>
+              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_target_hedge_eth] %>"><%= format_venue_eth_amount(auto_status[:current_target_hedge_eth]) %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Current short</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:current_hyperliquid_eth_short].presence || "unavailable" %></p>
-              <% if auto_status[:current_hyperliquid_eth_short].present? && BigDecimal(auto_status[:current_hyperliquid_eth_short]).zero? %>
+              <p class="text-gray-500 text-xs uppercase tracking-wide"><%= auto_short_label %></p>
+              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_venue_eth_short] %>"><%= format_venue_eth_amount(auto_status[:current_venue_eth_short]) %></p>
+              <% if auto_status[:current_venue_eth_short].present? && BigDecimal(auto_status[:current_venue_eth_short]).zero? %>
                 <p class="text-yellow-200 text-xs mt-1">No current hedge short detected.</p>
               <% end %>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Current drift</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:current_drift_eth].presence || "unavailable" %></p>
+              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_drift_eth] %>"><%= format_venue_eth_amount(auto_status[:current_drift_eth]) %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Tolerance</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:tolerance_eth].presence || "unavailable" %></p>
+              <p class="text-white font-medium mt-1" title="<%= auto_status[:tolerance_eth] %>"><%= format_venue_eth_amount(auto_status[:tolerance_eth]) %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Last rebalance</p>
@@ -492,6 +541,12 @@
               <p class="text-gray-500 text-xs uppercase tracking-wide">Tolerance state</p>
               <p class="<%= auto_status[:inside_tolerance] ? 'text-green-300' : 'text-red-300' %> font-medium mt-1"><%= auto_status[:inside_tolerance] ? "inside tolerance" : "outside tolerance" %></p>
             </div>
+            <% if auto_status[:margin_mode].present? %>
+              <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+                <p class="text-gray-500 text-xs uppercase tracking-wide">Margin mode</p>
+                <p class="text-white font-medium mt-1"><%= auto_status[:margin_mode].to_s.humanize %><%= auto_status[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></p>
+              </div>
+            <% end %>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Approx lower ETH price threshold</p>
               <p class="text-white font-medium mt-1"><%= auto_status[:estimated_lower_eth_price_threshold].present? ? format_usd(BigDecimal(auto_status[:estimated_lower_eth_price_threshold])) : "unavailable" %></p>
@@ -569,11 +624,11 @@
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Current short</p>
-              <p class="text-white font-medium mt-1"><%= history_summary[:current_short_eth].presence || "unavailable" %></p>
+              <p class="text-white font-medium mt-1" title="<%= history_summary[:current_short_eth] %>"><%= format_venue_eth_amount(history_summary[:current_short_eth]) %></p>
             </div>
             <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
               <p class="text-gray-500 text-xs uppercase tracking-wide">Current drift</p>
-              <p class="text-white font-medium mt-1"><%= history_summary[:current_drift_eth].presence || "unavailable" %></p>
+              <p class="text-white font-medium mt-1" title="<%= history_summary[:current_drift_eth] %>"><%= format_venue_eth_amount(history_summary[:current_drift_eth]) %></p>
             </div>
           </div>
           <div class="mt-4 max-h-[28rem] overflow-y-auto rounded-lg border border-gray-800">
@@ -778,13 +833,23 @@
 <% position_valuation = @position_valuation || PositionValuation.current(@position) %>
 <% pool_unrealized = position_valuation.pool_delta_usd %>
 <% latest_snap = @pnl_snapshots.first %>
-<% hedge_unrealized = (latest_snap&.hedge_unrealized || 0).to_d %>
+<% production_dashboard ||= @aerodrome_production_dashboard_status || {} %>
+<% pnl_execution_venue = HedgeVenues.normalize(production_dashboard[:execution_venue] || @position.hedge&.execution_venue) %>
+<% venue_hedge_unrealized_raw = production_dashboard[:venue_hedge_unrealized_pnl_usd].presence %>
+<% hedge_unrealized = pnl_execution_venue == "nado" ? (venue_hedge_unrealized_raw ? BigDecimal(venue_hedge_unrealized_raw.to_s) : nil) : (latest_snap&.hedge_unrealized || 0).to_d %>
+<% hedge_unrealized_available = !hedge_unrealized.nil? %>
 <% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
-<% total_unrealized = pool_unrealized ? pool_unrealized + hedge_unrealized : hedge_unrealized %>
+<% total_unrealized = if pool_unrealized && hedge_unrealized_available
+  pool_unrealized + hedge_unrealized
+elsif pool_unrealized && pnl_execution_venue != "nado"
+  pool_unrealized
+elsif hedge_unrealized_available
+  hedge_unrealized
+end %>
 <% total_fees = latest_snap&.total_fees_usd || 0 %>
 <% aerodrome_fees_pnl = @aerodrome_fees_report&.fetch(:total_fees_usd, nil).presence %>
 <% aerodrome_fees_pnl = BigDecimal(aerodrome_fees_pnl.to_s) if aerodrome_fees_pnl %>
-<% total_pnl_available = pool_unrealized.present? || !@position.mellow_autopilot? %>
+<% total_pnl_available = !total_unrealized.nil? || (!@position.mellow_autopilot? && hedge_unrealized_available) %>
 <% total_pnl = total_pnl_available ? total_unrealized + hedge_realized + (aerodrome_position?(@position) ? 0 : total_fees) : nil %>
 <% rewards_pnl = @aerodrome_rewards_report&.fetch(:claimable_aero_usd, nil).presence %>
 <% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
@@ -816,11 +881,19 @@
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge</p>
     <% if @position.hedge %>
-      <% hedge_value = position_valuation.current_value_usd ? position_valuation.current_value_usd * @position.hedge.target : nil %>
+      <% hedge_value = pnl_execution_venue == "nado" ? production_dashboard[:current_venue_notional_usd] : (position_valuation.current_value_usd ? position_valuation.current_value_usd * @position.hedge.target : nil) %>
       <p class="text-xl font-bold <%= @position.hedge.active? ? 'text-white' : 'text-gray-500' %>">
         <%= valuation_value_display(hedge_value) %>
       </p>
-      <p class="text-gray-500 text-sm">Target: <%= number_to_percentage(@position.hedge.target * 100, precision: 0) %> &middot; Tolerance: <%= number_to_percentage(@position.hedge.tolerance * 100, precision: 0) %></p>
+      <p class="text-gray-500 text-sm">
+        <%= HedgeVenues.label(pnl_execution_venue) %>
+        <% if pnl_execution_venue == "nado" %>
+          &middot; Short <span title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %> ETH</span>
+          <% if production_dashboard[:margin_mode].present? %>&middot; <%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %><% end %>
+        <% else %>
+          &middot; Target: <%= number_to_percentage(@position.hedge.target * 100, precision: 0) %> &middot; Tolerance: <%= number_to_percentage(@position.hedge.tolerance * 100, precision: 0) %>
+        <% end %>
+      </p>
     <% else %>
       <p class="text-xl font-bold text-gray-500">None</p>
     <% end %>
@@ -835,20 +908,25 @@
       <%= total_pnl ? format_usd(total_pnl) : "Unavailable" %>
     </p>
     <p class="text-gray-500 text-sm mt-1">
-      Unrealized: <span class="<%= total_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %></span>
+      Unrealized: <span class="<%= (total_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %></span>
       &middot; Realized: <span class="<%= hedge_realized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(hedge_realized) %></span>
       &middot; Fees: <span class="text-green-400"><%= aerodrome_position?(@position) ? "see Aerodrome LP Fees" : format_usd(total_fees) %></span>
     </p>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Total Unrealized</p>
-    <p class="text-2xl font-bold mt-2 <%= total_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>">
+    <p class="text-2xl font-bold mt-2 <%= (total_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
       <%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %>
     </p>
     <p class="text-gray-500 text-sm mt-1">
       Pool: <span class="<%= (pool_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %></span>
-      &middot; Hedge: <span class="<%= hedge_unrealized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(hedge_unrealized) %></span>
+      &middot; Hedge: <span class="<%= (hedge_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></span>
     </p>
+    <% if pnl_execution_venue == "nado" && !hedge_unrealized_available %>
+      <p class="text-yellow-200 text-xs mt-2"><%= production_dashboard[:venue_hedge_pnl_message].presence || "Nado hedge PnL unavailable from readback." %></p>
+    <% elsif pnl_execution_venue == "nado" %>
+      <p class="text-gray-500 text-xs mt-2">Nado short PnL uses readback entry price minus mark price times short size.</p>
+    <% end %>
   </div>
   <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
     <p class="text-gray-400 text-xs uppercase tracking-wide">Realized PnL</p>

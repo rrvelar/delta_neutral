@@ -171,7 +171,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "span", text: "MONITOR ONLY"
     assert_select "span", text: "NO ORDERS"
     assert_select "span", text: "HEDGE DISABLED"
-    assert_select "span", text: "READ-ONLY HYPERLIQUID"
+    assert_select "span", text: "SELECTED VENUE: HYPERLIQUID"
     assert_select "span", text: "NOT LIVE HEDGE-READY"
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID 315985", response.body
@@ -618,6 +618,61 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "$2,611.87", response.body
     assert_no_match "$186.00", response.body
     assert_no_match "-$2,422", response.body
+  end
+
+  test "show uses Nado readback for current hedge status and pnl when hedge venue is nado" do
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:71261528",
+      entry_value_usd: BigDecimal("2029"),
+      asset0_amount: BigDecimal("0.936162"),
+      asset1_amount: BigDecimal("100"),
+      mellow_metadata: JSON.generate(
+        "submitted_wallet" => position.wallet.address,
+        "share_token" => "0xshare",
+        "strategy_token_id" => "71261528",
+        "strategy_pool_address" => position.pool_address,
+        "user_share_percent" => "1.23",
+        "user_weth_exposure" => "0.936162",
+        "user_usdc_exposure" => "100",
+        "user_total_value_usd" => "2029",
+        "last_probe_confidence" => "high",
+        "hedge_ready" => true
+      )
+    )
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.001", active: true, execution_venue: "nado")
+    nado_position = {
+      venue: "Nado",
+      symbol: "ETH-PERP",
+      product_id: 4,
+      side: "short",
+      size: BigDecimal("-0.936"),
+      short_size: BigDecimal("0.936"),
+      margin_mode: "isolated",
+      entry_price: BigDecimal("2061"),
+      mark_price: BigDecimal("2050"),
+      notional_usd: BigDecimal("1918.8"),
+      isolated_margin_usd: BigDecimal("1909"),
+      status: "ok"
+    }
+    adapter = NadoDashboardAdapterMock.new(nado_position)
+    original_build = HedgeVenues.method(:build)
+
+    HedgeVenues.stub(:build, ->(name, **kwargs) { name.to_s == "nado" ? adapter : original_build.call(name, **kwargs) }) do
+      NadoHedgeExecutionService.stub(:new, ->(**) { NadoPreflightMock.new }) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "Current Nado ETH short", response.body
+    assert_match "0.936000", response.body
+    assert_match "within tolerance / no-op", response.body
+    assert_match "Isolated 1.0x", response.body
+    assert_match "$1,909.00", response.body
+    assert_match "Nado short PnL uses readback entry price minus mark price times short size.", response.body
+    assert_no_match "Current Hyperliquid ETH position", response.body
   end
 
   test "show displays unavailable Mellow pnl when pro rata value is not usable" do
@@ -1212,6 +1267,71 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       raise "USDC must not be read" if asset == "USDC"
 
       @positions.empty? ? nil : @positions.shift
+    end
+  end
+
+  class NadoDashboardAdapterMock
+    def initialize(position)
+      @position = position
+    end
+
+    def venue_name = "Nado"
+
+    def mode = "live_configured_but_disabled"
+
+    def live_supported? = true
+
+    def live_enabled? = false
+
+    def blockers = []
+
+    def warnings = []
+
+    def read_position(symbol:)
+      raise "unexpected symbol" unless symbol == "ETH"
+
+      @position
+    end
+
+    def account_state
+      {
+        venue: "Nado",
+        current_short_eth: "0.936",
+        current_side: "short",
+        margin_mode: "isolated",
+        hedge_positions_count: 1
+      }
+    end
+
+    def open_short_preview(symbol:, size_eth:, max_slippage:)
+      {
+        rounded_size_eth: size_eth.to_s("F"),
+        payload: {
+          schema: "nado_eip712_order_preview",
+          symbol: symbol,
+          max_slippage: max_slippage
+        }
+      }
+    end
+
+    def close_preview(symbol:, size_eth:)
+      {
+        rounded_size_eth: size_eth.to_s("F"),
+        payload: {
+          schema: "nado_eip712_order_preview",
+          symbol: symbol,
+          reduce_only: true
+        }
+      }
+    end
+  end
+
+  class NadoPreflightMock
+    def preflight(**)
+      {
+        blockers: [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit." ],
+        estimated_notional_usd: "1918.8"
+      }
     end
   end
 

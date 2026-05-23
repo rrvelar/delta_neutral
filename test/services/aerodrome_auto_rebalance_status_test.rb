@@ -68,6 +68,69 @@ class AerodromeAutoRebalanceStatusTest < ActiveSupport::TestCase
     assert_equal ShortRebalance::STATUS_SUCCESS, report.fetch(:last_rebalance_status)
   end
 
+  test "uses Nado current short and auto gate without Hyperliquid pause blockers" do
+    position = create_position
+    Hedge.create!(
+      position: position,
+      target: "1.0",
+      tolerance: "0.001",
+      active: true,
+      execution_venue: "nado"
+    )
+
+    with_env(
+      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false",
+      "AERODROME_HEDGE_PAUSED" => "true",
+      "AERODROME_HEDGE_ENABLED" => "false"
+    ) do
+      report = AerodromeAutoRebalanceStatus.new(
+        position: position,
+        dashboard_status: {
+          execution_venue: "nado",
+          current_short_eth: "1.2495",
+          drift_eth: "0.0005",
+          margin_mode: "isolated",
+          isolated_margin_usd: "2500"
+        }
+      ).report
+
+      assert_equal "nado", report.fetch(:execution_venue)
+      assert_equal "Nado", report.fetch(:execution_venue_name)
+      assert_equal "1.2495", report.fetch(:current_venue_eth_short)
+      assert_equal false, report.fetch(:rebalance_needed)
+      assert_equal true, report.fetch(:inside_tolerance)
+      assert_equal "disabled", report.fetch(:auto_rebalance_status)
+      assert_equal "Manual Nado hedge is active; automatic Nado rebalance is disabled.", report.fetch(:auto_rebalance_message)
+      assert_empty report.fetch(:blockers)
+    end
+  end
+
+  test "blocks Nado auto rebalance only on Nado auto gate when drift exceeds tolerance" do
+    position = create_position
+    Hedge.create!(
+      position: position,
+      target: "1.0",
+      tolerance: "0.001",
+      active: true,
+      execution_venue: "nado"
+    )
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false", "AERODROME_HEDGE_PAUSED" => "true") do
+      report = AerodromeAutoRebalanceStatus.new(
+        position: position,
+        dashboard_status: {
+          execution_venue: "nado",
+          current_short_eth: "1.20",
+          drift_eth: "0.05"
+        }
+      ).report
+
+      assert_equal true, report.fetch(:rebalance_needed)
+      assert_includes report.fetch(:blockers), "rebalance needed but AERODROME_NADO_AUTO_REBALANCE_ENABLED is not true"
+      refute_includes report.fetch(:blockers), "rebalance needed but AERODROME_HEDGE_PAUSED is true"
+    end
+  end
+
   private
 
   def build_report(position, current_short:)

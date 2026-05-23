@@ -24,12 +24,19 @@ class AerodromeAutoRebalanceStatus
       position: @position,
       hedge: hedge,
       scheduler: scheduler_status,
+      execution_venue: execution_venue,
+      execution_venue_name: HedgeVenues.label(execution_venue),
       current_target_hedge_eth: target&.to_s("F"),
       current_hyperliquid_eth_short: current_short&.to_s("F"),
+      current_venue_eth_short: current_short&.to_s("F"),
+      current_short_label: current_short_label,
       current_drift_eth: drift&.to_s("F"),
       tolerance_eth: tolerance&.to_s("F"),
       inside_tolerance: inside_tolerance,
       rebalance_needed: rebalance_needed,
+      margin_mode: @dashboard_status[:margin_mode],
+      isolated_margin_usd: @dashboard_status[:isolated_margin_usd],
+      current_venue_notional_usd: @dashboard_status[:current_venue_notional_usd],
       last_short_rebalance: last_rebalance,
       last_rebalance_time: last_rebalance&.rebalanced_at,
       last_rebalance_status: last_rebalance&.status,
@@ -37,6 +44,7 @@ class AerodromeAutoRebalanceStatus
       estimated_upper_eth_price_threshold: estimated_thresholds(target: target, current_short: current_short, tolerance: tolerance)[:upper],
       threshold_confidence: "low",
       auto_rebalance_status: auto_rebalance_status(blockers: blockers, hedge: hedge),
+      auto_rebalance_message: auto_rebalance_message(hedge: hedge, rebalance_needed: rebalance_needed),
       env_gates: env_gates,
       blockers: blockers,
       warnings: @warnings
@@ -56,6 +64,8 @@ class AerodromeAutoRebalanceStatus
   end
 
   def weth_amount
+    return @position.mellow_weth_exposure if @position.mellow_autopilot? && @position.mellow_weth_exposure
+
     if %w[ETH WETH].include?(@position.asset0.to_s.upcase)
       @position.asset0_amount
     elsif %w[ETH WETH].include?(@position.asset1.to_s.upcase)
@@ -119,8 +129,11 @@ class AerodromeAutoRebalanceStatus
   def status_blockers(hedge:, rebalance_needed:)
     blockers = []
     blockers << "No active hedge configured for this position" unless hedge
-    blockers << "current Hyperliquid ETH short unavailable" if decimal_from_status(:current_short_eth).nil?
+    blockers << "current #{HedgeVenues.label(execution_venue)} ETH short unavailable" if decimal_from_status(:current_short_eth).nil?
     blockers << "current target hedge unavailable" if hedge && target_short(hedge).nil?
+    return nado_status_blockers(blockers, rebalance_needed: rebalance_needed) if execution_venue == "nado"
+    return ethereal_status_blockers(blockers, rebalance_needed: rebalance_needed) if execution_venue == "ethereal"
+
     blockers << "rebalance needed but AERODROME_HEDGE_ENABLED is not true" if rebalance_needed && !bool_env("AERODROME_HEDGE_ENABLED")
     blockers << "rebalance needed but AERODROME_HEDGE_PAUSED is true" if rebalance_needed && bool_env("AERODROME_HEDGE_PAUSED", default: true)
     blockers << "rebalance needed but AERODROME_LIVE_APPROVED is not true" if rebalance_needed && !bool_env("AERODROME_LIVE_APPROVED")
@@ -130,12 +143,17 @@ class AerodromeAutoRebalanceStatus
 
   def auto_rebalance_status(blockers:, hedge:)
     return "blocked" if blockers.any?
+    return "disabled" if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    return "disabled" if execution_venue == "ethereal"
     return "paused" if !hedge || !bool_env("AERODROME_HEDGE_ENABLED") || bool_env("AERODROME_HEDGE_PAUSED", default: true)
 
     "active"
   end
 
   def env_gates
+    return nado_env_gates if execution_venue == "nado"
+    return ethereal_env_gates if execution_venue == "ethereal"
+
     {
       "AERODROME_HEDGE_ENABLED" => ENV.fetch("AERODROME_HEDGE_ENABLED", nil),
       "AERODROME_HEDGE_PAUSED" => ENV.fetch("AERODROME_HEDGE_PAUSED", nil),
@@ -148,5 +166,51 @@ class AerodromeAutoRebalanceStatus
 
   def bool_env(key, default: false)
     ActiveModel::Type::Boolean.new.cast(ENV.fetch(key, default.to_s))
+  end
+
+  def execution_venue
+    HedgeVenues.normalize(active_hedge&.execution_venue || @dashboard_status[:execution_venue])
+  end
+
+  def current_short_label
+    execution_venue == HedgeVenues::DEFAULT ? "Current Hyperliquid ETH short" : "Current #{HedgeVenues.label(execution_venue)} ETH short"
+  end
+
+  def nado_status_blockers(blockers, rebalance_needed:)
+    blockers << "rebalance needed but AERODROME_NADO_AUTO_REBALANCE_ENABLED is not true" if rebalance_needed && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    blockers
+  end
+
+  def ethereal_status_blockers(blockers, rebalance_needed:)
+    blockers << "rebalance needed but Ethereal auto-rebalance is not implemented" if rebalance_needed
+    blockers
+  end
+
+  def auto_rebalance_message(hedge:, rebalance_needed:)
+    return nil unless hedge
+    if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+      return "Manual Nado hedge is active; automatic Nado rebalance is disabled."
+    end
+    return "Ethereal is read-only/dry-run; automatic rebalance is not implemented." if execution_venue == "ethereal"
+    return "Current hedge is within tolerance; no automatic rebalance is needed." unless rebalance_needed
+
+    nil
+  end
+
+  def nado_env_gates
+    {
+      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", nil),
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => ENV.fetch("AERODROME_NADO_HEDGE_LIVE_ENABLED", nil),
+      "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
+    }
+  end
+
+  def ethereal_env_gates
+    {
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED", nil),
+      "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
+    }
   end
 end

@@ -100,7 +100,10 @@ class PositionsController < ApplicationController
       end
       @aerodrome_rewards_report = aerodrome_rewards_report
       @aerodrome_fees_report = aerodrome_fees_report
-      @aerodrome_production_dashboard_status = AerodromeProductionDashboardStatus.new(position: @position).report
+      @aerodrome_production_dashboard_status = AerodromeProductionDashboardStatus.new(
+        position: @position,
+        hedge_venue_adapter: @selected_hedge_venue_adapter
+      ).report
       @aerodrome_rebalance_history_status = AerodromeRebalanceHistoryStatus.new(
         position: @position,
         dashboard_status: @aerodrome_production_dashboard_status
