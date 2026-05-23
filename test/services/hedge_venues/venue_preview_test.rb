@@ -183,13 +183,15 @@ module HedgeVenues
 
     test "nado live open submits single signed short with rounded size" do
       submitted = []
+      fixed_now = Time.utc(2026, 5, 23, 12, 0, 0)
       service = NadoHedgeExecutionService.new(
         env: nado_live_env,
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
         http_post: ->(_uri, payload) {
           submitted << payload
           { status: "success", data: [ { digest: "0x#{"cd" * 32}" } ] }
-        }
+        },
+        now: -> { fixed_now }
       )
 
       result = service.open_short(
@@ -209,23 +211,28 @@ module HedgeVenues
       order = row.fetch(:order)
       assert_equal 4, row.fetch(:product_id)
       assert_equal "-1093000000000000000", order.fetch(:amount)
+      assert_equal (fixed_now.to_i + NadoHedgeExecutionService::DEFAULT_ORDER_TTL_SECONDS).to_s, order.fetch(:expiration)
+      assert_equal ((fixed_now.to_f * 1000).to_i + 5000), order.fetch(:nonce).to_i >> 20
       assert_equal "0x#{"ab" * 65}", row.fetch(:signature)
       assert_equal "1.093", result.receipt.fetch(:rounded_size_eth)
       assert_equal "execute_place_orders_batch", result.receipt.fetch(:submitted_order_summary).fetch(:body_shape)
+      diagnostics = result.receipt.fetch(:submitted_order_summary).fetch(:recv_time_diagnostics)
+      assert_equal 5.0, diagnostics.fetch(:seconds_until_recv_time)
+      assert_equal order.fetch(:expiration).to_i, diagnostics.fetch(:order_expiration)
       assert_equal "0x#{"cd" * 32}", result.receipt.fetch(:exchange_order_id)
       assert_equal "submitted", result.receipt.fetch(:submit_response_classification).fetch(:status)
       assert_equal "<redacted>", result.receipt.fetch(:submitted_order_summary).fetch(:signature)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
     end
 
-    test "nado live submit rejection records useful sanitized response message" do
+    test "nado live submit recv_time rejection records useful sanitized response message" do
       service = NadoHedgeExecutionService.new(
         env: nado_live_env,
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
         http_post: ->(_uri, _payload) {
           {
             status: "failure",
-            data: [ { error_code: 2011, error: "recv_time expired" } ],
+            data: [ { error_code: 2012, error: "Request received more than 100 seconds before the 'recv_time'." } ],
             request_type: "execute_place_orders"
           }
         }
@@ -242,7 +249,8 @@ module HedgeVenues
       classification = result.receipt.fetch(:submit_response_classification)
       assert_equal "failed_before_submit", result.status
       assert_equal "rejected", classification.fetch(:status)
-      assert_match "error_code=2011 recv_time expired", classification.fetch(:message)
+      assert_match "error_code=2012", classification.fetch(:message)
+      assert_match "more than 100 seconds", classification.fetch(:message)
       assert_nil result.receipt.fetch(:exchange_order_id)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
     end

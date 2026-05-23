@@ -263,7 +263,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_empty service.rebalance_calls
   end
 
-  test "nado hedge sync records rejected exchange response message" do
+  test "nado hedge sync records rejected recv_time exchange response message" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     result = NadoHedgeExecutionService::Result.new("failed_before_submit", [], [], {
       final_status: "failed_before_submit",
@@ -276,15 +276,15 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       },
       submit_response_classification: {
         status: "rejected",
-        message: "Nado execute_place_orders rejected order: error_code=2011 recv_time expired.",
+        message: "Nado execute_place_orders rejected order: error_code=2012 Request received more than 100 seconds before the 'recv_time'.",
         response_summary: {
           status: "failure",
-          data: [ { error_code: 2011, error: "recv_time expired" } ]
+          data: [ { error_code: 2012, error: "Request received more than 100 seconds before the 'recv_time'." } ]
         }
       },
       raw_submit_response_summary: {
         status: "failure",
-        data: [ { error_code: 2011, error: "recv_time expired" } ]
+        data: [ { error_code: 2012, error: "Request received more than 100 seconds before the 'recv_time'." } ]
       },
       exchange_order_id: nil,
       post_submit_readback: nil
@@ -302,7 +302,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     rebalance = hedge.short_rebalances.order(:id).last
     assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
     assert_match "Nado execute_place_orders rejected order", rebalance.message
-    assert_match "error_code=2011", rebalance.message
+    assert_match "error_code=2012", rebalance.message
+    assert_match "more than 100 seconds", rebalance.message
     assert_nil rebalance.exchange_order_id
     assert_no_match(/signature|private/i, rebalance.message)
   end

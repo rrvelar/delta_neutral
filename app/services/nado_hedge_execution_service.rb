@@ -5,6 +5,8 @@ class NadoHedgeExecutionService
   DEFAULT_SYMBOL = "ETH-PERP".freeze
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   DEFAULT_ORDER_TTL_SECONDS = 3600
+  RECEIVE_TIME_BUFFER_SECONDS = 5
+  MAX_RECEIVE_TIME_FUTURE_SECONDS = 100
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
@@ -92,17 +94,20 @@ class NadoHedgeExecutionService
     rounded_size = round_size(order_size, product: product)
     amount_x18 = decimal_to_x18(rounded_size)
     amount_x18 = -amount_x18 if side == "sell"
+    now = @now.call
     order_fields = nado_order_fields(
       side: side,
       reduce_only: reduce_only,
       price: rounded_price,
       amount_x18: amount_x18,
-      product: product
+      product: product,
+      now: now
     )
     typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
+    timing = order_timing_summary(order_fields, local_time: now)
 
     {
-      ok: product.fetch(:blockers).empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
+      ok: product.fetch(:blockers).empty? && timing.fetch(:blockers).empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
       summary: {
         venue: "Nado",
         symbol: DEFAULT_SYMBOL,
@@ -116,12 +121,16 @@ class NadoHedgeExecutionService
         amount_x18: amount_x18.to_s,
         appendix: order_fields[:appendix],
         order_type: "ioc",
-        isolated: appendix_isolated?(order_fields[:appendix].to_i)
+        isolated: appendix_isolated?(order_fields[:appendix].to_i),
+        recv_time_ms: timing.dig(:diagnostics, :recv_time_ms),
+        seconds_until_recv_time: timing.dig(:diagnostics, :seconds_until_recv_time),
+        order_expiration: timing.dig(:diagnostics, :order_expiration)
       },
+      timing: timing.fetch(:diagnostics),
       typed_data: typed_data,
       order_fields: order_fields,
       product: product,
-      blockers: product.fetch(:blockers),
+      blockers: product.fetch(:blockers) + timing.fetch(:blockers),
       warnings: product.fetch(:warnings)
     }
   end
@@ -329,13 +338,13 @@ class NadoHedgeExecutionService
     (BigDecimal(size_eth.to_s) / increment).floor * increment
   end
 
-  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:)
+  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:)
     {
       sender: subaccount,
       priceX18: decimal_to_x18(price).to_s,
       amount: amount_x18.to_s,
-      expiration: (@now.call.to_i + DEFAULT_ORDER_TTL_SECONDS).to_s,
-      nonce: nonce("#{side}:#{amount_x18}:#{@now.call.to_i}").to_s,
+      expiration: (now.to_i + DEFAULT_ORDER_TTL_SECONDS).to_s,
+      nonce: nado_receive_time_nonce(seed: "#{side}:#{amount_x18}:#{now.to_f}", now: now).to_s,
       appendix: build_appendix(reduce_only: reduce_only).to_s
     }
   end
@@ -470,7 +479,8 @@ class NadoHedgeExecutionService
       body_shape: EXECUTE_BODY_SHAPE,
       request_type: "place_orders",
       signature: "<redacted>",
-      typed_data_hash: typed_data_hash(order[:typed_data])
+      typed_data_hash: typed_data_hash(order[:typed_data]),
+      recv_time_diagnostics: order[:timing]
     )
   end
 
@@ -653,8 +663,52 @@ class NadoHedgeExecutionService
     (appendix & (1 << 8)).positive?
   end
 
-  def nonce(seed)
-    Digest::SHA256.hexdigest(seed)[0, 16].to_i(16)
+  def nado_receive_time_nonce(seed:, now:)
+    receive_time_ms = local_time_ms(now) + (RECEIVE_TIME_BUFFER_SECONDS * 1000)
+    entropy = Digest::SHA256.hexdigest(seed)[0, 8].to_i(16) & ((1 << 20) - 1)
+    (receive_time_ms << 20) | entropy
+  end
+
+  def order_timing_summary(order_fields, local_time:)
+    diagnostics = recv_time_diagnostics(order_fields, local_time: local_time)
+    blockers = []
+    seconds_until_recv_time = diagnostics[:seconds_until_recv_time]
+    blockers << "Nado recv_time is not computable from order nonce" unless seconds_until_recv_time
+    if seconds_until_recv_time && seconds_until_recv_time > MAX_RECEIVE_TIME_FUTURE_SECONDS
+      blockers << "Nado recv_time is more than #{MAX_RECEIVE_TIME_FUTURE_SECONDS} seconds in the future"
+    end
+    blockers << "Nado recv_time is stale" if seconds_until_recv_time && seconds_until_recv_time.negative?
+    { diagnostics: diagnostics, blockers: blockers }
+  end
+
+  def recv_time_diagnostics(order_fields, local_time:)
+    nonce = Integer(order_fields[:nonce])
+    recv_time_ms = nonce >> 20
+    local_submit_time_ms = local_time_ms(local_time)
+    expiration = Integer(order_fields[:expiration])
+    {
+      recv_time_ms: recv_time_ms,
+      recv_time: Time.at(recv_time_ms / 1000.0).utc.iso8601(3),
+      local_submit_time_ms: local_submit_time_ms,
+      local_submit_time: local_time.utc.iso8601(3),
+      seconds_until_recv_time: ((recv_time_ms - local_submit_time_ms) / 1000.0).round(3),
+      order_expiration: expiration,
+      order_expiration_time: Time.at(expiration).utc.iso8601
+    }
+  rescue ArgumentError, TypeError
+    {
+      recv_time_ms: nil,
+      recv_time: nil,
+      local_submit_time_ms: local_time_ms(local_time),
+      local_submit_time: local_time.utc.iso8601(3),
+      seconds_until_recv_time: nil,
+      order_expiration: order_fields[:expiration],
+      order_expiration_time: nil
+    }
+  end
+
+  def local_time_ms(time)
+    (time.to_f * 1000).to_i
   end
 
   def verifying_contract(product_id)
