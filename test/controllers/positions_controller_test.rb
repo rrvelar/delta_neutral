@@ -335,6 +335,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Nado"
+    assert_match AerodromeDashboardHedgeAction::NADO_CONFIRMATION, response.body
+    assert_no_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
     assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit.", response.body
     assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"

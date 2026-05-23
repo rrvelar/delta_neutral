@@ -207,7 +207,8 @@ class PositionsController < ApplicationController
       account_state: @selected_hedge_venue_adapter.account_state,
       open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
-      live_preflight: target ? selected_venue_live_preflight(target: target, current_position: current_position) : nil
+      live_preflight: target ? selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) : nil,
+      action_live_preflights: selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position)
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
@@ -232,13 +233,28 @@ class PositionsController < ApplicationController
     "no-op"
   end
 
-  def selected_venue_live_preflight(target:, current_position:)
+  def selected_venue_live_preflight(target:, current_short:, drift:, current_position:)
+    action = selected_venue_next_action(target: target, current_short: current_short, drift: drift, tolerance: target && @position.hedge ? target * @position.hedge.tolerance : nil)
+    mapped_action = action == "increase short" || action == "reduce short" ? "rebalance" : action
+    mapped_action = "open" unless %w[open rebalance close].include?(mapped_action)
+    selected_venue_action_live_preflight(action: mapped_action, target: target, current_short: current_short, drift: drift, current_position: current_position)
+  end
+
+  def selected_venue_action_live_preflights(target:, current_short:, drift:, current_position:)
+    {
+      open: selected_venue_action_live_preflight(action: "open", target: target, current_short: current_short, drift: drift, current_position: current_position),
+      rebalance: selected_venue_action_live_preflight(action: "rebalance", target: target, current_short: current_short, drift: drift, current_position: current_position),
+      close: selected_venue_action_live_preflight(action: "close", target: target, current_short: current_short, drift: drift, current_position: current_position)
+    }
+  end
+
+  def selected_venue_action_live_preflight(action:, target:, current_short:, drift:, current_position:)
     max_slippage = ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
     if @selected_hedge_venue == "nado"
       return NadoHedgeExecutionService.new(venue: @selected_hedge_venue_adapter).preflight(
         position: @position,
-        action: "open",
-        size_eth: target,
+        action: action,
+        size_eth: selected_venue_action_size(action: action, target: target, current_short: current_short, drift: drift),
         current_position: current_position,
         confirmation: nil,
         max_slippage: max_slippage
@@ -247,12 +263,25 @@ class PositionsController < ApplicationController
 
     @selected_hedge_venue_adapter.single_venue_preflight(
       position: @position,
-      action: "open",
-      target_size_eth: target,
+      action: action,
+      target_size_eth: selected_venue_action_size(action: action, target: target, current_short: current_short, drift: drift),
       current_position: current_position,
       confirmation: nil,
       max_slippage: max_slippage
     )
+  end
+
+  def selected_venue_action_size(action:, target:, current_short:, drift:)
+    case action
+    when "open"
+      target || BigDecimal("0")
+    when "rebalance"
+      drift || BigDecimal("0")
+    when "close"
+      current_short || BigDecimal("0")
+    else
+      BigDecimal("0")
+    end
   end
 
   def aerodrome_rewards_report

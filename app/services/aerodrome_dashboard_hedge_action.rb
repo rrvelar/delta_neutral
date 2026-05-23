@@ -1,5 +1,6 @@
 class AerodromeDashboardHedgeAction
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_HYPERLIQUID_ORDERS"
+  NADO_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS"
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
@@ -207,6 +208,8 @@ class AerodromeDashboardHedgeAction
   end
 
   def execution_gate_blockers
+    return [] if @venue_key == "nado"
+
     self.class.execution_gate_blockers(
       action: @action,
       submitted_confirmation: @confirmation,

@@ -248,7 +248,7 @@
             <p class="text-gray-400 text-xs mt-1">Preview buttons are dry-run. Live buttons submit only one explicit action and remain blocked unless all dashboard live gates are configured.</p>
             <% selected_venue = @selected_hedge_venue || HedgeVenues::DEFAULT %>
             <% selected_adapter = @selected_hedge_venue_adapter || HedgeVenues.build(selected_venue) %>
-            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT %>
+            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT || (selected_venue == "nado" && selected_adapter.live_supported? && selected_adapter.live_enabled?) %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
               <%= form_with url: hedge_venue_position_path(@position), method: :patch, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
                 <div class="flex-1">
@@ -381,12 +381,20 @@
                 <% action_state = dashboard_actions[key] || {} %>
                 <% action_visible = action_state[:visible] %>
                 <% if selected_venue == "nado" && @selected_hedge_venue_dashboard.present? %>
+                  <% nado_preflight = (@selected_hedge_venue_dashboard[:action_live_preflights] || {})[key] || {} %>
+                  <% nado_button_blockers = (nado_preflight[:blockers] || []).reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
                   <% action_visible = case key
                     when :open then @selected_hedge_venue_dashboard[:next_action] == "open"
                     when :rebalance then @selected_hedge_venue_dashboard[:next_action].in?([ "increase short", "reduce short" ])
                     when :close then BigDecimal(@selected_hedge_venue_dashboard[:current_short_eth].to_s).positive?
                     else false
                     end %>
+                  <% action_state = {
+                    live_enabled: selected_adapter.live_enabled? && nado_button_blockers.blank?,
+                    blockers: nado_preflight[:blockers] || [],
+                    label: label
+                  } %>
+                  <% required_phrase = AerodromeDashboardHedgeAction::NADO_CONFIRMATION %>
                 <% end %>
                 <% live_enabled = action_state[:live_enabled] %>
                 <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">

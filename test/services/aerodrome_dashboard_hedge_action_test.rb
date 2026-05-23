@@ -306,6 +306,59 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "nado manual close uses nado confirmation and ignores global hedge pause" do
+    position = create_mellow_position(weth_exposure: "1.2")
+    service = NadoServiceStub.new(status: "submitted_and_confirmed", read_position: { asset: "ETH", size: BigDecimal("-0.955"), mark_price: BigDecimal("2300"), margin_mode: "cross" })
+
+    with_env(@env.merge(
+      "AERODROME_HEDGE_PAUSED" => "true",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_CONFIRMATION" => AerodromeDashboardHedgeAction::NADO_CONFIRMATION
+    )) do
+      report = build_action(
+        position: position,
+        action: "close",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::NADO_CONFIRMATION,
+        positions: [],
+        venue: "nado",
+        nado_service_factory: -> { service }
+      ).report
+
+      assert_equal "submitted", report.fetch(:status)
+      assert_empty report.fetch(:blockers)
+      assert_equal BigDecimal("0.955"), service.close_calls.first.fetch(:size_eth)
+      assert_equal AerodromeDashboardHedgeAction::NADO_CONFIRMATION, service.close_calls.first.fetch(:confirmation)
+      assert_equal false, report.fetch(:hyperliquid_execution)
+    end
+  end
+
+  test "nado manual close is blocked when nado live flag is false" do
+    position = create_mellow_position(weth_exposure: "1.2")
+    service = NadoServiceStub.new(status: "submitted_and_confirmed", read_position: { asset: "ETH", size: BigDecimal("-0.955"), mark_price: BigDecimal("2300"), margin_mode: "cross" }, preflight_blockers: [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" ])
+
+    with_env(@env.merge(
+      "AERODROME_HEDGE_PAUSED" => "true",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "false",
+      "AERODROME_NADO_HEDGE_CONFIRMATION" => AerodromeDashboardHedgeAction::NADO_CONFIRMATION
+    )) do
+      report = build_action(
+        position: position,
+        action: "close",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::NADO_CONFIRMATION,
+        positions: [],
+        venue: "nado",
+        nado_service_factory: -> { service }
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true"
+      assert_empty service.close_calls
+      assert_not_includes report.fetch(:blockers), "AERODROME_HEDGE_PAUSED must be false"
+    end
+  end
+
   test "hyperliquid preview still blocks inactive position" do
     position = create_position(active: false)
 
@@ -452,17 +505,19 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
   end
 
   class NadoServiceStub
-    attr_reader :open_calls, :rebalance_calls
+    attr_reader :open_calls, :rebalance_calls, :close_calls
 
-    def initialize(status:, read_position: nil)
+    def initialize(status:, read_position: nil, preflight_blockers: [])
       @status = status
       @read_position = read_position
+      @preflight_blockers = preflight_blockers
       @open_calls = []
       @rebalance_calls = []
+      @close_calls = []
     end
 
     def preflight(*)
-      { blockers: [], warnings: [] }
+      { blockers: @preflight_blockers, warnings: [] }
     end
 
     def read_position
@@ -478,8 +533,17 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       })
     end
 
-    def close_short(**)
-      raise "close_short not expected"
+    def close_short(**kwargs)
+      @close_calls << kwargs
+      NadoHedgeExecutionService::Result.new(@status, [], [], {
+        final_status: @status,
+        rounded_size_eth: kwargs.fetch(:size_eth).to_s("F"),
+        submitted_order_summary: {
+          signature: "<redacted>",
+          side: "buy",
+          reduce_only: true
+        }
+      })
     end
 
     def rebalance_short(**kwargs)
