@@ -9,6 +9,8 @@ class NadoHedgeExecutionService
   MAX_RECEIVE_TIME_FUTURE_SECONDS = 100
   POST_SUBMIT_READBACK_ATTEMPTS = 3
   POST_SUBMIT_READBACK_DELAY_SECONDS = 0.05
+  POST_SUBMIT_CLOSE_READBACK_ATTEMPTS = 12
+  POST_SUBMIT_CLOSE_READBACK_DELAY_SECONDS = 0.25
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
   DEFAULT_MARGIN_MODE = "isolated".freeze
   DEFAULT_REQUESTED_LEVERAGE = BigDecimal("1")
@@ -97,8 +99,10 @@ class NadoHedgeExecutionService
       "isolated_full_close"
     elsif delta.positive?
       "isolated_increase"
-    elsif margin_mode(current_position) == "isolated"
+    elsif margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "close_reopen"
       "isolated_full_close_then_reopen"
+    elsif margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "delta_reduce"
+      "blocked"
     elsif delta.negative?
       "isolated_decrease"
     else
@@ -113,13 +117,63 @@ class NadoHedgeExecutionService
       tolerance_eth: decimal_string(tolerance),
       current_margin_mode: margin_mode(current_position),
       desired_margin_mode: desired_margin_mode,
+      isolated_decrease_strategy: isolated_decrease_strategy,
       partial_isolated_reduce_supported: false,
+      partial_isolated_reduce_evidence: "No sibling fixture/test proves partial isolated reduce. Sibling evidence proves UI-equivalent full close with appendix=2817; split/partial reduce remains disabled by default.",
+      blocked_reason: action == "blocked" ? blocked_plan_reason(current_position: current_position, delta: delta) : nil,
       strategy: action == "isolated_full_close_then_reopen" ? "full_close_then_reopen" : action
     }
   end
 
   def auto_rebalance_short(position:, delta_eth:, current_position:, max_slippage:)
     execute_rebalance(position: position, delta_eth: BigDecimal(delta_eth.to_s), current_position: current_position, confirmation: nil, max_slippage: max_slippage, require_confirmation: false)
+  end
+
+  def resume_reopen_after_close(position:, target_size_eth:, confirmation:, max_slippage:, require_confirmation: true)
+    current_position = read_position
+    blocker = "Nado resume reopen requires flat readback; current short is #{decimal_string(short_size(current_position))} ETH."
+    plan = {
+      action: "resume_reopen_after_delayed_flat",
+      current_size_eth: decimal_string(short_size(current_position)),
+      target_size_eth: decimal_string(target_size_eth),
+      delta_eth: decimal_string(BigDecimal(target_size_eth.to_s) - short_size(current_position)),
+      tolerance_eth: "0",
+      current_margin_mode: margin_mode(current_position),
+      desired_margin_mode: desired_margin_mode,
+      partial_isolated_reduce_supported: false,
+      strategy: "resume_reopen_after_close"
+    }
+    unless current_position.nil? || short_size(current_position).zero?
+      return Result.new("blocked_before_submit", [ blocker ], [], {
+        timestamp: @now.call.utc.iso8601,
+        action: "resume_reopen_after_close",
+        venue: "nado",
+        position_id: position.id,
+        action_plan: plan,
+        pre_submit_readback: serialize_position(current_position),
+        final_status: "blocked_before_submit",
+        final_message: "Nado resume reopen requires flat readback.",
+        manual_action_required: true,
+        blockers: [ blocker ],
+        warnings: []
+      })
+    end
+
+    reopen_result = execute(
+      position: position,
+      action: "open",
+      size_eth: target_size_eth,
+      current_position: nil,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      require_confirmation: require_confirmation
+    )
+    receipt = reopen_result.receipt.merge(
+      action: "resume_reopen_after_close",
+      action_plan: plan,
+      resume_after_delayed_flat: true
+    )
+    Result.new(reopen_result.status, reopen_result.blockers, reopen_result.warnings, receipt)
   end
 
   def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
@@ -202,6 +256,7 @@ class NadoHedgeExecutionService
     target_size = short_size(current_position) + BigDecimal(delta_eth.to_s)
     plan = plan_rebalance(target_size_eth: target_size, current_position: current_position, tolerance_eth: BigDecimal("0"))
     return no_op_result(position: position, plan: plan, current_position: current_position) if plan[:action] == "no_op"
+    return blocked_plan_result(position: position, plan: plan, current_position: current_position) if plan[:action] == "blocked"
     return execute_close_then_reopen(position: position, target_size: target_size, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, plan: plan) if plan[:action] == "isolated_full_close_then_reopen"
     return execute(position: position, action: "close", size_eth: short_size(current_position), current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation) if plan[:action] == "isolated_full_close"
 
@@ -335,6 +390,28 @@ class NadoHedgeExecutionService
       warnings: []
     }
     Result.new("no_op", [], [], receipt)
+  end
+
+  def blocked_plan_result(position:, plan:, current_position:)
+    blocker = plan[:blocked_reason] || "Nado isolated planner blocked"
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "rebalance",
+      venue: "nado",
+      position_id: position.id,
+      source: position.position_source,
+      source_external_id: position.external_id,
+      action_plan: plan,
+      submitted: false,
+      pre_submit_readback: serialize_position(current_position),
+      post_submit_readback: serialize_position(current_position),
+      final_status: "blocked_before_submit",
+      final_message: blocker,
+      manual_action_required: true,
+      blockers: [ blocker ],
+      warnings: []
+    }
+    Result.new("blocked_before_submit", [ blocker ], [], receipt)
   end
 
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
@@ -686,8 +763,8 @@ class NadoHedgeExecutionService
 
   def poll_post_submit_readback(action:, expected_short:)
     attempts = []
-    POST_SUBMIT_READBACK_ATTEMPTS.times do |index|
-      @sleeper.call(POST_SUBMIT_READBACK_DELAY_SECONDS) if index.positive?
+    readback_attempts(action).times do |index|
+      @sleeper.call(readback_delay_seconds(action)) if index.positive?
       position = safe_read_position
       serialized = serialize_position(position)
       attempts << {
@@ -699,6 +776,14 @@ class NadoHedgeExecutionService
       return { attempts: attempts, position: position, confirmed: true } if attempts.last.fetch(:confirmed)
     end
     { attempts: attempts, position: nil, confirmed: false }
+  end
+
+  def readback_attempts(action)
+    action.to_s == "close" ? POST_SUBMIT_CLOSE_READBACK_ATTEMPTS : POST_SUBMIT_READBACK_ATTEMPTS
+  end
+
+  def readback_delay_seconds(action)
+    action.to_s == "close" ? POST_SUBMIT_CLOSE_READBACK_DELAY_SECONDS : POST_SUBMIT_READBACK_DELAY_SECONDS
   end
 
   def readback_confirms_action?(position, action, expected_short:)
@@ -1008,6 +1093,19 @@ class NadoHedgeExecutionService
 
   def desired_margin_mode
     (@env["AERODROME_NADO_MARGIN_MODE"].presence || DEFAULT_MARGIN_MODE).to_s.downcase
+  end
+
+  def isolated_decrease_strategy
+    strategy = @env["AERODROME_NADO_ISOLATED_DECREASE_STRATEGY"].presence || "close_reopen"
+    strategy.to_s.downcase
+  end
+
+  def blocked_plan_reason(current_position:, delta:)
+    return "current Nado readback is unavailable" if current_position == :unavailable
+    return "current Nado position is long" if position_size(current_position).positive?
+    return "partial isolated delta reduce is not proven; use close_reopen strategy" if delta.negative? && margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "delta_reduce"
+
+    "Nado isolated planner blocked"
   end
 
   def requested_leverage

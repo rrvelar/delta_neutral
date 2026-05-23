@@ -350,6 +350,21 @@ module HedgeVenues
       assert_equal "isolated_increase", increase.fetch(:action)
       assert_equal "isolated_full_close_then_reopen", decrease.fetch(:action)
       assert_equal false, decrease.fetch(:partial_isolated_reduce_supported)
+      assert_equal "close_reopen", decrease.fetch(:isolated_decrease_strategy)
+    end
+
+    test "nado isolated planner blocks delta reduce strategy because partial reduce is unproven" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "delta_reduce"))
+
+      plan = service.plan_rebalance(
+        target_size_eth: BigDecimal("0.794"),
+        current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
+        tolerance_eth: BigDecimal("0.001")
+      )
+
+      assert_equal "blocked", plan.fetch(:action)
+      assert_equal "delta_reduce", plan.fetch(:isolated_decrease_strategy)
+      assert_match "partial isolated delta reduce is not proven", plan.fetch(:blocked_reason)
     end
 
     test "nado live open submits single signed short with rounded size" do
@@ -511,11 +526,9 @@ module HedgeVenues
     test "nado close reopen stops before reopen when close readback does not confirm flat" do
       submitted = []
       venue = NadoPollingVenue.new(
-        [
-          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
-          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
+        Array.new(NadoHedgeExecutionService::POST_SUBMIT_CLOSE_READBACK_ATTEMPTS) {
           { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" }
-        ],
+        },
         env: nado_live_env
       )
       service = NadoHedgeExecutionService.new(
@@ -588,6 +601,94 @@ module HedgeVenues
       assert_equal "rejected", result.receipt.fetch(:reopen_leg).fetch(:submit_response_classification).fetch(:status)
       assert_match "error_code=2006", result.receipt.fetch(:final_message)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado close reopen waits for delayed flat before reopening" do
+      submitted = []
+      venue = NadoPollingVenue.new(
+        [
+          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
+          { size: BigDecimal("-0.936"), short_size: BigDecimal("0.936"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" },
+          nil,
+          { size: BigDecimal("-0.845"), short_size: BigDecimal("0.845"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" }
+        ],
+        env: nado_live_env
+      )
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.091"),
+        current_position: {
+          size: BigDecimal("-0.936"),
+          short_size: BigDecimal("0.936"),
+          symbol: "ETH-PERP",
+          side: "short",
+          margin_mode: "isolated",
+          isolated_margin_usd: BigDecimal("1909")
+        },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal 2, submitted.size
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal 3, result.receipt.fetch(:close_leg).fetch(:post_submit_readback_poll_attempts).size
+    end
+
+    test "nado resume reopen after delayed flat only opens target when readback is flat" do
+      submitted = []
+      venue = NadoPollingVenue.new([ nil, { size: BigDecimal("-0.845"), short_size: BigDecimal("0.845"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" } ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"90" * 32}" } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.resume_reopen_after_close(
+        position: mellow_position,
+        target_size_eth: BigDecimal("0.845"),
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal 1, submitted.size
+      assert_equal "resume_reopen_after_close", result.receipt.fetch(:action)
+      assert_equal true, result.receipt.fetch(:resume_after_delayed_flat)
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal "-845000000000000000", submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order).fetch(:amount)
+    end
+
+    test "nado resume reopen after delayed flat blocks when short remains" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: NadoPollingVenue.new([ { size: BigDecimal("-0.1"), short_size: BigDecimal("0.1"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" } ], env: nado_live_env),
+        signer_post: ->(*) { raise "signer should not be called" }
+      )
+
+      result = service.resume_reopen_after_close(
+        position: mellow_position,
+        target_size_eth: BigDecimal("0.845"),
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_match "requires flat readback", result.receipt.fetch(:final_message)
     end
 
     test "nado live close isolated short uses ui equivalent isolated reduce only appendix" do
