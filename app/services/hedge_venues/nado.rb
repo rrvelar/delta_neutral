@@ -59,7 +59,7 @@ module HedgeVenues
     end
 
     def blockers
-      [ "Dry-run/read-only only; live submit not enabled for Nado." ] + config_blockers
+      live_flag_enabled? ? config_blockers : [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit." ] + config_blockers
     end
 
     def warnings
@@ -138,7 +138,7 @@ module HedgeVenues
         asset: symbol == "ETH-PERP" ? "ETH" : symbol,
         symbol: symbol,
         exchange_symbol: symbol,
-        size: amount.negative? ? amount : -amount,
+        size: amount,
         short_size: amount.negative? ? amount.abs : BigDecimal("0"),
         mark_price: decimal_or_nil(row["mark_price"] || row["markPrice"]),
         raw: row,

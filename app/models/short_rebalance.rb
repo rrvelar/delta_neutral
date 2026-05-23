@@ -8,4 +8,6 @@ class ShortRebalance < ApplicationRecord
   STATUS_FAILED = "failed"
 
   belongs_to :hedge
+
+  validates :venue, inclusion: { in: Hedge::EXECUTION_VENUES }
 end

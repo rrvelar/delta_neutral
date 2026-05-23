@@ -8,6 +8,9 @@
 # The +asset0_hl_account+ and +asset1_hl_account+ columns store the subaccount
 # address; +nil+ means the short lives on the main account.
 class Hedge < ApplicationRecord
+  EXECUTION_VENUES = %w[hyperliquid nado ethereal].freeze
+  DEFAULT_EXECUTION_VENUE = "hyperliquid".freeze
+
   belongs_to :position
 
   has_many :short_rebalances, dependent: :destroy
@@ -15,12 +18,25 @@ class Hedge < ApplicationRecord
   validates :target, :tolerance, presence: true
   validates :target, numericality: { greater_than: 0, less_than_or_equal_to: 1 }
   validates :tolerance, numericality: { greater_than: 0, less_than_or_equal_to: 1 }
+  validates :execution_venue, inclusion: { in: EXECUTION_VENUES }
 
   # @!scope class
   # @!method active
   #   Returns only hedges that are currently active.
   #   @return [ActiveRecord::Relation<Hedge>]
   scope :active, -> { where(active: true) }
+
+  def hyperliquid_execution?
+    execution_venue == "hyperliquid"
+  end
+
+  def nado_execution?
+    execution_venue == "nado"
+  end
+
+  def ethereal_execution?
+    execution_venue == "ethereal"
+  end
 
   # Returns the Hyperliquid account address assigned for the given asset index.
   #

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_22_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_23_000100) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -45,6 +45,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_22_000000) do
     t.string "asset0_hl_account"
     t.string "asset1_hl_account"
     t.datetime "created_at", null: false
+    t.string "execution_venue", default: "hyperliquid", null: false
     t.integer "position_id", null: false
     t.decimal "target", precision: 5, scale: 4, null: false
     t.decimal "tolerance", precision: 5, scale: 4, null: false
@@ -126,14 +127,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_22_000000) do
   create_table "short_rebalances", force: :cascade do |t|
     t.string "asset"
     t.datetime "created_at", null: false
+    t.string "exchange_order_id"
     t.integer "hedge_id", null: false
     t.text "message"
     t.decimal "new_short_size", precision: 20, scale: 8
     t.decimal "old_short_size", precision: 20, scale: 8
+    t.string "order_side"
     t.decimal "realized_pnl", precision: 20, scale: 8
     t.datetime "rebalanced_at"
+    t.string "receipt_path"
+    t.boolean "reduce_only"
     t.string "status", default: "success", null: false
     t.datetime "updated_at", null: false
+    t.string "venue", default: "hyperliquid", null: false
     t.index ["hedge_id"], name: "index_short_rebalances_on_hedge_id"
   end
 

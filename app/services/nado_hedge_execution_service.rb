@@ -58,13 +58,37 @@ class NadoHedgeExecutionService
     execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
   end
 
+  def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:)
+    execute(
+      position: position,
+      action: "rebalance",
+      size_eth: BigDecimal(delta_eth.to_s),
+      current_position: current_position,
+      confirmation: confirmation,
+      max_slippage: max_slippage
+    )
+  end
+
+  def auto_rebalance_short(position:, delta_eth:, current_position:, max_slippage:)
+    execute(
+      position: position,
+      action: "rebalance",
+      size_eth: BigDecimal(delta_eth.to_s),
+      current_position: current_position,
+      confirmation: nil,
+      max_slippage: max_slippage,
+      require_confirmation: false
+    )
+  end
+
   def build_order_preview(position:, action:, size_eth:, max_slippage:)
-    side = action.to_s == "close" ? "buy" : "sell"
-    reduce_only = action.to_s == "close"
+    side = order_side(action: action, size_eth: size_eth)
+    reduce_only = reduce_only_order?(action: action, size_eth: size_eth)
+    order_size = order_size(size_eth)
     product = product_metadata
     price = order_price(position: position, side: side, max_slippage: max_slippage, product: product)
     rounded_price = round_price(price, side: side, product: product)
-    rounded_size = round_size(size_eth, product: product)
+    rounded_size = round_size(order_size, product: product)
     amount_x18 = decimal_to_x18(rounded_size)
     amount_x18 = -amount_x18 if side == "sell"
     order_fields = nado_order_fields(
@@ -101,11 +125,15 @@ class NadoHedgeExecutionService
     }
   end
 
+  def read_position
+    safe_read_position
+  end
+
   private
 
-  def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
+  def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage)
-    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order)
+    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
     return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil) if blockers.any?
 
     signing = sign(order.fetch(:typed_data), order: order, action: action)
@@ -123,20 +151,25 @@ class NadoHedgeExecutionService
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil)
   end
 
-  def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:)
+  def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
+    order_size = order_size(size_eth)
     blockers = []
     blockers << "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" unless @venue.live_flag_enabled?
-    blockers << "submitted confirmation must equal #{@venue.live_confirmation_phrase}" unless confirmation.to_s == @venue.live_confirmation_phrase && @venue.live_confirmation_phrase.present?
+    blockers << "submitted confirmation must equal #{@venue.live_confirmation_phrase}" if require_confirmation && !(confirmation.to_s == @venue.live_confirmation_phrase && @venue.live_confirmation_phrase.present?)
     blockers << "position must be active" unless position.active?
     blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
-    blockers << "target hedge size must be positive" unless BigDecimal(size_eth.to_s).positive?
+    blockers << "target hedge size must be positive" if action.to_s == "open" && !order_size.positive?
+    blockers << "rebalance delta must be non-zero" if action.to_s == "rebalance" && order_size.zero?
+    blockers << "close size must be positive" if action.to_s == "close" && !order_size.positive?
     blockers << "Nado signer service is not configured" if signer_url.blank?
     blockers << "Nado signer service is unavailable" if signer_url.present? && !signer_available?
     blockers << "Nado submit URL is not configured" if submit_base_url.blank?
     blockers << "NADO_ACCOUNT_SUBACCOUNT or derivable NADO_ACCOUNT_ADDRESS is required" if subaccount.blank?
     blockers << "Nado readback is unavailable" if current_position == :unavailable
+    blockers << "current Nado position is long; manual action required" if position_size(current_position).positive?
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
+    blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
   end
@@ -390,7 +423,7 @@ class NadoHedgeExecutionService
     return "failed_before_submit" unless parsed[:status] == "submitted"
 
     current_short = short_size(post_position)
-    if action.to_s == "open"
+    if action.to_s.in?(%w[open rebalance])
       current_short.positive? ? "submitted_and_confirmed" : "submitted_but_readback_pending"
     else
       current_short.zero? ? "submitted_and_confirmed" : "submitted_but_not_confirmed"
@@ -508,6 +541,21 @@ class NadoHedgeExecutionService
     order_type_ioc = 1 << 9
     reduce_only_bit = reduce_only ? 1 << 11 : 0
     version | order_type_ioc | reduce_only_bit
+  end
+
+  def order_side(action:, size_eth:)
+    return "buy" if action.to_s == "close"
+    return BigDecimal(size_eth.to_s).negative? ? "buy" : "sell" if action.to_s == "rebalance"
+
+    "sell"
+  end
+
+  def reduce_only_order?(action:, size_eth:)
+    action.to_s == "close" || (action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative?)
+  end
+
+  def order_size(size_eth)
+    BigDecimal(size_eth.to_s).abs
   end
 
   def appendix_isolated?(appendix)

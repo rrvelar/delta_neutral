@@ -282,6 +282,30 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "nado manual rebalance calls Nado service with signed delta" do
+    position = create_mellow_position(weth_exposure: "1.2")
+    service = NadoServiceStub.new(status: "submitted_and_confirmed", read_position: { asset: "ETH", size: BigDecimal("-0.5"), mark_price: BigDecimal("2300") })
+
+    with_env(@env.merge(
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO"
+    )) do
+      report = build_action(
+        position: position,
+        action: "rebalance",
+        execute: true,
+        confirmation: "CONFIRM_NADO",
+        positions: [],
+        venue: "nado",
+        nado_service_factory: -> { service }
+      ).report
+
+      assert_equal "submitted", report.fetch(:status)
+      assert_equal BigDecimal("0.7"), service.rebalance_calls.first.fetch(:delta_eth)
+      assert_equal false, report.fetch(:hyperliquid_execution)
+    end
+  end
+
   test "hyperliquid preview still blocks inactive position" do
     position = create_position(active: false)
 
@@ -415,8 +439,9 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
   class EmergencyCloseStub
     attr_reader :called
 
-    def initialize(status:)
+    def initialize(status:, read_position: nil)
       @status = status
+      @read_position = read_position
       @called = false
     end
 
@@ -427,15 +452,21 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
   end
 
   class NadoServiceStub
-    attr_reader :open_calls
+    attr_reader :open_calls, :rebalance_calls
 
-    def initialize(status:)
+    def initialize(status:, read_position: nil)
       @status = status
+      @read_position = read_position
       @open_calls = []
+      @rebalance_calls = []
     end
 
     def preflight(*)
       { blockers: [], warnings: [] }
+    end
+
+    def read_position
+      @read_position
     end
 
     def open_short(**kwargs)
@@ -449,6 +480,19 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
 
     def close_short(**)
       raise "close_short not expected"
+    end
+
+    def rebalance_short(**kwargs)
+      @rebalance_calls << kwargs
+      NadoHedgeExecutionService::Result.new(@status, [], [], {
+        final_status: @status,
+        rounded_size_eth: kwargs.fetch(:delta_eth).abs.to_s("F"),
+        submitted_order_summary: {
+          signature: "<redacted>",
+          side: kwargs.fetch(:delta_eth).negative? ? "buy" : "sell",
+          reduce_only: kwargs.fetch(:delta_eth).negative?
+        }
+      })
     end
   end
 

@@ -191,7 +191,7 @@ class HedgesController < ApplicationController
   #
   # @return [ActionController::Parameters]
   def hedge_params
-    params.require(:hedge).permit(:position_id, :target, :tolerance, :active)
+    params.require(:hedge).permit(:position_id, :target, :tolerance, :active, :execution_venue)
   end
 
   # Returns active positions that do not yet have a hedge.

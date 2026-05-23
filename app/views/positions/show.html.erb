@@ -250,7 +250,7 @@
             <% selected_adapter = @selected_hedge_venue_adapter || HedgeVenues.build(selected_venue) %>
             <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
-              <%= form_with url: position_path(@position), method: :get, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
+              <%= form_with url: hedge_venue_position_path(@position), method: :patch, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
                 <div class="flex-1">
                   <%= form.label :hedge_venue, "Hedge venue", class: "block text-gray-500 text-xs uppercase tracking-wide" %>
                   <%= form.select :hedge_venue, options_for_select(@hedge_venue_options || HedgeVenues.options, selected_venue), {}, class: "mt-1 w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" %>
@@ -304,11 +304,13 @@
                   <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Delta to target</p>
                     <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:drift_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:drift_eth]) %></p>
+                    <p class="mt-1 text-gray-500">Tolerance <span title="<%= venue_dashboard[:tolerance_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:tolerance_eth]) %></span></p>
                   </div>
                   <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <p class="text-gray-500">Live availability</p>
                     <span class="mt-1 inline-flex max-w-full rounded-full border border-gray-700 px-2 py-1 text-gray-100"><%= live_status %></span>
                     <p class="mt-2 text-gray-400 break-words whitespace-normal"><%= live_detail %></p>
+                    <p class="mt-2 text-gray-500">Next action: <span class="text-gray-200"><%= venue_dashboard[:next_action] || "unavailable" %></span></p>
                   </div>
                 </div>
                 <% if venue_dashboard.dig(:open_preview, :payload).present? %>
@@ -349,6 +351,15 @@
                     <% end %>
                   </div>
                 <% end %>
+                <% if selected_adapter.venue_name == "Nado" %>
+                  <p class="mt-3 text-xs text-gray-400 break-words">
+                    <% if ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false")) %>
+                      Manual Nado hedge actions are available when gates pass; automatic Nado rebalance is enabled.
+                    <% else %>
+                      Manual Nado hedge actions are available when gates pass; automatic Nado rebalance is disabled.
+                    <% end %>
+                  </p>
+                <% end %>
                 <% if venue_dashboard[:warnings].present? %>
                   <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
                     <p class="font-medium text-yellow-200">Warnings</p>
@@ -369,6 +380,14 @@
               ].each do |key, preview_path, live_path, label, required_phrase| %>
                 <% action_state = dashboard_actions[key] || {} %>
                 <% action_visible = action_state[:visible] %>
+                <% if selected_venue == "nado" && @selected_hedge_venue_dashboard.present? %>
+                  <% action_visible = case key
+                    when :open then @selected_hedge_venue_dashboard[:next_action] == "open"
+                    when :rebalance then @selected_hedge_venue_dashboard[:next_action].in?([ "increase short", "reduce short" ])
+                    when :close then BigDecimal(@selected_hedge_venue_dashboard[:current_short_eth].to_s).positive?
+                    else false
+                    end %>
+                <% end %>
                 <% live_enabled = action_state[:live_enabled] %>
                 <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
                   <div class="flex items-center justify-between gap-2">
@@ -554,6 +573,7 @@
               <thead class="sticky top-0 z-10 bg-gray-950">
                 <tr class="border-b border-gray-800 text-left text-gray-400">
                   <th class="px-3 py-3 font-medium">Time</th>
+                  <th class="px-3 py-3 font-medium">Venue</th>
                   <th class="px-3 py-3 font-medium">Asset</th>
                   <th class="px-3 py-3 font-medium">Status</th>
                   <th class="px-3 py-3 font-medium text-right">Old short</th>
@@ -568,6 +588,7 @@
                   <% delta_eth = rebalance.new_short_size && rebalance.old_short_size ? rebalance.new_short_size - rebalance.old_short_size : nil %>
                   <tr class="hover:bg-gray-900/50">
                     <td class="px-3 py-3 text-gray-300 whitespace-nowrap"><%= rebalance.rebalanced_at&.strftime("%m/%d/%Y %H:%M:%S") || "—" %></td>
+                    <td class="px-3 py-3 text-gray-300"><%= rebalance.venue %></td>
                     <td class="px-3 py-3 text-white"><%= rebalance.asset %></td>
                     <td class="px-3 py-3">
                       <span class="inline-block px-2 py-1 rounded-full border text-xs font-semibold <%= rebalance_status_class(rebalance.status) %>"><%= rebalance.status %></span>

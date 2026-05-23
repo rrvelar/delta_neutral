@@ -87,7 +87,7 @@ class PositionsController < ApplicationController
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
     if @position.dex.name == "aerodrome_slipstream"
-      @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue])
+      @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue].presence || @position.hedge&.execution_venue)
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @selected_hedge_venue_dashboard = selected_hedge_venue_dashboard
@@ -148,6 +148,16 @@ class PositionsController < ApplicationController
     run_dashboard_hedge_action("close", execute: true)
   end
 
+  def hedge_venue
+    position = Current.user.positions.includes(:hedge).find(params[:id])
+    hedge = position.hedge
+    return redirect_to position_path(position), alert: "Create an active hedge before selecting a venue." unless hedge
+
+    venue = HedgeVenues.normalize(params[:hedge_venue])
+    hedge.update!(execution_venue: venue)
+    redirect_to position_path(position, hedge_venue: venue), notice: "Hedge venue set to #{HedgeVenues.label(venue)}."
+  end
+
   private
 
   def run_dashboard_hedge_action(action, execute:)
@@ -157,7 +167,7 @@ class PositionsController < ApplicationController
       action: action,
       execute: execute,
       confirmation: params[:dashboard_hedge_confirmation],
-      venue: params[:hedge_venue]
+      venue: params[:hedge_venue].presence || position.hedge&.execution_venue
     ).report
     level = report.fetch(:status) == "blocked" || report.fetch(:status) == "failed" ? :alert : :notice
     redirect_params = report.fetch(:hedge_venue) == HedgeVenues::DEFAULT ? {} : { hedge_venue: report.fetch(:hedge_venue) }
@@ -185,12 +195,15 @@ class PositionsController < ApplicationController
     current_short = selected_venue_short_size(current_position)
     target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
     drift = target ? target - current_short : nil
+    tolerance = target && @position.hedge ? target * @position.hedge.tolerance : nil
 
     {
       target_hedge_eth: target&.to_s("F"),
       current_venue_position: current_position,
       current_short_eth: current_short.to_s("F"),
       drift_eth: drift&.to_s("F"),
+      tolerance_eth: tolerance&.to_s("F"),
+      next_action: selected_venue_next_action(target: target, current_short: current_short, drift: drift, tolerance: tolerance),
       account_state: @selected_hedge_venue_adapter.account_state,
       open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
@@ -207,6 +220,16 @@ class PositionsController < ApplicationController
     size.negative? ? size.abs : BigDecimal("0")
   rescue ArgumentError
     BigDecimal("0")
+  end
+
+  def selected_venue_next_action(target:, current_short:, drift:, tolerance:)
+    return "unavailable" unless target && drift && tolerance
+    return "close" if target.zero? && current_short.positive?
+    return "open" if current_short.zero? && target.positive? && target > tolerance
+    return "increase short" if drift > tolerance
+    return "reduce short" if drift < -tolerance
+
+    "no-op"
   end
 
   def selected_venue_live_preflight(target:, current_position:)

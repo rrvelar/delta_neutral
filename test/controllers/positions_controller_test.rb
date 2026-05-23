@@ -325,7 +325,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 
-  test "show selected Nado venue renders read-only dry-run mode and disabled live actions" do
+  test "show selected Nado venue renders live gated mode and disabled live actions" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
 
@@ -335,9 +335,19 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Nado"
-    assert_match "Dry-run/read-only only; live submit not enabled for Nado.", response.body
+    assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit.", response.body
     assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
+  test "hedge venue selection persists to hedge" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    patch hedge_venue_position_path(position), params: { hedge_venue: "nado" }
+
+    assert_redirected_to position_path(position, hedge_venue: "nado")
+    assert_equal "nado", hedge.reload.execution_venue
   end
 
   test "ethereal preview does not call Hyperliquid writes and redirects with dry-run mode" do

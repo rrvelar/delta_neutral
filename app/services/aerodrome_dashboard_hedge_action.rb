@@ -219,7 +219,7 @@ class AerodromeDashboardHedgeAction
     return nado_service.preflight(
       position: @position,
       action: @action,
-      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      size_eth: nado_action_size(target: target, drift: drift, current_short: current_short),
       current_position: before_position,
       confirmation: @confirmation,
       max_slippage: max_slippage
@@ -245,6 +245,8 @@ class AerodromeDashboardHedgeAction
       nado_service.close_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
     elsif @action == "open"
       nado_service.open_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "rebalance"
+      nado_service.rebalance_short(position: @position, delta_eth: drift, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
     else
       NadoHedgeExecutionService::Result.new("blocked_before_submit", [ "Nado live rebalance is not implemented; use open or close" ], [], {})
     end
@@ -270,9 +272,13 @@ class AerodromeDashboardHedgeAction
   end
 
   def current_eth_position
+    return nado_service.read_position if @venue_key == "nado"
+
     venue.read_position(symbol: "ETH")
   rescue => e
     @warnings << "current #{venue.venue_name} ETH readback unavailable: #{e.class}: #{e.message}"
+    return :unavailable if @venue_key == "nado"
+
     nil
   end
 
@@ -304,7 +310,7 @@ class AerodromeDashboardHedgeAction
     return nado_service.preflight(
       position: @position,
       action: @action,
-      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      size_eth: nado_action_size(target: target, drift: drift, current_short: current_short),
       current_position: before_position,
       confirmation: @confirmation,
       max_slippage: max_slippage
@@ -335,6 +341,12 @@ class AerodromeDashboardHedgeAction
     else
       BigDecimal("0")
     end
+  end
+
+  def nado_action_size(target:, drift:, current_short:)
+    return drift || BigDecimal("0") if @action == "rebalance"
+
+    preflight_target_size(target: target, drift: drift, current_short: current_short)
   end
 
   def max_slippage
@@ -392,7 +404,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def short_size(position)
-    return BigDecimal("0") unless position
+    return BigDecimal("0") unless position && position != :unavailable
     return position.short_size || BigDecimal("0") if position.respond_to?(:short_size)
 
     size = BigDecimal(position.fetch(:size).to_s)
@@ -400,7 +412,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def serialize_position(position)
-    return nil unless position
+    return nil unless position && position != :unavailable
     return position.as_json if position.respond_to?(:as_json) && !position.is_a?(Hash)
 
     position.merge(size: BigDecimal(position.fetch(:size).to_s).to_s("F"))

@@ -69,7 +69,7 @@ module HedgeVenues
       assert_equal "nado_eip712_order_preview", preview.fetch(:payload).fetch(:schema)
       assert_equal "0.01", preview.fetch(:payload).fetch(:size_increment)
       assert_equal "floor_to_size_increment", preview.fetch(:payload).fetch(:size_rounding)
-      assert_includes preview.fetch(:blockers), "Dry-run/read-only only; live submit not enabled for Nado."
+      assert_includes preview.fetch(:blockers), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit."
       assert_includes preview.fetch(:blockers), "NADO_READ_ONLY_ENABLED is not true"
     end
 
@@ -232,6 +232,54 @@ module HedgeVenues
       assert_equal "500000000000000000", order.fetch(:amount)
       assert_equal true, (order.fetch(:appendix).to_i & (1 << 11)).positive?
       assert_equal "submitted_and_confirmed", result.status
+    end
+
+    test "nado live rebalance increase sells non reduce only" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"34" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: { digest: "0x#{"56" * 32}" } }
+        }
+      )
+
+      service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("0.25"),
+        current_position: { size: BigDecimal("-0.75"), symbol: "ETH-PERP" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      order = submitted.first.fetch(:place_order).fetch(:order)
+      assert_equal "-250000000000000000", order.fetch(:amount)
+      assert_equal false, (order.fetch(:appendix).to_i & (1 << 11)).positive?
+    end
+
+    test "nado live rebalance decrease buys reduce only" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"78" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: { digest: "0x#{"90" * 32}" } }
+        }
+      )
+
+      service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("-0.25"),
+        current_position: { size: BigDecimal("-1.25"), symbol: "ETH-PERP" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      order = submitted.first.fetch(:place_order).fetch(:order)
+      assert_equal "250000000000000000", order.fetch(:amount)
+      assert_equal true, (order.fetch(:appendix).to_i & (1 << 11)).positive?
     end
 
     private

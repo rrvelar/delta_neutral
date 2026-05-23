@@ -16,6 +16,7 @@ Rails.application.routes.draw do
     post :hedge_rebalance, on: :member
     post :hedge_close_preview, on: :member
     post :hedge_close, on: :member
+    patch :hedge_venue, on: :member
     resources :aerodrome_hedge_proposals, only: [ :create ] do
       post :regenerate, on: :collection
     end

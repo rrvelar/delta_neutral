@@ -44,6 +44,16 @@ class HedgeSyncJob < ApplicationJob
           next
         end
 
+        if hedge.nado_execution?
+          sync_nado_aerodrome_hedge(hedge)
+          next
+        end
+
+        if hedge.ethereal_execution?
+          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — ethereal live rebalance is not implemented")
+          next
+        end
+
         unless aerodrome_hedge_enabled?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
           next
@@ -126,6 +136,79 @@ class HedgeSyncJob < ApplicationJob
     hedge_assets.each do |asset|
       check_and_rebalance(hedge, asset.fetch(:symbol), asset.fetch(:amount), asset.fetch(:index), hyperliquid, asset_price_usd: asset.fetch(:price))
     end
+  end
+
+  def sync_nado_aerodrome_hedge(hedge)
+    unless nado_auto_rebalance_enabled?
+      Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true")
+      return
+    end
+
+    readiness_errors = aerodrome_readiness_errors(hedge)
+    if readiness_errors.any?
+      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
+      return
+    end
+
+    valuation = PositionValuation.current(hedge.position)
+    weth_exposure = valuation.weth_exposure
+    unless weth_exposure
+      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — Mellow WETH pro-rata exposure unavailable")
+      return
+    end
+
+    target_short = weth_exposure * hedge.target
+    price = nado_eth_price(hedge.position, valuation)
+    safety_errors = nado_safety_errors(target_short: target_short, price: price)
+    if safety_errors.any?
+      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — #{safety_errors.join(', ')}")
+      record_nado_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: safety_errors.join("; "))
+      return
+    end
+
+    service = NadoHedgeExecutionService.new
+    current_position = service.read_position
+    if current_position == :unavailable
+      record_nado_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "Nado readback unavailable")
+      return
+    end
+
+    current_size = nado_position_size(current_position)
+    if current_size.positive?
+      record_nado_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "current Nado position is long; manual action required")
+      return
+    end
+
+    current_short = current_size.negative? ? current_size.abs : BigDecimal("0")
+    delta = target_short - current_short
+    tolerance = target_short * hedge.tolerance
+    if delta.abs <= tolerance
+      Rails.logger.debug { "[HedgeSyncJob] Nado hedge #{hedge.id}: within tolerance, no rebalance needed" }
+      return
+    end
+
+    preview = service.build_order_preview(position: hedge.position, action: "rebalance", size_eth: delta, max_slippage: nado_max_slippage)
+    rounded_size = BigDecimal(preview.dig(:summary, :rounded_size_eth).to_s)
+    if rounded_size.zero?
+      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — rounded order size is zero")
+      return
+    end
+
+    result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
+    receipt_path = write_nado_receipt(result.receipt)
+    status = result.status.to_s.start_with?("submitted") ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
+    after_short = nado_readback_short(result.receipt[:post_submit_readback], fallback: current_short)
+    record_nado_rebalance(
+      hedge,
+      old_short: current_short,
+      new_short: after_short,
+      status: status,
+      message: result.blockers.presence&.join("; ") || result.receipt[:final_status],
+      order_side: result.receipt.dig(:submitted_order_summary, :side),
+      reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
+      exchange_order_id: result.receipt[:exchange_order_id],
+      receipt_path: receipt_path
+    )
   end
 
   # Rebalances the short for a single asset if needed.
@@ -420,6 +503,73 @@ class HedgeSyncJob < ApplicationJob
 
   def aerodrome_hedge_paused?
     ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
+  end
+
+  def nado_auto_rebalance_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false"))
+  end
+
+  def nado_max_slippage
+    ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
+  end
+
+  def nado_position_size(position)
+    return BigDecimal("0") unless position && position != :unavailable
+
+    BigDecimal(position.fetch(:size).to_s)
+  rescue ArgumentError
+    BigDecimal("0")
+  end
+
+  def nado_readback_short(readback, fallback:)
+    return fallback unless readback.is_a?(Hash)
+
+    size = BigDecimal(readback.fetch(:size).to_s)
+    size.negative? ? size.abs : BigDecimal("0")
+  rescue ArgumentError, KeyError
+    fallback
+  end
+
+  def nado_eth_price(position, valuation)
+    if position.mellow_autopilot? && valuation.weth_exposure&.positive? && valuation.current_value_usd
+      usdc = valuation.usdc_exposure || BigDecimal("0")
+      return (valuation.current_value_usd - usdc) / valuation.weth_exposure
+    end
+
+    position.asset0_price_usd
+  end
+
+  def nado_safety_errors(target_short:, price:)
+    errors = []
+    errors << aerodrome_limit_error("AERODROME_MAX_SHORT_ETH", target_short, "target ETH short")
+    errors << aerodrome_limit_error("AERODROME_MAX_SHORT_NOTIONAL_USD", target_short * price, "target ETH notional") if price
+    errors.compact
+  end
+
+  def record_nado_rebalance(hedge, old_short:, new_short:, status:, message: nil, order_side: nil, reduce_only: nil, exchange_order_id: nil, receipt_path: nil)
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: old_short,
+      new_short_size: new_short,
+      realized_pnl: BigDecimal("0"),
+      status: status,
+      message: message,
+      rebalanced_at: Time.current,
+      venue: "nado",
+      order_side: order_side,
+      reduce_only: reduce_only,
+      exchange_order_id: exchange_order_id,
+      receipt_path: receipt_path
+    )
+  end
+
+  def write_nado_receipt(receipt)
+    dir = Rails.root.join("storage", "nado_hedge_rebalances")
+    FileUtils.mkdir_p(dir)
+    path = dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    event = receipt.merge(event: "nado_auto_rebalance", timestamp: Time.current.iso8601, receipt_path: path.to_s)
+    File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
+    path.to_s
   end
 
   def aerodrome_readiness_errors(hedge)

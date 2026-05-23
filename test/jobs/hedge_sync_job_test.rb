@@ -11,6 +11,75 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   private
 
+  class NadoAutoServiceStub
+    attr_reader :rebalance_calls
+
+    def initialize(current_position:)
+      @current_position = current_position
+      @rebalance_calls = []
+    end
+
+    def read_position
+      @current_position
+    end
+
+    def build_order_preview(position:, action:, size_eth:, max_slippage:)
+      {
+        summary: {
+          rounded_size_eth: BigDecimal(size_eth.to_s).abs.to_s("F"),
+          side: BigDecimal(size_eth.to_s).negative? ? "buy" : "sell",
+          reduce_only: BigDecimal(size_eth.to_s).negative?,
+          estimated_notional_usd: "100"
+        },
+        warnings: []
+      }
+    end
+
+    def auto_rebalance_short(**kwargs)
+      @rebalance_calls << kwargs
+      delta = BigDecimal(kwargs.fetch(:delta_eth).to_s)
+      old_short = current_short
+      new_short = old_short + delta
+      NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
+        final_status: "submitted_and_confirmed",
+        submitted_order_summary: {
+          side: delta.negative? ? "buy" : "sell",
+          reduce_only: delta.negative?,
+          rounded_size_eth: delta.abs.to_s("F"),
+          estimated_notional_usd: "100"
+        },
+        exchange_order_id: "0x#{"ab" * 32}",
+        post_submit_readback: { size: -new_short.abs }
+      })
+    end
+
+    private
+
+    def current_short
+      size = BigDecimal(@current_position.fetch(:size).to_s)
+      size.negative? ? size.abs : BigDecimal("0")
+    end
+  end
+
+  def nado_mellow_hedge(weth_exposure: "1.2", target: "1.0", tolerance: "0.05")
+    Position.update_all(active: false)
+    position = aerodrome_position(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:#{SecureRandom.hex(4)}",
+      asset0_amount: BigDecimal(weth_exposure),
+      asset1_amount: BigDecimal("240"),
+      entry_value_usd: BigDecimal(weth_exposure) * BigDecimal("2300") + BigDecimal("240"),
+      mellow_metadata: {
+        hedge_ready: true,
+        last_probe_confidence: "high",
+        user_weth_exposure: weth_exposure,
+        user_usdc_exposure: "240",
+        user_total_value_usd: (BigDecimal(weth_exposure) * BigDecimal("2300") + BigDecimal("240")).to_s("F")
+      }.to_json
+    )
+    Hedge.create!(position: position, target: target, tolerance: tolerance, active: true, execution_venue: "nado")
+  end
+
   def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {},
                          market_close_result: { "status" => "ok" }, market_close_error: nil,
                          market_order_result: { "status" => "ok" }, market_order_error: nil,
@@ -102,6 +171,93 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_nothing_raised do
       HedgeSyncJob.perform_later
     end
+  end
+
+  test "hedge venue defaults to hyperliquid" do
+    assert_equal "hyperliquid", Hedge.new.execution_venue
+  end
+
+  test "nado hedge sync does not instantiate Hyperliquid when auto gate disabled" do
+    hedge = nado_mellow_hedge
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false") do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  end
+
+  test "nado hedge sync increases short from Mellow target and readback" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" })
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+          assert_difference "ShortRebalance.count", 1 do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+
+    assert_equal BigDecimal("0.7"), service.rebalance_calls.first.fetch(:delta_eth)
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal "nado", rebalance.venue
+    assert_equal "sell", rebalance.order_side
+    assert_equal false, rebalance.reduce_only
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
+  end
+
+  test "nado hedge sync reduces short with reduce only order" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.0")
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-1.4"), symbol: "ETH-PERP" })
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+
+    assert_equal BigDecimal("-0.4"), service.rebalance_calls.first.fetch(:delta_eth)
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal "buy", rebalance.order_side
+    assert_equal true, rebalance.reduce_only
+  end
+
+  test "nado hedge sync skips within tolerance" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.0", tolerance: "0.05")
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.98"), symbol: "ETH-PERP" })
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_empty service.rebalance_calls
+  end
+
+  test "nado hedge sync blocks conflicting long readback" do
+    hedge = nado_mellow_hedge
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("0.2"), symbol: "ETH-PERP" })
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_difference "ShortRebalance.count", 1 do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_match "current Nado position is long", rebalance.message
+    assert_empty service.rebalance_calls
   end
 
   test "creates rebalance records with realized PnL from fills" do
