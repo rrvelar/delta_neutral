@@ -102,6 +102,68 @@ module HedgeVenues
       assert_equal "type=subaccount_info&subaccount=0xsubaccount", calls.first.query
     end
 
+    test "nado read position parses cross margin ETH-PERP short from subaccount info" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(_uri) { nado_cross_margin_response(amount: "-955000000000000000").to_json })
+
+      eth = venue.read_position(symbol: "ETH")
+      perp = venue.read_position(symbol: "ETH-PERP")
+      state = venue.account_state
+
+      assert_equal eth, perp
+      assert_equal "ETH-PERP", eth.fetch(:symbol)
+      assert_equal 4, eth.fetch(:product_id)
+      assert_equal "short", eth.fetch(:side)
+      assert_equal BigDecimal("0.955"), eth.fetch(:short_size)
+      assert_equal "cross", eth.fetch(:margin_mode)
+      assert_equal BigDecimal("2061"), eth.fetch(:entry_price)
+      assert_equal 1, state.fetch(:raw_positions_count)
+      assert_equal 1, state.fetch(:normalized_positions_count)
+      assert_equal "0.955", state.fetch(:current_short_eth)
+      assert_equal "short", state.fetch(:current_side)
+    end
+
+    test "nado read position ignores spot collateral only rows" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(_uri) {
+        {
+          data: {
+            spot_products: [ { product_id: 9, symbol: "USDC" } ],
+            spot_balances: [ { product_id: 9, balance: { amount: "1000000000000000000000" } } ]
+          }
+        }.to_json
+      })
+
+      assert_nil venue.read_position(symbol: "ETH")
+      assert_equal 0, venue.account_state.fetch(:raw_positions_count)
+    end
+
+    test "nado read position classifies ETH-PERP long as conflicting long" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(_uri) { nado_cross_margin_response(amount: "955000000000000000").to_json })
+
+      position = venue.read_position(symbol: "ETH")
+
+      assert_equal "long", position.fetch(:side)
+      assert_equal BigDecimal("0"), position.fetch(:short_size)
+      assert_equal BigDecimal("0.955"), position.fetch(:size)
+    end
+
+    test "nado account state warns and blocks when raw positions cannot be normalized" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true"), http_get: ->(_uri) {
+        {
+          data: {
+            positions: [ { product_id: 99, balance: { amount: "1000000000000000000" } } ],
+            perp_products: [ { product_id: 99, symbol: "DOGE-PERP" } ]
+          }
+        }.to_json
+      })
+
+      assert_nil venue.read_position(symbol: "ETH")
+      state = venue.account_state
+      assert_equal 1, state.fetch(:raw_positions_count)
+      assert_equal 0, state.fetch(:normalized_positions_count)
+      assert_includes state.fetch(:warnings), "Nado raw positions are present but no ETH-PERP position was normalized."
+      assert_includes state.fetch(:blockers), "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order."
+    end
+
     test "nado single venue preflight blocks when reduce only close path is unavailable" do
       venue = HedgeVenues::Nado.new(
         env: {
@@ -223,6 +285,55 @@ module HedgeVenues
       assert_equal "submitted", result.receipt.fetch(:submit_response_classification).fetch(:status)
       assert_equal "<redacted>", result.receipt.fetch(:submitted_order_summary).fetch(:signature)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado accepted submit polls until readback confirms short" do
+      venue = NadoPollingVenue.new([ nil, { size: BigDecimal("-0.955"), short_size: BigDecimal("0.955"), symbol: "ETH-PERP", side: "short" } ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, _payload) { { status: "success", data: [ { digest: "0x#{"cd" * 32}" } ] } },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.955"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal "0x#{"cd" * 32}", result.receipt.fetch(:exchange_order_id)
+      assert_equal 2, result.receipt.fetch(:post_submit_readback_poll_attempts).size
+      assert_equal BigDecimal("0.955"), result.receipt.fetch(:post_submit_readback).fetch(:short_size)
+    end
+
+    test "nado accepted submit with nil readback remains unconfirmed" do
+      venue = NadoPollingVenue.new([ nil, nil, nil ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, _payload) { { status: "success", data: [ { digest: "0x#{"cd" * 32}" } ] } },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.955"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "submitted_but_readback_pending", result.status
+      assert_equal "Nado submit accepted but readback did not confirm ETH-PERP position.", result.receipt.fetch(:final_message)
+      assert_equal 3, result.receipt.fetch(:post_submit_readback_poll_attempts).size
+      assert_nil result.receipt.fetch(:post_submit_readback)
+      assert_no_match(/#{'ab' * 20}|private_key|authorization|cookie/i, result.receipt.to_json)
     end
 
     test "nado live submit recv_time rejection records useful sanitized response message" do
@@ -367,6 +478,68 @@ module HedgeVenues
           market_price: "2300"
         }.to_json
       }
+    end
+
+    def nado_readonly_env
+      {
+        "NADO_READ_ONLY_ENABLED" => "true",
+        "NADO_GATEWAY_QUERY_BASE_URL" => "https://nado.example/v1",
+        "NADO_ACCOUNT_SUBACCOUNT" => "0xsubaccount"
+      }
+    end
+
+    def nado_cross_margin_response(amount:)
+      {
+        data: {
+          perp_products: [
+            {
+              product_id: 4,
+              symbol: "ETH-PERP",
+              risk: { price_x18: "2061000000000000000000" }
+            }
+          ],
+          perp_balances: [
+            {
+              product_id: 4,
+              balance: {
+                amount: amount,
+                v_quote_balance: "1968255000000000000000"
+              }
+            }
+          ]
+        }
+      }
+    end
+
+    class NadoPollingVenue
+      def initialize(readbacks, env:)
+        @readbacks = readbacks
+        @env = env
+      end
+
+      def live_flag_enabled?
+        @env["AERODROME_NADO_HEDGE_LIVE_ENABLED"] == "true"
+      end
+
+      def live_confirmation_phrase
+        @env["AERODROME_NADO_HEDGE_CONFIRMATION"].to_s
+      end
+
+      def live_mode_state
+        "live_ready"
+      end
+
+      def live_enabled?
+        live_flag_enabled?
+      end
+
+      def read_position(symbol:)
+        @readbacks.shift
+      end
+
+      def raw_positions_present_but_unnormalized?
+        false
+      end
     end
 
     def mellow_position

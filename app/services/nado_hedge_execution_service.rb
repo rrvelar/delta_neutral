@@ -7,17 +7,20 @@ class NadoHedgeExecutionService
   DEFAULT_ORDER_TTL_SECONDS = 3600
   RECEIVE_TIME_BUFFER_SECONDS = 5
   MAX_RECEIVE_TIME_FUTURE_SECONDS = 100
+  POST_SUBMIT_READBACK_ATTEMPTS = 3
+  POST_SUBMIT_READBACK_DELAY_SECONDS = 0.05
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
-  def initialize(env: ENV, venue: nil, http_get: nil, http_post: nil, signer_post: nil, now: -> { Time.current })
+  def initialize(env: ENV, venue: nil, http_get: nil, http_post: nil, signer_post: nil, now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
     @venue = venue || HedgeVenues::Nado.new(env: env, http_get: http_get)
     @http_get = http_get || method(:http_get)
     @http_post = http_post || method(:http_post)
     @signer_post = signer_post || method(:signer_post)
     @now = now
+    @sleeper = sleeper
   end
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
@@ -144,21 +147,22 @@ class NadoHedgeExecutionService
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage)
     blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
-    return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil) if blockers.any?
+    return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil) if blockers.any?
 
     signing = sign(order.fetch(:typed_data), order: order, action: action)
     unless signing[:status] == "signed"
-      return result("failed_before_submit", [ signing[:reason] || "Nado signer did not return a signature" ], order, position, action, current_position, nil, nil)
+      return result("failed_before_submit", [ signing[:reason] || "Nado signer did not return a signature" ], order, position, action, current_position, nil, nil, nil)
     end
 
     payload = submit_payload(order: order, signature: signing.fetch(:signature))
     response = post_execute(payload)
     parsed = parse_submit_response(response)
-    post_position = safe_read_position
+    readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: action) : { attempts: [], position: nil }
+    post_position = readback_poll.fetch(:position)
     status = final_status(parsed, post_position: post_position, action: action)
-    result(status, [], order, position, action, current_position, parsed, post_position)
+    result(status, [], order, position, action, current_position, parsed, post_position, readback_poll)
   rescue => e
-    result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil)
+    result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
   end
 
   def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
@@ -176,6 +180,7 @@ class NadoHedgeExecutionService
     blockers << "Nado submit URL is not configured" if submit_base_url.blank?
     blockers << "NADO_ACCOUNT_SUBACCOUNT or derivable NADO_ACCOUNT_ADDRESS is required" if subaccount.blank?
     blockers << "Nado readback is unavailable" if current_position == :unavailable
+    blockers << "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order." if current_position.nil? && @venue.respond_to?(:raw_positions_present_but_unnormalized?) && @venue.raw_positions_present_but_unnormalized?
     blockers << "current Nado position is long; manual action required" if position_size(current_position).positive?
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
@@ -184,7 +189,7 @@ class NadoHedgeExecutionService
     blockers.uniq
   end
 
-  def result(status, blockers, order, position, action, pre_position, submit_result, post_position)
+  def result(status, blockers, order, position, action, pre_position, submit_result, post_position, readback_poll)
     receipt = {
       timestamp: @now.call.utc.iso8601,
       action: action,
@@ -200,8 +205,10 @@ class NadoHedgeExecutionService
       submit_response_classification: submit_result,
       raw_submit_response_summary: submit_result&.dig(:response_summary),
       exchange_order_id: submit_result&.dig(:exchange_order_id),
+      post_submit_readback_poll_attempts: readback_poll&.fetch(:attempts, []),
       post_submit_readback: serialize_position(post_position),
       final_status: status,
+      final_message: final_message(status, submit_result),
       manual_action_required: manual_action_required?(status),
       next_manual_instruction: manual_instruction(status),
       blockers: blockers,
@@ -467,6 +474,30 @@ class NadoHedgeExecutionService
     end
   end
 
+  def poll_post_submit_readback(action:)
+    attempts = []
+    POST_SUBMIT_READBACK_ATTEMPTS.times do |index|
+      @sleeper.call(POST_SUBMIT_READBACK_DELAY_SECONDS) if index.positive?
+      position = safe_read_position
+      serialized = serialize_position(position)
+      attempts << {
+        attempt: index + 1,
+        position_present: serialized.present?,
+        confirmed: readback_confirms_action?(position, action),
+        readback: serialized
+      }
+      return { attempts: attempts, position: position } if attempts.last.fetch(:confirmed)
+    end
+    { attempts: attempts, position: nil }
+  end
+
+  def readback_confirms_action?(position, action)
+    return false if position == :unavailable
+
+    current_short = short_size(position)
+    action.to_s == "close" ? current_short.zero? : current_short.positive?
+  end
+
   def safe_read_position
     @venue.read_position(symbol: "ETH")
   rescue
@@ -546,7 +577,14 @@ class NadoHedgeExecutionService
   end
 
   def manual_action_required?(status)
-    status.in?(%w[submitted_but_not_confirmed failed_before_submit manual_action_required])
+    status.in?(%w[submitted_but_not_confirmed submitted_but_readback_pending failed_before_submit manual_action_required])
+  end
+
+  def final_message(status, submit_result)
+    return submit_result&.dig(:message) if status == "submitted_and_confirmed"
+    return "Nado submit accepted but readback did not confirm ETH-PERP position." if status.to_s.start_with?("submitted_but")
+
+    submit_result&.dig(:message) || status
   end
 
   def manual_instruction(status)

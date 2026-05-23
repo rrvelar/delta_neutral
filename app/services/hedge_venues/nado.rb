@@ -53,20 +53,36 @@ module HedgeVenues
         subaccount_preview: short_hex(subaccount),
         query_base_url: query_base_url,
         positions_count: positions.size,
+        raw_positions_count: raw_position_rows.size,
+        normalized_positions_count: positions.size,
+        hedge_positions_count: eth_perp_positions.size,
+        current_short_eth: current_eth_perp_short&.dig(:short_size)&.to_s("F"),
+        current_side: current_eth_perp_short&.dig(:side),
+        product_id: current_eth_perp_short&.dig(:product_id),
+        margin_mode: current_eth_perp_short&.dig(:margin_mode),
         warnings: warnings,
         blockers: blockers
       }
     end
 
     def blockers
-      live_flag_enabled? ? config_blockers : [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit." ] + config_blockers
+      live_blockers = live_flag_enabled? ? [] : [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit." ]
+      live_blockers + config_blockers + parser_blockers
     end
 
     def warnings
       [
         "Nado preview applies configured size increment rounding when available.",
         "Nado account readback uses GET-only gateway queries when read-only config is supplied."
-      ] + @read_warnings
+      ] + parser_warnings + @read_warnings
+    end
+
+    def raw_positions_present_but_unnormalized?
+      return false if config_blockers.any?
+
+      raw_position_rows.any? && positions.empty?
+    rescue
+      false
     end
 
     private
@@ -112,36 +128,119 @@ module HedgeVenues
 
     def positions
       @positions ||= begin
-        data = response_payload(get_json("/query", type: "subaccount_info", subaccount: subaccount))
-        product_map = product_map(data)
-        Array(data["perp_balances"] || data["perp_positions"] || data["positions"]).filter_map do |row|
-          normalize_position(row, product_map)
+        data = subaccount_info
+        products = product_map(data)
+        cross_margin = raw_cross_margin_position_rows.filter_map { |row| normalize_cross_margin_position(row, products) }
+        if cross_margin.any?
+          cross_margin
+        else
+          isolated_position_rows.filter_map { |row| normalize_isolated_position(row, products) }
         end
       end
+    end
+
+    def subaccount_info
+      @subaccount_info ||= response_payload(get_json("/query", type: "subaccount_info", subaccount: subaccount))
+    end
+
+    def isolated_info
+      @isolated_info ||= response_payload(get_json("/query", type: "isolated_positions", subaccount: subaccount))
+    rescue => e
+      @read_warnings << "Nado isolated position readback unavailable: #{e.class}: #{e.message}"
+      {}
+    end
+
+    def raw_position_rows
+      raw_cross_margin_position_rows + isolated_position_rows
+    end
+
+    def raw_cross_margin_position_rows
+      data = subaccount_info
+      Array(data["perp_balances"] || data["perp_positions"] || data["positions"]).select { |row| row.is_a?(Hash) }
+    end
+
+    def isolated_position_rows
+      Array(isolated_info["isolated_positions"]).select { |row| row.is_a?(Hash) }
+    end
+
+    def eth_perp_positions
+      positions.select { |position| position[:symbol] == "ETH-PERP" || position[:product_id].to_i == 4 }
+    end
+
+    def current_eth_perp_short
+      eth_perp_positions.find { |position| position[:side] == "short" }
+    end
+
+    def parser_warnings
+      return [] if config_blockers.any?
+
+      warnings = []
+      if raw_position_rows.any? && positions.empty?
+        warnings << "Nado raw positions are present but no ETH-PERP position was normalized."
+      end
+      warnings
+    end
+
+    def parser_blockers
+      raw_positions_present_but_unnormalized? ? [ "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order." ] : []
     end
 
     def normalize_symbol(symbol)
       symbol.to_s.upcase == "WETH" || symbol.to_s.upcase == "ETH" ? "ETH-PERP" : symbol
     end
 
-    def normalize_position(row, product_map)
+    def normalize_cross_margin_position(row, product_map)
       return nil unless row.is_a?(Hash)
 
-      product_id = (row["product_id"] || row["productId"]).to_s
+      product_id = product_id_from(row)
       product = product_map.fetch(product_id, {})
-      amount = decimal_or_nil(row.dig("balance", "amount")) || decimal_or_nil(row["size_base"]) || decimal_or_nil(row["size"]) || decimal_or_nil(row["amount"])
+      amount = position_amount(row)
       return nil if amount.nil? || amount.zero?
 
-      symbol = canonical_symbol(product["symbol"] || product["base"] || product["ticker_id"] || product_id)
+      symbol = position_symbol(row, product, product_id)
+      return nil unless eth_perp_position?(symbol, product_id)
+
+      build_position(row: row, product: product, product_id: product_id, symbol: symbol, amount: amount, margin_mode: "cross")
+    end
+
+    def normalize_isolated_position(row, product_map)
+      base_balance = row["base_balance"] || {}
+      base_product = row["base_product"] || {}
+      product_id = product_id_from(base_product).presence || product_id_from(base_balance).presence || product_id_from(row)
+      product = product_map.fetch(product_id, {}).merge(base_product)
+      amount = decimal_or_nil(base_balance.dig("balance", "amount")) || decimal_or_nil(base_balance["amount"])
+      return nil if amount.nil? || amount.zero?
+
+      symbol = position_symbol(row, product, product_id)
+      return nil unless eth_perp_position?(symbol, product_id)
+
+      build_position(row: row, product: product, product_id: product_id, symbol: symbol, amount: amount, margin_mode: "isolated")
+    end
+
+    def build_position(row:, product:, product_id:, symbol:, amount:, margin_mode:)
+      symbol = "ETH-PERP" if product_id.to_i == 4
+      mark_price = price_from_product(product) || decimal_or_nil(row["mark_price"] || row["markPrice"])
+      raw_v_quote = row.dig("balance", "v_quote_balance") || row["v_quote_balance"] || row["vQuoteBalance"]
+      entry_price = entry_price(amount: amount, raw_v_quote: raw_v_quote) || decimal_or_nil(row["entry_price"] || row["entryPrice"])
+      notional = mark_price ? amount.abs * mark_price : decimal_or_nil(row["notional_usd"] || row["notional"])
       {
         venue: venue_name,
         asset: symbol == "ETH-PERP" ? "ETH" : symbol,
         symbol: symbol,
         exchange_symbol: symbol,
+        product_id: product_id.present? ? product_id.to_i : nil,
+        side: amount.negative? ? "short" : "long",
         size: amount,
+        size_base: amount.abs,
         short_size: amount.negative? ? amount.abs : BigDecimal("0"),
-        mark_price: decimal_or_nil(row["mark_price"] || row["markPrice"]),
-        raw: row,
+        margin_mode: margin_mode,
+        entry_price: entry_price,
+        mark_price: mark_price,
+        notional_usd: notional,
+        metadata: {
+          raw_product_id: product_id.presence,
+          source: margin_mode == "cross" ? "subaccount_info" : "isolated_positions"
+        },
         status: "ok"
       }
     end
@@ -150,7 +249,7 @@ module HedgeVenues
       Array(data["perp_products"] || data["products"]).each_with_object({}) do |row, map|
         next unless row.is_a?(Hash)
 
-        key = (row["product_id"] || row["productId"] || row["id"]).to_s
+        key = product_id_from(row)
         map[key] = row if key.present?
       end
     end
@@ -200,8 +299,54 @@ module HedgeVenues
     def canonical_symbol(value)
       text = value.to_s.upcase
       return "ETH-PERP" if text == "ETH" || text == "WETH"
+      return text.split("_", 2).first if text.include?("-PERP_")
 
       text
+    end
+
+    def product_id_from(row)
+      (row["product_id"] || row["productId"] || row["asset_id"] || row["assetId"] || row["id"]).to_s
+    end
+
+    def position_symbol(row, product, product_id)
+      canonical_symbol(
+        row["symbol"] || row["exchange_symbol"] || row["exchangeSymbol"] || row["market"] || row["ticker"] ||
+          product["symbol"] || product["base"] || product["ticker_id"] || product["ticker"] || product["name"] ||
+          "perp_product:#{product_id}"
+      )
+    end
+
+    def eth_perp_position?(symbol, product_id)
+      symbol == "ETH-PERP" || product_id.to_i == 4
+    end
+
+    def position_amount(row)
+      balance = row["balance"].is_a?(Hash) ? row["balance"] : {}
+      signed = decimal_or_nil(balance["amount"]) ||
+        decimal_or_nil(row["size_base"]) ||
+        decimal_or_nil(row["size"]) ||
+        decimal_or_nil(row["amount"]) ||
+        decimal_or_nil(row["base_balance"])
+      return signed if signed
+
+      unsigned = decimal_or_nil(row["abs_size"] || row["size_base_abs"] || row["quantity"])
+      return nil unless unsigned
+
+      side = (row["side"] || row["direction"]).to_s.downcase
+      side == "short" || side == "sell" ? -unsigned : unsigned
+    end
+
+    def price_from_product(product)
+      risk = product["risk"].is_a?(Hash) ? product["risk"] : {}
+      decimal_or_nil(risk["price_x18"] || risk["oracle_price_x18"] || product["price_x18"] || product["oracle_price_x18"]) ||
+        decimal_or_nil(product["mark_price"] || product["markPrice"])
+    end
+
+    def entry_price(amount:, raw_v_quote:)
+      quote = decimal_or_nil(raw_v_quote)
+      return nil if quote.nil? || amount.zero?
+
+      (quote / amount).abs
     end
 
     def decimal_or_nil(value)

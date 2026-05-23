@@ -196,7 +196,7 @@ class HedgeSyncJob < ApplicationJob
 
     result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
     receipt_path = write_nado_receipt(result.receipt)
-    status = result.status.to_s.start_with?("submitted") ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
+    status = result.status == "submitted_and_confirmed" ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
     after_short = nado_readback_short(result.receipt[:post_submit_readback], fallback: current_short)
     record_nado_rebalance(
       hedge,
@@ -565,6 +565,7 @@ class HedgeSyncJob < ApplicationJob
 
   def nado_rebalance_message(result)
     result.blockers.presence&.join("; ") ||
+      result.receipt[:final_message].presence ||
       result.receipt.dig(:submit_response_classification, :message).presence ||
       result.receipt[:final_status]
   end

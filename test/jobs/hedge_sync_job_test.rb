@@ -308,6 +308,47 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_no_match(/signature|private/i, rebalance.message)
   end
 
+  test "nado hedge sync does not mark accepted submit successful without confirmed readback" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    result = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      final_status: "submitted_but_readback_pending",
+      final_message: "Nado submit accepted but readback did not confirm ETH-PERP position.",
+      submitted_order_summary: {
+        side: "sell",
+        reduce_only: false,
+        rounded_size_eth: "0.7",
+        estimated_notional_usd: "100",
+        signature: "<redacted>"
+      },
+      submit_response_classification: {
+        status: "submitted",
+        message: "Nado execute_place_orders accepted order."
+      },
+      exchange_order_id: "0x#{"28" * 32}",
+      post_submit_readback_poll_attempts: [
+        { attempt: 1, position_present: false, confirmed: false },
+        { attempt: 2, position_present: false, confirmed: false },
+        { attempt: 3, position_present: false, confirmed: false }
+      ],
+      post_submit_readback: nil
+    })
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" }, result: result)
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_difference "ShortRebalance.count", 1 do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
+    assert_equal BigDecimal("0.5"), rebalance.new_short_size
+    assert_equal "0x#{"28" * 32}", rebalance.exchange_order_id
+    assert_match "readback did not confirm", rebalance.message
+  end
+
   test "creates rebalance records with realized PnL from fills" do
     hedge = hedges(:eth_hedge)
 
