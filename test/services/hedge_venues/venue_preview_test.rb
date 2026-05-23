@@ -116,10 +116,38 @@ module HedgeVenues
       assert_equal BigDecimal("0.955"), eth.fetch(:short_size)
       assert_equal "cross", eth.fetch(:margin_mode)
       assert_equal BigDecimal("2061"), eth.fetch(:entry_price)
+      assert_includes state.fetch(:warnings), "Current Nado hedge is cross-margin; target mode is isolated 1x. Close and reopen isolated after confirmation."
       assert_equal 1, state.fetch(:raw_positions_count)
       assert_equal 1, state.fetch(:normalized_positions_count)
       assert_equal "0.955", state.fetch(:current_short_eth)
       assert_equal "short", state.fetch(:current_side)
+    end
+
+    test "nado read position parses isolated ETH-PERP short margin mode" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        if uri.query.include?("isolated_positions")
+          {
+            data: {
+              isolated_positions: [
+                {
+                  base_product: { product_id: 4, symbol: "ETH-PERP", risk: { price_x18: "2061000000000000000000" } },
+                  base_balance: { balance: { amount: "-955000000000000000", v_quote_balance: "1968255000000000000000" } },
+                  quote_balance: { balance: { amount: "1968255000000000000000" } }
+                }
+              ]
+            }
+          }.to_json
+        else
+          { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+        end
+      })
+
+      position = venue.read_position(symbol: "ETH")
+
+      assert_equal "isolated", position.fetch(:margin_mode)
+      assert_equal "short", position.fetch(:side)
+      assert_equal BigDecimal("0.955"), position.fetch(:short_size)
+      assert_equal BigDecimal("1968.255"), position.fetch(:isolated_margin_usd)
     end
 
     test "nado read position ignores spot collateral only rows" do
@@ -275,6 +303,15 @@ module HedgeVenues
       assert_equal "-1093000000000000000", order.fetch(:amount)
       assert_equal (fixed_now.to_i + NadoHedgeExecutionService::DEFAULT_ORDER_TTL_SECONDS).to_s, order.fetch(:expiration)
       assert_equal ((fixed_now.to_f * 1000).to_i + 5000), order.fetch(:nonce).to_i >> 20
+      appendix = order.fetch(:appendix).to_i
+      assert_equal true, (appendix & (1 << 8)).positive?
+      assert_equal true, (appendix & (1 << 9)).positive?
+      decoded = result.receipt.fetch(:submitted_order_summary).fetch(:appendix_decoded)
+      assert_equal true, decoded.fetch(:isolated)
+      assert_equal "ioc", decoded.fetch(:order_type)
+      assert_equal "1.0", result.receipt.fetch(:submitted_order_summary).fetch(:requested_leverage)
+      assert_equal "isolated", result.receipt.fetch(:submitted_order_summary).fetch(:margin_mode)
+      assert_equal result.receipt.fetch(:submitted_order_summary).fetch(:estimated_notional_usd), result.receipt.fetch(:submitted_order_summary).fetch(:isolated_margin_usd)
       assert_equal "0x#{"ab" * 65}", row.fetch(:signature)
       assert_equal "1.093", result.receipt.fetch(:rounded_size_eth)
       assert_equal "execute_place_orders_batch", result.receipt.fetch(:submitted_order_summary).fetch(:body_shape)
@@ -285,6 +322,69 @@ module HedgeVenues
       assert_equal "submitted", result.receipt.fetch(:submit_response_classification).fetch(:status)
       assert_equal "<redacted>", result.receipt.fetch(:submitted_order_summary).fetch(:signature)
       assert_no_match(/#{'ab' * 20}/, result.receipt.to_json)
+    end
+
+    test "nado live open blocks when isolated margin mode cannot be built" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env.merge("AERODROME_NADO_MARGIN_MODE" => "cross"),
+        signer_post: ->(*) { raise "signer should not be called" }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("1"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Nado margin mode must be isolated for live open/increase; refusing cross-margin submit."
+    end
+
+    test "nado live rebalance increase blocks existing cross margin short" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(*) { raise "signer should not be called" }
+      )
+
+      result = service.rebalance_short(
+        position: mellow_position,
+        delta_eth: BigDecimal("0.1"),
+        current_position: { size: BigDecimal("-0.955"), symbol: "ETH-PERP", side: "short", margin_mode: "cross" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Existing Nado position is cross-margin but desired mode is isolated; close existing position before reopening."
+    end
+
+    test "nado live close allows existing cross margin short with reduce only buy" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ef" * 65}" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.close_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.955"),
+        current_position: { size: BigDecimal("-0.955"), symbol: "ETH-PERP", side: "short", margin_mode: "cross" },
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      assert_equal "buy", result.receipt.fetch(:submitted_order_summary).fetch(:side)
+      assert_equal true, result.receipt.fetch(:submitted_order_summary).fetch(:reduce_only)
+      assert_equal false, result.receipt.fetch(:submitted_order_summary).fetch(:isolated)
+      assert_equal "955000000000000000", order.fetch(:amount)
     end
 
     test "nado accepted submit polls until readback confirms short" do
@@ -427,7 +527,7 @@ module HedgeVenues
       service.rebalance_short(
         position: mellow_position,
         delta_eth: BigDecimal("0.25"),
-        current_position: { size: BigDecimal("-0.75"), symbol: "ETH-PERP" },
+        current_position: { size: BigDecimal("-0.75"), symbol: "ETH-PERP", margin_mode: "isolated" },
         confirmation: "CONFIRM_NADO",
         max_slippage: "0.01"
       )

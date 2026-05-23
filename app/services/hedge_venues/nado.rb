@@ -60,6 +60,7 @@ module HedgeVenues
         current_side: current_eth_perp_short&.dig(:side),
         product_id: current_eth_perp_short&.dig(:product_id),
         margin_mode: current_eth_perp_short&.dig(:margin_mode),
+        margin_warning: current_margin_warning,
         warnings: warnings,
         blockers: blockers
       }
@@ -178,6 +179,7 @@ module HedgeVenues
       if raw_position_rows.any? && positions.empty?
         warnings << "Nado raw positions are present but no ETH-PERP position was normalized."
       end
+      warnings << current_margin_warning if current_margin_warning
       warnings
     end
 
@@ -223,6 +225,7 @@ module HedgeVenues
       raw_v_quote = row.dig("balance", "v_quote_balance") || row["v_quote_balance"] || row["vQuoteBalance"]
       entry_price = entry_price(amount: amount, raw_v_quote: raw_v_quote) || decimal_or_nil(row["entry_price"] || row["entryPrice"])
       notional = mark_price ? amount.abs * mark_price : decimal_or_nil(row["notional_usd"] || row["notional"])
+      isolated_margin = isolated_margin(row, amount: amount)
       {
         venue: venue_name,
         asset: symbol == "ETH-PERP" ? "ETH" : symbol,
@@ -237,6 +240,7 @@ module HedgeVenues
         entry_price: entry_price,
         mark_price: mark_price,
         notional_usd: notional,
+        isolated_margin_usd: isolated_margin,
         metadata: {
           raw_product_id: product_id.presence,
           source: margin_mode == "cross" ? "subaccount_info" : "isolated_positions"
@@ -347,6 +351,19 @@ module HedgeVenues
       return nil if quote.nil? || amount.zero?
 
       (quote / amount).abs
+    end
+
+    def isolated_margin(row, amount:)
+      return nil unless amount
+
+      raw_quote = row.dig("quote_balance", "balance", "amount") || row.dig("quote_balance", "amount")
+      decimal_or_nil(raw_quote)&.abs
+    end
+
+    def current_margin_warning
+      return nil unless current_eth_perp_short&.dig(:margin_mode) == "cross"
+
+      "Current Nado hedge is cross-margin; target mode is isolated 1x. Close and reopen isolated after confirmation."
     end
 
     def decimal_or_nil(value)

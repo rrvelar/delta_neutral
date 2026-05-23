@@ -10,6 +10,8 @@ class NadoHedgeExecutionService
   POST_SUBMIT_READBACK_ATTEMPTS = 3
   POST_SUBMIT_READBACK_DELAY_SECONDS = 0.05
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
+  DEFAULT_MARGIN_MODE = "isolated".freeze
+  DEFAULT_REQUESTED_LEVERAGE = BigDecimal("1")
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
@@ -98,13 +100,15 @@ class NadoHedgeExecutionService
     amount_x18 = decimal_to_x18(rounded_size)
     amount_x18 = -amount_x18 if side == "sell"
     now = @now.call
+    margin = margin_plan(action: action, reduce_only: reduce_only, rounded_size: rounded_size, rounded_price: rounded_price)
     order_fields = nado_order_fields(
       side: side,
       reduce_only: reduce_only,
       price: rounded_price,
       amount_x18: amount_x18,
       product: product,
-      now: now
+      now: now,
+      isolated_margin_x6: margin[:isolated_margin_x6]
     )
     typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
     timing = order_timing_summary(order_fields, local_time: now)
@@ -125,6 +129,11 @@ class NadoHedgeExecutionService
         appendix: order_fields[:appendix],
         order_type: "ioc",
         isolated: appendix_isolated?(order_fields[:appendix].to_i),
+        margin_mode: margin[:margin_mode],
+        requested_leverage: margin[:requested_leverage]&.to_s("F"),
+        isolated_margin_usd: margin[:isolated_margin_usd]&.to_s("F"),
+        isolated_margin_x6: margin[:isolated_margin_x6],
+        appendix_decoded: decode_appendix(order_fields[:appendix]),
         recv_time_ms: timing.dig(:diagnostics, :recv_time_ms),
         seconds_until_recv_time: timing.dig(:diagnostics, :seconds_until_recv_time),
         order_expiration: timing.dig(:diagnostics, :order_expiration)
@@ -133,7 +142,7 @@ class NadoHedgeExecutionService
       typed_data: typed_data,
       order_fields: order_fields,
       product: product,
-      blockers: product.fetch(:blockers) + timing.fetch(:blockers),
+      blockers: product.fetch(:blockers) + timing.fetch(:blockers) + margin.fetch(:blockers),
       warnings: product.fetch(:warnings)
     }
   end
@@ -182,6 +191,8 @@ class NadoHedgeExecutionService
     blockers << "Nado readback is unavailable" if current_position == :unavailable
     blockers << "Nado raw positions are present but parser could not normalize ETH-PERP; refusing to submit another order." if current_position.nil? && @venue.respond_to?(:raw_positions_present_but_unnormalized?) && @venue.raw_positions_present_but_unnormalized?
     blockers << "current Nado position is long; manual action required" if position_size(current_position).positive?
+    blockers << "Existing Nado position is cross-margin but desired mode is isolated; close existing position before reopening." if isolated_increase?(action, size_eth) && margin_mode(current_position) == "cross"
+    blockers << "Existing Nado position margin mode is unknown; close existing position before reopening isolated." if isolated_increase?(action, size_eth) && margin_mode(current_position) == "unknown"
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
     blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
@@ -345,14 +356,14 @@ class NadoHedgeExecutionService
     (BigDecimal(size_eth.to_s) / increment).floor * increment
   end
 
-  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:)
+  def nado_order_fields(side:, reduce_only:, price:, amount_x18:, product:, now:, isolated_margin_x6:)
     {
       sender: subaccount,
       priceX18: decimal_to_x18(price).to_s,
       amount: amount_x18.to_s,
       expiration: (now.to_i + DEFAULT_ORDER_TTL_SECONDS).to_s,
       nonce: nado_receive_time_nonce(seed: "#{side}:#{amount_x18}:#{now.to_f}", now: now).to_s,
-      appendix: build_appendix(reduce_only: reduce_only).to_s
+      appendix: build_appendix(reduce_only: reduce_only, isolated_margin_x6: isolated_margin_x6).to_s
     }
   end
 
@@ -417,7 +428,10 @@ class NadoHedgeExecutionService
       place_orders: {
         orders: [
           {
+            id: order_id(order),
             product_id: order.dig(:product, :product_id),
+            borrow_margin: nil,
+            spot_leverage: nil,
             order: order.fetch(:order_fields),
             signature: signature
           }
@@ -675,11 +689,13 @@ class NadoHedgeExecutionService
     nil
   end
 
-  def build_appendix(reduce_only:)
+  def build_appendix(reduce_only:, isolated_margin_x6:)
     version = 1
+    isolated_bit = isolated_margin_x6 ? 1 << 8 : 0
     order_type_ioc = 1 << 9
     reduce_only_bit = reduce_only ? 1 << 11 : 0
-    version | order_type_ioc | reduce_only_bit
+    value_bits = (isolated_margin_x6 || 0) << 64
+    value_bits | version | isolated_bit | order_type_ioc | reduce_only_bit
   end
 
   def order_side(action:, size_eth:)
@@ -699,6 +715,71 @@ class NadoHedgeExecutionService
 
   def appendix_isolated?(appendix)
     (appendix & (1 << 8)).positive?
+  end
+
+  def margin_plan(action:, reduce_only:, rounded_size:, rounded_price:)
+    return { margin_mode: "reduce_only", requested_leverage: nil, isolated_margin_usd: nil, isolated_margin_x6: nil, blockers: [] } if reduce_only
+
+    blockers = []
+    mode = desired_margin_mode
+    leverage = requested_leverage
+    blockers << "Nado margin mode must be isolated for live open/increase; refusing cross-margin submit." unless mode == "isolated"
+    blockers << "Nado requested leverage must be positive." unless leverage&.positive?
+    notional = rounded_size * rounded_price
+    margin = leverage&.positive? ? notional / leverage : nil
+    margin_x6 = margin ? (margin * BigDecimal(1_000_000)).round(0).to_i : nil
+    blockers << "Nado isolated-margin order builder unavailable; refusing cross-margin submit." if mode == "isolated" && (!margin_x6 || margin_x6 <= 0)
+    {
+      margin_mode: mode,
+      requested_leverage: leverage,
+      isolated_margin_usd: margin ? BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000) : nil,
+      isolated_margin_x6: blockers.empty? ? margin_x6 : nil,
+      blockers: blockers
+    }
+  end
+
+  def desired_margin_mode
+    (@env["AERODROME_NADO_MARGIN_MODE"].presence || DEFAULT_MARGIN_MODE).to_s.downcase
+  end
+
+  def requested_leverage
+    BigDecimal((@env["AERODROME_NADO_REQUESTED_LEVERAGE"].presence || DEFAULT_REQUESTED_LEVERAGE).to_s)
+  rescue ArgumentError
+    nil
+  end
+
+  def decode_appendix(appendix)
+    value = appendix.to_i
+    low_flags = value & ((1 << 64) - 1)
+    margin_x6 = value >> 64
+    isolated = appendix_isolated?(value)
+    {
+      appendix: value.to_s,
+      low_flags: low_flags,
+      version: low_flags & 0xFF,
+      isolated: isolated,
+      order_type: ((low_flags >> 9) & 0b11) == 1 ? "ioc" : "default",
+      reduce_only: (low_flags & (1 << 11)).positive?,
+      isolated_margin_x6: isolated ? margin_x6 : nil,
+      isolated_margin_usd: isolated ? (BigDecimal(margin_x6.to_s) / BigDecimal(1_000_000)).to_s("F") : nil
+    }
+  end
+
+  def isolated_increase?(action, size_eth)
+    return false unless desired_margin_mode == "isolated"
+    return true if action.to_s == "open"
+
+    action.to_s == "rebalance" && BigDecimal(size_eth.to_s).positive?
+  end
+
+  def margin_mode(position)
+    return nil unless position && position != :unavailable
+
+    (position[:margin_mode] || position["margin_mode"] || "unknown").to_s
+  end
+
+  def order_id(order)
+    Digest::SHA256.hexdigest(JSON.generate(order.fetch(:order_fields)))[0, 8].to_i(16) & ((1 << 31) - 1)
   end
 
   def nado_receive_time_nonce(seed:, now:)
