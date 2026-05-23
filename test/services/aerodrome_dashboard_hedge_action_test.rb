@@ -189,6 +189,76 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "nado live action is blocked when venue live env is false" do
+    position = create_mellow_position(weth_exposure: "1.09")
+    runner = CallRecorder.new
+
+    with_env(@env.merge(
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "false",
+      "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO"
+    )) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: "CONFIRM_NADO",
+        positions: [],
+        hedge_sync_runner: runner,
+        venue: "nado"
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "Nado live env flag is not true"
+      assert_includes report.fetch(:blockers), "Nado live submit adapter is not wired in delta_neutral"
+      assert_empty runner.calls
+      assert_equal false, report.fetch(:hyperliquid_execution)
+    end
+  end
+
+  test "ethereal live action is blocked without exact venue confirmation" do
+    position = create_mellow_position(weth_exposure: "1.09")
+    runner = CallRecorder.new
+
+    with_env(@env.merge(
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_ETHEREAL_HEDGE_CONFIRMATION" => "CONFIRM_ETHEREAL"
+    )) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: "wrong",
+        positions: [],
+        hedge_sync_runner: runner,
+        venue: "ethereal"
+      ).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "submitted confirmation must equal CONFIRM_ETHEREAL"
+      assert_includes report.fetch(:blockers), "Ethereal live submit adapter is not wired in delta_neutral"
+      assert_empty runner.calls
+    end
+  end
+
+  test "nado selected venue uses Mellow target exposure from valuation" do
+    position = create_mellow_position(weth_exposure: "1.16", target: "0.95")
+
+    with_env(@env) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: false,
+        positions: [],
+        venue: "nado"
+      ).report
+
+      assert_equal "preview", report.fetch(:status)
+      assert_equal "1.102", report.fetch(:target_short_eth)
+      assert_equal "1.102", report.fetch(:hedge_venue_live_preflight).fetch(:target_hedge_size_eth)
+      assert_equal "1.102", report.fetch(:hedge_venue_preview).fetch(:requested_size_eth)
+    end
+  end
+
   test "hyperliquid preview still blocks inactive position" do
     position = create_position(active: false)
 
@@ -367,6 +437,41 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       external_id: SecureRandom.hex(4),
       pool_address: "0xpool",
       active: active
+    )
+    Hedge.create!(position: position, target: target, tolerance: tolerance, active: true)
+    position
+  end
+
+  def create_mellow_position(weth_exposure:, target: "1.0", tolerance: "0.05", active: true)
+    dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    wallet = Wallet.find_or_create_by!(
+      user: users(:one),
+      network: networks(:base),
+      address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+    )
+    total_value = BigDecimal(weth_exposure) * BigDecimal("2300") + BigDecimal("240")
+    position = Position.create!(
+      user: users(:one),
+      dex: dex,
+      wallet: wallet,
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:#{SecureRandom.hex(4)}",
+      pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: weth_exposure,
+      asset1_amount: "240.0",
+      asset0_price_usd: "2300.0",
+      asset1_price_usd: "1.0",
+      entry_value_usd: total_value.to_s("F"),
+      active: active,
+      mellow_metadata: {
+        hedge_ready: true,
+        last_probe_confidence: "high",
+        user_weth_exposure: weth_exposure,
+        user_usdc_exposure: "240.0",
+        user_total_value_usd: total_value.to_s("F")
+      }.to_json
     )
     Hedge.create!(position: position, target: target, tolerance: tolerance, active: true)
     position

@@ -9,6 +9,14 @@ module HedgeVenues
       "Ethereal"
     end
 
+    def live_flag_enabled?
+      bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
+    end
+
+    def live_confirmation_phrase
+      env["AERODROME_ETHEREAL_HEDGE_CONFIRMATION"].to_s
+    end
+
     def read_position(symbol:)
       return nil if config_blockers.any?
 
@@ -80,6 +88,7 @@ module HedgeVenues
       {
         venue: venue_name,
         mode: mode,
+        live_mode_state: live_mode_state,
         live_supported: live_supported?,
         live_enabled: live_enabled?,
         status: source[:status],

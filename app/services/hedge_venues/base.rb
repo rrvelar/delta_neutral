@@ -4,8 +4,9 @@ module HedgeVenues
 
     attr_reader :env
 
-    def initialize(env: ENV, **)
+    def initialize(env: ENV, close_reduce_only_available: true, **)
       @env = env
+      @close_reduce_only_available = close_reduce_only_available
     end
 
     def venue_name
@@ -22,6 +23,22 @@ module HedgeVenues
 
     def live_enabled?
       false
+    end
+
+    def live_mode_state
+      live_flag_enabled? ? "live_configured_but_disabled" : mode
+    end
+
+    def live_flag_enabled?
+      false
+    end
+
+    def live_confirmation_phrase
+      nil
+    end
+
+    def close_reduce_only_available?
+      @close_reduce_only_available
     end
 
     def read_position(symbol:)
@@ -45,6 +62,23 @@ module HedgeVenues
       preview(action: "close_short", symbol: symbol, size_eth: size_eth, max_slippage: nil, reduce_only: true)
     end
 
+    def single_venue_preflight(position:, action:, target_size_eth:, current_position:, confirmation:, max_slippage:)
+      SingleVenuePreflight.new(
+        venue: self,
+        position: position,
+        action: action,
+        target_size_eth: target_size_eth,
+        current_position: current_position,
+        confirmation: confirmation,
+        max_slippage: max_slippage,
+        env: env
+      ).report
+    end
+
+    def round_order_size(value)
+      round_size(value)
+    end
+
     def blockers
       [ "#{DRY_RUN_BLOCKER} for #{venue_name}." ]
     end
@@ -60,6 +94,7 @@ module HedgeVenues
       {
         venue: venue_name,
         mode: mode,
+        live_mode_state: live_mode_state,
         live_supported: live_supported?,
         live_enabled: live_enabled?,
         action: action,

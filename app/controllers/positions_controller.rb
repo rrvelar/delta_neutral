@@ -90,6 +90,7 @@ class PositionsController < ApplicationController
       @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue])
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
+      @selected_hedge_venue_dashboard = selected_hedge_venue_dashboard
       @latest_aerodrome_weth_rebalance = @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first
       @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
@@ -175,6 +176,44 @@ class PositionsController < ApplicationController
       message = "#{label} #{report.fetch(:status)} on #{venue}. Target #{report[:target_short_eth] || 'unavailable'} ETH, delta #{delta} ETH."
       report.fetch(:warnings).present? ? "#{message} #{report.fetch(:warnings).join('; ')}" : message
     end
+  end
+
+  def selected_hedge_venue_dashboard
+    return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
+
+    current_position = @selected_hedge_venue_adapter.read_position(symbol: "ETH")
+    current_short = selected_venue_short_size(current_position)
+    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
+    drift = target ? target - current_short : nil
+
+    {
+      target_hedge_eth: target&.to_s("F"),
+      current_venue_position: current_position,
+      current_short_eth: current_short.to_s("F"),
+      drift_eth: drift&.to_s("F"),
+      account_state: @selected_hedge_venue_adapter.account_state,
+      open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
+      close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
+      live_preflight: target ? @selected_hedge_venue_adapter.single_venue_preflight(
+        position: @position,
+        action: "open",
+        target_size_eth: target,
+        current_position: current_position,
+        confirmation: nil,
+        max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
+      ) : nil
+    }
+  rescue => e
+    { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
+  end
+
+  def selected_venue_short_size(position)
+    return BigDecimal("0") unless position
+
+    size = BigDecimal(position.fetch(:size).to_s)
+    size.negative? ? size.abs : BigDecimal("0")
+  rescue ArgumentError
+    BigDecimal("0")
   end
 
   def aerodrome_rewards_report

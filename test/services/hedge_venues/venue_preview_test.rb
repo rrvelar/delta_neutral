@@ -101,5 +101,89 @@ module HedgeVenues
       assert_equal "/v1/query", calls.first.path
       assert_equal "type=subaccount_info&subaccount=0xsubaccount", calls.first.query
     end
+
+    test "nado single venue preflight blocks when reduce only close path is unavailable" do
+      venue = HedgeVenues::Nado.new(
+        env: {
+          "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+          "AERODROME_NADO_HEDGE_CONFIRMATION" => "CONFIRM_NADO",
+          "AERODROME_HEDGE_ENABLED" => "true",
+          "AERODROME_HEDGE_PAUSED" => "false"
+        },
+        close_reduce_only_available: false
+      )
+      position = mellow_position
+
+      preflight = venue.single_venue_preflight(
+        position: position,
+        action: "open",
+        target_size_eth: BigDecimal("1.09"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_includes preflight.fetch(:blockers), "close/reduce-only path is unavailable"
+      assert_equal false, preflight.fetch(:submitted)
+      assert_equal "1.09", preflight.fetch(:target_hedge_size_eth)
+    end
+
+    test "ethereal single venue preflight blocks conflicting venue readback" do
+      venue = HedgeVenues::Ethereal.new(
+        env: {
+          "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+          "AERODROME_ETHEREAL_HEDGE_CONFIRMATION" => "CONFIRM_ETHEREAL",
+          "AERODROME_HEDGE_ENABLED" => "true",
+          "AERODROME_HEDGE_PAUSED" => "false"
+        }
+      )
+      position = mellow_position
+
+      preflight = venue.single_venue_preflight(
+        position: position,
+        action: "open",
+        target_size_eth: BigDecimal("1.09"),
+        current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" },
+        confirmation: "CONFIRM_ETHEREAL",
+        max_slippage: "0.01"
+      )
+
+      assert_includes preflight.fetch(:blockers), HedgeVenues::SingleVenuePreflight::CONFLICTING_POSITION_BLOCKER
+      assert_equal "sell_short", preflight.fetch(:intended_side)
+    end
+
+    private
+
+    def mellow_position
+      dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+      wallet = Wallet.find_or_create_by!(
+        user: users(:one),
+        network: networks(:base),
+        address: "0x23cb5f48fa3f4502232f3442637f90e8e3355701"
+      )
+      Position.create!(
+        user: users(:one),
+        dex: dex,
+        wallet: wallet,
+        source: Position::SOURCE_MELLOW_AUTOPILOT,
+        external_id: "mellow:71261528",
+        pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+        asset0: "WETH",
+        asset1: "USDC",
+        asset0_amount: "1.09",
+        asset1_amount: "240.0",
+        asset0_price_usd: "2300.0",
+        asset1_price_usd: "1.0",
+        entry_value_usd: "2611.0",
+        active: true,
+        mellow_metadata: {
+          hedge_ready: true,
+          last_probe_confidence: "high",
+          user_weth_exposure: "1.09",
+          user_usdc_exposure: "240.0",
+          user_total_value_usd: "2611.0"
+        }.to_json
+      )
+    end
   end
 end

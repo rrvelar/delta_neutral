@@ -269,6 +269,42 @@
               <% if selected_adapter.blockers.present? %>
                 <p class="mt-2 text-yellow-200 text-xs"><%= selected_adapter.blockers.join("; ") %></p>
               <% end %>
+              <% if @selected_hedge_venue_dashboard.present? %>
+                <% venue_dashboard = @selected_hedge_venue_dashboard %>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                    <p class="text-gray-500">Target hedge ETH</p>
+                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:target_hedge_eth] || "Unavailable" %></p>
+                  </div>
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                    <p class="text-gray-500">Venue short ETH</p>
+                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:current_short_eth] || "Unavailable" %></p>
+                  </div>
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                    <p class="text-gray-500">Delta to target</p>
+                    <p class="text-gray-100 font-medium"><%= venue_dashboard[:drift_eth] || "Unavailable" %></p>
+                  </div>
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-2">
+                    <p class="text-gray-500">Live availability</p>
+                    <p class="text-gray-100 font-medium"><%= selected_adapter.live_mode_state.humanize %></p>
+                  </div>
+                </div>
+                <% if venue_dashboard.dig(:open_preview, :payload).present? %>
+                  <p class="mt-2 text-gray-400 text-xs">
+                    Open preview: rounded <%= venue_dashboard.dig(:open_preview, :rounded_size_eth) %> ETH,
+                    schema <%= venue_dashboard.dig(:open_preview, :payload, :schema) %>. Dry-run/read-only; creates no orders.
+                  </p>
+                <% end %>
+                <% if venue_dashboard[:live_preflight].present? %>
+                  <% preflight = venue_dashboard[:live_preflight] %>
+                  <p class="mt-2 text-yellow-200 text-xs">
+                    Live preflight: <%= preflight[:blockers].presence&.join("; ") || "blocked until a separately audited submit adapter is wired." %>
+                  </p>
+                <% end %>
+                <% if venue_dashboard[:warnings].present? %>
+                  <p class="mt-2 text-yellow-200 text-xs"><%= venue_dashboard[:warnings].join("; ") %></p>
+                <% end %>
+              <% end %>
             </div>
             <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
               <% [

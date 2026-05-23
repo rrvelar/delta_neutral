@@ -15,6 +15,14 @@ module HedgeVenues
       "Nado"
     end
 
+    def live_flag_enabled?
+      bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    end
+
+    def live_confirmation_phrase
+      env["AERODROME_NADO_HEDGE_CONFIRMATION"].to_s
+    end
+
     def read_position(symbol:)
       return nil if config_blockers.any?
 
@@ -30,6 +38,9 @@ module HedgeVenues
       {
         venue: venue_name,
         mode: mode,
+        live_mode_state: live_mode_state,
+        live_supported: live_supported?,
+        live_enabled: live_enabled?,
         status: "account_readonly",
         subaccount_preview: short_hex(subaccount),
         query_base_url: query_base_url,

@@ -26,7 +26,7 @@ class AerodromeDashboardHedgeAction
     target = target_short
     drift = target ? target - current_short : nil
     blockers = action_blockers(target: target, current_short: current_short, drift: drift)
-    blockers.concat(non_hyperliquid_live_blockers) if @execute
+    blockers.concat(non_hyperliquid_live_blockers(target: target, current_short: current_short, before_position: before_position)) if @execute
     blockers.concat(execution_gate_blockers) if @execute
     result = blockers.any? ? blocked(blockers, target: target, current_short: current_short, drift: drift, before_position: before_position) : run_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
 
@@ -128,6 +128,7 @@ class AerodromeDashboardHedgeAction
       hedge_venue_live_supported: venue.live_supported?,
       hedge_venue_live_enabled: venue.live_enabled?,
       hedge_venue_preview: venue_preview(target: target, drift: drift, current_short: current_short),
+      hedge_venue_live_preflight: hedge_venue_live_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position),
       hedge_venue_account_state: venue.account_state,
       target_short_eth: target&.to_s("F"),
       target_notional_usd: target && eth_price ? (target * eth_price).to_s("F") : nil,
@@ -206,10 +207,13 @@ class AerodromeDashboardHedgeAction
     self.class.execution_gate_blockers(action: @action, submitted_confirmation: @confirmation, require_submitted_confirmation: true)
   end
 
-  def non_hyperliquid_live_blockers
+  def non_hyperliquid_live_blockers(target:, current_short:, before_position:)
     return [] if @venue_key == "hyperliquid"
 
-    [ "#{venue.venue_name} is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid" ]
+    [
+      "#{venue.venue_name} is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid",
+      *single_venue_preflight(target: target, drift: nil, current_short: current_short, before_position: before_position).fetch(:blockers)
+    ].uniq
   end
 
   def run_emergency_close
@@ -249,6 +253,37 @@ class AerodromeDashboardHedgeAction
       venue.rebalance_preview(symbol: "ETH", delta_eth: drift || BigDecimal("0"), max_slippage: max_slippage)
     when "close"
       venue.close_preview(symbol: "ETH", size_eth: current_short)
+    end
+  end
+
+  def hedge_venue_live_preflight(target:, drift:, current_short:, before_position:)
+    return nil if @venue_key == "hyperliquid"
+    return nil unless target && current_short
+
+    single_venue_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position)
+  end
+
+  def single_venue_preflight(target:, drift:, current_short:, before_position:)
+    venue.single_venue_preflight(
+      position: @position,
+      action: @action,
+      target_size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    )
+  end
+
+  def preflight_target_size(target:, drift:, current_short:)
+    case @action
+    when "open"
+      target
+    when "rebalance"
+      (drift || target - current_short).abs
+    when "close"
+      current_short
+    else
+      BigDecimal("0")
     end
   end
 
