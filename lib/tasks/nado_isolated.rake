@@ -59,4 +59,130 @@ namespace :nado do
     puts JSON.pretty_generate(result)
     abort("Nado isolated payload check failed") if failures.any?
   end
+
+  desc "Controlled Nado isolated delta-order live verification path; dry-run by default"
+  task isolated_delta_live_check: :environment do
+    direction = (ENV["direction"] || ENV["DIRECTION"] || "decrease").to_s.downcase
+    size_eth = BigDecimal((ENV["size_eth"] || ENV["SIZE_ETH"] || "0.005").to_s)
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
+    position = nado_delta_probe_position
+    current_position = nado_delta_probe_current_position
+    service = nado_delta_probe_service(current_position)
+
+    result = if direction == "round_trip"
+      service.round_trip_delta_probe(
+        position: position,
+        size_eth: size_eth,
+        current_position: current_position,
+        confirmation: confirmation,
+        max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01",
+        dry_run: dry_run
+      )
+    else
+      service.delta_probe(
+        position: position,
+        direction: direction,
+        size_eth: size_eth,
+        current_position: current_position,
+        confirmation: confirmation,
+        max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01",
+        dry_run: dry_run
+      )
+    end
+
+    receipt_path = Rails.root.join("storage", "nado_delta_live_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    FileUtils.mkdir_p(receipt_path.dirname)
+    File.open(receipt_path, "a") { |file| file.puts(JSON.generate(result.receipt)) }
+
+    puts JSON.pretty_generate(result.receipt)
+    puts "Receipt appended to #{receipt_path}"
+    abort("Nado isolated delta probe did not pass: #{result.status}") unless result.status.in?(%w[dry_run submitted_and_confirmed])
+  end
+
+  def nado_delta_probe_position
+    return nado_delta_probe_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_NADO_READBACK"])
+
+    Position.find(ENV["position_id"] || ENV["POSITION_ID"] || 3)
+  end
+
+  def nado_delta_probe_mock_position
+    Position.new(
+      id: ENV["position_id"] || ENV["POSITION_ID"] || 3,
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:mock-delta-probe",
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "0.809",
+      asset1_amount: "240",
+      asset0_price_usd: "2300",
+      asset1_price_usd: "1",
+      active: true,
+      mellow_metadata: {
+        hedge_ready: true,
+        last_probe_confidence: "high",
+        user_weth_exposure: "0.809",
+        user_usdc_exposure: "240",
+        user_total_value_usd: "2100.7"
+      }.to_json
+    )
+  end
+
+  def nado_delta_probe_current_position
+    return nado_delta_probe_mock_readback if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_NADO_READBACK"])
+
+    HedgeVenues::Nado.new.read_position(symbol: "ETH")
+  end
+
+  def nado_delta_probe_mock_readback(size: BigDecimal("0.809"))
+    {
+      size: -size,
+      short_size: size,
+      symbol: "ETH-PERP",
+      side: "short",
+      margin_mode: "isolated",
+      isolated_margin_usd: BigDecimal("1860.7"),
+      product_id: 4,
+      entry_price: BigDecimal("2300"),
+      mark_price: BigDecimal("2300"),
+      metadata: { raw: { "subaccount" => "0x#{"02" * 32}" } }
+    }
+  end
+
+  def nado_delta_probe_service(current_position)
+    mock = ActiveModel::Type::Boolean.new.cast(ENV["MOCK_NADO_READBACK"])
+    env = mock ? nado_delta_probe_mock_env : ENV
+    venue = mock ? NadoDeltaProbeMockVenue.new([ current_position ]) : nil
+    NadoHedgeExecutionService.new(env: env, venue: venue, sleeper: ->(_seconds) { })
+  end
+
+  def nado_delta_probe_mock_env
+    {
+      "NADO_API_BASE_URL" => "https://nado.invalid/v1",
+      "NADO_ACCOUNT_ADDRESS" => "0x#{"11" * 20}",
+      "NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}",
+      "EXECUTION_SIGNER_URL" => "http://127.0.0.1:9123",
+      "NADO_ETH_PERP_PRODUCT_METADATA_JSON" => {
+        product_id: 4,
+        chain_id: 1,
+        price_increment_x18: "100000000000000000",
+        size_increment: "1000000000000000",
+        market_price: "2300"
+      }.to_json
+    }
+  end
+
+  class NadoDeltaProbeMockVenue
+    def initialize(readbacks)
+      @readbacks = readbacks
+    end
+
+    def read_position(symbol:)
+      @readbacks.last
+    end
+
+    def raw_positions_present_but_unnormalized?
+      false
+    end
+  end
 end

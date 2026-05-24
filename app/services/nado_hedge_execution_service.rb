@@ -15,6 +15,7 @@ class NadoHedgeExecutionService
   DEFAULT_MARGIN_MODE = "isolated".freeze
   DEFAULT_REQUESTED_LEVERAGE = BigDecimal("1")
   UI_EQUIVALENT_ISOLATED_CLOSE_APPENDIX = 2817
+  DELTA_PROBE_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_DELTA_PROBE_ORDERS".freeze
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
@@ -176,6 +177,89 @@ class NadoHedgeExecutionService
     Result.new(reopen_result.status, reopen_result.blockers, reopen_result.warnings, receipt)
   end
 
+  def build_delta_probe_preview(position:, direction:, size_eth:, current_position:, max_slippage:)
+    normalized_direction = normalize_delta_probe_direction(direction)
+    build_delta_probe_order_preview(
+      position: position,
+      direction: normalized_direction,
+      size_eth: size_eth,
+      max_slippage: max_slippage,
+      current_position: current_position
+    )
+  end
+
+  def delta_probe(position:, direction:, size_eth:, current_position:, confirmation:, max_slippage:, dry_run: true)
+    normalized_direction = normalize_delta_probe_direction(direction)
+    order = build_delta_probe_preview(
+      position: position,
+      direction: normalized_direction,
+      size_eth: size_eth,
+      current_position: current_position,
+      max_slippage: max_slippage
+    )
+    blockers = dry_run ? order.fetch(:blockers) : delta_probe_live_blockers(position: position, confirmation: confirmation, order: order, current_position: current_position)
+    return delta_probe_result("dry_run", blockers, order, position, normalized_direction, current_position, nil, nil, nil, dry_run: true) if dry_run
+    return delta_probe_result("blocked_before_submit", blockers, order, position, normalized_direction, current_position, nil, nil, nil, dry_run: false) if blockers.any?
+
+    signing = sign(order.fetch(:typed_data), order: order, action: "nado_isolated_delta_probe")
+    unless signing[:status] == "signed"
+      return delta_probe_result("failed_before_submit", [ signing[:reason] || "Nado signer did not return a signature" ], order, position, normalized_direction, current_position, nil, nil, nil, dry_run: false)
+    end
+
+    payload = submit_payload(order: order, signature: signing.fetch(:signature))
+    response = post_execute(payload)
+    parsed = parse_submit_response(response)
+    expected_short = BigDecimal(order.dig(:summary, :expected_after_short_eth).to_s)
+    readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: "rebalance", expected_short: expected_short) : { attempts: [], position: nil, confirmed: false }
+    post_position = readback_poll.fetch(:position)
+    status = parsed[:status] == "submitted" && readback_poll[:confirmed] ? "submitted_and_confirmed" : parsed[:status] == "submitted" ? "submitted_but_readback_pending" : "failed_before_submit"
+    delta_probe_result(status, [], order, position, normalized_direction, current_position, parsed, post_position, readback_poll, dry_run: false)
+  rescue => e
+    delta_probe_result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, normalized_direction || direction, current_position, nil, nil, nil, dry_run: dry_run)
+  end
+
+  def round_trip_delta_probe(position:, size_eth:, current_position:, confirmation:, max_slippage:, dry_run: true)
+    initial_position = current_position
+    decrease = delta_probe(
+      position: position,
+      direction: "decrease",
+      size_eth: size_eth,
+      current_position: initial_position,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      dry_run: dry_run
+    )
+    if dry_run
+      increase = nil
+      if decrease.blockers.empty?
+        after_decrease = synthetic_position_after_probe(current_position, decrease.receipt.dig(:payload_summary, :expected_after_short_eth))
+        increase = delta_probe(
+          position: position,
+          direction: "increase",
+          size_eth: size_eth,
+          current_position: after_decrease,
+          confirmation: confirmation,
+          max_slippage: max_slippage,
+          dry_run: true
+        )
+      end
+      return round_trip_delta_probe_result(position: position, initial_position: initial_position, decrease_result: decrease, increase_result: increase, dry_run: true)
+    end
+    return round_trip_delta_probe_result(position: position, initial_position: initial_position, decrease_result: decrease, increase_result: nil, dry_run: dry_run) if decrease.status != "submitted_and_confirmed"
+
+    after_decrease = read_position
+    increase = delta_probe(
+      position: position,
+      direction: "increase",
+      size_eth: size_eth,
+      current_position: after_decrease,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      dry_run: false
+    )
+    round_trip_delta_probe_result(position: position, initial_position: initial_position, decrease_result: decrease, increase_result: increase, dry_run: false)
+  end
+
   def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
     side = order_side(action: action, size_eth: size_eth)
     reduce_only = reduce_only_order?(action: action, size_eth: size_eth)
@@ -251,6 +335,236 @@ class NadoHedgeExecutionService
   end
 
   private
+
+  def normalize_delta_probe_direction(direction)
+    normalized = direction.to_s.downcase
+    return normalized if normalized.in?(%w[decrease increase])
+
+    raise ArgumentError, "direction must be decrease or increase"
+  end
+
+  def build_delta_probe_order_preview(position:, direction:, size_eth:, max_slippage:, current_position:)
+    if direction == "increase"
+      order = build_order_preview(position: position, action: "rebalance", size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
+      return annotate_delta_probe_order(order: order, direction: direction, current_position: current_position)
+    end
+
+    build_delta_probe_decrease_preview(position: position, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
+  end
+
+  def build_delta_probe_decrease_preview(position:, size_eth:, max_slippage:, current_position:)
+    product = product_metadata
+    order_size = order_size(size_eth)
+    price = order_price(position: position, side: "buy", max_slippage: max_slippage, product: product)
+    rounded_price = round_price(price, side: "buy", product: product)
+    rounded_size = round_size(order_size, product: product)
+    amount_x18 = decimal_to_x18(rounded_size)
+    now = @now.call
+    order_fields = nado_order_fields(
+      side: "buy",
+      reduce_only: true,
+      price: rounded_price,
+      amount_x18: amount_x18,
+      product: product,
+      now: now,
+      isolated_margin_x6: nil,
+      sender: nado_default_1_sender,
+      appendix_override: UI_EQUIVALENT_ISOLATED_CLOSE_APPENDIX,
+      expiration_milliseconds: true
+    )
+    typed_data = product[:product_id] && product[:chain_id] ? typed_data(product: product, order_fields: order_fields) : nil
+    timing = order_timing_summary(order_fields, local_time: now)
+    before_short = short_size(current_position)
+    expected_after = before_short - rounded_size
+    blockers = product.fetch(:blockers) + timing.fetch(:blockers) + delta_probe_position_blockers(direction: "decrease", current_position: current_position, rounded_size: rounded_size)
+    warnings = product.fetch(:warnings) + [
+      "Nado isolated delta decrease probe uses UI-equivalent isolated reduce-only low bits (appendix=2817) with delta size; production auto-rebalance still uses close_reopen until live proof exists."
+    ]
+
+    {
+      ok: blockers.empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
+      summary: {
+        venue: "Nado",
+        symbol: DEFAULT_SYMBOL,
+        action: "isolated_delta_probe",
+        probe_direction: "decrease",
+        delta_probe: true,
+        partial_reduce_candidate: true,
+        close_reopen: false,
+        full_close: false,
+        side: "buy",
+        reduce_only: true,
+        product_id: product[:product_id],
+        rounded_size_eth: decimal_string(rounded_size),
+        rounded_price: decimal_string(rounded_price),
+        estimated_notional_usd: decimal_string(rounded_size * rounded_price),
+        amount_x18: amount_x18.to_s,
+        amount_sign: "positive",
+        sender: order_fields[:sender],
+        current_position_subaccount: isolated_position_subaccount(current_position),
+        order_sender_kind: "default_1",
+        appendix: order_fields[:appendix],
+        order_type: "ioc",
+        isolated: appendix_isolated?(order_fields[:appendix].to_i),
+        margin_mode: "isolated_delta_probe_reduce_only",
+        requested_leverage: nil,
+        isolated_margin_usd: position_value(current_position, :isolated_margin_usd)&.to_s,
+        isolated_margin_x6: nil,
+        current_position_isolated_margin_x6: isolated_margin_x6_from_position(current_position),
+        isolated_margin_handling: "omitted from appendix high bits; UI-equivalent isolated reduce-only low bits only",
+        appendix_decoded: decode_appendix(order_fields[:appendix]),
+        recv_time_ms: timing.dig(:diagnostics, :recv_time_ms),
+        seconds_until_recv_time: timing.dig(:diagnostics, :seconds_until_recv_time),
+        order_expiration: timing.dig(:diagnostics, :order_expiration),
+        before_short_eth: decimal_string(before_short),
+        expected_after_short_eth: decimal_string(expected_after)
+      },
+      timing: timing.fetch(:diagnostics),
+      typed_data: typed_data,
+      order_fields: order_fields,
+      product: product,
+      blockers: blockers,
+      warnings: warnings
+    }
+  end
+
+  def annotate_delta_probe_order(order:, direction:, current_position:)
+    before_short = short_size(current_position)
+    rounded_size = BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)
+    expected_after = before_short + rounded_size
+    summary = order.fetch(:summary).merge(
+      action: "isolated_delta_probe",
+      probe_direction: direction,
+      delta_probe: true,
+      close_reopen: false,
+      full_close: false,
+      partial_reduce_candidate: false,
+      amount_sign: "negative",
+      before_short_eth: decimal_string(before_short),
+      expected_after_short_eth: decimal_string(expected_after),
+      isolated_margin_handling: "isolated 1x margin encoded in appendix high bits"
+    )
+    blockers = order.fetch(:blockers) + delta_probe_position_blockers(direction: direction, current_position: current_position, rounded_size: rounded_size)
+    warnings = order.fetch(:warnings) + [
+      "Nado isolated delta increase probe uses the same isolated 1x sell semantics as the working Nado open/increase path."
+    ]
+    order.merge(summary: summary, blockers: blockers.uniq, warnings: warnings.uniq)
+  end
+
+  def delta_probe_position_blockers(direction:, current_position:, rounded_size:)
+    blockers = []
+    blockers << "current Nado readback is unavailable" if current_position == :unavailable
+    blockers << "current Nado position must be an isolated short" unless isolated_short_position?(current_position)
+    blockers << "delta probe size must be positive after rounding" unless rounded_size.positive?
+    blockers << "decrease delta must be smaller than current isolated short" if direction == "decrease" && short_size(current_position) <= rounded_size
+    blockers
+  end
+
+  def isolated_short_position?(position)
+    position.present? && position != :unavailable && margin_mode(position) == "isolated" && short_size(position).positive?
+  end
+
+  def delta_probe_live_blockers(position:, confirmation:, order:, current_position:)
+    blockers = []
+    blockers << "AERODROME_NADO_DELTA_PROBE_ENABLED must be true" unless delta_probe_enabled?
+    blockers << "submitted confirmation must equal #{DELTA_PROBE_CONFIRMATION}" unless confirmation.to_s == DELTA_PROBE_CONFIRMATION
+    blockers << "position must be active" unless position.active?
+    blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
+    blockers << "Nado signer service is not configured" if signer_url.blank?
+    blockers << "Nado signer service is unavailable" if signer_url.present? && !signer_available?
+    blockers << "Nado submit URL is not configured" if submit_base_url.blank?
+    blockers << "NADO_ACCOUNT_SUBACCOUNT or derivable NADO_ACCOUNT_ADDRESS is required" if subaccount.blank?
+    blockers.concat(delta_probe_position_blockers(direction: order.dig(:summary, :probe_direction), current_position: current_position, rounded_size: BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)))
+    blockers.concat(order.fetch(:blockers, []))
+    blockers.uniq
+  end
+
+  def delta_probe_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["AERODROME_NADO_DELTA_PROBE_ENABLED"])
+  end
+
+  def delta_probe_result(status, blockers, order, position, direction, pre_position, submit_result, post_position, readback_poll, dry_run:)
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "isolated_delta_probe",
+      venue: "nado",
+      direction: direction,
+      dry_run: dry_run,
+      position_id: position.id,
+      source: position.position_source,
+      source_external_id: position.external_id,
+      before_readback: serialize_position(pre_position),
+      delta_size_eth: order.dig(:summary, :rounded_size_eth),
+      expected_after_short_eth: order.dig(:summary, :expected_after_short_eth),
+      payload_summary: sanitized_order_summary(order),
+      submit_response_classification: submit_result,
+      exchange_order_id: submit_result&.dig(:exchange_order_id),
+      poll_attempts: readback_poll&.fetch(:attempts, []),
+      after_readback: serialize_position(post_position),
+      final_status: status,
+      final_message: delta_probe_final_message(status, submit_result, dry_run: dry_run),
+      manual_action_required: manual_action_required?(status),
+      blockers: blockers,
+      warnings: order.fetch(:warnings, [])
+    }
+    Result.new(status, blockers, order.fetch(:warnings, []), receipt)
+  end
+
+  def round_trip_delta_probe_result(position:, initial_position:, decrease_result:, increase_result:, dry_run:)
+    final_position = increase_result&.receipt&.dig(:after_readback) || decrease_result.receipt[:after_readback]
+    status = if dry_run
+      "dry_run"
+    elsif decrease_result.status != "submitted_and_confirmed"
+      decrease_result.status
+    else
+      increase_result&.status || "failed_before_submit"
+    end
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "isolated_delta_probe_round_trip",
+      venue: "nado",
+      dry_run: dry_run,
+      position_id: position.id,
+      before_readback: serialize_position(initial_position),
+      decrease_leg: decrease_result.receipt,
+      increase_leg: increase_result&.receipt,
+      after_readback: final_position,
+      final_status: status,
+      final_message: round_trip_delta_probe_message(decrease_result: decrease_result, increase_result: increase_result, dry_run: dry_run),
+      manual_action_required: manual_action_required?(status),
+      blockers: decrease_result.blockers + (increase_result&.blockers || []),
+      warnings: decrease_result.warnings + (increase_result&.warnings || [])
+    }
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def synthetic_position_after_probe(position, expected_short_eth)
+    return position unless position && position != :unavailable && expected_short_eth.present?
+
+    updated = position.deep_dup
+    expected = BigDecimal(expected_short_eth.to_s)
+    updated[:size] = -expected
+    updated[:short_size] = expected
+    updated["size"] = -expected if updated.key?("size")
+    updated["short_size"] = expected if updated.key?("short_size")
+    updated
+  end
+
+  def delta_probe_final_message(status, submit_result, dry_run:)
+    return "Nado isolated delta probe dry-run only; no signature or order submission." if dry_run
+    return "Nado isolated delta probe submitted and confirmed by readback." if status == "submitted_and_confirmed"
+    return "Nado isolated delta probe submit accepted but readback did not confirm expected delta." if status.to_s.start_with?("submitted_but")
+
+    submit_result&.dig(:message) || status
+  end
+
+  def round_trip_delta_probe_message(decrease_result:, increase_result:, dry_run:)
+    return "Nado isolated delta round-trip dry-run only; no signature or order submission." if dry_run
+    return "Nado isolated delta decrease did not confirm; increase leg was not submitted." unless decrease_result.status == "submitted_and_confirmed"
+    return "Nado isolated delta round-trip completed and confirmed." if increase_result&.status == "submitted_and_confirmed"
+
+    increase_result&.receipt&.dig(:final_message) || "Nado isolated delta increase leg did not confirm."
+  end
 
   def execute_rebalance(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
     target_size = short_size(current_position) + BigDecimal(delta_eth.to_s)
@@ -1197,6 +1511,8 @@ class NadoHedgeExecutionService
     recv_time_ms = nonce >> 20
     local_submit_time_ms = local_time_ms(local_time)
     expiration = Integer(order_fields[:expiration])
+    expiration_units = expiration >= 1_000_000_000_000 ? "milliseconds" : "seconds"
+    expiration_time = expiration_units == "milliseconds" ? Time.at(expiration / 1000.0).utc.iso8601(3) : Time.at(expiration).utc.iso8601
     {
       recv_time_ms: recv_time_ms,
       recv_time: Time.at(recv_time_ms / 1000.0).utc.iso8601(3),
@@ -1204,7 +1520,8 @@ class NadoHedgeExecutionService
       local_submit_time: local_time.utc.iso8601(3),
       seconds_until_recv_time: ((recv_time_ms - local_submit_time_ms) / 1000.0).round(3),
       order_expiration: expiration,
-      order_expiration_time: Time.at(expiration).utc.iso8601
+      order_expiration_units: expiration_units,
+      order_expiration_time: expiration_time
     }
   rescue ArgumentError, TypeError
     {
@@ -1214,6 +1531,7 @@ class NadoHedgeExecutionService
       local_submit_time: local_time.utc.iso8601(3),
       seconds_until_recv_time: nil,
       order_expiration: order_fields[:expiration],
+      order_expiration_units: nil,
       order_expiration_time: nil
     }
   end

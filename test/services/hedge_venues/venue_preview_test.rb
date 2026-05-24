@@ -1061,6 +1061,185 @@ module HedgeVenues
       assert_equal false, (order.fetch(:appendix).to_i & (1 << 8)).positive?
     end
 
+    test "nado delta probe dry-run decrease builds delta reduce-only payload not full close" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env)
+
+      result = service.delta_probe(
+        position: mellow_position,
+        direction: "decrease",
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: nil,
+        max_slippage: "0.01",
+        dry_run: true
+      )
+
+      summary = result.receipt.fetch(:payload_summary)
+      assert_equal "dry_run", result.status
+      assert_equal "decrease", summary.fetch(:probe_direction)
+      assert_equal "0.005", summary.fetch(:rounded_size_eth)
+      assert_equal "5000000000000000", summary.fetch(:amount_x18)
+      assert_equal "buy", summary.fetch(:side)
+      assert_equal true, summary.fetch(:reduce_only)
+      assert_equal false, summary.fetch(:full_close)
+      assert_equal false, summary.fetch(:close_reopen)
+      assert_equal true, summary.fetch(:partial_reduce_candidate)
+      assert_equal "2817", summary.fetch(:appendix)
+      assert_equal "default_1", summary.fetch(:order_sender_kind)
+      assert_equal "0x#{"11" * 20}64656661756c745f31000000", summary.fetch(:sender)
+      assert_equal "0.804", summary.fetch(:expected_after_short_eth)
+      assert_no_match(/#{'ab' * 20}|private_key|authorization|cookie/i, result.receipt.to_json)
+    end
+
+    test "nado delta probe dry-run increase builds isolated sell delta payload" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env)
+
+      result = service.delta_probe(
+        position: mellow_position,
+        direction: "increase",
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: nil,
+        max_slippage: "0.01",
+        dry_run: true
+      )
+
+      summary = result.receipt.fetch(:payload_summary)
+      assert_equal "dry_run", result.status
+      assert_equal "increase", summary.fetch(:probe_direction)
+      assert_equal "-5000000000000000", summary.fetch(:amount_x18)
+      assert_equal "sell", summary.fetch(:side)
+      assert_equal false, summary.fetch(:reduce_only)
+      assert_equal true, summary.fetch(:isolated)
+      assert_equal "isolated", summary.fetch(:margin_mode)
+      assert_equal "0.814", summary.fetch(:expected_after_short_eth)
+      assert_match "appendix high bits", summary.fetch(:isolated_margin_handling)
+    end
+
+    test "nado delta probe live mode refuses without explicit env gate and confirmation" do
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        signer_post: ->(*) { raise "signer should not be called" }
+      )
+
+      result = service.delta_probe(
+        position: mellow_position,
+        direction: "decrease",
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: "wrong",
+        max_slippage: "0.01",
+        dry_run: false
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "AERODROME_NADO_DELTA_PROBE_ENABLED must be true"
+      assert_includes result.blockers, "submitted confirmation must equal #{NadoHedgeExecutionService::DELTA_PROBE_CONFIRMATION}"
+    end
+
+    test "nado delta probe round trip refuses non isolated short" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env)
+
+      result = service.round_trip_delta_probe(
+        position: mellow_position,
+        size_eth: BigDecimal("0.005"),
+        current_position: { size: BigDecimal("-0.809"), short_size: BigDecimal("0.809"), symbol: "ETH-PERP", side: "short", margin_mode: "cross" },
+        confirmation: nil,
+        max_slippage: "0.01",
+        dry_run: true
+      )
+
+      assert_equal "dry_run", result.status
+      assert_includes result.blockers, "current Nado position must be an isolated short"
+      assert_nil result.receipt.fetch(:increase_leg)
+    end
+
+    test "nado delta probe decrease success requires readback before minus delta" do
+      submitted = []
+      venue = NadoPollingVenue.new([ nado_isolated_short(size: "0.804") ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env.merge("AERODROME_NADO_DELTA_PROBE_ENABLED" => "true"),
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "success", data: [ { digest: "0x#{"12" * 32}" } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.delta_probe(
+        position: mellow_position,
+        direction: "decrease",
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: NadoHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+        max_slippage: "0.01",
+        dry_run: false
+      )
+
+      assert_equal "submitted_and_confirmed", result.status
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      assert_equal "5000000000000000", order.fetch(:amount)
+      assert_equal "2817", order.fetch(:appendix)
+      assert_equal "0.804", result.receipt.fetch(:expected_after_short_eth)
+      assert_equal BigDecimal("0.804"), result.receipt.fetch(:after_readback).fetch(:short_size)
+    end
+
+    test "nado delta probe increase success requires readback before plus delta" do
+      venue = NadoPollingVenue.new([ nado_isolated_short(size: "0.814") ], env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env.merge("AERODROME_NADO_DELTA_PROBE_ENABLED" => "true"),
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, _payload) { { status: "success", data: [ { digest: "0x#{"34" * 32}" } ] } },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.delta_probe(
+        position: mellow_position,
+        direction: "increase",
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: NadoHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+        max_slippage: "0.01",
+        dry_run: false
+      )
+
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal "0.814", result.receipt.fetch(:expected_after_short_eth)
+      assert_equal BigDecimal("0.814"), result.receipt.fetch(:after_readback).fetch(:short_size)
+    end
+
+    test "nado delta probe round trip does not run increase after failed decrease" do
+      submitted = []
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env.merge("AERODROME_NADO_DELTA_PROBE_ENABLED" => "true"),
+        venue: NadoPollingVenue.new([ nado_isolated_short(size: "0.809") ], env: nado_live_env),
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}", signer_id: "test-signer" } },
+        http_post: ->(_uri, payload) {
+          submitted << payload
+          { status: "failure", data: [ { error_code: 400, error: "Reduce only order increases position." } ] }
+        },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.round_trip_delta_probe(
+        position: mellow_position,
+        size_eth: BigDecimal("0.005"),
+        current_position: nado_isolated_short(size: "0.809"),
+        confirmation: NadoHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+        max_slippage: "0.01",
+        dry_run: false
+      )
+
+      assert_equal 1, submitted.size
+      assert_equal "failed_before_submit", result.status
+      assert_nil result.receipt.fetch(:increase_leg)
+      assert_match "increase leg was not submitted", result.receipt.fetch(:final_message)
+      assert_no_match(/#{'ab' * 20}|private_key|authorization|cookie/i, result.receipt.to_json)
+    end
+
     private
 
     def nado_live_env
@@ -1109,6 +1288,19 @@ module HedgeVenues
             }
           ]
         }
+      }
+    end
+
+    def nado_isolated_short(size:)
+      short = BigDecimal(size)
+      {
+        size: -short,
+        short_size: short,
+        symbol: "ETH-PERP",
+        side: "short",
+        margin_mode: "isolated",
+        isolated_margin_usd: BigDecimal("1860.7"),
+        metadata: { raw: { "subaccount" => "0x#{"02" * 32}" } }
       }
     end
 
