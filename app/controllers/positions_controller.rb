@@ -309,13 +309,16 @@ class PositionsController < ApplicationController
         depositor_source: nil,
         gauge_address: nil,
         token_id: @position.external_id,
+        strategy_level_estimate: @position.mellow_autopilot?,
+        reward_label: @position.mellow_autopilot? ? "Mellow pro-rata AERO rewards estimate" : "Claimable AERO",
+        claimable_by_app: false,
         aero_usd_price: nil,
         aero_usd_price_source: "unavailable",
         warnings: [ "AERODROME_REWARDS_ENABLED is not true" ]
       }
     end
 
-    AerodromeRewardsCheck.new.report
+    AerodromeRewardsCheck.new(position: @position).report
   rescue => e
     Rails.logger.warn("Aerodrome rewards dashboard read failed for position #{@position.id}: #{e.class} #{e.message}")
     {
@@ -346,11 +349,14 @@ class PositionsController < ApplicationController
         fee1_usd: nil,
         total_fees_usd: nil,
         token_id: @position.external_id,
+        strategy_level_estimate: @position.mellow_autopilot?,
+        fee_label: @position.mellow_autopilot? ? "Mellow pro-rata LP fee estimate" : "Unclaimed fees USD estimate",
+        collect_enabled_by_app: false,
         warnings: [ "AERODROME_FEES_ENABLED is not true" ]
       }
     end
 
-    AerodromeFeesCheck.new.report
+    AerodromeFeesCheck.new(position: @position).report
   rescue => e
     Rails.logger.warn("Aerodrome fees dashboard read failed for position #{@position.id}: #{e.class} #{e.message}")
     {

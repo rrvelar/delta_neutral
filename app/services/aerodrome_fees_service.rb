@@ -16,24 +16,28 @@ class AerodromeFeesService
   )
 
   SOURCE = "nonfungible_position_manager.positions.tokens_owed"
+  MELLOW_SOURCE = "#{SOURCE}.mellow_strategy_pro_rata"
 
   def initialize(slipstream_service: nil)
     @slipstream_service = slipstream_service
   end
 
   def fees_for_position(position)
-    raw_position = slipstream_service.position(position.external_id)
+    token = AerodromePositionTokenResolver.resolve(position)
+    return unavailable(position, token) unless token.status == "ok"
+
+    raw_position = slipstream_service.position(token.token_id)
     token0 = slipstream_service.token_data(raw_position.token0_address)
     token1 = slipstream_service.token_data(raw_position.token1_address)
-    fee0_amount = decimal_amount(raw_position.tokens_owed0_raw, token0.decimals)
-    fee1_amount = decimal_amount(raw_position.tokens_owed1_raw, token1.decimals)
+    fee0_amount = pro_rate(decimal_amount(raw_position.tokens_owed0_raw, token0.decimals), token.pro_rata_share)
+    fee1_amount = pro_rate(decimal_amount(raw_position.tokens_owed1_raw, token1.decimals), token.pro_rata_share)
     fee0_usd = fee_usd(fee0_amount, token0.symbol, position)
     fee1_usd = fee_usd(fee1_amount, token1.symbol, position)
 
     FeeData.new(
       status: "detected",
-      fee_source: SOURCE,
-      token_id: position.external_id.to_s,
+      fee_source: token.strategy_level ? MELLOW_SOURCE : SOURCE,
+      token_id: token.display_token_id,
       pool_address: position.pool_address,
       fee0_symbol: token0.symbol,
       fee0_amount: fee0_amount,
@@ -42,7 +46,7 @@ class AerodromeFeesService
       fee1_amount: fee1_amount,
       fee1_usd: fee1_usd,
       total_fees_usd: total_fees_usd(fee0_usd, fee1_usd),
-      warnings: [],
+      warnings: token.warnings,
       blockers: []
     )
   end
@@ -55,6 +59,28 @@ class AerodromeFeesService
 
   def decimal_amount(raw, decimals)
     BigDecimal(raw.to_s) / (BigDecimal("10")**Integer(decimals))
+  end
+
+  def pro_rate(value, share)
+    value * (share || BigDecimal("1"))
+  end
+
+  def unavailable(position, token)
+    FeeData.new(
+      status: "unavailable",
+      fee_source: "unavailable",
+      token_id: token.display_token_id,
+      pool_address: position.pool_address,
+      fee0_symbol: nil,
+      fee0_amount: nil,
+      fee0_usd: nil,
+      fee1_symbol: nil,
+      fee1_amount: nil,
+      fee1_usd: nil,
+      total_fees_usd: nil,
+      warnings: token.warnings,
+      blockers: []
+    )
   end
 
   def fee_usd(amount, symbol, position)

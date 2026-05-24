@@ -2,9 +2,10 @@ class AerodromeFeesCheck
   BANNER = "AERODROME FEES CHECK — READ ONLY"
   DEX_NAME = "aerodrome_slipstream"
 
-  def initialize(fees_service: nil, rewards_service: nil)
+  def initialize(fees_service: nil, rewards_service: nil, position: nil)
     @fees_service = fees_service
     @rewards_service = rewards_service
+    @position = position
     @warnings = []
     @blockers = []
   end
@@ -21,7 +22,12 @@ class AerodromeFeesCheck
       transactions_enabled: false,
       collect_enabled: false,
       pool_address: position&.pool_address,
-      token_id: position&.external_id&.to_s,
+      token_id: fee_data&.token_id || position&.external_id&.to_s,
+      token_source: position ? token_context(position).source : nil,
+      strategy_level_estimate: position ? token_context(position).strategy_level : false,
+      pro_rata_share: decimal_string(position ? token_context(position).pro_rata_share : nil),
+      fee_label: position&.mellow_autopilot? ? "Mellow pro-rata LP fee estimate" : "Unclaimed fees USD estimate",
+      collect_enabled_by_app: false,
       fee_source: fee_data&.fee_source || "unavailable",
       fee0_symbol: fee_data&.fee0_symbol,
       fee0_amount: decimal_string(fee_data&.fee0_amount),
@@ -39,6 +45,8 @@ class AerodromeFeesCheck
   private
 
   def active_aerodrome_position
+    return @position if @position
+
     dex = Dex.find_by(name: DEX_NAME)
     unless dex
       @blockers << "Aerodrome Slipstream dex record is missing"
@@ -51,6 +59,9 @@ class AerodromeFeesCheck
   end
 
   def read_fees(position)
+    token = token_context(position)
+    return unavailable(position, token.warnings.join("; "), token: token) if token.status != "ok"
+
     return staked_fee_unavailable(position) if staked_position?(position)
 
     fees_service.fees_for_position(position)
@@ -63,11 +74,14 @@ class AerodromeFeesCheck
   def staked_position?(position)
     return false if ENV["AERODROME_VOTER_ADDRESS"].blank?
 
+    token = token_context(position)
+    return false if token.status != "ok"
+
     depositor = ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || position.wallet.address
     gauge = rewards_service.gauge_for_pool(position.pool_address)
     return false if gauge == AerodromeRewardsService::ZERO_ADDRESS
 
-    rewards_service.staked_contains(gauge, depositor, position.external_id)
+    rewards_service.staked_contains(gauge, depositor, token.token_id)
   rescue AerodromeRewardsService::Error => e
     @warnings << "staking status could not be verified for fee read: #{e.message}"
     false
@@ -80,11 +94,11 @@ class AerodromeFeesCheck
     )
   end
 
-  def unavailable(position, warning)
+  def unavailable(position, warning, token: token_context(position))
     AerodromeFeesService::FeeData.new(
       status: "unavailable",
       fee_source: "unavailable",
-      token_id: position.external_id.to_s,
+      token_id: token.display_token_id,
       pool_address: position.pool_address,
       fee0_symbol: nil,
       fee0_amount: nil,
@@ -96,6 +110,11 @@ class AerodromeFeesCheck
       warnings: [ warning ],
       blockers: []
     )
+  end
+
+  def token_context(position)
+    @token_context ||= {}
+    @token_context[position.id] ||= AerodromePositionTokenResolver.resolve(position)
   end
 
   def fees_service

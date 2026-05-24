@@ -2,9 +2,10 @@ class AerodromeRewardsCheck
   BANNER = "AERODROME REWARDS CHECK — READ ONLY"
   DEX_NAME = "aerodrome_slipstream"
 
-  def initialize(rewards_service: nil, price_service: nil)
+  def initialize(rewards_service: nil, price_service: nil, position: nil)
     @rewards_service = rewards_service
     @price_service = price_service
+    @position = position
     @blockers = []
     @warnings = []
     @checks = []
@@ -27,6 +28,11 @@ class AerodromeRewardsCheck
       claims_enabled: false,
       pool_address: context[:pool_address],
       token_id: context[:token_id],
+      token_source: context[:token_source],
+      strategy_level_estimate: context[:strategy_level_estimate],
+      pro_rata_share: decimal_string(context[:pro_rata_share]),
+      reward_label: context[:reward_label],
+      claimable_by_app: context[:claimable_by_app],
       position_wallet_address: context[:position_wallet_address],
       wallet_address: context[:position_wallet_address],
       depositor_address: selected_depositor_address(context),
@@ -56,6 +62,8 @@ class AerodromeRewardsCheck
   private
 
   def active_aerodrome_position
+    return @position if @position
+
     dex = Dex.find_by(name: DEX_NAME)
     unless dex
       @blockers << "Aerodrome Slipstream dex record is missing"
@@ -70,9 +78,16 @@ class AerodromeRewardsCheck
   def position_context(position)
     return {} unless position
 
+    token = token_context(position)
     {
       pool_address: position.pool_address,
-      token_id: position.external_id,
+      token_id: token.display_token_id,
+      resolved_token_id: token.token_id,
+      token_source: token.source,
+      strategy_level_estimate: token.strategy_level,
+      pro_rata_share: token.pro_rata_share,
+      reward_label: token.strategy_level ? "Mellow pro-rata AERO rewards estimate" : "Claimable AERO",
+      claimable_by_app: false,
       position_wallet_address: position.wallet.address,
       asset0: position.asset0,
       asset1: position.asset1,
@@ -94,6 +109,12 @@ class AerodromeRewardsCheck
       return nil
     end
 
+    token = token_context(position)
+    if token.status != "ok"
+      @checks << { name: "Aerodrome reward token id", status: "unavailable", value: token.display_token_id }
+      return unavailable_reward_data(position, token)
+    end
+
     depositor = depositor_address_for(position)
     if depositor.blank?
       @blockers << "Position #{position.id} has no rewards depositor address; set AERODROME_REWARDS_DEPOSITOR_ADDRESS or configure a wallet address"
@@ -110,8 +131,9 @@ class AerodromeRewardsCheck
       pool_address: position.pool_address,
       gauge_address: gauge_address,
       depositor_address: depositor,
-      token_id: position.external_id
+      token_id: token.token_id
     )
+    reward_data = pro_rate_mellow_rewards(reward_data, token) if token.strategy_level
     @checks << { name: "CL gauge reward read", status: reward_data.status, value: reward_data.gauge_address }
     reward_data
   rescue AerodromeRewardsService::ConfigError, AerodromeRewardsService::DecodeError => e
@@ -120,6 +142,63 @@ class AerodromeRewardsCheck
   rescue AerodromeRewardsService::Error => e
     @warnings << e.message
     nil
+  end
+
+  def token_context(position)
+    @token_context ||= {}
+    @token_context[position.id] ||= AerodromePositionTokenResolver.resolve(position)
+  end
+
+  def unavailable_reward_data(position, token)
+    AerodromeRewardsService::RewardData.new(
+      status: "unavailable",
+      pool_address: position.pool_address,
+      gauge_address: nil,
+      depositor_address: depositor_address_for(position),
+      account_address: depositor_address_for(position),
+      token_id: token.display_token_id,
+      staked: nil,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
+      reward_token_address: nil,
+      claimable_aero_raw: nil,
+      claimable_aero: nil,
+      claimable_aero_usd: nil,
+      warnings: token.warnings,
+      blockers: []
+    )
+  end
+
+  def pro_rate_mellow_rewards(reward_data, token)
+    AerodromeRewardsService::RewardData.new(
+      status: reward_data.status,
+      pool_address: reward_data.pool_address,
+      gauge_address: reward_data.gauge_address,
+      depositor_address: reward_data.depositor_address,
+      account_address: reward_data.account_address,
+      token_id: token.display_token_id,
+      staked: reward_data.staked,
+      staked_token_ids: reward_data.staked_token_ids,
+      reward_rate_raw: reward_data.reward_rate_raw,
+      reward_token_address: reward_data.reward_token_address,
+      claimable_aero_raw: pro_rate_integer(reward_data.claimable_aero_raw, token.pro_rata_share),
+      claimable_aero: pro_rate_decimal(reward_data.claimable_aero, token.pro_rata_share),
+      claimable_aero_usd: pro_rate_decimal(reward_data.claimable_aero_usd, token.pro_rata_share),
+      warnings: reward_data.warnings + token.warnings,
+      blockers: reward_data.blockers
+    )
+  end
+
+  def pro_rate_decimal(value, share)
+    return nil if value.nil?
+
+    BigDecimal(value.to_s) * share
+  end
+
+  def pro_rate_integer(value, share)
+    return nil if value.nil?
+
+    (BigDecimal(value.to_s) * share).to_i
   end
 
   def merge_reward_messages(reward_data)
@@ -176,13 +255,14 @@ class AerodromeRewardsCheck
   end
 
   def gauge_as_depositor_result(position, depositor, gauge_address)
+    token = token_context(position)
     AerodromeRewardsService::RewardData.new(
       status: "unavailable",
       pool_address: position.pool_address,
       gauge_address: gauge_address,
       depositor_address: depositor,
       account_address: depositor,
-      token_id: position.external_id,
+      token_id: token.display_token_id,
       staked: nil,
       staked_token_ids: nil,
       reward_rate_raw: nil,

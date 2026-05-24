@@ -1,1094 +1,542 @@
-<div class="flex items-center justify-between mb-8">
-  <div>
-    <h1 class="text-3xl font-bold text-white inline-flex items-center gap-2">
-      <%= @position.asset0 %>/<%= @position.asset1 %>
-      <%= link_to position_path(@position), class: "text-gray-400 hover:text-white transition" do %>
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182M21.015 4.356v4.992" />
-        </svg>
-      <% end %>
-    </h1>
-    <p class="text-gray-400 mt-1 flex items-center gap-2">
-      <%= dex_display_name(@position) %> &middot;
-      <%= chain_display_name(@position) %> &middot;
-      <%= @position.mellow_autopilot? ? "Observed token ID" : "Token ID" %> <%= @position.external_id %> &middot;
-      <span id="copy-address" class="cursor-pointer hover:text-white transition inline-flex items-center gap-1" title="<%= @position.pool_address %>" onclick="navigator.clipboard.writeText('<%= @position.pool_address %>'); var icon=this.querySelector('.copy-icon'); icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M4.5 12.75l6 6 9-13.5\' />'; icon.classList.add('text-green-400'); setTimeout(function(){ icon.innerHTML='<path stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75\' />'; icon.classList.remove('text-green-400'); }, 1500)">
-        <%= @position.pool_address.to_s[0..5] %>&hellip;<%= @position.pool_address.to_s[-4..] %>
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 copy-icon">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
-        </svg>
-      </span>
-    </p>
-  </div>
-  <div class="flex items-center space-x-3">
-    <% if aerodrome_position?(@position) %>
-      <div class="text-right">
-        <%= button_to "Refresh Read-only Data", sync_now_position_path(@position), method: :post, title: "Updates on-chain LP data only. No orders, no Hyperliquid, no hedge execution.", class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-        <p class="text-gray-500 text-xs mt-2">Updates on-chain LP data only &middot; No orders &middot; No Hyperliquid &middot; No hedge execution</p>
-      </div>
-      <div class="text-right">
-        <% proposal_button_path = @latest_aerodrome_hedge_proposal ? regenerate_position_aerodrome_hedge_proposals_path(@position) : position_aerodrome_hedge_proposals_path(@position) %>
-        <% proposal_button_label = @latest_aerodrome_hedge_proposal ? "Regenerate Manual Hedge Proposal" : "Generate Manual Hedge Proposal" %>
-        <%= button_to proposal_button_label, proposal_button_path, method: :post, title: "Manual proposal only. No orders. No Hyperliquid. Execution disabled. Not a live hedge.", class: "bg-yellow-900/60 hover:bg-yellow-900 text-yellow-100 border border-yellow-700 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-        <p class="text-gray-500 text-xs mt-2">Manual proposal only &middot; No orders &middot; No Hyperliquid &middot; Execution disabled &middot; Not a live hedge</p>
-      </div>
-      <span class="bg-yellow-900/40 text-yellow-300 border border-yellow-800 px-4 py-2 rounded-lg text-sm font-medium">Monitor-only</span>
-    <% elsif @position.hedge %>
-      <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-      <%= link_to "View Hedge", hedge_path(@position.hedge), class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-    <% else %>
-      <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-      <%= link_to "Create Hedge", new_hedge_path(position_id: @position.id), class: "bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-lg text-sm font-medium transition" %>
-    <% end %>
-  </div>
-</div>
+<% position_valuation = @position_valuation || PositionValuation.current(@position) %>
+<% aerodrome = aerodrome_position?(@position) %>
+<% production_dashboard = @aerodrome_production_dashboard_status || {} %>
+<% auto_status = @aerodrome_auto_rebalance_status || {} %>
+<% selected_venue = @selected_hedge_venue || HedgeVenues.normalize(@position.hedge&.execution_venue) %>
+<% selected_adapter = @selected_hedge_venue_adapter || (aerodrome ? HedgeVenues.build(selected_venue) : nil) %>
+<% selected_venue_name = selected_adapter&.venue_name || HedgeVenues.label(selected_venue) %>
+<% venue_dashboard = @selected_hedge_venue_dashboard || {} %>
+<% dashboard_status = production_dashboard.presence || {} %>
+<% target_eth_short = dashboard_status[:target_hedge_eth] || venue_dashboard[:target_hedge_eth] %>
+<% current_short_eth = dashboard_status[:current_short_eth] || venue_dashboard[:current_short_eth] %>
+<% drift_eth = dashboard_status[:drift_eth] || venue_dashboard[:drift_eth] %>
+<% tolerance_eth = venue_dashboard[:tolerance_eth] || auto_status[:tolerance_eth] %>
+<% current_venue_position = dashboard_status[:current_venue_position] || venue_dashboard[:current_venue_position] || {} %>
+<% margin_mode = dashboard_status[:margin_mode] || current_venue_position[:margin_mode] %>
+<% effective_leverage = current_venue_position[:effective_leverage] || dashboard_status[:effective_leverage] %>
+<% mark_price = dashboard_status[:mark_price] || current_venue_position[:mark_price] %>
+<% current_notional = dashboard_status[:current_venue_notional_usd] || current_venue_position[:notional_usd] %>
+<% entry_price = dashboard_status[:entry_price] || current_venue_position[:entry_price] %>
+<% isolated_margin = dashboard_status[:isolated_margin_usd] || current_venue_position[:isolated_margin_usd] %>
+<% drift_usd = dashboard_status[:drift_notional_usd] %>
+<% rebalance_needed = dashboard_status[:rebalance_needed_now] || auto_status[:rebalance_needed] %>
+<% tolerance_label = rebalance_needed ? "Needs Rebalance" : "Within Tolerance" %>
+<% selected_live_enabled = selected_adapter&.live_enabled? %>
+<% selected_live_supported = selected_adapter&.live_supported? %>
+<% live_status_label = selected_live_enabled ? "Live Enabled" : (selected_live_supported ? "Live Gated" : "Read-only") %>
+<% auto_gate_enabled = if selected_venue == "nado"
+  ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false"))
+elsif selected_venue == "ethereal"
+  ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", "false"))
+else
+  ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false")) && !ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
+end %>
+<% auto_status_label = auto_gate_enabled ? "Auto Enabled" : "Auto Paused" %>
+<% next_action = venue_dashboard[:next_action] || (rebalance_needed ? "rebalance" : "no-op") %>
+<% action_preflights = venue_dashboard[:action_live_preflights] || {} %>
+<% recommended_action_key = case next_action
+when "open" then :open
+when "increase short", "reduce short", "rebalance" then :rebalance
+when "close" then :close
+else :open
+end %>
+<% active_preflight = action_preflights[recommended_action_key] || venue_dashboard[:live_preflight] || {} %>
+<% selected_action_blockers = (active_preflight[:blockers] || []).uniq %>
+<% selected_action_warnings = (active_preflight[:warnings] || []).uniq %>
+<% open_preview = venue_dashboard[:open_preview] || {} %>
+<% rewards_report = @aerodrome_rewards_report || {} %>
+<% fees_report = @aerodrome_fees_report || {} %>
+<% hedge_preview = aerodrome ? aerodrome_hedge_preview_for(@position) : nil %>
+<% latest_snap = @pnl_snapshots.first %>
+<% pool_unrealized = position_valuation.pool_delta_usd %>
+<% pnl_execution_venue = HedgeVenues.normalize(dashboard_status[:execution_venue] || @position.hedge&.execution_venue) %>
+<% venue_hedge_unrealized_raw = dashboard_status[:venue_hedge_unrealized_pnl_usd].presence %>
+<% hedge_unrealized = pnl_execution_venue.in?(%w[nado ethereal]) ? (venue_hedge_unrealized_raw ? BigDecimal(venue_hedge_unrealized_raw.to_s) : nil) : (latest_snap&.hedge_unrealized || 0).to_d %>
+<% hedge_unrealized_available = !hedge_unrealized.nil? %>
+<% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
+<% total_unrealized = if pool_unrealized && hedge_unrealized_available
+  pool_unrealized + hedge_unrealized
+elsif pool_unrealized && !pnl_execution_venue.in?(%w[nado ethereal])
+  pool_unrealized
+elsif hedge_unrealized_available
+  hedge_unrealized
+end %>
+<% total_pnl = total_unrealized ? total_unrealized + hedge_realized : nil %>
+<% rewards_pnl = rewards_report.fetch(:claimable_aero_usd, nil).presence %>
+<% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
+<% fees_pnl = fees_report.fetch(:total_fees_usd, nil).presence %>
+<% fees_pnl = BigDecimal(fees_pnl.to_s) if fees_pnl %>
+<% total_pnl_with_rewards = total_pnl && rewards_pnl ? total_pnl + rewards_pnl : nil %>
+<% total_pnl_with_rewards_and_fees = total_pnl_with_rewards && fees_pnl ? total_pnl_with_rewards + fees_pnl : nil %>
+<% mellow_asset0_value = @position.mellow_autopilot? && position_valuation.current_value_usd && position_valuation.usdc_exposure ? position_valuation.current_value_usd - position_valuation.usdc_exposure : nil %>
+<% mellow_asset1_value = @position.mellow_autopilot? ? position_valuation.usdc_exposure : nil %>
+<% current_short_label = "Current #{selected_venue_name} ETH short" %>
+<% current_position_label = "Current #{selected_venue_name} ETH-PERP position" %>
+<% drift_negative = begin
+  drift_eth.present? && BigDecimal(drift_eth.to_s).negative?
+rescue ArgumentError
+  false
+end %>
 
-<% if aerodrome_position?(@position) %>
-  <% position_valuation = @position_valuation || PositionValuation.current(@position) %>
-  <% hedge_preview = aerodrome_hedge_preview_for(@position) %>
-  <% aerodrome_hedge = @position.hedge %>
-  <% weth_amount = position_valuation.weth_exposure || (@position.asset0.to_s.upcase == "WETH" || @position.asset0.to_s.upcase == "ETH" ? @position.asset0_amount : @position.asset1_amount) %>
-  <% target_eth_short = aerodrome_hedge && weth_amount ? weth_amount * aerodrome_hedge.target : nil %>
-  <% aerodrome_hedge_enabled = ENV["AERODROME_HEDGE_ENABLED"].to_s.downcase == "true" %>
-  <% aerodrome_hedge_paused = ENV["AERODROME_HEDGE_PAUSED"].nil? ? true : ENV["AERODROME_HEDGE_PAUSED"].to_s.downcase == "true" %>
-  <% aerodrome_live_approved = ENV["AERODROME_LIVE_APPROVED"].to_s.downcase == "true" %>
-  <% hyperliquid_testnet = ENV["HYPERLIQUID_TESTNET"].to_s.downcase == "true" %>
-  <% aerodrome_pool_delta = position_valuation.pool_delta_usd %>
-  <% production_dashboard = @aerodrome_production_dashboard_status || {} %>
-  <% hard_ceiling = production_dashboard[:hard_ceiling] || {} %>
-  <% production_venue = production_dashboard[:execution_venue] || @selected_hedge_venue || HedgeVenues::DEFAULT %>
-  <% production_venue_name = production_dashboard[:execution_venue_name] || HedgeVenues.label(production_venue) %>
-  <% current_short_label = production_dashboard[:current_short_label] || "Current ETH short" %>
-  <% current_position_label = production_dashboard[:current_position_label] || "Current Hyperliquid ETH position" %>
-  <div class="bg-yellow-950/30 border border-yellow-800 rounded-xl p-5 mb-8">
-    <div class="flex flex-wrap gap-2 mb-4">
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">MONITOR ONLY</span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NO ORDERS</span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">HEDGE DISABLED</span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">SELECTED VENUE: <%= production_venue_name.upcase %></span>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">NOT LIVE HEDGE-READY</span>
-    </div>
-    <p class="text-yellow-100 font-medium">Aerodrome Slipstream supervised position on <%= chain_display_name(@position) %>.</p>
-    <p class="text-yellow-200/80 text-sm mt-1">AERODROME_HEDGE_ENABLED must remain false outside explicit supervised dashboard submits. Dashboard hedge actions are blocked unless explicit live gates and typed confirmation are present. Preview actions are dry-run only. Close uses the separately gated emergency close path.</p>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
-        <p class="text-gray-400 text-xs uppercase tracking-wide">Position Details</p>
-        <dl class="mt-3 space-y-2 text-sm">
-          <div class="flex justify-between gap-4"><dt class="text-gray-500">DEX</dt><dd class="text-white"><%= dex_display_name(@position) %></dd></div>
-          <div class="flex justify-between gap-4"><dt class="text-gray-500">Source</dt><dd class="text-white"><%= @position.source_label %></dd></div>
-          <div class="flex justify-between gap-4"><dt class="text-gray-500">Chain</dt><dd class="text-white"><%= chain_display_name(@position) %></dd></div>
-          <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= @position.mellow_autopilot? ? "Observed strategy token ID" : "Token ID" %></dt><dd class="text-white"><%= @position.external_id %></dd></div>
-          <div class="flex justify-between gap-4"><dt class="text-gray-500">Pool</dt><dd class="text-white text-right break-all"><%= @position.pool_address %></dd></div>
-        </dl>
-      </div>
-      <% if @position.mellow_autopilot? %>
-        <% mellow = @position.mellow_metadata_hash %>
-        <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-          <p class="text-gray-400 text-xs uppercase tracking-wide">Mellow Autopilot Shared Strategy</p>
-          <p class="text-yellow-200/80 text-xs mt-2">This is pro-rata exposure derived from shared Autopilot strategy accounting. Do not hedge the full strategy NFT.</p>
-          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Tx hash</span><span class="text-white text-right break-all"><%= mellow["tx_hash"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Submitted wallet</span><span class="text-white text-right break-all"><%= mellow["submitted_wallet"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Share token</span><span class="text-white text-right break-all"><%= mellow["share_token"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Observed strategy token ID</span><span class="text-white"><%= mellow["strategy_token_id"].presence || @position.external_id %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User share %</span><span class="text-white" title="<%= mellow["user_share_percent"] %>"><%= format_percent_amount(mellow["user_share_percent"]) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Confidence</span><span class="text-white"><%= mellow["last_probe_confidence"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Last probe at</span><span class="text-white"><%= mellow["last_probe_at"].presence || "unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User total value USD</span><span class="text-white"><%= optional_usd_display(mellow["user_total_value_usd"]) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total WETH</span><span class="text-white" title="<%= mellow["strategy_total_weth"] %>"><%= format_venue_eth_amount(mellow["strategy_total_weth"]) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Strategy total USDC</span><span class="text-white"><%= format_token_amount(mellow["strategy_total_usdc"], decimals: 2) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User WETH exposure</span><span class="text-white" title="<%= mellow["user_weth_exposure"].presence || @position.asset0_amount %>"><%= format_venue_eth_amount(mellow["user_weth_exposure"].presence || @position.asset0_amount) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">User USDC exposure</span><span class="text-white"><%= format_token_amount(mellow["user_usdc_exposure"].presence || @position.asset1_amount, decimals: 2) %></span></div>
-          </div>
-          <% if !@position.hedge_ready? %>
-            <p class="mt-3 text-red-200 text-sm">Mellow pro-rata exposure is not hedge-ready. Refresh read-only data and inspect blockers before using live hedge controls.</p>
+<div class="space-y-8">
+  <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20">
+    <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+      <div class="min-w-0">
+        <p class="text-xs uppercase tracking-wide text-gray-500">Position Control Center</p>
+        <h1 class="mt-1 text-3xl font-semibold text-white"><%= @position.asset0 %>/<%= @position.asset1 %></h1>
+        <p class="mt-2 text-sm text-gray-400">
+          <%= @position.source_label %> &middot; <%= dex_display_name(@position) %> &middot; <%= chain_display_name(@position) %>
+        </p>
+        <div class="mt-4 flex flex-wrap gap-2">
+          <span class="rounded-full border border-indigo-700 bg-indigo-950/60 px-3 py-1 text-xs font-semibold text-indigo-200">Selected Venue: <%= selected_venue_name %></span>
+          <% if margin_mode.present? %>
+            <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-200"><%= margin_mode.to_s == "isolated" ? "Isolated 1.0x" : "#{margin_mode.to_s.humanize} Margin" %></span>
           <% end %>
+          <span class="rounded-full border <%= selected_live_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-yellow-800 bg-yellow-950/60 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= live_status_label %></span>
+          <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_status_label %></span>
+          <span class="rounded-full border <%= rebalance_needed ? 'border-red-800 bg-red-950/60 text-red-200' : 'border-green-800 bg-green-950/60 text-green-300' %> px-3 py-1 text-xs font-semibold"><%= tolerance_label %></span>
         </div>
-      <% end %>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4">
-        <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge Preview</p>
-        <% if hedge_preview&.supported %>
-          <div class="mt-3 space-y-2 text-sm">
-            <p class="text-yellow-300 font-medium">PREVIEW ONLY</p>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested side</span><span class="text-white"><%= hedge_preview.hedge_side %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested asset</span><span class="text-white"><%= hedge_preview.hedge_asset %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested amount</span><span class="text-white"><%= number_with_precision(hedge_preview.suggested_short_amount, precision: 6) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested notional</span><span class="text-white"><%= format_usd(hedge_preview.suggested_short_notional_usd) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution</span><span class="text-yellow-300">disabled</span></div>
-          </div>
+      </div>
+      <div class="flex flex-wrap gap-3">
+        <% if aerodrome %>
+          <%= button_to "Refresh Read-only Data", sync_now_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-700" %>
+          <% proposal_button_path = @latest_aerodrome_hedge_proposal ? regenerate_position_aerodrome_hedge_proposals_path(@position) : position_aerodrome_hedge_proposals_path(@position) %>
+          <% proposal_button_label = @latest_aerodrome_hedge_proposal ? "Regenerate Manual Hedge Proposal" : "Generate Manual Hedge Proposal" %>
+          <%= button_to proposal_button_label, proposal_button_path, method: :post, class: "rounded-lg border border-yellow-800 bg-yellow-950/50 px-4 py-2 text-sm font-medium text-yellow-100 transition hover:bg-yellow-900/70" %>
+        <% elsif @position.hedge %>
+          <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-700" %>
+          <%= link_to "View Hedge", hedge_path(@position.hedge), class: "rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-700" %>
         <% else %>
-          <p class="mt-3 text-gray-300 font-medium">Hedge preview unavailable</p>
-          <p class="text-gray-500 text-sm mt-1"><%= hedge_preview&.reason || "preview data is unavailable" %></p>
+          <%= button_to "Sync Now", sync_now_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-700" %>
+          <%= link_to "Create Hedge", new_hedge_path(position_id: @position.id), class: "rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-100 transition hover:bg-gray-700" %>
         <% end %>
       </div>
-      <% if aerodrome_hedge %>
-        <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p class="text-gray-400 text-xs uppercase tracking-wide">Aerodrome Hedge Status</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Dashboard status and gated one-shot controls &middot; No background queues &middot; No tmux workflow</p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <% unless aerodrome_hedge_enabled %>
-                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">disabled</span>
-              <% end %>
-              <% if aerodrome_hedge_paused %>
-                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-yellow-900/50 text-yellow-300 border border-yellow-700">paused</span>
-              <% end %>
-              <% if hyperliquid_testnet %>
-                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-blue-950/60 text-blue-200 border border-blue-800">testnet</span>
-              <% end %>
-              <% unless aerodrome_live_approved %>
-                <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-red-950/50 text-red-200 border border-red-800">live-blocked</span>
-              <% end %>
-            </div>
+    </div>
+  </section>
+
+  <% if aerodrome %>
+    <section>
+      <div class="mb-3 flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>
+        <span class="text-xs text-gray-500">Source of truth: <%= selected_venue_name %> readback + <%= @position.mellow_autopilot? ? "Mellow pro-rata accounting" : "Slipstream NFT accounting" %></span>
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <% [
+          [ position_valuation.hedge_target_label, format_venue_eth_amount(position_valuation.weth_exposure), "WETH exposure" ],
+          [ @position.mellow_autopilot? ? "Mellow USDC exposure" : "#{@position.asset1} amount", format_token_amount(position_valuation.usdc_exposure || @position.asset1_amount, decimals: 2), "USDC leg" ],
+          [ position_valuation.current_value_label, valuation_value_display(position_valuation.current_value_usd), "Entry #{valuation_value_display(position_valuation.entry_value_usd)}" ],
+          [ "Hedge venue", selected_venue_name, margin_mode.present? ? margin_mode.to_s.humanize : "margin unavailable" ],
+          [ "Target hedge ETH", format_venue_eth_amount(target_eth_short), "Target short" ],
+          [ current_short_label, format_venue_eth_amount(current_short_eth), "Exchange readback" ],
+          [ "Drift", format_venue_eth_amount(drift_eth), drift_usd.present? ? format_venue_usd_amount(drift_usd) : "USD unavailable" ],
+          [ "Tolerance state", tolerance_label, "Tolerance #{format_venue_eth_amount(tolerance_eth)}" ],
+          [ "Margin mode", margin_mode.present? ? (margin_mode.to_s == "isolated" ? "Isolated 1.0x" : margin_mode.to_s.humanize) : "Unavailable", selected_venue == "ethereal" ? "Ethereal cross only" : "Venue readback" ],
+          [ "Effective leverage", effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable", current_notional.present? ? "Notional #{format_venue_usd_amount(current_notional)}" : "Notional unavailable" ],
+          [ "Entry price", format_venue_usd_amount(entry_price), "Readback entry" ],
+          [ "Mark price", format_venue_usd_amount(mark_price), "Readback mark" ],
+          [ "Isolated margin", format_venue_usd_amount(isolated_margin), margin_mode.to_s == "isolated" ? "Isolated collateral" : "Not applicable" ]
+        ].each do |label, value, detail| %>
+          <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-900 p-4">
+            <p class="truncate text-xs uppercase tracking-wide text-gray-500"><%= label %></p>
+            <p class="mt-2 truncate text-xl font-semibold text-white" title="<%= value %>"><%= value %></p>
+            <p class="mt-1 truncate text-xs text-gray-500" title="<%= detail %>"><%= detail %></p>
           </div>
-          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Hedge configured</span><span class="text-white">yes</span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Active</span><span class="text-white"><%= aerodrome_hedge.active? ? "yes" : "no" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Target percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.target * 100, precision: 2) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Tolerance percent</span><span class="text-white"><%= number_to_percentage(aerodrome_hedge.tolerance * 100, precision: 2) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.hedge_target_label %></span><span class="text-white" title="<%= target_eth_short %>"><%= target_eth_short ? format_venue_eth_amount(target_eth_short) : "Unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution venue</span><span class="text-white"><%= production_venue_name %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="text-white" title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %></span></div>
-            <% if production_dashboard[:margin_mode].present? %>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></span></div>
-            <% end %>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_ENABLED</span><span class="text-white"><%= aerodrome_hedge_enabled %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_HEDGE_PAUSED</span><span class="text-white"><%= aerodrome_hedge_paused %><%= " (default)" if ENV["AERODROME_HEDGE_PAUSED"].nil? %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">AERODROME_LIVE_APPROVED</span><span class="text-white"><%= aerodrome_live_approved %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">HYPERLIQUID_TESTNET</span><span class="text-white"><%= hyperliquid_testnet %></span></div>
-          </div>
-          <div class="mt-4 border-t border-gray-800 pt-4">
-            <p class="text-gray-400 text-xs uppercase tracking-wide">Last WETH/ETH Rebalance</p>
-            <% if @latest_aerodrome_weth_rebalance %>
-              <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                <div class="flex justify-between gap-4"><span class="text-gray-500">ID</span><span class="text-white"><%= @latest_aerodrome_weth_rebalance.id %></span></div>
-                <div class="flex justify-between gap-4"><span class="text-gray-500">Status</span><span class="<%= @latest_aerodrome_weth_rebalance.status == ShortRebalance::STATUS_SUCCESS ? 'text-green-300' : 'text-red-300' %>"><%= @latest_aerodrome_weth_rebalance.status %></span></div>
-                <div class="flex justify-between gap-4"><span class="text-gray-500">Old short size</span><span class="text-white"><%= number_with_precision(@latest_aerodrome_weth_rebalance.old_short_size, precision: 6) %></span></div>
-                <div class="flex justify-between gap-4"><span class="text-gray-500">New short size</span><span class="text-white"><%= number_with_precision(@latest_aerodrome_weth_rebalance.new_short_size, precision: 6) %></span></div>
-                <div class="flex justify-between gap-4"><span class="text-gray-500">Rebalanced at</span><span class="text-white"><%= @latest_aerodrome_weth_rebalance.rebalanced_at.strftime("%m/%d/%Y %H:%M") %></span></div>
-                <div class="flex justify-between gap-4"><span class="text-gray-500">Message</span><span class="text-white text-right"><%= @latest_aerodrome_weth_rebalance.message.presence || "-" %></span></div>
-              </div>
-            <% else %>
-              <p class="mt-3 text-gray-500 text-sm">No WETH/ETH rebalance history.</p>
-            <% end %>
-          </div>
+        <% end %>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Hedge Control Center</p>
+          <h2 class="mt-1 text-xl font-semibold text-white"><%= selected_venue_name %> Hedge Actions</h2>
+          <p class="mt-1 text-sm text-gray-400">Preview, confirm, submit, read back. Live actions stay gated until the exact venue confirmation is entered.</p>
         </div>
-      <% end %>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <div class="flex flex-wrap items-start justify-between gap-3">
+        <%= form_with url: hedge_venue_position_path(@position), method: :patch, class: "flex flex-col gap-2 sm:flex-row sm:items-end" do |form| %>
           <div>
-            <p class="text-gray-400 text-xs uppercase tracking-wide">Production Hedge Dashboard</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Preview first &middot; Live submit requires env gates plus typed confirmation &middot; Close uses emergency close</p>
+            <%= form.label :hedge_venue, "Hedge venue", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+            <%= form.select :hedge_venue, options_for_select(@hedge_venue_options || HedgeVenues.options, selected_venue), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
           </div>
-          <% if production_dashboard[:within_caps] %>
-            <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-green-950/50 text-green-300 border border-green-800">within caps</span>
-          <% else %>
-            <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-red-950/50 text-red-200 border border-red-800">blocked</span>
+          <%= form.submit "Set Venue", class: "rounded-lg bg-gray-800 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-gray-700" %>
+        <% end %>
+      </div>
+
+      <div class="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-1">
+          <p class="text-xs uppercase tracking-wide text-gray-500">Action Preview</p>
+          <div class="mt-3 space-y-2 text-sm">
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="truncate text-white" title="<%= current_short_eth %>"><%= format_venue_eth_amount(current_short_eth) %> ETH</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Target short</span><span class="truncate text-white" title="<%= target_eth_short %>"><%= format_venue_eth_amount(target_eth_short) %> ETH</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Delta</span><span class="<%= drift_negative ? 'text-red-300' : 'text-green-300' %>" title="<%= drift_eth %>"><%= format_venue_eth_amount(drift_eth) %> ETH</span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Notional impact</span><span class="text-white"><%= format_venue_usd_amount(drift_usd) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Mark price</span><span class="text-white"><%= format_venue_usd_amount(mark_price) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Entry price</span><span class="text-white"><%= format_venue_usd_amount(entry_price) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Isolated margin</span><span class="text-white"><%= format_venue_usd_amount(isolated_margin) %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= margin_mode.present? ? margin_mode.to_s.humanize : "Unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Estimated leverage</span><span class="text-white"><%= effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Next action</span><span class="<%= rebalance_needed ? 'text-yellow-200' : 'text-green-300' %>"><%= rebalance_needed ? next_action.to_s.humanize : "within tolerance / no-op" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white"><%= current_venue_position.present? ? "available" : "unavailable" %></span></div>
+          </div>
+          <% if hedge_preview && !hedge_preview.supported %>
+            <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3">
+              <p class="text-xs font-semibold text-yellow-100">Hedge preview unavailable</p>
+              <p class="mt-1 break-words text-xs text-yellow-200"><%= hedge_preview.reason %></p>
+            </div>
+          <% end %>
+          <% if selected_adapter&.venue_name == "Ethereal" %>
+            <p class="mt-4 rounded-lg border border-indigo-900 bg-indigo-950/30 p-3 text-xs text-indigo-100">Ethereal uses cross margin only. Effective leverage is estimated from position notional / account collateral.</p>
           <% end %>
         </div>
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 text-sm">
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Execution venue</span><span class="text-white"><%= production_venue_name %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Configured ETH cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_eth].present? ? format_venue_eth_amount(production_dashboard[:current_configured_hedge_cap_eth]) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard ETH ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_eth].present? ? format_venue_eth_amount(hard_ceiling[:hard_max_short_eth]) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Configured notional cap</span><span class="text-white"><%= production_dashboard[:current_configured_hedge_cap_notional_usd].present? ? format_usd(BigDecimal(production_dashboard[:current_configured_hedge_cap_notional_usd])) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard notional ceiling</span><span class="text-white"><%= hard_ceiling[:hard_max_short_notional_usd].present? ? format_usd(BigDecimal(hard_ceiling[:hard_max_short_notional_usd])) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Emergency close cap</span><span class="text-white"><%= production_dashboard[:configured_emergency_close_max_eth].present? ? format_venue_eth_amount(production_dashboard[:configured_emergency_close_max_eth]) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Hard emergency ceiling</span><span class="text-white"><%= hard_ceiling[:hard_emergency_close_max_eth].present? ? format_venue_eth_amount(hard_ceiling[:hard_emergency_close_max_eth]) : "missing" %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Mellow WETH exposure</span><span class="text-white truncate" title="<%= production_dashboard[:current_aerodrome_lp_weth_amount] %>"><%= format_venue_eth_amount(production_dashboard[:current_aerodrome_lp_weth_amount]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Target hedge</span><span class="text-white truncate" title="<%= production_dashboard[:target_hedge_eth] %>"><%= format_venue_eth_amount(production_dashboard[:target_hedge_eth]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Target notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:target_hedge_notional_usd]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="text-white truncate" title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Current venue notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:current_venue_notional_usd]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Drift ETH</span><span class="text-white truncate" title="<%= production_dashboard[:drift_eth] %>"><%= format_venue_eth_amount(production_dashboard[:drift_eth]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Drift notional</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:drift_notional_usd]) %></span></div>
-          <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Tolerance state</span><span class="<%= production_dashboard[:rebalance_needed_now] ? 'text-red-300' : 'text-green-300' %>"><%= production_dashboard[:rebalance_needed_now] ? "needs rebalance" : "within tolerance / no-op" %></span></div>
-          <% if production_dashboard[:margin_mode].present? %>
-            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></span></div>
-          <% end %>
-          <% if production_dashboard[:isolated_margin_usd].present? %>
-            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Isolated margin</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:isolated_margin_usd]) %></span></div>
-          <% end %>
-          <% if production_dashboard[:entry_price].present? %>
-            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Entry price</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:entry_price]) %></span></div>
-          <% end %>
-          <% if production_dashboard[:mark_price].present? %>
-            <div class="min-w-0 flex justify-between gap-4"><span class="text-gray-500">Mark price</span><span class="text-white"><%= format_venue_usd_amount(production_dashboard[:mark_price]) %></span></div>
-          <% end %>
-          <div class="min-w-0 md:col-span-2 xl:col-span-3 flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white text-right break-words"><%= production_dashboard[:current_venue_position] ? production_dashboard[:current_venue_position].except(:venue).inspect : "nil / unavailable" %></span></div>
-        </div>
-        <% if production_dashboard[:blockers].present? %>
-          <div class="mt-4 bg-red-950/30 border border-red-900 rounded-lg p-3">
-            <p class="text-red-200 text-sm font-semibold">Blockers</p>
-            <ul class="mt-2 list-disc list-inside text-red-100/90 text-sm space-y-1">
-              <% production_dashboard[:blockers].each do |blocker| %>
-                <li><%= blocker %></li>
-              <% end %>
-            </ul>
-          </div>
-        <% end %>
-        <% if production_dashboard[:warnings].present? %>
-          <div class="mt-4 bg-yellow-950/30 border border-yellow-900 rounded-lg p-3">
-            <p class="text-yellow-200 text-sm font-semibold">Warnings</p>
-            <ul class="mt-2 list-disc list-inside text-yellow-100/90 text-sm space-y-1">
-              <% production_dashboard[:warnings].each do |warning| %>
-                <li><%= warning %></li>
-              <% end %>
-            </ul>
-          </div>
-        <% end %>
-        <div class="mt-4 border-t border-gray-800 pt-4">
-          <p class="text-gray-400 text-xs uppercase tracking-wide">Dashboard Flow</p>
-          <% dashboard_actions = production_dashboard[:dashboard_actions] || {} %>
-          <% dashboard_confirmation = AerodromeDashboardHedgeAction::CONFIRMATION %>
-          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-white font-medium">Refresh / sync</p>
-              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :refresh_sync) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-white font-medium">Open / approve hedge</p>
-              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :approve_or_edit_hedge) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-white font-medium">Rebalance hedge</p>
-              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :open_or_rebalance) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-white font-medium">Close hedge</p>
-              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :close_hedge) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3 md:col-span-2">
-              <p class="text-white font-medium">Stop / close plan</p>
-              <p class="text-gray-400 mt-1"><%= production_dashboard.dig(:action_plan, :stop_close_plan) %></p>
-            </div>
-          </div>
-          <div class="mt-4 bg-gray-950/50 border border-gray-800 rounded-lg p-4">
-            <p class="text-white font-medium">Dashboard Hedge Actions</p>
-            <p class="text-gray-400 text-xs mt-1">Preview buttons are dry-run. Live buttons submit only one explicit action and remain blocked unless all dashboard live gates are configured.</p>
-            <% selected_venue = @selected_hedge_venue || HedgeVenues::DEFAULT %>
-            <% selected_adapter = @selected_hedge_venue_adapter || HedgeVenues.build(selected_venue) %>
-            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT || (selected_venue.in?(%w[nado ethereal]) && selected_adapter.live_supported? && selected_adapter.live_enabled?) %>
-            <div class="mt-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
-              <%= form_with url: hedge_venue_position_path(@position), method: :patch, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
-                <div class="flex-1">
-                  <%= form.label :hedge_venue, "Hedge venue", class: "block text-gray-500 text-xs uppercase tracking-wide" %>
-                  <%= form.select :hedge_venue, options_for_select(@hedge_venue_options || HedgeVenues.options, selected_venue), {}, class: "mt-1 w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" %>
-                </div>
-                <%= form.submit "Apply", class: "bg-gray-700 hover:bg-gray-600 text-gray-100 px-3 py-2 rounded-lg text-sm font-medium transition" %>
-              <% end %>
-              <div class="mt-3 flex flex-wrap gap-2 text-xs">
-                <span class="inline-block px-2 py-1 rounded-full border border-gray-700 text-gray-200"><%= selected_adapter.venue_name %></span>
-                <span class="inline-block px-2 py-1 rounded-full border border-gray-700 text-gray-200"><%= selected_adapter.mode.humanize %></span>
-                <% if selected_adapter.live_supported? && selected_adapter.live_enabled? %>
-                  <span class="inline-block px-2 py-1 rounded-full border border-green-800 bg-green-950/40 text-green-200">live enabled</span>
-                <% else %>
-                  <span class="inline-block px-2 py-1 rounded-full border border-yellow-800 bg-yellow-950/40 text-yellow-200">dry-run/read-only</span>
-                <% end %>
+
+        <div class="space-y-4 xl:col-span-2">
+          <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p class="text-xs uppercase tracking-wide text-gray-500">Live Gates</p>
+                <p class="mt-1 text-sm text-gray-300"><%= live_status_label %> for <%= selected_venue_name %>. Preview actions do not create orders.</p>
               </div>
-              <% if selected_adapter.blockers.present? %>
-                <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
-                  <p class="font-medium text-yellow-200">Venue blockers</p>
-                  <ul class="mt-2 space-y-1">
-                    <% selected_adapter.blockers.uniq.each do |blocker| %>
-                      <li class="break-words whitespace-normal">- <%= blocker %></li>
-                    <% end %>
-                  </ul>
-                </div>
-              <% end %>
-              <% if @selected_hedge_venue_dashboard.present? %>
-                <% venue_dashboard = @selected_hedge_venue_dashboard %>
-                <% preflight = venue_dashboard[:live_preflight] || {} %>
-                <% live_blockers = (preflight[:blockers] || []).uniq %>
-                <%
-                  live_status, live_detail =
-                    if selected_adapter.venue_name == "Ethereal"
-                      if selected_adapter.live_enabled? && live_blockers.blank?
-                        [ "Live ready", "Ethereal cross-margin submit path is wired and required gates are satisfied." ]
-                      elsif selected_adapter.live_supported?
-                        [ "Live gated", "Ethereal uses cross margin only; live submit requires Ethereal env gates, signer, and exact confirmation." ]
-                      else
-                        [ "Unavailable", "Live submit is not available for Ethereal." ]
-                      end
-                    elsif selected_adapter.live_supported? && selected_adapter.live_enabled? && live_blockers.blank?
-                      [ "Live ready", "Nado submit path is wired and required gates are satisfied." ]
-                    elsif selected_adapter.live_supported?
-                      [ "Live gated", "#{selected_adapter.venue_name} submit path is wired, but required gates are not satisfied." ]
-                    else
-                      [ "Unavailable", "Live submit is not available for this venue." ]
-                    end
-                %>
-                <div class="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
-                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                    <p class="text-gray-500">Target hedge ETH</p>
-                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:target_hedge_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:target_hedge_eth]) %></p>
-                  </div>
-                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                    <p class="text-gray-500">Venue short ETH</p>
-                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:current_short_eth]) %></p>
-                  </div>
-                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                    <p class="text-gray-500">Delta to target</p>
-                    <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard[:drift_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:drift_eth]) %></p>
-                    <p class="mt-1 text-gray-500">Tolerance <span title="<%= venue_dashboard[:tolerance_eth] %>"><%= format_venue_eth_amount(venue_dashboard[:tolerance_eth]) %></span></p>
-                  </div>
-                  <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                    <p class="text-gray-500">Live availability</p>
-                    <span class="mt-1 inline-flex max-w-full rounded-full border border-gray-700 px-2 py-1 text-gray-100"><%= live_status %></span>
-                    <p class="mt-2 text-gray-400 break-words whitespace-normal"><%= live_detail %></p>
-                    <p class="mt-2 text-gray-500">Next action: <span class="text-gray-200"><%= venue_dashboard[:next_action] || "unavailable" %></span></p>
-                  </div>
-                  <% if selected_adapter.venue_name == "Ethereal" %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Ethereal margin</p>
-                      <p class="mt-1 text-gray-100 font-medium">Cross only</p>
-                      <p class="mt-2 text-gray-400 break-words whitespace-normal">Effective leverage is estimated from position notional divided by account collateral.</p>
-                    </div>
-                  <% end %>
-                  <% if venue_dashboard.dig(:current_venue_position, :margin_mode).present? %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Margin mode</p>
-                      <% mode = venue_dashboard.dig(:current_venue_position, :margin_mode).to_s %>
-                      <p class="mt-1 truncate text-gray-100 font-medium"><%= mode.humanize %><%= mode == "isolated" ? " 1.0x" : "" %></p>
-                      <p class="mt-1 text-gray-500">Desired: <%= selected_adapter.venue_name == "Ethereal" ? "cross only" : "isolated 1.0x" %></p>
-                    </div>
-                  <% end %>
-                  <% if venue_dashboard.dig(:current_venue_position, :isolated_margin_usd).present? %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Isolated margin</p>
-                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :isolated_margin_usd) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :isolated_margin_usd)) %></p>
-                    </div>
-                  <% end %>
-                  <% if venue_dashboard.dig(:current_venue_position, :notional_usd).present? %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Venue notional</p>
-                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :notional_usd) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :notional_usd)) %></p>
-                    </div>
-                  <% end %>
-                  <% if venue_dashboard.dig(:current_venue_position, :entry_price).present? %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Entry price</p>
-                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :entry_price) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :entry_price)) %></p>
-                    </div>
-                  <% end %>
-                  <% if venue_dashboard.dig(:current_venue_position, :mark_price).present? %>
-                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
-                      <p class="text-gray-500">Mark price</p>
-                      <p class="mt-1 truncate text-gray-100 font-medium" title="<%= venue_dashboard.dig(:current_venue_position, :mark_price) %>"><%= format_venue_usd_amount(venue_dashboard.dig(:current_venue_position, :mark_price)) %></p>
-                    </div>
-                  <% end %>
-                </div>
-                <% if venue_dashboard.dig(:open_preview, :payload).present? %>
-                  <% open_preview = venue_dashboard[:open_preview] %>
-                  <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs">
-                    <p class="font-medium text-gray-200">Open preview</p>
-                    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Rounded size</p>
-                        <p class="truncate text-gray-100" title="<%= open_preview[:rounded_size_eth] %>"><%= format_venue_eth_amount(open_preview[:rounded_size_eth]) %> ETH</p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Notional</p>
-                        <p class="truncate text-gray-100" title="<%= preflight[:estimated_notional_usd] %>"><%= format_venue_usd_amount(preflight[:estimated_notional_usd]) %></p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Schema</p>
-                        <p class="break-words text-gray-100"><%= open_preview.dig(:payload, :schema) %></p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Mode / Orders</p>
-                        <p class="break-words text-gray-100">Dry-run/read-only / none</p>
-                      </div>
-                    </div>
-                  </div>
-                <% end %>
-                <% if selected_adapter.venue_name == "Nado" && venue_dashboard.dig(:action_live_preflights, :close, :order_summary).present? && BigDecimal(venue_dashboard[:current_short_eth].to_s).positive? %>
-                  <% close_summary = venue_dashboard.dig(:action_live_preflights, :close, :order_summary) %>
-                  <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs">
-                    <p class="font-medium text-gray-200">Close preview</p>
-                    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Side / reduce-only</p>
-                        <p class="break-words text-gray-100"><%= close_summary[:side] %> / <%= close_summary[:reduce_only] ? "yes" : "no" %></p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Rounded size</p>
-                        <p class="truncate text-gray-100" title="<%= close_summary[:rounded_size_eth] %>"><%= format_venue_eth_amount(close_summary[:rounded_size_eth]) %> ETH</p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Margin mode</p>
-                        <p class="break-words text-gray-100"><%= close_summary[:margin_mode].presence || "unavailable" %></p>
-                      </div>
-                      <div class="min-w-0">
-                        <p class="text-gray-500">Appendix</p>
-                        <p class="break-words text-gray-100">isolated=<%= close_summary.dig(:appendix_decoded, :isolated) %>, reduce_only=<%= close_summary.dig(:appendix_decoded, :reduce_only) %></p>
-                      </div>
-                    </div>
-                  </div>
-                <% end %>
-                <% if preflight.present? %>
-                  <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs">
-                    <p class="font-medium text-yellow-200">Live preflight</p>
-                    <% if preflight.dig(:action_plan, :action).present? %>
-                      <div class="mt-2 rounded border border-yellow-900/50 bg-gray-950/40 p-2 text-yellow-100">
-                        <p class="font-medium">Planned action: <%= preflight.dig(:action_plan, :action).to_s.humanize %></p>
-                        <% if preflight.dig(:action_plan, :action) == "isolated_full_close_then_reopen" %>
-                          <p class="mt-1 break-words whitespace-normal">Nado isolated rebalance will close current isolated short and reopen target size.</p>
-                        <% end %>
-                      </div>
-                    <% end %>
-                    <% if live_blockers.present? %>
-                      <ul class="mt-2 space-y-1 text-yellow-100">
-                        <% live_blockers.each do |blocker| %>
-                          <li class="break-words whitespace-normal">- <%= blocker %></li>
-                        <% end %>
-                      </ul>
-                    <% else %>
-                      <p class="mt-2 text-green-200 break-words whitespace-normal">No live preflight blockers reported.</p>
-                    <% end %>
-                  </div>
-                <% end %>
-                <% if selected_adapter.venue_name == "Nado" %>
-                  <p class="mt-3 text-xs text-gray-400 break-words">
-                    <% if ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false")) %>
-                      Manual Nado hedge actions are available when gates pass; automatic Nado rebalance is enabled.
-                    <% else %>
-                      Manual Nado hedge actions are available when gates pass; automatic Nado rebalance is disabled.
-                    <% end %>
-                  </p>
-                <% end %>
-                <% if venue_dashboard[:warnings].present? %>
-                  <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
-                    <p class="font-medium text-yellow-200">Warnings</p>
-                    <ul class="mt-2 space-y-1">
-                      <% venue_dashboard[:warnings].each do |warning| %>
-                        <li class="break-words whitespace-normal">- <%= warning %></li>
-                      <% end %>
-                    </ul>
-                  </div>
-                <% end %>
-              <% end %>
+              <span class="rounded-full border <%= selected_action_blockers.blank? ? 'border-green-800 bg-green-950/50 text-green-300' : 'border-yellow-800 bg-yellow-950/50 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= selected_action_blockers.blank? ? "Preflight clear" : "#{selected_action_blockers.size} blocker#{'s' unless selected_action_blockers.size == 1}" %></span>
             </div>
-            <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
-              <% [
-                [ :open, hedge_open_preview_position_path(@position), hedge_open_position_path(@position), "Open Hedge", dashboard_confirmation ],
-                [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge", dashboard_confirmation ],
-                [ :close, hedge_close_preview_position_path(@position), hedge_close_position_path(@position), "Close Hedge", AerodromeLiveEmergencyClose::CONFIRMATION ]
-              ].each do |key, preview_path, live_path, label, required_phrase| %>
-                <% action_state = dashboard_actions[key] || {} %>
-                <% action_visible = action_state[:visible] %>
-                <% if selected_venue.in?(%w[nado ethereal]) && @selected_hedge_venue_dashboard.present? %>
-                  <% venue_action_preflight = (@selected_hedge_venue_dashboard[:action_live_preflights] || {})[key] || {} %>
-                  <% venue_button_blockers = (venue_action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
-                  <% action_visible = case key
-                    when :open then @selected_hedge_venue_dashboard[:next_action] == "open"
-                    when :rebalance then @selected_hedge_venue_dashboard[:next_action].in?([ "increase short", "reduce short" ])
-                    when :close then BigDecimal(@selected_hedge_venue_dashboard[:current_short_eth].to_s).positive?
-                    else false
-                    end %>
-                  <% action_state = {
-                    live_enabled: selected_adapter.live_enabled? && venue_button_blockers.blank?,
-                    blockers: (venue_action_preflight[:blockers] || []).uniq,
-                    label: label
-                  } %>
-                  <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION %>
+            <% if selected_action_blockers.present? %>
+              <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+                <% selected_action_blockers.each do |blocker| %>
+                  <li class="break-words"><%= blocker %></li>
                 <% end %>
-                <% live_enabled = action_state[:live_enabled] %>
-                <% confirmation_input_enabled = action_visible && live_enabled && venue_live_actions_enabled %>
-                <% confirmation_input_id = "dashboard-hedge-confirmation-#{key}" %>
-                <% live_submit_id = "dashboard-hedge-live-submit-#{key}" %>
-                <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-                  <div class="flex items-center justify-between gap-2">
-                    <p class="text-white font-medium"><%= label %></p>
-                    <% if action_visible %>
-                      <span class="text-green-300 text-xs">available</span>
-                    <% else %>
-                      <span class="text-gray-500 text-xs">not needed</span>
-                    <% end %>
+              </ul>
+            <% else %>
+              <p class="mt-3 text-sm text-green-200">No live preflight blockers reported for the planned action.</p>
+            <% end %>
+            <% if selected_action_warnings.present? %>
+              <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-yellow-200">
+                <% selected_action_warnings.each do |warning| %>
+                  <li class="break-words"><%= warning %></li>
+                <% end %>
+              </ul>
+            <% end %>
+            <% if selected_venue == "ethereal" && @position.hedge&.execution_venue != "ethereal" %>
+              <p class="mt-3 text-sm text-yellow-200">Current active hedge venue is <%= HedgeVenues.label(@position.hedge&.execution_venue) %>; opening Ethereal would create a second hedge unless migration is intended.</p>
+            <% end %>
+            <% unless selected_adapter&.live_enabled? %>
+              <p class="mt-3 text-sm text-yellow-200">Live submit is disabled for <%= selected_venue_name %>; previews do not create orders.</p>
+            <% end %>
+          </div>
+
+          <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <% [
+              [ :open, hedge_open_preview_position_path(@position), hedge_open_position_path(@position), "Open Hedge" ],
+              [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge" ],
+              [ :close, hedge_close_preview_position_path(@position), hedge_close_position_path(@position), "Close Hedge" ]
+            ].each do |key, preview_path, live_path, label| %>
+              <% action_preflight = action_preflights[key] || {} %>
+              <% action_blockers = (action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
+              <% action_needed = case key
+              when :open then next_action == "open"
+              when :rebalance then next_action.in?([ "increase short", "reduce short", "rebalance" ])
+              when :close then BigDecimal(current_short_eth.to_s).positive? rescue false
+              end %>
+              <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : (selected_venue == "ethereal" ? AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION : (key == :close ? AerodromeLiveEmergencyClose::CONFIRMATION : AerodromeDashboardHedgeAction::CONFIRMATION)) %>
+              <% confirmation_enabled = action_needed && selected_adapter&.live_enabled? && action_blockers.blank? %>
+              <% submit_id = "dashboard-hedge-live-submit-#{key}" %>
+              <div class="rounded-xl border <%= action_needed ? 'border-indigo-800 bg-indigo-950/20' : 'border-gray-800 bg-gray-950/40 opacity-80' %> p-4">
+                <div class="flex items-start justify-between gap-2">
+                  <div>
+                    <p class="font-medium text-white"><%= label %></p>
+                    <p class="mt-1 text-xs text-gray-500"><%= action_needed ? "Relevant now" : "Not needed now" %></p>
                   </div>
-                  <div class="mt-3 flex flex-wrap gap-2">
-                    <%= button_to "#{label} Preview", preview_path, method: :post, params: { hedge_venue: selected_venue }, disabled: !action_visible, class: "bg-gray-700 hover:bg-gray-600 disabled:bg-gray-900 disabled:text-gray-600 text-gray-100 px-3 py-2 rounded-lg text-xs font-medium transition" %>
-                  </div>
-                  <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/60 p-2">
-                    <p class="text-gray-500 text-xs">Required phrase</p>
-                    <div class="mt-1 flex items-center gap-2">
-                      <code id="dashboard-hedge-phrase-<%= key %>" class="flex-1 break-all text-[11px] text-gray-200"><%= required_phrase %></code>
-                      <button type="button" class="shrink-0 bg-gray-800 hover:bg-gray-700 text-gray-100 px-2 py-1 rounded text-xs" onclick="navigator.clipboard.writeText(document.getElementById('dashboard-hedge-phrase-<%= key %>').innerText)">Copy</button>
-                    </div>
-                    <p class="text-gray-500 text-xs mt-2">Paste this exact phrase to enable live submit.</p>
+                  <% if key == recommended_action_key && next_action != "no-op" %>
+                    <span class="rounded-full border border-indigo-700 bg-indigo-950 px-2 py-1 text-[11px] text-indigo-200">planned</span>
+                  <% end %>
+                </div>
+                <div class="mt-3">
+                  <%= button_to "#{label} Preview", preview_path, method: :post, params: { hedge_venue: selected_venue }, disabled: !action_needed, class: "w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 transition hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600" %>
+                </div>
+                <% if action_needed %>
+                  <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950 p-2">
+                    <p class="text-xs text-gray-500">Required phrase</p>
+                    <code id="dashboard-hedge-phrase-<%= key %>" class="mt-1 block break-all text-[11px] text-gray-200"><%= required_phrase %></code>
                   </div>
                   <%= form_with url: live_path, method: :post, class: "mt-3" do |form| %>
                     <%= form.hidden_field :hedge_venue, value: selected_venue %>
                     <%= form.text_field :dashboard_hedge_confirmation,
-                      id: confirmation_input_id,
+                      id: "dashboard-hedge-confirmation-#{key}",
                       placeholder: required_phrase,
                       value: "",
                       autocomplete: "off",
-                      disabled: !confirmation_input_enabled,
-                      data: { required_confirmation: required_phrase, live_submit_id: live_submit_id },
+                      disabled: !confirmation_enabled,
+                      data: { required_confirmation: required_phrase, live_submit_id: submit_id },
                       oninput: "document.getElementById(this.dataset.liveSubmitId).disabled = this.value !== this.dataset.requiredConfirmation",
-                      class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
-                    <%= form.submit "#{label} Live",
-                      id: live_submit_id,
-                      disabled: true,
-                      class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
+                      class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600 disabled:border-gray-800 disabled:text-gray-600" %>
+                    <%= form.submit "#{label} Live", id: submit_id, disabled: true, class: "mt-2 w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-900 disabled:border-gray-800 disabled:bg-gray-900 disabled:text-gray-600" %>
                   <% end %>
-                  <% unless venue_live_actions_enabled %>
-                    <p class="text-yellow-200 text-xs mt-2">Live submit is disabled for <%= selected_adapter.venue_name %>; previews do not create orders.</p>
-                  <% end %>
-                  <% if action_state[:blockers].present? %>
-                    <ul class="text-yellow-200 text-xs mt-2 space-y-1">
-                      <% action_state[:blockers].each do |blocker| %>
-                        <li class="break-words whitespace-normal">- <%= blocker %></li>
-                      <% end %>
-                    </ul>
-                  <% end %>
-                </div>
-              <% end %>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <% auto_status = @aerodrome_auto_rebalance_status || {} %>
-        <% auto_hedge = auto_status[:hedge] %>
-        <% scheduler = auto_status[:scheduler] || {} %>
-        <% auto_state = auto_status[:auto_rebalance_status] || "blocked" %>
-        <% auto_venue_name = auto_status[:execution_venue_name] || production_venue_name %>
-        <% auto_short_label = auto_status[:current_short_label] || "Current short" %>
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p class="text-gray-400 text-xs uppercase tracking-wide">Auto-Rebalance Status</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Read-only estimate. HedgeSyncJob triggers on selected-venue drift, not a fixed ETH price.</p>
-            <% if auto_status[:auto_rebalance_message].present? %>
-              <p class="text-gray-400 text-xs mt-2"><%= auto_status[:auto_rebalance_message] %></p>
-            <% end %>
-          </div>
-          <span class="inline-block px-2 py-1 rounded-full border text-xs font-semibold <%= auto_rebalance_status_class(auto_state) %>"><%= auto_state == "active" ? "Active" : auto_state.capitalize %></span>
-        </div>
-        <% if auto_hedge.nil? %>
-          <p class="mt-4 text-gray-400 text-sm">No active hedge configured for this position.</p>
-        <% else %>
-          <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Position sync</p>
-              <p class="text-white font-medium mt-1"><%= scheduler[:position_sync_schedule].presence || "unknown" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Hedge sync</p>
-              <p class="text-white font-medium mt-1"><%= scheduler[:hedge_sync_schedule].presence || "unknown" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Execution venue</p>
-              <p class="text-white font-medium mt-1"><%= auto_venue_name %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Rebalance needed now</p>
-              <p class="<%= auto_status[:rebalance_needed] ? 'text-red-300' : 'text-green-300' %> font-medium mt-1"><%= auto_status[:rebalance_needed] ? "yes" : "no" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Current target</p>
-              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_target_hedge_eth] %>"><%= format_venue_eth_amount(auto_status[:current_target_hedge_eth]) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide"><%= auto_short_label %></p>
-              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_venue_eth_short] %>"><%= format_venue_eth_amount(auto_status[:current_venue_eth_short]) %></p>
-              <% if auto_status[:current_venue_eth_short].present? && BigDecimal(auto_status[:current_venue_eth_short]).zero? %>
-                <p class="text-yellow-200 text-xs mt-1">No current hedge short detected.</p>
-              <% end %>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Current drift</p>
-              <p class="text-white font-medium mt-1" title="<%= auto_status[:current_drift_eth] %>"><%= format_venue_eth_amount(auto_status[:current_drift_eth]) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Tolerance</p>
-              <p class="text-white font-medium mt-1" title="<%= auto_status[:tolerance_eth] %>"><%= format_venue_eth_amount(auto_status[:tolerance_eth]) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Last rebalance</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:last_rebalance_time]&.strftime("%m/%d/%Y %H:%M") || "No rebalance history yet." %></p>
-              <% if auto_status[:last_rebalance_status].present? %>
-                <p class="text-gray-400 text-xs mt-1"><%= auto_status[:last_rebalance_status] %></p>
-              <% end %>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Tolerance state</p>
-              <p class="<%= auto_status[:inside_tolerance] ? 'text-green-300' : 'text-red-300' %> font-medium mt-1"><%= auto_status[:inside_tolerance] ? "inside tolerance" : "outside tolerance" %></p>
-            </div>
-            <% if auto_status[:margin_mode].present? %>
-              <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-                <p class="text-gray-500 text-xs uppercase tracking-wide">Margin mode</p>
-                <p class="text-white font-medium mt-1"><%= auto_status[:margin_mode].to_s.humanize %><%= auto_status[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %></p>
+                <% end %>
               </div>
             <% end %>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Approx lower ETH price threshold</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:estimated_lower_eth_price_threshold].present? ? format_usd(BigDecimal(auto_status[:estimated_lower_eth_price_threshold])) : "unavailable" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Approx upper ETH price threshold</p>
-              <p class="text-white font-medium mt-1"><%= auto_status[:estimated_upper_eth_price_threshold].present? ? format_usd(BigDecimal(auto_status[:estimated_upper_eth_price_threshold])) : "unavailable" %></p>
-            </div>
-            <div class="bg-yellow-950/30 border border-yellow-900 rounded-lg p-3">
-              <p class="text-yellow-200 font-medium">Approximate / low confidence</p>
-              <p class="text-yellow-100/80 text-xs mt-1">Rebalance triggers when abs(target hedge - current short) exceeds tolerance. Price thresholds are approximate because Slipstream concentrated-liquidity exposure changes non-linearly.</p>
-            </div>
           </div>
-          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-400 text-xs uppercase tracking-wide">Auto-Rebalance Gates</p>
-              <dl class="mt-2 space-y-1 text-sm">
-                <% (auto_status[:env_gates] || {}).each do |key, value| %>
-                  <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= key %></dt><dd class="text-white"><%= value.presence || "missing" %></dd></div>
-                <% end %>
-              </dl>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-400 text-xs uppercase tracking-wide">Blockers / Warnings</p>
-              <% if auto_status[:blockers].present? %>
-                <ul class="mt-2 list-disc list-inside text-red-200 text-sm space-y-1">
-                  <% auto_status[:blockers].each do |blocker| %>
-                    <li><%= blocker %></li>
-                  <% end %>
-                </ul>
-              <% end %>
-              <% if auto_status[:warnings].present? %>
-                <ul class="mt-2 list-disc list-inside text-yellow-200 text-sm space-y-1">
-                  <% auto_status[:warnings].each do |warning| %>
-                    <li><%= warning %></li>
-                  <% end %>
-                </ul>
-              <% end %>
-              <% if auto_status[:blockers].blank? && auto_status[:warnings].blank? %>
-                <p class="text-green-300 text-sm mt-2">No auto-rebalance blockers detected by this read-only check.</p>
-              <% end %>
-            </div>
-          </div>
-        <% end %>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <% rebalance_history = @aerodrome_rebalance_history_status || {} %>
-        <% history_hedge = rebalance_history[:hedge] %>
-        <% history_records = rebalance_history[:records] || [] %>
-        <% history_summary = rebalance_history[:summary] || {} %>
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge Rebalance History</p>
-            <p class="text-yellow-200/80 text-xs mt-2">Read-only history for the latest hedge on this position. No orders, no Hyperliquid calls, no background jobs.</p>
-          </div>
-          <%= link_to "Refresh", position_path(@position), class: "bg-gray-800 hover:bg-gray-700 text-gray-100 px-3 py-2 rounded-lg text-xs font-medium transition" %>
         </div>
-        <% if history_hedge.nil? %>
-          <p class="mt-4 text-gray-400 text-sm">No hedge configured for this position.</p>
-        <% elsif history_records.empty? %>
-          <p class="mt-4 text-gray-400 text-sm">No rebalance history yet.</p>
-        <% else %>
-          <div class="mt-4 grid grid-cols-1 md:grid-cols-5 gap-3 text-sm">
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Records shown</p>
-              <p class="text-white font-medium mt-1"><%= history_summary[:records_shown] %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Last rebalance</p>
-              <p class="text-white font-medium mt-1"><%= history_summary[:last_rebalance_at]&.strftime("%m/%d/%Y %H:%M") || "—" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Last status</p>
-              <p class="text-white font-medium mt-1"><%= history_summary[:last_status] || "—" %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Current short</p>
-              <p class="text-white font-medium mt-1" title="<%= history_summary[:current_short_eth] %>"><%= format_venue_eth_amount(history_summary[:current_short_eth]) %></p>
-            </div>
-            <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-              <p class="text-gray-500 text-xs uppercase tracking-wide">Current drift</p>
-              <p class="text-white font-medium mt-1" title="<%= history_summary[:current_drift_eth] %>"><%= format_venue_eth_amount(history_summary[:current_drift_eth]) %></p>
-            </div>
-          </div>
-          <div class="mt-4 max-h-[28rem] overflow-y-auto rounded-lg border border-gray-800">
-            <table class="w-full min-w-[980px] text-sm">
-              <thead class="sticky top-0 z-10 bg-gray-950">
-                <tr class="border-b border-gray-800 text-left text-gray-400">
-                  <th class="px-3 py-3 font-medium">Time</th>
-                  <th class="px-3 py-3 font-medium">Venue</th>
-                  <th class="px-3 py-3 font-medium">Asset</th>
-                  <th class="px-3 py-3 font-medium">Status</th>
-                  <th class="px-3 py-3 font-medium text-right">Old short</th>
-                  <th class="px-3 py-3 font-medium text-right">New short</th>
-                  <th class="px-3 py-3 font-medium text-right">Delta ETH</th>
-                  <th class="px-3 py-3 font-medium text-right">Realized PnL</th>
-                  <th class="px-3 py-3 font-medium">Message / error</th>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Auto-Rebalance Status</p>
+          <h2 class="mt-1 text-lg font-semibold text-white"><%= auto_status[:auto_rebalance_status].to_s.humanize.presence || "Unavailable" %></h2>
+          <% if auto_status[:auto_rebalance_message].present? %>
+            <p class="mt-1 text-sm text-gray-400"><%= auto_status[:auto_rebalance_message] %></p>
+          <% end %>
+        </div>
+        <div class="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <div><p class="text-xs text-gray-500">Position sync</p><p class="text-white"><%= auto_status.dig(:scheduler, :position_sync_schedule).presence || "every minute" %></p></div>
+          <div><p class="text-xs text-gray-500">Hedge sync</p><p class="text-white"><%= auto_status.dig(:scheduler, :hedge_sync_schedule).presence || "every 5 minutes" %></p></div>
+          <div><p class="text-xs text-gray-500">Selected venue</p><p class="text-white"><%= auto_status[:execution_venue_name] || selected_venue_name %></p></div>
+          <div><p class="text-xs text-gray-500">Last rebalance</p><p class="text-white"><%= auto_status[:last_rebalance_time]&.strftime("%m/%d %H:%M") || "None" %></p></div>
+        </div>
+      </div>
+      <div class="mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Current drift</p><p class="mt-1 text-white"><%= format_venue_eth_amount(auto_status[:current_drift_eth] || drift_eth) %></p></div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Tolerance</p><p class="mt-1 text-white"><%= format_venue_eth_amount(auto_status[:tolerance_eth] || tolerance_eth) %></p></div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Rebalance needed now</p><p class="<%= auto_status[:rebalance_needed] ? 'text-red-300' : 'text-green-300' %> mt-1"><%= auto_status[:rebalance_needed] ? "yes" : "no" %></p></div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Manage</p><%= link_to "Settings", edit_settings_path, class: "mt-1 inline-block text-indigo-300 hover:text-indigo-200" %></div>
+      </div>
+      <% auto_messages = ((auto_status[:blockers] || []) + (auto_status[:warnings] || [])).uniq %>
+      <% if auto_messages.present? %>
+        <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+          <% auto_messages.each do |message| %><li><%= message %></li><% end %>
+        </ul>
+      <% end %>
+    </section>
+
+    <% history_report = @aerodrome_rebalance_history_status || {} %>
+    <% history_records = history_report[:records] || [] %>
+    <% selected_history = history_records.select { |record| HedgeVenues.normalize(record.venue) == selected_venue } %>
+    <% previous_history = history_records.reject { |record| HedgeVenues.normalize(record.venue) == selected_venue } %>
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Recent Rebalance History</p>
+          <h2 class="mt-1 text-lg font-semibold text-white"><%= selected_venue_name %> history</h2>
+        </div>
+        <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs text-gray-300"><%= selected_history.size %> selected-venue rows</span>
+      </div>
+      <% if selected_history.any? %>
+        <div class="mt-4 overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-800 text-sm">
+            <thead class="text-left text-xs uppercase tracking-wide text-gray-500">
+              <tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Time</th><th class="px-3 py-2">Venue</th><th class="px-3 py-2">Side</th><th class="px-3 py-2">Old</th><th class="px-3 py-2">New</th><th class="px-3 py-2">Delta</th><th class="px-3 py-2">Realized</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Message</th><th class="px-3 py-2">Order</th></tr>
+            </thead>
+            <tbody class="divide-y divide-gray-800">
+              <% selected_history.first(12).each do |rebalance| %>
+                <tr>
+                  <% rebalance_delta = if rebalance.old_short_size && rebalance.new_short_size
+                    BigDecimal(rebalance.new_short_size.to_s) - BigDecimal(rebalance.old_short_size.to_s)
+                  end %>
+                  <td class="px-3 py-3 text-gray-500"><%= rebalance.id %></td>
+                  <td class="px-3 py-3 text-gray-400"><%= rebalance.rebalanced_at&.strftime("%m/%d %H:%M") || "—" %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= rebalance.venue %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= [ rebalance.order_side, ("reduce-only" if rebalance.reduce_only) ].compact.join(" / ").presence || "—" %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= format_venue_eth_amount(rebalance.old_short_size) %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= format_venue_eth_amount(rebalance.new_short_size) %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= signed_eth_delta(rebalance_delta) %></td>
+                  <td class="px-3 py-3 text-gray-300"><%= rebalance.realized_pnl ? format_usd(rebalance.realized_pnl) : "—" %></td>
+                  <td class="px-3 py-3"><span class="rounded-full border px-2 py-1 text-xs <%= rebalance_status_class(rebalance.status) %>"><%= rebalance.status %></span></td>
+                  <td class="max-w-xs break-words px-3 py-3 text-gray-400"><%= rebalance.message.presence || "—" %></td>
+                  <td class="max-w-xs truncate px-3 py-3 text-gray-400" title="<%= rebalance.exchange_order_id %>"><%= rebalance.exchange_order_id.presence || "—" %></td>
                 </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-900">
-                <% history_records.each do |rebalance| %>
-                  <% delta_eth = rebalance.new_short_size && rebalance.old_short_size ? rebalance.new_short_size - rebalance.old_short_size : nil %>
-                  <tr class="hover:bg-gray-900/50">
-                    <td class="px-3 py-3 text-gray-300 whitespace-nowrap"><%= rebalance.rebalanced_at&.strftime("%m/%d/%Y %H:%M:%S") || "—" %></td>
-                    <td class="px-3 py-3 text-gray-300"><%= rebalance.venue %></td>
-                    <td class="px-3 py-3 text-white"><%= rebalance.asset %></td>
-                    <td class="px-3 py-3">
-                      <span class="inline-block px-2 py-1 rounded-full border text-xs font-semibold <%= rebalance_status_class(rebalance.status) %>"><%= rebalance.status %></span>
-                    </td>
-                    <td class="px-3 py-3 text-right text-gray-300"><%= rebalance.old_short_size ? number_with_precision(rebalance.old_short_size, precision: 6) : "—" %></td>
-                    <td class="px-3 py-3 text-right text-white"><%= rebalance.new_short_size ? number_with_precision(rebalance.new_short_size, precision: 6) : "—" %></td>
-                    <td class="px-3 py-3 text-right <%= delta_eth && delta_eth.negative? ? 'text-red-300' : 'text-green-300' %>"><%= signed_eth_delta(delta_eth) %></td>
-                    <td class="px-3 py-3 text-right <%= (rebalance.realized_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= rebalance.realized_pnl ? format_usd(rebalance.realized_pnl) : "—" %></td>
-                    <td class="px-3 py-3 text-gray-300 max-w-md"><%= rebalance.message.presence || "—" %></td>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      <% else %>
+        <p class="mt-4 text-sm text-gray-400">No <%= selected_venue_name %> rebalance history yet.</p>
+      <% end %>
+      <% if previous_history.any? %>
+        <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/50 p-4">
+          <summary class="cursor-pointer text-sm font-medium text-gray-200">Previous venue history (<%= previous_history.size %>)</summary>
+          <div class="mt-3 overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-800 text-sm">
+              <tbody class="divide-y divide-gray-800">
+                <% previous_history.first(20).each do |rebalance| %>
+                  <tr>
+                    <td class="px-3 py-2 text-gray-400"><%= rebalance.rebalanced_at&.strftime("%m/%d %H:%M") || "—" %></td>
+                    <td class="px-3 py-2 text-gray-300"><%= rebalance.venue %></td>
+                    <td class="px-3 py-2 text-gray-300"><%= format_venue_eth_amount(rebalance.new_short_size) %></td>
+                    <td class="px-3 py-2 text-gray-400"><%= rebalance.status %></td>
                   </tr>
                 <% end %>
               </tbody>
             </table>
           </div>
-        <% end %>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <p class="text-gray-400 text-xs uppercase tracking-wide">PnL Baseline</p>
-        <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.entry_value_label %></span><span class="text-white"><%= valuation_value_display(position_valuation.entry_value_usd) %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.current_value_label %></span><span class="text-white"><%= valuation_value_display(position_valuation.current_value_usd) %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500"><%= position_valuation.pool_delta_label %></span><span class="<%= (aerodrome_pool_delta || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= aerodrome_pool_delta ? format_usd(aerodrome_pool_delta) : "Unavailable" %></span></div>
-        </div>
-        <% if position_valuation.warnings.present? %>
-          <p class="text-yellow-200 text-xs mt-3"><%= position_valuation.warnings.join("; ") %></p>
-        <% end %>
-        <p class="text-gray-500 text-xs mt-3">PnL baseline starts from first Aerodrome snapshot unless manually set.</p>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <% rewards_report = @aerodrome_rewards_report || {} %>
-        <p class="text-gray-400 text-xs uppercase tracking-wide">AERO Rewards</p>
-        <p class="text-yellow-200/80 text-xs mt-2">Read-only. Claiming is not implemented. Rewards are not included in Total PnL.</p>
-        <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-          <div class="flex justify-between gap-4">
-            <span class="text-gray-500">Status</span>
-            <span class="text-white"><%= rewards_report[:gauge_status] || rewards_report[:status] || "unavailable" %></span>
-          </div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Staked</span><span class="text-white"><%= rewards_report[:staked].nil? ? "unknown" : rewards_report[:staked] %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO</span><span class="text-white"><%= rewards_report[:claimable_aero].present? ? number_with_precision(BigDecimal(rewards_report[:claimable_aero].to_s), precision: 6) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD price</span><span class="text-white"><%= rewards_report[:aero_usd_price].present? ? format_usd(BigDecimal(rewards_report[:aero_usd_price].to_s), precision: 6) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">AERO USD price source</span><span class="text-white"><%= rewards_report[:aero_usd_price_source].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Claimable AERO USD</span><span class="text-white"><%= rewards_report[:claimable_aero_usd].present? ? format_usd(BigDecimal(rewards_report[:claimable_aero_usd].to_s)) : "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor address</span><span class="text-white text-right break-all"><%= rewards_report[:depositor_address].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Depositor source</span><span class="text-white"><%= rewards_report[:depositor_source].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Gauge address</span><span class="text-white text-right break-all"><%= rewards_report[:gauge_address].presence || "unavailable" %></span></div>
-          <div class="flex justify-between gap-4"><span class="text-gray-500">Token ID</span><span class="text-white"><%= rewards_report[:token_id].presence || @position.external_id %></span></div>
-        </div>
-        <% if rewards_report[:warnings].present? %>
-          <p class="text-yellow-200 text-xs mt-3"><%= rewards_report[:warnings].join("; ") %></p>
-        <% end %>
-        <p class="text-gray-500 text-xs mt-3">Unclaimed rewards are an estimate and are not realized until claimed/sold. Claiming is not implemented.</p>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2">
-        <p class="text-gray-400 text-xs uppercase tracking-wide">Latest Manual Hedge Proposal</p>
-        <p class="text-yellow-200/80 text-xs mt-2">Manual proposal only &middot; No orders &middot; No Hyperliquid &middot; Execution disabled &middot; Not a live hedge</p>
-        <% if @latest_aerodrome_hedge_proposal %>
-          <% proposal = @latest_aerodrome_hedge_proposal %>
-          <% stale_reasons = proposal.stale_reasons(@position) %>
-          <% safety = @aerodrome_proposal_safety_results.fetch(proposal.id) %>
-          <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Proposal ID</span><span class="text-white"><%= proposal.id %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Status</span><span class="text-white"><%= proposal.status %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Safety status</span><span class="<%= safety.blocked ? 'text-red-300' : (safety.warnings.any? ? 'text-yellow-300' : 'text-green-300') %>"><%= safety.status %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Freshness</span><span class="<%= stale_reasons.any? ? 'text-red-300' : 'text-green-300' %>"><%= proposal.freshness_label(@position) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Stale reason</span><span class="text-white text-right"><%= stale_reasons.any? ? stale_reasons.join(", ") : "None" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested action</span><span class="text-white"><%= proposal.hedge_side %> <%= proposal.hedge_asset %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested amount</span><span class="text-white"><%= number_with_precision(proposal.suggested_short_amount, precision: 6) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Suggested notional</span><span class="text-white"><%= format_usd(proposal.suggested_short_notional_usd) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">WETH price</span><span class="text-white"><%= format_usd(proposal.weth_price_usd) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">LP value</span><span class="text-white"><%= format_usd(proposal.lp_total_value_usd) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Execution</span><span class="text-yellow-300"><%= proposal.execution_enabled? ? "enabled" : "disabled / manual review only" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Hyperliquid</span><span class="text-yellow-300"><%= proposal.hyperliquid_called? ? "called" : "not called" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Generated</span><span class="text-white"><%= proposal.generated_at.strftime("%m/%d/%Y %H:%M") %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Source</span><span class="text-white text-right"><%= proposal.source %></span></div>
-          </div>
-          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <div class="<%= safety.blocked ? 'bg-red-950/30 border-red-800' : 'bg-gray-900/50 border-gray-800' %> border rounded-lg p-3">
-              <p class="text-gray-400 text-xs uppercase tracking-wide">Checked Limits</p>
-              <dl class="mt-2 space-y-1">
-                <% safety.checked_limits.each do |key, limit| %>
-                  <div class="flex justify-between gap-4">
-                    <dt class="text-gray-500"><%= key.to_s.humanize %></dt>
-                    <dd class="text-white text-right">
-                      actual <%= limit[:actual]&.to_s("F") || "unavailable" %> /
-                      limit <%= limit[:configured] ? (limit[:limit]&.to_s("F") || "invalid") : "not configured" %>
-                      (<%= limit[:status] %>)
-                    </dd>
-                  </div>
+        </details>
+      <% end %>
+    </section>
+
+    <section class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 xl:col-span-2">
+        <p class="text-xs uppercase tracking-wide text-gray-500">PnL & Rewards</p>
+        <h2 class="mt-1 text-lg font-semibold text-white">PnL Summary</h2>
+        <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Excluding Rewards / Fees</p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total unrealized</p><p class="mt-2 text-xl font-semibold <%= (total_unrealized || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_unrealized ? format_usd(total_unrealized) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Pool <%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %> / Hedge <%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Realized</p><p class="mt-2 text-xl font-semibold <%= hedge_realized >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= format_usd(hedge_realized) %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO rewards estimate" : "AERO rewards estimate" %></p><p class="mt-2 text-xl font-semibold text-white"><%= rewards_pnl ? format_usd(rewards_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= rewards_report[:warnings]&.first.presence || "Claiming is not implemented." %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= fees_report[:fee_label].presence || "LP fees estimate" %></p><p class="mt-2 text-xl font-semibold text-white"><%= fees_pnl ? format_usd(fees_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= fees_report[:warnings]&.first.presence || "Collecting is not implemented." %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Including Unclaimed AERO Rewards Estimate</p><p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards ? format_usd(total_pnl_with_rewards) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Unclaimed rewards are not realized until claimed/sold.</p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Including Rewards + LP Fees Estimate</p><p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards_and_fees || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards_and_fees ? format_usd(total_pnl_with_rewards_and_fees) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= total_pnl_with_rewards ? "Rewards included when priced." : "Reward/fee estimates unavailable. Including fees unavailable." %></p></div>
+            </div>
+            <% if pnl_execution_venue.in?(%w[nado ethereal]) %>
+              <p class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400">
+                <% if hedge_unrealized_available %>
+                  <%= HedgeVenues.label(pnl_execution_venue) %> short PnL uses readback entry price minus mark price times short size.
+                <% else %>
+                  <%= dashboard_status[:venue_hedge_pnl_message].presence || "#{HedgeVenues.label(pnl_execution_venue)} hedge PnL unavailable: readback missing entry price." %>
                 <% end %>
-              </dl>
-            </div>
-            <div class="<%= safety.blocked ? 'bg-red-950/30 border-red-800' : 'bg-gray-900/50 border-gray-800' %> border rounded-lg p-3">
-              <p class="text-gray-400 text-xs uppercase tracking-wide">Failures / Warnings</p>
-              <% if safety.failures.any? %>
-                <ul class="mt-2 list-disc list-inside text-red-200 space-y-1">
-                  <% safety.failures.each do |failure| %>
-                    <li><%= failure %></li>
-                  <% end %>
-                </ul>
-              <% end %>
-              <% if safety.warnings.any? %>
-                <ul class="mt-2 list-disc list-inside text-yellow-200 space-y-1">
-                  <% safety.warnings.each do |warning| %>
-                    <li><%= warning %></li>
-                  <% end %>
-                </ul>
-              <% end %>
-              <% if safety.failures.empty? && safety.warnings.empty? %>
-                <p class="mt-2 text-green-300">All configured proposal safety limits passed.</p>
-              <% end %>
-            </div>
-          </div>
-          <p class="text-yellow-200/80 text-sm mt-4">Local record only. Review does not place orders, call Hyperliquid, or create a live hedge.</p>
-          <div class="flex flex-wrap gap-3 mt-4">
-            <% if proposal.status == "draft" %>
-              <% if safety.blocked %>
-                <span class="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium bg-red-950/70 text-red-200 border border-red-800">Blocked proposals cannot be marked reviewed</span>
-              <% else %>
-                <%= button_to "Mark Reviewed", mark_reviewed_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-gray-700 hover:bg-gray-600 text-gray-200 px-3 py-2 rounded-lg text-sm font-medium transition" %>
-              <% end %>
-              <%= button_to "Reject", reject_aerodrome_hedge_proposal_path(proposal), method: :post, class: "bg-red-950/70 hover:bg-red-950 text-red-200 border border-red-800 px-3 py-2 rounded-lg text-sm font-medium transition" %>
+              </p>
             <% end %>
+            <% if position_valuation.warnings.present? %>
+              <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+                <% position_valuation.warnings.each do |warning| %>
+                  <li><%= warning %></li>
+                <% end %>
+              </ul>
+            <% end %>
+            <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/50 p-4">
+              <summary class="cursor-pointer text-sm font-medium text-gray-200">Rewards and Fee Readback Details</summary>
+              <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-4">
+                  <h3 class="text-sm font-semibold text-white">AERO Rewards</h3>
+                  <p class="mt-1 text-xs text-gray-500">Read-only. Claiming is not implemented. Rewards are not included in Total PnL.</p>
+                  <dl class="mt-3 space-y-2 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Status</dt><dd class="text-right text-white"><%= rewards_report[:status].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Gauge status</dt><dd class="text-right text-white"><%= rewards_report[:gauge_status].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Token source</dt><dd class="break-all text-right text-white"><%= rewards_report[:token_source].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= rewards_report[:reward_label].presence || "Claimable AERO" %></dt><dd class="text-right text-white"><%= format_venue_eth_amount(rewards_report[:claimable_aero]) %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO USD estimate" : "Claimable AERO USD" %></dt><dd class="text-right text-white"><%= format_venue_usd_amount(rewards_report[:claimable_aero_usd]) %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">AERO USD price</dt><dd class="text-right text-white"><%= rewards_report[:aero_usd_price].present? ? "$#{format_venue_eth_amount(rewards_report[:aero_usd_price])}" : "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">AERO USD price source</dt><dd class="text-right text-white"><%= rewards_report[:aero_usd_price_source].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Staked</dt><dd class="text-right text-white"><%= rewards_report.key?(:staked) ? rewards_report[:staked].to_s : "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Depositor</dt><dd class="break-all text-right text-white"><%= rewards_report[:depositor_address].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Depositor source</dt><dd class="text-right text-white"><%= rewards_report[:depositor_source].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Gauge</dt><dd class="break-all text-right text-white"><%= rewards_report[:gauge_address].presence || "unavailable" %></dd></div>
+                  </dl>
+                  <% if rewards_report[:warnings].present? %>
+                    <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+                      <% rewards_report[:warnings].each do |warning| %><li><%= warning %></li><% end %>
+                    </ul>
+                  <% end %>
+                </div>
+                <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-4">
+                  <h3 class="text-sm font-semibold text-white"><%= fees_report[:fee_label].presence || "Aerodrome LP Fees" %></h3>
+                  <p class="mt-1 text-xs text-gray-500">Unclaimed fees are not realized PnL until collected.</p>
+                  <dl class="mt-3 space-y-2 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Status</dt><dd class="text-right text-white"><%= fees_report[:status].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Fee source</dt><dd class="break-all text-right text-white"><%= fees_report[:fee_source].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Token ID</dt><dd class="break-all text-right text-white"><%= fees_report[:token_id].presence || @position.external_id %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= fees_report[:fee0_symbol].presence || @position.asset0 %> fees</dt><dd class="text-right text-white"><%= format_venue_eth_amount(fees_report[:fee0_amount]) %> <%= fees_report[:fee0_symbol] %> / <%= format_venue_usd_amount(fees_report[:fee0_usd]) %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= fees_report[:fee1_symbol].presence || @position.asset1 %> fees</dt><dd class="text-right text-white"><%= format_venue_eth_amount(fees_report[:fee1_amount]) %> <%= fees_report[:fee1_symbol] %> / <%= format_venue_usd_amount(fees_report[:fee1_usd]) %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Total fees</dt><dd class="text-right text-white"><%= format_venue_usd_amount(fees_report[:total_fees_usd]) %></dd></div>
+                  </dl>
+                  <% if fees_report[:warnings].present? %>
+                    <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+                      <% fees_report[:warnings].each do |warning| %><li><%= warning %></li><% end %>
+                    </ul>
+                  <% end %>
+                </div>
+              </div>
+            </details>
           </div>
-        <% else %>
-          <p class="mt-3 text-gray-300 font-medium">No manual hedge proposal generated.</p>
-          <p class="text-gray-500 text-sm mt-1">Generate a local proposal for manual review only. Execution remains disabled.</p>
+
+      <div class="space-y-4">
+        <details class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+          <summary class="cursor-pointer text-sm font-semibold text-white">Position Details</summary>
+          <dl class="mt-4 space-y-2 text-sm">
+            <div class="flex justify-between gap-4"><dt class="text-gray-500">DEX</dt><dd class="text-white"><%= dex_display_name(@position) %></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-gray-500">Source</dt><dd class="text-white"><%= @position.source_label %></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-gray-500">Token ID</dt><dd class="text-white"><%= @position.external_id %></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-gray-500">Pool</dt><dd class="break-all text-right text-white"><%= @position.pool_address %></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= position_valuation.entry_value_label %></dt><dd class="text-white"><%= valuation_value_display(position_valuation.entry_value_usd) %></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= position_valuation.pool_delta_label %></dt><dd class="text-white"><%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %></dd></div>
+          </dl>
+        </details>
+
+        <% if @position.mellow_autopilot? %>
+          <% mellow = @position.mellow_metadata_hash %>
+          <details class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+            <summary class="cursor-pointer text-sm font-semibold text-white">Mellow Autopilot Accounting</summary>
+            <dl class="mt-4 space-y-2 text-sm">
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">Observed strategy token ID</dt><dd class="text-white"><%= mellow["strategy_token_id"].presence || @position.external_id %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">Share token</dt><dd class="break-all text-right text-white"><%= mellow["share_token"].presence || "unavailable" %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">User share %</dt><dd class="text-white"><%= format_percent_amount(mellow["user_share_percent"]) %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">User WETH exposure</dt><dd class="text-white"><%= format_venue_eth_amount(mellow["user_weth_exposure"].presence || @position.asset0_amount) %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">User USDC exposure</dt><dd class="text-white"><%= format_token_amount(mellow["user_usdc_exposure"].presence || @position.asset1_amount, decimals: 2) %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">Confidence</dt><dd class="text-white"><%= mellow["last_probe_confidence"].presence || "unavailable" %></dd></div>
+            </dl>
+          </details>
         <% end %>
-      </div>
-      <div class="bg-gray-950/40 border border-gray-800 rounded-lg p-4 md:col-span-2 overflow-x-auto">
-        <p class="text-gray-400 text-xs uppercase tracking-wide">Manual Proposal History</p>
-        <p class="text-yellow-200/80 text-xs mt-2">Manual proposal only &middot; No orders &middot; No Hyperliquid &middot; Execution disabled &middot; Not a live hedge</p>
-        <% if @aerodrome_hedge_proposals.present? %>
-          <table class="w-full mt-4 text-sm">
-            <thead>
-              <tr class="border-b border-gray-800">
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">ID</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Status</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Safety</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Failures / Warnings</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Asset</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Side</th>
-                <th class="text-right text-gray-500 font-medium py-2 pr-3">Amount</th>
-                <th class="text-right text-gray-500 font-medium py-2 pr-3">Notional</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Generated</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Reviewed</th>
-                <th class="text-left text-gray-500 font-medium py-2 pr-3">Execution</th>
-                <th class="text-left text-gray-500 font-medium py-2">Hyperliquid</th>
-              </tr>
-            </thead>
-            <tbody>
-              <% @aerodrome_hedge_proposals.each do |proposal| %>
+
+        <details class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+          <summary class="cursor-pointer text-sm font-semibold text-white">Manual Proposal History</summary>
+          <% proposals = @aerodrome_hedge_proposals || [] %>
+          <% if proposals.any? %>
+            <div class="mt-4 space-y-2">
+              <% proposals.each do |proposal| %>
+                <% safety = @aerodrome_proposal_safety_results&.fetch(proposal.id, nil) %>
                 <% stale_reasons = proposal.stale_reasons(@position) %>
-                <% safety = @aerodrome_proposal_safety_results.fetch(proposal.id) %>
-                <tr class="border-b border-gray-900 <%= safety.blocked ? 'bg-red-950/20' : '' %>">
-                  <td class="py-2 pr-3 text-white"><%= proposal.id %></td>
-                  <td class="py-2 pr-3 text-white"><%= proposal.status %></td>
-                  <td class="py-2 pr-3 <%= safety.blocked ? 'text-red-300' : (safety.warnings.any? ? 'text-yellow-300' : 'text-green-300') %>"><%= safety.status %></td>
-                  <td class="py-2 pr-3 text-gray-300"><%= (safety.failures + safety.warnings).presence&.join(", ") || "None" %></td>
-                  <td class="py-2 pr-3 text-white"><%= proposal.hedge_asset %></td>
-                  <td class="py-2 pr-3 text-white"><%= proposal.hedge_side %></td>
-                  <td class="py-2 pr-3 text-right text-white"><%= number_with_precision(proposal.suggested_short_amount, precision: 6) %></td>
-                  <td class="py-2 pr-3 text-right text-white"><%= format_usd(proposal.suggested_short_notional_usd) %></td>
-                  <td class="py-2 pr-3 text-gray-300"><%= proposal.generated_at.strftime("%m/%d/%Y %H:%M") %></td>
-                  <td class="py-2 pr-3 text-gray-300"><%= proposal.reviewed_at ? proposal.reviewed_at.strftime("%m/%d/%Y %H:%M") : "-" %></td>
-                  <td class="py-2 pr-3 text-yellow-300"><%= proposal.execution_enabled? ? "enabled" : "disabled" %></td>
-                  <td class="py-2 text-yellow-300"><%= proposal.hyperliquid_called? ? "called" : "not called" %></td>
-                </tr>
+                <div class="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-sm">
+                  <p class="text-white">Proposal #<%= proposal.id %> <span class="text-gray-500">(<%= proposal.status %>)</span></p>
+                  <p class="mt-1 text-gray-400"><%= proposal.hedge_side %> <%= proposal.hedge_asset %> <%= format_venue_eth_amount(proposal.suggested_short_amount) %></p>
+                  <div class="mt-3 grid grid-cols-1 gap-2 text-xs text-gray-400 sm:grid-cols-2">
+                    <p>Manual proposal only</p>
+                    <p>No orders / No Hyperliquid</p>
+                    <p>Execution disabled</p>
+                    <p>Not a live hedge</p>
+                    <p>Local record only</p>
+                    <p>Review does not place orders</p>
+                    <p>Safety status: <span class="font-semibold text-white"><%= safety&.status || "unavailable" %></span></p>
+                    <p>Freshness: <span class="font-semibold text-white"><%= proposal.freshness_label(@position) %></span></p>
+                    <p>Execution: disabled / manual review only</p>
+                    <p>Hyperliquid: not called</p>
+                  </div>
+                  <% if safety %>
+                    <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+                      <p class="text-xs font-semibold text-gray-300">Checked Limits</p>
+                      <dl class="mt-2 space-y-1 text-xs">
+                        <% safety.checked_limits.each_value do |limit| %>
+                          <div class="flex justify-between gap-3"><dt class="text-gray-500"><%= limit[:env_key] %></dt><dd class="text-right text-gray-300"><%= limit[:status] %></dd></div>
+                        <% end %>
+                      </dl>
+                      <% if safety.failures.present? %>
+                        <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-red-200">
+                          <% safety.failures.each do |failure| %><li><%= failure %></li><% end %>
+                        </ul>
+                        <p class="mt-2 text-xs text-red-200">Blocked proposals cannot be marked reviewed</p>
+                      <% end %>
+                      <% if safety.warnings.present? %>
+                        <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-yellow-200">
+                          <% safety.warnings.each do |warning| %><li><%= warning %></li><% end %>
+                        </ul>
+                      <% end %>
+                    </div>
+                  <% end %>
+                  <p class="mt-2 text-xs text-gray-500">Stale reasons: <%= stale_reasons.any? ? stale_reasons.join(", ") : "None" %></p>
+                  <div class="mt-3 flex gap-2">
+                    <span class="rounded-lg border border-gray-700 px-2 py-1 text-xs text-gray-300">Mark Reviewed</span>
+                    <span class="rounded-lg border border-gray-700 px-2 py-1 text-xs text-gray-300">Reject</span>
+                  </div>
+                </div>
               <% end %>
-            </tbody>
-          </table>
-        <% else %>
-          <p class="mt-3 text-gray-500 text-sm">No manual proposal history.</p>
-        <% end %>
+            </div>
+          <% else %>
+            <p class="mt-4 text-sm text-gray-500">No manual proposal history.</p>
+          <% end %>
+        </details>
       </div>
-    </div>
-  </div>
-<% end %>
-
-<% position_valuation = @position_valuation || PositionValuation.current(@position) %>
-<% pool_unrealized = position_valuation.pool_delta_usd %>
-<% latest_snap = @pnl_snapshots.first %>
-<% production_dashboard ||= @aerodrome_production_dashboard_status || {} %>
-<% pnl_execution_venue = HedgeVenues.normalize(production_dashboard[:execution_venue] || @position.hedge&.execution_venue) %>
-<% venue_hedge_unrealized_raw = production_dashboard[:venue_hedge_unrealized_pnl_usd].presence %>
-<% hedge_unrealized = pnl_execution_venue == "nado" ? (venue_hedge_unrealized_raw ? BigDecimal(venue_hedge_unrealized_raw.to_s) : nil) : (latest_snap&.hedge_unrealized || 0).to_d %>
-<% hedge_unrealized_available = !hedge_unrealized.nil? %>
-<% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
-<% total_unrealized = if pool_unrealized && hedge_unrealized_available
-  pool_unrealized + hedge_unrealized
-elsif pool_unrealized && pnl_execution_venue != "nado"
-  pool_unrealized
-elsif hedge_unrealized_available
-  hedge_unrealized
-end %>
-<% total_fees = latest_snap&.total_fees_usd || 0 %>
-<% aerodrome_fees_pnl = @aerodrome_fees_report&.fetch(:total_fees_usd, nil).presence %>
-<% aerodrome_fees_pnl = BigDecimal(aerodrome_fees_pnl.to_s) if aerodrome_fees_pnl %>
-<% total_pnl_available = !total_unrealized.nil? || (!@position.mellow_autopilot? && hedge_unrealized_available) %>
-<% total_pnl = total_pnl_available ? total_unrealized + hedge_realized + (aerodrome_position?(@position) ? 0 : total_fees) : nil %>
-<% rewards_pnl = @aerodrome_rewards_report&.fetch(:claimable_aero_usd, nil).presence %>
-<% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
-<% total_pnl_with_rewards = total_pnl && rewards_pnl ? total_pnl + rewards_pnl : nil %>
-<% total_pnl_with_rewards_and_fees = total_pnl_with_rewards && aerodrome_fees_pnl ? total_pnl_with_rewards + aerodrome_fees_pnl : nil %>
-<% mellow_asset0_value = @position.mellow_autopilot? && position_valuation.current_value_usd && position_valuation.usdc_exposure ? position_valuation.current_value_usd - position_valuation.usdc_exposure : nil %>
-<% mellow_asset1_value = @position.mellow_autopilot? ? position_valuation.usdc_exposure : nil %>
-
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
-    <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset0 %></p>
-    <p class="text-xl font-bold text-white"><%= @position.mellow_autopilot? ? valuation_value_display(mellow_asset0_value) : asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %></p>
-    <p class="text-gray-500 text-sm"><%= amount_display(@position.asset0_amount, precision: 6) %> &middot; <%= price_display(@position.asset0_price_usd) %></p>
-  </div>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
-    <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.asset1 %></p>
-    <p class="text-xl font-bold text-white"><%= @position.mellow_autopilot? ? valuation_value_display(mellow_asset1_value) : asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
-    <p class="text-gray-500 text-sm"><%= amount_display(@position.asset1_amount, precision: 2) %> &middot; <%= price_display(@position.asset1_price_usd) %></p>
-  </div>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
-    <p class="text-gray-400 text-xs uppercase tracking-wide"><%= @position.mellow_autopilot? ? "Mellow Pro-Rata Value" : "Total Pooled Value" %></p>
-    <p class="text-xl font-bold text-white"><%= valuation_value_display(position_valuation.current_value_usd) %></p>
-    <% if position_valuation.entry_value_usd %>
-      <p class="text-gray-500 text-sm">Entry: <%= format_usd(position_valuation.entry_value_usd) %></p>
-    <% else %>
-      <p class="text-gray-500 text-sm"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %> &middot; <%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p>
-    <% end %>
-  </div>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-2">
-    <p class="text-gray-400 text-xs uppercase tracking-wide">Hedge</p>
-    <% if @position.hedge %>
-      <% hedge_value = pnl_execution_venue == "nado" ? production_dashboard[:current_venue_notional_usd] : (position_valuation.current_value_usd ? position_valuation.current_value_usd * @position.hedge.target : nil) %>
-      <p class="text-xl font-bold <%= @position.hedge.active? ? 'text-white' : 'text-gray-500' %>">
-        <%= valuation_value_display(hedge_value) %>
-      </p>
-      <p class="text-gray-500 text-sm">
-        <%= HedgeVenues.label(pnl_execution_venue) %>
-        <% if pnl_execution_venue == "nado" %>
-          &middot; Short <span title="<%= production_dashboard[:current_short_eth] %>"><%= format_venue_eth_amount(production_dashboard[:current_short_eth]) %> ETH</span>
-          <% if production_dashboard[:margin_mode].present? %>&middot; <%= production_dashboard[:margin_mode].to_s.humanize %><%= production_dashboard[:margin_mode].to_s == "isolated" ? " 1.0x" : "" %><% end %>
-        <% else %>
-          &middot; Target: <%= number_to_percentage(@position.hedge.target * 100, precision: 0) %> &middot; Tolerance: <%= number_to_percentage(@position.hedge.tolerance * 100, precision: 0) %>
-        <% end %>
-      </p>
-    <% else %>
-      <p class="text-xl font-bold text-gray-500">None</p>
-    <% end %>
-  </div>
+    </section>
+  <% else %>
+    <section class="grid grid-cols-1 gap-4 md:grid-cols-4">
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4"><p class="text-xs uppercase tracking-wide text-gray-500"><%= @position.asset0 %></p><p class="mt-2 text-xl font-semibold text-white"><%= asset_value_display(@position.asset0_amount, @position.asset0_price_usd) %></p></div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4"><p class="text-xs uppercase tracking-wide text-gray-500"><%= @position.asset1 %></p><p class="mt-2 text-xl font-semibold text-white"><%= asset_value_display(@position.asset1_amount, @position.asset1_price_usd) %></p></div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4"><p class="text-xs uppercase tracking-wide text-gray-500">Total Pooled Value</p><p class="mt-2 text-xl font-semibold text-white"><%= valuation_value_display(position_valuation.current_value_usd) %></p></div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4"><p class="text-xs uppercase tracking-wide text-gray-500">Hedge</p><p class="mt-2 text-xl font-semibold <%= @position.hedge ? 'text-white' : 'text-gray-500' %>"><%= @position.hedge ? "Configured" : "None" %></p></div>
+    </section>
+  <% end %>
 </div>
-
-<h2 class="text-xl font-semibold text-white mb-4">PnL Summary</h2>
-<div class="grid grid-cols-3 gap-4 mb-6">
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-    <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL</p>
-    <p class="text-2xl font-bold mt-2 <%= (total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
-      <%= total_pnl ? format_usd(total_pnl) : "Unavailable" %>
-    </p>
-    <p class="text-gray-500 text-sm mt-1">
-      Unrealized: <span class="<%= (total_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %></span>
-      &middot; Realized: <span class="<%= hedge_realized >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(hedge_realized) %></span>
-      &middot; Fees: <span class="text-green-400"><%= aerodrome_position?(@position) ? "see Aerodrome LP Fees" : format_usd(total_fees) %></span>
-    </p>
-  </div>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-    <p class="text-gray-400 text-xs uppercase tracking-wide">Total Unrealized</p>
-    <p class="text-2xl font-bold mt-2 <%= (total_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
-      <%= total_pnl_available ? format_usd(total_unrealized) : "Unavailable" %>
-    </p>
-    <p class="text-gray-500 text-sm mt-1">
-      Pool: <span class="<%= (pool_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %></span>
-      &middot; Hedge: <span class="<%= (hedge_unrealized || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></span>
-    </p>
-    <% if pnl_execution_venue == "nado" && !hedge_unrealized_available %>
-      <p class="text-yellow-200 text-xs mt-2"><%= production_dashboard[:venue_hedge_pnl_message].presence || "Nado hedge PnL unavailable from readback." %></p>
-    <% elsif pnl_execution_venue == "nado" %>
-      <p class="text-gray-500 text-xs mt-2">Nado short PnL uses readback entry price minus mark price times short size.</p>
-    <% end %>
-  </div>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-    <p class="text-gray-400 text-xs uppercase tracking-wide">Realized PnL</p>
-    <p class="text-2xl font-bold mt-2 <%= hedge_realized >= 0 ? 'text-green-400' : 'text-red-400' %>">
-      <%= format_usd(hedge_realized) %>
-    </p>
-  </div>
-</div>
-<% if aerodrome_position?(@position) %>
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Excluding Rewards / Fees</p>
-      <p class="text-2xl font-bold mt-2 <%= (total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p>
-      <p class="text-gray-500 text-sm mt-1">Pool and hedge only. Unclaimed AERO rewards and LP fee estimates excluded.</p>
-    </div>
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Including Unclaimed AERO Rewards Estimate</p>
-      <% if total_pnl_with_rewards %>
-        <p class="text-2xl font-bold mt-2 <%= total_pnl_with_rewards >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_pnl_with_rewards) %></p>
-        <p class="text-gray-500 text-sm mt-1">Includes unclaimed AERO rewards estimate. Unclaimed rewards are not realized until claimed/sold.</p>
-      <% else %>
-        <p class="text-2xl font-bold mt-2 text-gray-500">Unavailable</p>
-        <p class="text-gray-500 text-sm mt-1">AERO USD unavailable. Rewards are read-only; claiming is not implemented.</p>
-      <% end %>
-    </div>
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Total PnL Including Rewards + LP Fees Estimate</p>
-      <% if total_pnl_with_rewards_and_fees %>
-        <p class="text-2xl font-bold mt-2 <%= total_pnl_with_rewards_and_fees >= 0 ? 'text-green-400' : 'text-red-400' %>"><%= format_usd(total_pnl_with_rewards_and_fees) %></p>
-        <p class="text-gray-500 text-sm mt-1">Includes unclaimed AERO rewards and unclaimed LP fees estimates. Neither is realized until claimed/collected.</p>
-      <% else %>
-        <p class="text-2xl font-bold mt-2 text-gray-500">Unavailable</p>
-        <p class="text-gray-500 text-sm mt-1">Including fees unavailable. Fee values are read-only estimates when available.</p>
-      <% end %>
-    </div>
-  </div>
-<% end %>
-<% if latest_snap %>
-  <p class="text-gray-600 text-xs mb-8">As of <%= latest_snap.captured_at.strftime("%m/%d/%Y %H:%M") %></p>
-<% end %>
-
-<h2 class="text-xl font-semibold text-white mb-4">LP Fees</h2>
-<% if aerodrome_position?(@position) %>
-  <% fees_report = @aerodrome_fees_report || {} %>
-  <div class="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-6">
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p class="text-gray-400 text-xs uppercase tracking-wide">Aerodrome LP Fees</p>
-        <p class="text-yellow-200/80 text-xs mt-2">Read-only. Collecting fees is not implemented. Fee values are estimates until collected.</p>
-      </div>
-      <span class="inline-block px-2 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700"><%= fees_report[:status].presence || "unavailable" %></span>
-    </div>
-    <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Source / method</span><span class="text-white text-right"><%= fees_report[:fee_source].presence || "unavailable" %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Token ID</span><span class="text-white"><%= fees_report[:token_id].presence || @position.external_id %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Fee0 amount</span><span class="text-white"><%= fees_report[:fee0_amount].present? ? "#{number_with_precision(BigDecimal(fees_report[:fee0_amount].to_s), precision: 6)} #{fees_report[:fee0_symbol]}" : "unavailable" %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Fee0 USD</span><span class="text-white"><%= fees_report[:fee0_usd].present? ? format_usd(BigDecimal(fees_report[:fee0_usd].to_s)) : "unavailable" %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Fee1 amount</span><span class="text-white"><%= fees_report[:fee1_amount].present? ? "#{number_with_precision(BigDecimal(fees_report[:fee1_amount].to_s), precision: 6)} #{fees_report[:fee1_symbol]}" : "unavailable" %></span></div>
-      <div class="flex justify-between gap-4"><span class="text-gray-500">Fee1 USD</span><span class="text-white"><%= fees_report[:fee1_usd].present? ? format_usd(BigDecimal(fees_report[:fee1_usd].to_s)) : "unavailable" %></span></div>
-      <div class="flex justify-between gap-4 md:col-span-2"><span class="text-gray-500">Unclaimed fees USD estimate</span><span class="text-white"><%= fees_report[:total_fees_usd].present? ? format_usd(BigDecimal(fees_report[:total_fees_usd].to_s)) : "unavailable" %></span></div>
-    </div>
-    <% if fees_report[:warnings].present? %>
-      <p class="text-yellow-200 text-xs mt-3"><%= fees_report[:warnings].join("; ") %></p>
-    <% end %>
-    <p class="text-gray-500 text-xs mt-3">Unclaimed fees are not realized PnL until collected. Collecting fees is not implemented.</p>
-  </div>
-<% else %>
-  <div class="grid grid-cols-3 gap-4">
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Collected</p>
-      <p class="text-2xl font-bold mt-2 text-green-400">
-        <%= format_usd(latest_snap&.collected_fees_usd || 0) %>
-      </p>
-    </div>
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Uncollected</p>
-      <p class="text-2xl font-bold mt-2 text-green-400">
-        <%= format_usd(latest_snap&.uncollected_fees_usd || 0) %>
-      </p>
-    </div>
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <p class="text-gray-400 text-xs uppercase tracking-wide">Total Fees</p>
-      <p class="text-2xl font-bold mt-2 text-green-400">
-        <%= format_usd(latest_snap&.total_fees_usd || 0) %>
-      </p>
-    </div>
-  </div>
-<% end %>

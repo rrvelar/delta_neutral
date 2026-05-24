@@ -168,39 +168,28 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_select "span", text: "MONITOR ONLY"
-    assert_select "span", text: "NO ORDERS"
-    assert_select "span", text: "HEDGE DISABLED"
-    assert_select "span", text: "SELECTED VENUE: HYPERLIQUID"
-    assert_select "span", text: "NOT LIVE HEDGE-READY"
+    assert_match "Position Control Center", response.body
+    assert_match "Portfolio Snapshot", response.body
+    assert_match "Selected Venue: Hyperliquid", response.body
+    assert_match "Live Gated", response.body
+    assert_match "Auto Paused", response.body
     assert_match "Aerodrome Slipstream", response.body
-    assert_match "Token ID 315985", response.body
+    assert_match "Token ID", response.body
+    assert_match "315985", response.body
     assert_match "Refresh Read-only Data", response.body
     assert_match "Generate Manual Hedge Proposal", response.body
-    assert_match "Manual proposal only", response.body
-    assert_match "No orders", response.body
-    assert_match "Updates on-chain LP data only", response.body
-    assert_match "No Hyperliquid", response.body
-    assert_match "Execution disabled", response.body
-    assert_match "No hedge execution", response.body
-    assert_match "PREVIEW ONLY", response.body
-    assert_match "short", response.body
-    assert_match "ETH", response.body
+    assert_match "Hedge Control Center", response.body
     assert_match "1.250000", response.body
-    assert_match "$2,500.00", response.body
-    assert_match "AERODROME_HEDGE_ENABLED must remain false", response.body
-    assert_match "Production Hedge Dashboard", response.body
-    assert_match "Current Hyperliquid ETH position", response.body
-    assert_match "Dashboard Flow", response.body
-    assert_match "Dashboard Hedge Actions", response.body
+    assert_match "$3,000.00", response.body
+    assert_match "Current Hyperliquid ETH short", response.body
+    assert_match "Action Preview", response.body
     assert_match "Auto-Rebalance Status", response.body
-    assert_match "No active hedge configured for this position.", response.body
+    assert_match "Recent Rebalance History", response.body
     assert_match "Open Hedge", response.body
-    assert_match "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED must be true", response.body
-    assert_match AerodromeDashboardHedgeAction::CONFIRMATION, response.body
-    assert_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
-    assert_match "Paste this exact phrase to enable live submit.", response.body
-    assert_select "button", text: "Copy", count: 3
+    assert_match "Preview actions do not create orders.", response.body
+    assert_no_match "HEDGE DISABLED", response.body
+    assert_no_match "NOT LIVE HEDGE-READY", response.body
+    assert_no_match "Manual proposal only - No orders - No Hyperliquid", response.body
     assert_no_match "Sync Now", response.body
     assert_no_match "Create Hedge", response.body
     assert_no_match "Execute", response.body
@@ -233,48 +222,37 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Aerodrome Hedge Status", response.body
-    assert_match "Hedge configured", response.body
-    assert_match "yes", response.body
-    assert_match "Target percent", response.body
-    assert_match "50.00%", response.body
-    assert_match "Tolerance percent", response.body
-    assert_match "5.00%", response.body
-    assert_match "Target ETH short", response.body
+    assert_match "Portfolio Snapshot", response.body
+    assert_match "Hedge Control Center", response.body
+    assert_match "Target hedge ETH", response.body
     assert_match "0.625000", response.body
-    assert_match "Current Hyperliquid ETH position", response.body
-    assert_match "current ETH readback unavailable", response.body
-    assert_match "disabled", response.body
-    assert_match "paused", response.body
-    assert_match "testnet", response.body
-    assert_match "live-blocked", response.body
+    assert_match "Current Hyperliquid ETH short", response.body
+    assert_match "Live Gated", response.body
+    assert_match "Auto Paused", response.body
     assert_match "AERODROME_HEDGE_ENABLED", response.body
     assert_match "AERODROME_HEDGE_PAUSED", response.body
     assert_match "AERODROME_LIVE_APPROVED", response.body
     assert_match "HYPERLIQUID_TESTNET", response.body
-    assert_match "Last WETH/ETH Rebalance", response.body
+    assert_match "Recent Rebalance History", response.body
     assert_match rebalance.id.to_s, response.body
     assert_match "0.400000", response.body
     assert_match "success", response.body
     assert_match "testnet rebalance complete", response.body
-    assert_match "PnL Baseline", response.body
+    assert_match "PnL Summary", response.body
     assert_match "Entry value", response.body
     assert_match "$2,500.00", response.body
     assert_match "Current pooled value", response.body
     assert_match "$3,000.00", response.body
     assert_match "Pool delta from entry", response.body
     assert_match "$500.00", response.body
-    assert_match "PnL baseline starts from first Aerodrome snapshot unless manually set.", response.body
-    assert_match "Aerodrome LP Fees", response.body
-    assert_match "Collecting fees is not implemented", response.body
+    assert_match "Rewards and Fee Readback Details", response.body
     assert_match "Auto-Rebalance Status", response.body
     assert_match "Position sync", response.body
     assert_match "every minute", response.body
     assert_match "Hedge sync", response.body
     assert_match "every 5 minutes", response.body
     assert_match "Rebalance needed now", response.body
-    assert_match "Approximate / low confidence", response.body
-    assert_match "Price thresholds are approximate", response.body
+    assert_match "Needs Rebalance", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
@@ -320,8 +298,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Ethereal"
-    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true for Ethereal live submit.", response.body
+    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true", response.body
     assert_match "Ethereal uses cross margin only", response.body
+    assert_operator response.body.scan("ETHEREAL_LINKED_SIGNER_ADDRESS is required").size, :<=, 1
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 
@@ -463,6 +442,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Current Ethereal ETH short", response.body
     assert_match "0.560700", response.body
     assert_no_match "current Ethereal position is long", response.body
+    assert_no_match "{:", response.body
+    assert_no_match "=&gt;", response.body
   end
 
   test "show selected Nado venue renders live gated mode and disabled live actions" do
@@ -477,7 +458,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "option[selected='selected']", text: "Nado"
     assert_match AerodromeDashboardHedgeAction::NADO_CONFIRMATION, response.body
     assert_no_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
-    assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit.", response.body
+    assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true", response.body
     assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
@@ -576,9 +557,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Hedge Rebalance History", response.body
-    assert_match "No hedge configured for this position.", response.body
-    assert_match "Refresh", response.body
+    assert_match "Recent Rebalance History", response.body
+    assert_match "No Hyperliquid rebalance history yet.", response.body
+    assert_match "Refresh Read-only Data", response.body
   end
 
   test "show renders rebalance history empty state when hedge has no records" do
@@ -590,8 +571,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Hedge Rebalance History", response.body
-    assert_match "No rebalance history yet.", response.body
+    assert_match "Recent Rebalance History", response.body
+    assert_match "No Hyperliquid rebalance history yet.", response.body
   end
 
   test "show renders recent rebalance records for current position hedge only" do
@@ -633,14 +614,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Hedge Rebalance History", response.body
-    assert_match "Records shown", response.body
+    assert_match "Recent Rebalance History", response.body
+    assert_match "2 selected-venue rows", response.body
     assert_match "0.397300", response.body
-    assert_match "+0.397300", response.body
-    assert_match "+0.102700", response.body
     assert_match "order rejected", response.body
-    assert_match "$1.23", response.body
-    assert_match "-$2.50", response.body
     assert_match "bg-green-950", response.body
     assert_match "bg-red-950", response.body
     assert_no_match "other position record", response.body
@@ -690,7 +667,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     }
 
     with_env("AERODROME_REWARDS_ENABLED" => "true") do
-      AerodromeRewardsCheck.stub(:new, -> {
+      AerodromeRewardsCheck.stub(:new, ->(**) {
         Object.new.tap { |object| object.define_singleton_method(:report) { report } }
       }) do
         HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
@@ -755,9 +732,84 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Mellow pro-rata delta from entry", response.body
     assert_match "Mellow WETH pro-rata exposure", response.body
     assert_match "Observed strategy token ID", response.body
+    assert_match "Mellow pro-rata AERO rewards estimate", response.body
+    assert_match "Mellow pro-rata LP fee estimate", response.body
     assert_match "$2,611.87", response.body
     assert_no_match "$186.00", response.body
     assert_no_match "-$2,422", response.body
+  end
+
+  test "show displays Mellow rewards and LP fee estimates without parsing synthetic id as direct NFT" do
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:71261528",
+      entry_value_usd: BigDecimal("2600"),
+      mellow_metadata: JSON.generate(
+        "strategy_token_id" => "71261528",
+        "user_share_percent" => "1.25",
+        "user_weth_exposure" => "1.0",
+        "user_usdc_exposure" => "500",
+        "user_total_value_usd" => "2700",
+        "last_probe_confidence" => "high",
+        "hedge_ready" => true
+      )
+    )
+    rewards_report = {
+      status: "PASS",
+      gauge_status: "detected",
+      token_id: "mellow:71261528",
+      token_source: "mellow_strategy_observed_token",
+      strategy_level_estimate: true,
+      pro_rata_share: "0.0125",
+      reward_label: "Mellow pro-rata AERO rewards estimate",
+      staked: true,
+      claimable_aero: "1.25",
+      aero_usd_price: "0.5",
+      aero_usd_price_source: "manual",
+      claimable_aero_usd: "0.625",
+      depositor_address: "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6",
+      depositor_source: "env",
+      gauge_address: "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28",
+      warnings: [ "Mellow rewards/fees are read-only pro-rata estimates from the observed strategy token; claiming/collecting is not implemented." ]
+    }
+    fees_report = {
+      status: "PASS",
+      fee_source: AerodromeFeesService::MELLOW_SOURCE,
+      token_id: "mellow:71261528",
+      strategy_level_estimate: true,
+      fee_label: "Mellow pro-rata LP fee estimate",
+      fee0_symbol: "WETH",
+      fee0_amount: "0.2",
+      fee0_usd: "400.0",
+      fee1_symbol: "USDC",
+      fee1_amount: "2.0",
+      fee1_usd: "2.0",
+      total_fees_usd: "402.0",
+      warnings: []
+    }
+
+    with_env("AERODROME_REWARDS_ENABLED" => "true", "AERODROME_FEES_ENABLED" => "true") do
+      AerodromeRewardsCheck.stub(:new, ->(**) {
+        Object.new.tap { |object| object.define_singleton_method(:report) { rewards_report } }
+      }) do
+        AerodromeFeesCheck.stub(:new, ->(**) {
+          Object.new.tap { |object| object.define_singleton_method(:report) { fees_report } }
+        }) do
+          get position_path(position)
+        end
+      end
+    end
+
+    assert_response :success
+    assert_match "Mellow pro-rata AERO rewards estimate", response.body
+    assert_match "Mellow pro-rata AERO USD estimate", response.body
+    assert_match "Mellow pro-rata LP fee estimate", response.body
+    assert_match "mellow_strategy_observed_token", response.body
+    assert_match "$0.63", response.body
+    assert_match "$402.00", response.body
+    assert_match "$502.63", response.body
+    assert_no_match "invalid value for Integer", response.body
   end
 
   test "show uses Nado readback for current hedge status and pnl when hedge venue is nado" do
@@ -874,10 +926,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     }
 
     with_env("AERODROME_REWARDS_ENABLED" => "true", "AERODROME_FEES_ENABLED" => "true") do
-      AerodromeRewardsCheck.stub(:new, -> {
+      AerodromeRewardsCheck.stub(:new, ->(**) {
         Object.new.tap { |object| object.define_singleton_method(:report) { rewards_report } }
       }) do
-        AerodromeFeesCheck.stub(:new, -> {
+        AerodromeFeesCheck.stub(:new, ->(**) {
           Object.new.tap { |object| object.define_singleton_method(:report) { fees_report } }
         }) do
           HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
@@ -919,7 +971,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     }
 
     with_env("AERODROME_FEES_ENABLED" => "true") do
-      AerodromeFeesCheck.stub(:new, -> {
+      AerodromeFeesCheck.stub(:new, ->(**) {
         Object.new.tap { |object| object.define_singleton_method(:report) { fees_report } }
       }) do
         get position_path(position)
@@ -938,7 +990,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = create_aerodrome_position
 
     with_env("AERODROME_REWARDS_ENABLED" => "true") do
-      AerodromeRewardsCheck.stub(:new, -> { raise AerodromeRewardsService::RpcError, "RPC unavailable" }) do
+      AerodromeRewardsCheck.stub(:new, ->(**) { raise AerodromeRewardsService::RpcError, "RPC unavailable" }) do
         get position_path(position)
       end
     end

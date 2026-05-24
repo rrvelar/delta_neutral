@@ -88,6 +88,65 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "Mellow rewards use observed strategy token and pro-rate by user share" do
+    position = create_mellow_position(user_share_percent: "1.25")
+    strategy_reward_data = AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
+      account_address: position.wallet.address,
+      token_id: "71261528",
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 77,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 100_000_000_000_000_000_000,
+      claimable_aero: BigDecimal("100"),
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
+    service = reward_service_stub(position, strategy_reward_data, expected_token_id: "71261528")
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, position: position).report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_equal "mellow:71261528", report.fetch(:token_id)
+      assert_equal "mellow_strategy_observed_token", report.fetch(:token_source)
+      assert_equal true, report.fetch(:strategy_level_estimate)
+      assert_equal "0.0125", report.fetch(:pro_rata_share)
+      assert_equal "Mellow pro-rata AERO rewards estimate", report.fetch(:reward_label)
+      assert_equal "1.25", report.fetch(:claimable_aero)
+      assert_equal 1_250_000_000_000_000_000, report.fetch(:claimable_aero_raw)
+      assert_equal "0.625", report.fetch(:claimable_aero_usd)
+      assert_includes report.fetch(:warnings), "Mellow rewards/fees are read-only pro-rata estimates from the observed strategy token; claiming/collecting is not implemented."
+    end
+  end
+
+  test "Mellow rewards missing strategy token are unavailable without exception" do
+    position = create_mellow_position(strategy_token_id: nil)
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) { |_pool_address| raise "gauge should not be read without token id" }
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, position: position).report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_equal "unavailable", report.fetch(:gauge_status)
+      assert_nil report.fetch(:claimable_aero)
+      assert_includes report.fetch(:warnings), "Mellow observed strategy token id is unavailable."
+    end
+  end
+
   test "configured on-chain AERO USDC pool price produces claimable AERO USD" do
     position = create_aerodrome_position
     reward_data = AerodromeRewardsService::RewardData.new(
@@ -248,7 +307,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
   private
 
-  def reward_service_stub(position, reward_data)
+  def reward_service_stub(position, reward_data, expected_token_id: position.external_id)
     Object.new.tap do |object|
       object.define_singleton_method(:gauge_for_pool) do |pool_address|
         raise "unexpected pool" unless pool_address == position.pool_address
@@ -259,7 +318,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
         raise "unexpected pool" unless pool_address == position.pool_address
         raise "unexpected gauge" unless gauge_address == (reward_data.gauge_address || "0x1111111111111111111111111111111111111111")
         raise "unexpected depositor" unless depositor_address == position.wallet.address
-        raise "unexpected token" unless token_id == position.external_id
+        raise "unexpected token #{token_id.inspect}" unless token_id == expected_token_id
 
         reward_data
       end
@@ -304,6 +363,25 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
       active: true
     )
+  end
+
+  def create_mellow_position(strategy_token_id: "71261528", user_share_percent: "1.25")
+    metadata = {
+      "submitted_wallet" => "0x23cb5f48fa3f4502232f3442637f90e8e3355701",
+      "strategy_pool_address" => "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      "user_share_percent" => user_share_percent,
+      "hedge_ready" => true,
+      "last_probe_confidence" => "high"
+    }
+    metadata["strategy_token_id"] = strategy_token_id if strategy_token_id
+
+    create_aerodrome_position.tap do |position|
+      position.update!(
+        source: Position::SOURCE_MELLOW_AUTOPILOT,
+        external_id: strategy_token_id ? "mellow:#{strategy_token_id}" : "mellow:missing",
+        mellow_metadata: JSON.generate(metadata)
+      )
+    end
   end
 
   def base_wallet(address = "0x23cb5f48fa3f4502232f3442637f90e8e3355701")
