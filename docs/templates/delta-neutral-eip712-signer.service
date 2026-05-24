@@ -1,0 +1,28 @@
+[Unit]
+Description=Delta Neutral external EIP-712 signer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/delta_neutral
+Environment=EIP712_SIGNER_ENABLED=true
+Environment=EIP712_SIGNER_HOST=172.18.0.1
+Environment=EIP712_SIGNER_PORT=8766
+Environment=EIP712_SIGNER_ALLOWED_EXCHANGES=Nado
+Environment=EIP712_SIGNER_ALLOW_ETHEREAL=false
+Environment=EIP712_SIGNER_ALLOWED_ACTIONS=place_order,close_order,close_position
+Environment=EIP712_SIGNER_PRIVATE_KEY_ENV_NAME=EIP712_SIGNER_PRIVATE_KEY
+Environment=EIP712_SIGNER_REQUIRE_EXPECTED_ADDRESS=true
+LoadCredential=signer_key:/etc/delta-neutral/eip712-signer-key
+ExecStart=/bin/bash -lc 'export EIP712_SIGNER_PRIVATE_KEY="$(cat "$CREDENTIALS_DIRECTORY/signer_key")"; exec /opt/delta_neutral/signer-venv/bin/python /opt/delta_neutral/scripts/eip712_external_signer.py'
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/delta_neutral/log /opt/delta_neutral/tmp
+
+[Install]
+WantedBy=multi-user.target
