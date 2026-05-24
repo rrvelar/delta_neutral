@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -62,6 +63,35 @@ class Eip712ExternalSignerTest(unittest.TestCase):
         env["EIP712_SIGNER_ALLOW_ETHEREAL"] = "true"
         self.assertEqual({"Ethereal", "Nado"}, signer.allowed_exchanges(env))
 
+    def test_private_key_loads_from_env_var_for_backward_compatibility(self):
+        key = "0x" + "11" * 32
+
+        self.assertEqual(key, signer.private_key_value({"EIP712_SIGNER_PRIVATE_KEY": key}))
+
+    def test_private_key_file_is_preferred_and_trimmed(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as key_file:
+            key_file.write("0x" + "22" * 32 + "\n")
+            key_file.flush()
+
+            loaded = signer.private_key_value(
+                {
+                    "EIP712_SIGNER_PRIVATE_KEY": "0x" + "11" * 32,
+                    "EIP712_SIGNER_PRIVATE_KEY_FILE": key_file.name,
+                },
+            )
+
+        self.assertEqual("0x" + "22" * 32, loaded)
+
+    def test_unreadable_private_key_file_fails_closed_without_env_fallback(self):
+        loaded = signer.private_key_value(
+            {
+                "EIP712_SIGNER_PRIVATE_KEY": "0x" + "11" * 32,
+                "EIP712_SIGNER_PRIVATE_KEY_FILE": "/path/that/does/not/exist/eip712.key",
+            },
+        )
+
+        self.assertIsNone(loaded)
+
     def test_ethereal_trade_order_blocked_until_opt_in_then_reaches_key_gate(self):
         request = {"exchange": "Ethereal", "action": "place_order", "typed_data": ethereal_trade_order()}
         blocked = signer.sign_eip712_request(request, {"EIP712_SIGNER_ENABLED": "true"})
@@ -100,6 +130,24 @@ class Eip712ExternalSignerTest(unittest.TestCase):
         self.assertEqual("blocked", response["status"])
         self.assertEqual("exchange_not_allowed", response["error_classification"])
         self.assertNotIn("11" * 32, str(response))
+
+    def test_missing_key_fails_closed_without_secret_echo(self):
+        response = signer.sign_eip712_request(
+            {
+                "exchange": "Nado",
+                "action": "place_order",
+                "typed_data": {"types": {}, "primaryType": "Order", "domain": {}, "message": {}},
+            },
+            {
+                "EIP712_SIGNER_ENABLED": "true",
+                "EIP712_SIGNER_PRIVATE_KEY_FILE": "/path/that/does/not/exist/eip712.key",
+            },
+        )
+
+        self.assertEqual("blocked", response["status"])
+        self.assertIn(response["error_classification"], {"key_unavailable", "signing_dependency_unavailable"})
+        self.assertNotIn("EIP712_SIGNER_PRIVATE_KEY", str(response))
+        self.assertNotIn("/path/that/does/not/exist", str(response))
 
 
 if __name__ == "__main__":

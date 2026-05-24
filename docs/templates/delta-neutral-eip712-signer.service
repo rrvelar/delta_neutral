@@ -12,10 +12,9 @@ Environment=EIP712_SIGNER_PORT=8766
 Environment=EIP712_SIGNER_ALLOWED_EXCHANGES=Nado
 Environment=EIP712_SIGNER_ALLOW_ETHEREAL=false
 Environment=EIP712_SIGNER_ALLOWED_ACTIONS=place_order,close_order,close_position
-Environment=EIP712_SIGNER_PRIVATE_KEY_ENV_NAME=EIP712_SIGNER_PRIVATE_KEY
+Environment=EIP712_SIGNER_PRIVATE_KEY_FILE=/etc/delta-neutral/keys/eip712-signer.key
 Environment=EIP712_SIGNER_REQUIRE_EXPECTED_ADDRESS=true
-LoadCredential=signer_key:/etc/delta-neutral/eip712-signer-key
-ExecStart=/bin/bash -lc 'export EIP712_SIGNER_PRIVATE_KEY="$(cat "$CREDENTIALS_DIRECTORY/signer_key")"; exec /opt/delta_neutral/signer-venv/bin/python /opt/delta_neutral/scripts/eip712_external_signer.py'
+ExecStart=/opt/delta_neutral/signer-venv/bin/python /opt/delta_neutral/scripts/eip712_external_signer.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

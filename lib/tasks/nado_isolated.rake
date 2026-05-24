@@ -1,4 +1,26 @@
 namespace :nado do
+  desc "Read-only reconciliation for pending Nado ShortRebalance records"
+  task reconcile_pending_rebalances: :environment do
+    scope = ShortRebalance.where(venue: "nado", status: ShortRebalance::STATUS_PENDING)
+    scope = scope.where(hedge_id: ENV["HEDGE_ID"]) if ENV["HEDGE_ID"].present?
+    reconciler = NadoPendingRebalanceReconciler.new
+    results = scope.includes(:hedge).order(:rebalanced_at, :id).map do |rebalance|
+      before = rebalance.status
+      reconciled = reconciler.reconcile(rebalance)
+      rebalance.reload
+      {
+        id: rebalance.id,
+        hedge_id: rebalance.hedge_id,
+        before_status: before,
+        after_status: rebalance.status,
+        new_short_size: rebalance.new_short_size&.to_s("F"),
+        message: rebalance.message,
+        reconciled: reconciled.present? && rebalance.status == ShortRebalance::STATUS_SUCCESS
+      }
+    end
+    puts JSON.pretty_generate({ checked: results.size, results: results, orders_submitted: 0, signatures_created: 0 })
+  end
+
   desc "No-live Nado isolated payload parity check"
   task isolated_payload_check: :environment do
     env = {

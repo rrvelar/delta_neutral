@@ -118,7 +118,7 @@ def sign_eip712_request(request: dict[str, Any], env: dict[str, str]) -> dict[st
     if account is None:
         if Account is None or encode_typed_data is None:
             return _blocked("signing_dependency_unavailable", "eth-account is not installed for signer process")
-        return _blocked("key_unavailable", f"{private_key_env_name(env)} is not configured for signer process")
+        return _blocked("key_unavailable", "signer private key is not configured for signer process")
     expected = request.get("expected_signer_address")
     if _bool(env.get("EIP712_SIGNER_REQUIRE_EXPECTED_ADDRESS", "true")) and expected and str(expected).lower() != account.address.lower():
         return _blocked("expected_address_mismatch", "expected signer address does not match configured signer")
@@ -210,10 +210,21 @@ def private_key_env_name(env: dict[str, str]) -> str:
     return env.get("EIP712_SIGNER_PRIVATE_KEY_ENV_NAME") or "EIP712_SIGNER_PRIVATE_KEY"
 
 
+def private_key_value(env: dict[str, str]) -> str | None:
+    key_file = env.get("EIP712_SIGNER_PRIVATE_KEY_FILE")
+    if key_file:
+        try:
+            with open(key_file, encoding="utf-8") as private_key_file:
+                return private_key_file.read().strip()
+        except OSError:
+            return None
+    return env.get(private_key_env_name(env))
+
+
 def _load_account(env: dict[str, str]):
     if Account is None:
         return None
-    raw = env.get(private_key_env_name(env))
+    raw = private_key_value(env)
     if not raw:
         return None
     try:

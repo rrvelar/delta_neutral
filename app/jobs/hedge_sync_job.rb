@@ -45,6 +45,7 @@ class HedgeSyncJob < ApplicationJob
         end
 
         if hedge.nado_execution?
+          NadoPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
           sync_nado_aerodrome_hedge(hedge)
           next
         end

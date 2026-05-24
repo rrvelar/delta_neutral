@@ -416,6 +416,45 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_match "readback did not confirm", rebalance.message
   end
 
+  test "nado hedge sync reconciles pending rebalances before auto gate" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    receipt_path = Rails.root.join("tmp", "nado-pending-sync-#{SecureRandom.hex(6)}.jsonl")
+    exchange_order_id = "0x#{"29" * 32}"
+    File.write(receipt_path, "#{JSON.generate({
+      venue: "nado",
+      hedge_id: hedge.id,
+      exchange_order_id: exchange_order_id,
+      action_plan: { expected_after_short_eth: "0.7", delta_eth: "0.2" }
+    })}\n")
+    pending = hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "0.5",
+      new_short_size: "0.5",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_PENDING,
+      message: "Nado submit accepted but readback did not confirm ETH-PERP position.",
+      rebalanced_at: 5.minutes.ago,
+      venue: "nado",
+      order_side: "sell",
+      reduce_only: false,
+      exchange_order_id: exchange_order_id,
+      receipt_path: receipt_path.to_s
+    )
+    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.7"), symbol: "ETH-PERP" })
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false") do
+      NadoHedgeExecutionService.stub(:new, service) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal ShortRebalance::STATUS_SUCCESS, pending.reload.status
+    assert_equal BigDecimal("0.7"), pending.new_short_size
+    assert_equal "Confirmed by later Nado readback", pending.message
+  end
+
   test "creates rebalance records with realized PnL from fills" do
     hedge = hedges(:eth_hedge)
 
