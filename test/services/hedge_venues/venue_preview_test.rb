@@ -327,7 +327,7 @@ module HedgeVenues
       assert_includes preflight.fetch(:blockers), "current Nado position already exists; use close/readback before opening"
     end
 
-    test "nado isolated planner chooses no op increase and full close reopen" do
+    test "nado isolated planner chooses no op increase and delta decrease" do
       service = NadoHedgeExecutionService.new(env: nado_live_env)
 
       no_op = service.plan_rebalance(
@@ -348,13 +348,14 @@ module HedgeVenues
 
       assert_equal "no_op", no_op.fetch(:action)
       assert_equal "isolated_increase", increase.fetch(:action)
-      assert_equal "isolated_full_close_then_reopen", decrease.fetch(:action)
-      assert_equal false, decrease.fetch(:partial_isolated_reduce_supported)
-      assert_equal "close_reopen", decrease.fetch(:isolated_decrease_strategy)
+      assert_equal "isolated_decrease", decrease.fetch(:action)
+      assert_equal true, decrease.fetch(:partial_isolated_reduce_supported)
+      assert_equal "delta_reduce", decrease.fetch(:isolated_decrease_strategy)
+      assert_equal "isolated_decrease", decrease.fetch(:strategy)
     end
 
-    test "nado isolated planner blocks delta reduce strategy because partial reduce is unproven" do
-      service = NadoHedgeExecutionService.new(env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "delta_reduce"))
+    test "nado isolated planner can still choose close reopen fallback by env" do
+      service = NadoHedgeExecutionService.new(env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "close_reopen"))
 
       plan = service.plan_rebalance(
         target_size_eth: BigDecimal("0.794"),
@@ -362,9 +363,9 @@ module HedgeVenues
         tolerance_eth: BigDecimal("0.001")
       )
 
-      assert_equal "blocked", plan.fetch(:action)
-      assert_equal "delta_reduce", plan.fetch(:isolated_decrease_strategy)
-      assert_match "partial isolated delta reduce is not proven", plan.fetch(:blocked_reason)
+      assert_equal "isolated_full_close_then_reopen", plan.fetch(:action)
+      assert_equal "close_reopen", plan.fetch(:isolated_decrease_strategy)
+      assert_equal false, plan.fetch(:partial_isolated_reduce_supported)
     end
 
     test "nado live open submits single signed short with rounded size" do
@@ -483,9 +484,9 @@ module HedgeVenues
       assert_equal "955000000000000000", order.fetch(:amount)
     end
 
-    test "nado live rebalance partial decrease isolated short uses full close then reopen" do
+    test "nado live rebalance partial decrease isolated short uses delta reduce only" do
       submitted = []
-      venue = NadoPollingVenue.new([ nil, { size: BigDecimal("-0.845"), short_size: BigDecimal("0.845"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" } ], env: nado_live_env)
+      venue = NadoPollingVenue.new([ { size: BigDecimal("-0.845"), short_size: BigDecimal("0.845"), symbol: "ETH-PERP", side: "short", margin_mode: "isolated" } ], env: nado_live_env)
       service = NadoHedgeExecutionService.new(
         env: nado_live_env,
         venue: venue,
@@ -512,15 +513,20 @@ module HedgeVenues
         max_slippage: "0.01"
       )
 
-      assert_equal 2, submitted.size
+      assert_equal 1, submitted.size
       assert_equal "submitted_and_confirmed", result.status
-      assert_equal "isolated_full_close_then_reopen", result.receipt.fetch(:action_plan).fetch(:action)
-      assert_equal true, result.receipt.fetch(:full_close_reopen)
-      close_order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
-      reopen_order = submitted.second.fetch(:place_orders).fetch(:orders).first.fetch(:order)
-      assert_equal "936000000000000000", close_order.fetch(:amount)
-      assert_equal "2817", close_order.fetch(:appendix)
-      assert_equal "-845000000000000000", reopen_order.fetch(:amount)
+      assert_equal "isolated_decrease", result.receipt.fetch(:action_plan).fetch(:action)
+      assert_equal "delta_only", result.receipt.fetch(:action_plan).fetch(:strategy)
+      order = submitted.first.fetch(:place_orders).fetch(:orders).first.fetch(:order)
+      summary = result.receipt.fetch(:submitted_order_summary)
+      assert_equal "91000000000000000", order.fetch(:amount)
+      assert_equal "2817", order.fetch(:appendix)
+      assert_equal "buy", summary.fetch(:side)
+      assert_equal true, summary.fetch(:reduce_only)
+      assert_equal "default_1", summary.fetch(:order_sender_kind)
+      assert_equal false, summary.fetch(:full_close)
+      assert_equal false, summary.fetch(:close_reopen)
+      assert_equal "0.845", summary.fetch(:expected_after_short_eth)
     end
 
     test "nado close reopen stops before reopen when close readback does not confirm flat" do
@@ -532,7 +538,7 @@ module HedgeVenues
         env: nado_live_env
       )
       service = NadoHedgeExecutionService.new(
-        env: nado_live_env,
+        env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "close_reopen"),
         venue: venue,
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
         http_post: ->(_uri, payload) {
@@ -567,7 +573,7 @@ module HedgeVenues
       submitted = []
       venue = NadoPollingVenue.new([ nil ], env: nado_live_env)
       service = NadoHedgeExecutionService.new(
-        env: nado_live_env,
+        env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "close_reopen"),
         venue: venue,
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
         http_post: ->(_uri, payload) {
@@ -615,7 +621,7 @@ module HedgeVenues
         env: nado_live_env
       )
       service = NadoHedgeExecutionService.new(
-        env: nado_live_env,
+        env: nado_live_env.merge("AERODROME_NADO_ISOLATED_DECREASE_STRATEGY" => "close_reopen"),
         venue: venue,
         signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
         http_post: ->(_uri, payload) {
@@ -842,9 +848,53 @@ module HedgeVenues
 
       assert_equal "submitted_but_readback_pending", result.status
       assert_equal "Nado submit accepted but readback did not confirm ETH-PERP position.", result.receipt.fetch(:final_message)
-      assert_equal 3, result.receipt.fetch(:post_submit_readback_poll_attempts).size
+      assert_equal NadoHedgeExecutionService::POST_SUBMIT_READBACK_ATTEMPTS, result.receipt.fetch(:post_submit_readback_poll_attempts).size
       assert_nil result.receipt.fetch(:post_submit_readback)
       assert_no_match(/#{'ab' * 20}|private_key|authorization|cookie/i, result.receipt.to_json)
+    end
+
+    test "nado accepted submit can confirm after delayed readback polling" do
+      readbacks = [ nil, nil, nil, nado_isolated_short(size: "0.955") ]
+      venue = NadoPollingVenue.new(readbacks, env: nado_live_env)
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: venue,
+        signer_post: ->(_uri, _payload) { { status: "signed", signature: "0x#{"ab" * 65}" } },
+        http_post: ->(_uri, _payload) { { status: "success", data: [ { digest: "0x#{"cd" * 32}" } ] } },
+        sleeper: ->(_seconds) { }
+      )
+
+      result = service.open_short(
+        position: mellow_position,
+        size_eth: BigDecimal("0.955"),
+        current_position: nil,
+        confirmation: "CONFIRM_NADO",
+        max_slippage: "0.01"
+      )
+
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal 4, result.receipt.fetch(:post_submit_readback_poll_attempts).size
+      assert_equal BigDecimal("0.955"), result.receipt.fetch(:post_submit_readback).fetch(:short_size)
+    end
+
+    test "nado pending result reconciles when later readback matches expected short" do
+      pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+        final_status: "submitted_but_readback_pending",
+        action_plan: { expected_after_short_eth: "0.814" },
+        submitted_order_summary: { side: "sell", reduce_only: false, rounded_size_eth: "0.005" },
+        post_submit_readback: nil
+      })
+      service = NadoHedgeExecutionService.new(
+        env: nado_live_env,
+        venue: NadoPollingVenue.new([ nado_isolated_short(size: "0.814") ], env: nado_live_env)
+      )
+
+      result = service.reconcile_pending_result(pending)
+
+      assert_equal "submitted_and_confirmed", result.status
+      assert_equal true, result.receipt.fetch(:reconciled_after_pending)
+      assert_equal "Nado submit confirmed by later readback.", result.receipt.fetch(:final_message)
+      assert_equal BigDecimal("0.814"), result.receipt.fetch(:post_submit_readback).fetch(:short_size)
     end
 
     test "nado live submit recv_time rejection records useful sanitized response message" do

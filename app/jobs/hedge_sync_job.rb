@@ -203,8 +203,15 @@ class HedgeSyncJob < ApplicationJob
     end
 
     result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
+    result = service.reconcile_pending_result(result)
     receipt_path = write_nado_receipt(result.receipt)
-    status = result.status == "submitted_and_confirmed" ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
+    status = if result.status == "submitted_and_confirmed"
+      ShortRebalance::STATUS_SUCCESS
+    elsif result.status.to_s.start_with?("submitted_but")
+      ShortRebalance::STATUS_PENDING
+    else
+      ShortRebalance::STATUS_FAILED
+    end
     after_short = nado_readback_short(result.receipt[:post_submit_readback], fallback: current_short)
     record_nado_rebalance(
       hedge,

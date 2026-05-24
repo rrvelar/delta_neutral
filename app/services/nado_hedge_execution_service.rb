@@ -7,8 +7,8 @@ class NadoHedgeExecutionService
   DEFAULT_ORDER_TTL_SECONDS = 3600
   RECEIVE_TIME_BUFFER_SECONDS = 5
   MAX_RECEIVE_TIME_FUTURE_SECONDS = 100
-  POST_SUBMIT_READBACK_ATTEMPTS = 3
-  POST_SUBMIT_READBACK_DELAY_SECONDS = 0.05
+  POST_SUBMIT_READBACK_ATTEMPTS = 12
+  POST_SUBMIT_READBACK_DELAY_SECONDS = 0.25
   POST_SUBMIT_CLOSE_READBACK_ATTEMPTS = 12
   POST_SUBMIT_CLOSE_READBACK_DELAY_SECONDS = 0.25
   EXECUTE_BODY_SHAPE = "execute_place_orders_batch".freeze
@@ -100,10 +100,10 @@ class NadoHedgeExecutionService
       "isolated_full_close"
     elsif delta.positive?
       "isolated_increase"
+    elsif margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "delta_reduce"
+      "isolated_decrease"
     elsif margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "close_reopen"
       "isolated_full_close_then_reopen"
-    elsif margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "delta_reduce"
-      "blocked"
     elsif delta.negative?
       "isolated_decrease"
     else
@@ -119,8 +119,8 @@ class NadoHedgeExecutionService
       current_margin_mode: margin_mode(current_position),
       desired_margin_mode: desired_margin_mode,
       isolated_decrease_strategy: isolated_decrease_strategy,
-      partial_isolated_reduce_supported: false,
-      partial_isolated_reduce_evidence: "No sibling fixture/test proves partial isolated reduce. Sibling evidence proves UI-equivalent full close with appendix=2817; split/partial reduce remains disabled by default.",
+      partial_isolated_reduce_supported: partial_isolated_reduce_supported?,
+      partial_isolated_reduce_evidence: partial_isolated_reduce_evidence,
       blocked_reason: action == "blocked" ? blocked_plan_reason(current_position: current_position, delta: delta) : nil,
       strategy: action == "isolated_full_close_then_reopen" ? "full_close_then_reopen" : action
     }
@@ -261,6 +261,10 @@ class NadoHedgeExecutionService
   end
 
   def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
+    if isolated_delta_reduce_order?(action: action, size_eth: size_eth, current_position: current_position)
+      return build_delta_reduce_preview(position: position, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position, probe: false)
+    end
+
     side = order_side(action: action, size_eth: size_eth)
     reduce_only = reduce_only_order?(action: action, size_eth: size_eth)
     full_close = isolated_full_close?(action: action, current_position: current_position)
@@ -349,10 +353,10 @@ class NadoHedgeExecutionService
       return annotate_delta_probe_order(order: order, direction: direction, current_position: current_position)
     end
 
-    build_delta_probe_decrease_preview(position: position, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
+    build_delta_reduce_preview(position: position, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position, probe: true)
   end
 
-  def build_delta_probe_decrease_preview(position:, size_eth:, max_slippage:, current_position:)
+  def build_delta_reduce_preview(position:, size_eth:, max_slippage:, current_position:, probe:)
     product = product_metadata
     order_size = order_size(size_eth)
     price = order_price(position: position, side: "buy", max_slippage: max_slippage, product: product)
@@ -377,18 +381,17 @@ class NadoHedgeExecutionService
     before_short = short_size(current_position)
     expected_after = before_short - rounded_size
     blockers = product.fetch(:blockers) + timing.fetch(:blockers) + delta_probe_position_blockers(direction: "decrease", current_position: current_position, rounded_size: rounded_size)
-    warnings = product.fetch(:warnings) + [
-      "Nado isolated delta decrease probe uses UI-equivalent isolated reduce-only low bits (appendix=2817) with delta size; production auto-rebalance still uses close_reopen until live proof exists."
-    ]
+    warnings = product.fetch(:warnings) + [ delta_reduce_warning(probe: probe) ]
 
     {
       ok: blockers.empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
       summary: {
         venue: "Nado",
         symbol: DEFAULT_SYMBOL,
-        action: "isolated_delta_probe",
-        probe_direction: "decrease",
-        delta_probe: true,
+        action: probe ? "isolated_delta_probe" : "rebalance",
+        probe_direction: probe ? "decrease" : nil,
+        delta_probe: probe,
+        delta_only: true,
         partial_reduce_candidate: true,
         close_reopen: false,
         full_close: false,
@@ -406,7 +409,7 @@ class NadoHedgeExecutionService
         appendix: order_fields[:appendix],
         order_type: "ioc",
         isolated: appendix_isolated?(order_fields[:appendix].to_i),
-        margin_mode: "isolated_delta_probe_reduce_only",
+        margin_mode: probe ? "isolated_delta_probe_reduce_only" : "isolated_delta_reduce_only",
         requested_leverage: nil,
         isolated_margin_usd: position_value(current_position, :isolated_margin_usd)&.to_s,
         isolated_margin_x6: nil,
@@ -426,6 +429,12 @@ class NadoHedgeExecutionService
       blockers: blockers,
       warnings: warnings
     }
+  end
+
+  def delta_reduce_warning(probe:)
+    return "Nado isolated delta decrease probe uses UI-equivalent isolated reduce-only low bits (appendix=2817) with delta size; production auto-rebalance still uses close_reopen until live proof exists." if probe
+
+    "Nado isolated delta decrease uses the production-proven reduce-only buy payload: default_1 sender, appendix=2817, place_orders batch, no isolated margin high bits."
   end
 
   def annotate_delta_probe_order(order:, direction:, current_position:)
@@ -750,6 +759,31 @@ class NadoHedgeExecutionService
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
   end
 
+  def reconcile_pending_result(result)
+    return result unless result.status.to_s.start_with?("submitted_but")
+
+    receipt = result.receipt
+    expected_short = pending_expected_short(receipt)
+    return result unless expected_short
+
+    current_position = read_position
+    return result unless expected_short_confirmed?(current_short: short_size(current_position), expected_short: expected_short)
+
+    updated_receipt = receipt.merge(
+      post_submit_readback: serialize_position(current_position),
+      after_readback: serialize_position(current_position),
+      final_status: "submitted_and_confirmed",
+      final_message: "Nado submit confirmed by later readback.",
+      reconciled_after_pending: true,
+      manual_action_required: false,
+      next_manual_instruction: nil
+    )
+    Result.new("submitted_and_confirmed", [], result.warnings, updated_receipt)
+  rescue
+    result
+  end
+  public :reconcile_pending_result
+
   def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
     requested_order_size = order_size(size_eth)
     preview_order_size = decimal_or_nil(order.dig(:summary, :rounded_size_eth)) || requested_order_size
@@ -773,7 +807,7 @@ class NadoHedgeExecutionService
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
     blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
-    blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: preview_order_size, current_position: current_position)
+    blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: preview_order_size, current_position: current_position) && !partial_isolated_reduce_supported?
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
   end
@@ -786,6 +820,7 @@ class NadoHedgeExecutionService
       position_id: position.id,
       source: position.position_source,
       source_external_id: position.external_id,
+      action_plan: nado_execution_action_plan(action: action, pre_position: pre_position, order: order),
       target_size_eth: order.dig(:summary, :rounded_size_eth),
       rounded_size_eth: order.dig(:summary, :rounded_size_eth),
       estimated_notional_usd: order.dig(:summary, :estimated_notional_usd),
@@ -804,6 +839,41 @@ class NadoHedgeExecutionService
       warnings: order.fetch(:warnings, [])
     }
     Result.new(status, blockers, order.fetch(:warnings, []), receipt)
+  end
+
+  def nado_execution_action_plan(action:, pre_position:, order:)
+    return nil unless action.to_s == "rebalance"
+
+    current_short = short_size(pre_position)
+    rounded_size = BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)
+    delta = order.dig(:summary, :side).to_s == "buy" ? -rounded_size : rounded_size
+    {
+      action: delta.negative? ? "isolated_decrease" : "isolated_increase",
+      strategy: order.dig(:summary, :delta_only) ? "delta_only" : "isolated_increase",
+      current_size_eth: decimal_string(current_short),
+      target_size_eth: decimal_string(current_short + delta),
+      delta_eth: decimal_string(delta),
+      expected_after_short_eth: decimal_string(current_short + delta),
+      partial_isolated_reduce_supported: partial_isolated_reduce_supported?,
+      payload: delta.negative? ? "ui_equivalent_delta_reduce_appendix_2817" : "isolated_1x_increase"
+    }
+  rescue ArgumentError
+    nil
+  end
+
+  def pending_expected_short(receipt)
+    raw = receipt[:expected_after_short_eth] ||
+      receipt.dig(:action_plan, :expected_after_short_eth) ||
+      receipt.dig(:submitted_order_summary, :expected_after_short_eth)
+    return BigDecimal(raw.to_s) if raw.present?
+
+    pre = receipt[:pre_submit_readback] || receipt[:before_readback]
+    delta = receipt.dig(:action_plan, :delta_eth)
+    return nil unless pre && delta
+
+    short_size(pre) + BigDecimal(delta.to_s)
+  rescue ArgumentError
+    nil
   end
 
   def product_metadata
@@ -1343,7 +1413,7 @@ class NadoHedgeExecutionService
   end
 
   def isolated_partial_reduce_blocker
-    "Nado isolated partial reduce is not exchange-proven after error_code=2006; close the full isolated short and reopen the target size."
+    "Nado isolated partial reduce is disabled; close the full isolated short and reopen the target size."
   end
 
   def order_size(size_eth)
@@ -1410,16 +1480,35 @@ class NadoHedgeExecutionService
   end
 
   def isolated_decrease_strategy
-    strategy = @env["AERODROME_NADO_ISOLATED_DECREASE_STRATEGY"].presence || "close_reopen"
+    strategy = @env["AERODROME_NADO_ISOLATED_DECREASE_STRATEGY"].presence || "delta_reduce"
     strategy.to_s.downcase
+  end
+
+  def partial_isolated_reduce_supported?
+    isolated_decrease_strategy == "delta_reduce"
+  end
+
+  def partial_isolated_reduce_evidence
+    if partial_isolated_reduce_supported?
+      "Production live delta probe proved Nado isolated delta decrease with reduce-only buy size 0.005 ETH from 0.404 to 0.399, then isolated delta increase back to 0.404 by later readback. Payload: default_1 sender, appendix=2817, place_orders batch, no isolated margin high bits."
+    else
+      "Operator selected close_reopen fallback with AERODROME_NADO_ISOLATED_DECREASE_STRATEGY=close_reopen."
+    end
   end
 
   def blocked_plan_reason(current_position:, delta:)
     return "current Nado readback is unavailable" if current_position == :unavailable
     return "current Nado position is long" if position_size(current_position).positive?
-    return "partial isolated delta reduce is not proven; use close_reopen strategy" if delta.negative? && margin_mode(current_position) == "isolated" && isolated_decrease_strategy == "delta_reduce"
 
     "Nado isolated planner blocked"
+  end
+
+  def isolated_delta_reduce_order?(action:, size_eth:, current_position:)
+    action.to_s == "rebalance" &&
+      BigDecimal(size_eth.to_s).negative? &&
+      margin_mode(current_position) == "isolated" &&
+      short_size(current_position).positive? &&
+      partial_isolated_reduce_supported?
   end
 
   def requested_leverage
