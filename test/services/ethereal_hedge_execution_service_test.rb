@@ -155,6 +155,158 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_no_match(/0xsig|private|cookie|auth/i, result.receipt.to_json)
   end
 
+  test "delta probe dry-run decrease builds buy reduce-only delta order" do
+    service = build_service
+
+    result = service.delta_probe(
+      position: fake_position,
+      direction: "decrease",
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: nil,
+      max_slippage: "0.01",
+      dry_run: true
+    )
+
+    summary = result.receipt.fetch(:payload_summary)
+    assert_equal "dry_run", result.status
+    assert_equal "decrease", summary.fetch(:probe_direction)
+    assert_equal "buy", summary.fetch(:side)
+    assert_equal true, summary.fetch(:reduce_only)
+    assert_equal "0.005", summary.fetch(:rounded_size_eth)
+    assert_equal "0.5557", summary.fetch(:expected_after_short_eth)
+    assert_equal false, summary.fetch(:close_reopen)
+    assert_equal false, summary.fetch(:full_close)
+    assert_no_match(/isolated|appendix/i, result.receipt.to_json)
+    assert_no_match(/0xsig|private_key|authorization|cookie/i, result.receipt.to_json)
+  end
+
+  test "delta probe dry-run increase builds sell non reduce-only delta order" do
+    service = build_service
+
+    result = service.delta_probe(
+      position: fake_position,
+      direction: "increase",
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: nil,
+      max_slippage: "0.01",
+      dry_run: true
+    )
+
+    summary = result.receipt.fetch(:payload_summary)
+    assert_equal "dry_run", result.status
+    assert_equal "increase", summary.fetch(:probe_direction)
+    assert_equal "sell", summary.fetch(:side)
+    assert_equal false, summary.fetch(:reduce_only)
+    assert_equal "0.5657", summary.fetch(:expected_after_short_eth)
+  end
+
+  test "delta probe live mode refuses without explicit env gate and confirmation" do
+    service = build_service(signer_post: ->(*) { raise "signer should not be called" })
+
+    result = service.delta_probe(
+      position: fake_position,
+      direction: "decrease",
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: "wrong",
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "AERODROME_ETHEREAL_DELTA_PROBE_ENABLED must be true"
+    assert_includes result.blockers, "submitted confirmation must equal #{EtherealHedgeExecutionService::DELTA_PROBE_CONFIRMATION}"
+  end
+
+  test "delta probe decrease success requires readback before minus delta" do
+    submitted = []
+    reads = [ ethereal_short("0.5557") ]
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:read_position) { |symbol:| reads.shift }
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_DELTA_PROBE_ENABLED" => "true" },
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, payload) {
+        submitted << payload
+        { status: "SUBMITTED", id: "eth-delta-1" }
+      }
+    )
+
+    result = service.delta_probe(
+      position: fake_position,
+      direction: "decrease",
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "eth-delta-1", result.receipt.fetch(:exchange_order_id)
+    assert_equal true, submitted.first.dig(:data, :reduceOnly)
+    assert_equal 0, submitted.first.dig(:data, :side)
+    assert_equal "0.5557", result.receipt.fetch(:expected_after_short_eth)
+    assert_equal "0.5557", result.receipt.fetch(:after_readback).fetch(:short_size)
+    assert_no_match(/0xsig|private_key|authorization|cookie/i, result.receipt.to_json)
+  end
+
+  test "delta probe increase success requires readback before plus delta" do
+    reads = [ ethereal_short("0.5657") ]
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:read_position) { |symbol:| reads.shift }
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_DELTA_PROBE_ENABLED" => "true" },
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, _payload) { { status: "SUBMITTED", id: "eth-delta-2" } }
+    )
+
+    result = service.delta_probe(
+      position: fake_position,
+      direction: "increase",
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "0.5657", result.receipt.fetch(:expected_after_short_eth)
+    assert_equal "0.5657", result.receipt.fetch(:after_readback).fetch(:short_size)
+  end
+
+  test "delta probe round trip does not run increase after failed decrease" do
+    submitted = []
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_DELTA_PROBE_ENABLED" => "true" },
+      venue: FakeVenue.new(position: ethereal_short("0.5607")),
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, payload) {
+        submitted << payload
+        { status: "REJECTED", message: "blocked by exchange" }
+      }
+    )
+
+    result = service.round_trip_delta_probe(
+      position: fake_position,
+      size_eth: "0.005",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::DELTA_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal 1, submitted.size
+    assert_equal "failed_before_submit", result.status
+    assert_nil result.receipt.fetch(:increase_leg)
+    assert_match "increase leg was not submitted", result.receipt.fetch(:final_message)
+  end
+
   test "signer request uses external eip712 endpoint and includes parity diagnostics" do
     signer_calls = []
     venue = FakeVenue.new(position: ethereal_short("0.5"))
@@ -269,7 +421,7 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
 
   private
 
-  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil)
+  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil, env_extra: {})
     EtherealHedgeExecutionService.new(
       env: {
         "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
@@ -280,7 +432,7 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
         "ETHEREAL_LOT_SIZE" => "0.001",
         "ETHEREAL_TICK_SIZE" => "0.1",
         "EXECUTION_SIGNER_URL" => "http://127.0.0.1:8787/sign/eip712"
-      },
+      }.merge(env_extra),
       venue: venue,
       http_get: http_get || ->(uri) {
         body = if uri.to_s.end_with?("/health")

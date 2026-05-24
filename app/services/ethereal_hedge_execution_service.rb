@@ -6,6 +6,7 @@ class EtherealHedgeExecutionService
   DEFAULT_SYMBOL = "ETH-PERP".freeze
   EXCHANGE_SYMBOL = "ETHUSD".freeze
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_ETHEREAL_ORDERS".freeze
+  DELTA_PROBE_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_ETHEREAL_DELTA_PROBE_ORDERS".freeze
   ETHUSD_ONCHAIN_ID = 2
   ETHUSD_TICK_SIZE = BigDecimal("0.1")
   ETHUSD_LOT_SIZE = BigDecimal("0.0001")
@@ -78,6 +79,73 @@ class EtherealHedgeExecutionService
 
   def auto_rebalance_short(position:, delta_eth:, current_position:, max_slippage:)
     execute(position: position, action: "rebalance", size_eth: delta_eth, current_position: current_position, confirmation: nil, max_slippage: max_slippage, require_confirmation: false)
+  end
+
+  def delta_probe(position:, direction:, size_eth:, current_position:, confirmation:, max_slippage:, dry_run: true)
+    direction = direction.to_s
+    signed_delta = direction == "decrease" ? -BigDecimal(size_eth.to_s) : BigDecimal(size_eth.to_s)
+    order = build_order_preview(position: position, action: "rebalance", size_eth: signed_delta, current_position: current_position, max_slippage: max_slippage)
+    order = annotate_delta_probe_order(order: order, direction: direction, current_position: current_position)
+    blockers = delta_probe_position_blockers(direction: direction, current_position: current_position, rounded_size: BigDecimal(order.dig(:summary, :rounded_size_eth).to_s))
+    blockers.concat(order.fetch(:blockers))
+
+    if dry_run
+      return delta_probe_result("dry_run", blockers.uniq, order, position, direction, current_position, nil, synthetic_position_after_probe(current_position, order.dig(:summary, :expected_after_short_eth)), nil, dry_run: true)
+    end
+
+    blockers.concat(delta_probe_live_blockers(position: position, confirmation: confirmation, order: order, current_position: current_position))
+    blockers = blockers.uniq
+    return delta_probe_result("blocked_before_submit", blockers, order, position, direction, current_position, nil, nil, nil, dry_run: false) if blockers.any?
+
+    signing = sign(order.fetch(:typed_data), order: order)
+    unless signing[:status] == "signed"
+      return delta_probe_result("failed_before_submit", [ signing[:reason] || "Ethereal signer did not return a signature" ], order, position, direction, current_position, nil, nil, nil, dry_run: false)
+    end
+
+    payload = order.fetch(:submit_payload).deep_dup
+    payload[:signature] = signing.fetch(:signature)
+    response = post_order(payload)
+    parsed = parse_submit_response(response)
+    unless parsed[:status] == "submitted"
+      return delta_probe_result("failed_before_submit", [ parsed[:message] ], order, position, direction, current_position, parsed, nil, nil, dry_run: false)
+    end
+
+    expected = BigDecimal(order.dig(:summary, :expected_after_short_eth).to_s)
+    readback = poll_post_submit_readback(expected_short: expected, action: "rebalance")
+    status = readback[:confirmed] ? "submitted_and_confirmed" : "submitted_but_readback_pending"
+    delta_probe_result(status, [], order, position, direction, current_position, parsed, readback[:position], readback, dry_run: false)
+  rescue => e
+    delta_probe_result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, direction, current_position, nil, nil, nil, dry_run: dry_run)
+  end
+
+  def round_trip_delta_probe(position:, size_eth:, current_position:, confirmation:, max_slippage:, dry_run: true)
+    decrease = delta_probe(
+      position: position,
+      direction: "decrease",
+      size_eth: size_eth,
+      current_position: current_position,
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      dry_run: dry_run
+    )
+    if dry_run
+      next_position = decrease.blockers.empty? ? synthetic_position_after_probe(current_position, decrease.receipt[:expected_after_short_eth]) : current_position
+      increase = decrease.blockers.empty? ? delta_probe(position: position, direction: "increase", size_eth: size_eth, current_position: next_position, confirmation: confirmation, max_slippage: max_slippage, dry_run: true) : nil
+      return round_trip_delta_probe_result(position: position, initial_position: current_position, decrease_result: decrease, increase_result: increase, dry_run: true)
+    end
+
+    return round_trip_delta_probe_result(position: position, initial_position: current_position, decrease_result: decrease, increase_result: nil, dry_run: false) unless decrease.status == "submitted_and_confirmed"
+
+    increase = delta_probe(
+      position: position,
+      direction: "increase",
+      size_eth: size_eth,
+      current_position: decrease.receipt[:after_readback],
+      confirmation: confirmation,
+      max_slippage: max_slippage,
+      dry_run: false
+    )
+    round_trip_delta_probe_result(position: position, initial_position: current_position, decrease_result: decrease, increase_result: increase, dry_run: false)
   end
 
   def build_order_preview(position:, action:, size_eth:, current_position:, max_slippage:)
@@ -157,6 +225,141 @@ class EtherealHedgeExecutionService
   end
 
   private
+
+  def annotate_delta_probe_order(order:, direction:, current_position:)
+    before_short = short_size(current_position)
+    rounded_size = BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)
+    expected_after = direction == "decrease" ? before_short - rounded_size : before_short + rounded_size
+    summary = order.fetch(:summary).merge(
+      action: "cross_delta_probe",
+      probe_direction: direction,
+      delta_probe: true,
+      close_reopen: false,
+      full_close: false,
+      before_short_eth: decimal_string(before_short),
+      expected_after_short_eth: decimal_string(expected_after),
+      expected_after_delta_eth: decimal_string(direction == "decrease" ? -rounded_size : rounded_size)
+    )
+    warnings = order.fetch(:warnings) + [
+      "Ethereal delta probe uses true cross-margin delta orders; no close/reopen and no hedge target change."
+    ]
+    order.merge(summary: summary, warnings: warnings.uniq)
+  end
+
+  def delta_probe_position_blockers(direction:, current_position:, rounded_size:)
+    blockers = []
+    blockers << "direction must be decrease or increase" unless direction.in?(%w[decrease increase])
+    blockers << "current Ethereal readback is unavailable" if current_position == :unavailable || current_position.nil?
+    blockers << "current Ethereal position must be a cross-margin short" unless cross_short_position?(current_position)
+    blockers << "delta probe size must be positive after rounding" unless rounded_size.positive?
+    blockers << "decrease delta must be smaller than current Ethereal short" if direction == "decrease" && short_size(current_position) <= rounded_size
+    blockers
+  end
+
+  def cross_short_position?(position)
+    position.is_a?(Hash) && position[:margin_mode] == "cross" && short_size(position).positive?
+  end
+
+  def delta_probe_live_blockers(position:, confirmation:, order:, current_position:)
+    blockers = []
+    blockers << "AERODROME_ETHEREAL_DELTA_PROBE_ENABLED must be true" unless delta_probe_enabled?
+    blockers << "submitted confirmation must equal #{DELTA_PROBE_CONFIRMATION}" unless confirmation.to_s == DELTA_PROBE_CONFIRMATION
+    blockers << "position must be active" unless position.active?
+    blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
+    blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
+    blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required" unless ethereal_subaccount_configured?
+    blockers << "ETHEREAL_API_BASE_URL is required" if @env["ETHEREAL_API_BASE_URL"].blank?
+    blockers << "Ethereal signer service URL is required" if signer_url.blank?
+    blockers << "Ethereal signer service does not advertise Ethereal support" if signer_url.present? && !signer_supports_ethereal?
+    blockers.concat(delta_probe_position_blockers(direction: order.dig(:summary, :probe_direction), current_position: current_position, rounded_size: BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)))
+    blockers.concat(order.fetch(:blockers, []))
+    blockers.uniq
+  end
+
+  def delta_probe_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["AERODROME_ETHEREAL_DELTA_PROBE_ENABLED"])
+  end
+
+  def delta_probe_result(status, blockers, order, position, direction, pre_position, submit_response, post_position, readback_poll, dry_run:)
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "cross_delta_probe",
+      venue: "ethereal",
+      direction: direction,
+      dry_run: dry_run,
+      position_id: position.id,
+      source: position.respond_to?(:position_source) ? position.position_source : nil,
+      source_external_id: position.respond_to?(:external_id) ? position.external_id : nil,
+      before_readback: serialize_position(pre_position),
+      delta_size_eth: order.dig(:summary, :rounded_size_eth),
+      expected_after_short_eth: order.dig(:summary, :expected_after_short_eth),
+      payload_summary: sanitized_order_summary(order),
+      submit_response_classification: submit_response,
+      exchange_order_id: submit_response&.dig(:exchange_order_id),
+      poll_attempts: readback_poll&.fetch(:attempts, []),
+      after_readback: serialize_position(post_position),
+      final_status: status,
+      final_message: delta_probe_final_message(status, submit_response, dry_run: dry_run),
+      manual_action_required: manual_action_required?(status),
+      blockers: unique_messages(blockers),
+      warnings: order.fetch(:warnings, [])
+    }.compact
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def round_trip_delta_probe_result(position:, initial_position:, decrease_result:, increase_result:, dry_run:)
+    status = if dry_run
+      "dry_run"
+    elsif decrease_result.status != "submitted_and_confirmed"
+      decrease_result.status
+    else
+      increase_result&.status || "failed_before_submit"
+    end
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "cross_delta_probe_round_trip",
+      venue: "ethereal",
+      dry_run: dry_run,
+      position_id: position.id,
+      before_readback: serialize_position(initial_position),
+      decrease_leg: decrease_result.receipt,
+      increase_leg: increase_result&.receipt,
+      after_readback: increase_result&.receipt&.dig(:after_readback) || decrease_result.receipt[:after_readback],
+      final_status: status,
+      final_message: round_trip_delta_probe_message(decrease_result: decrease_result, increase_result: increase_result, dry_run: dry_run),
+      manual_action_required: manual_action_required?(status),
+      blockers: unique_messages(decrease_result.blockers + (increase_result&.blockers || [])),
+      warnings: unique_messages(decrease_result.warnings + (increase_result&.warnings || []))
+    }
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def synthetic_position_after_probe(position, expected_short_eth)
+    return position unless position.is_a?(Hash) && expected_short_eth.present?
+
+    expected = BigDecimal(expected_short_eth.to_s)
+    position.deep_dup.merge(size: "-#{expected.to_s('F')}", short_size: expected.to_s("F"), side: expected.positive? ? "short" : "flat", margin_mode: "cross")
+  end
+
+  def delta_probe_final_message(status, submit_response, dry_run:)
+    return "Ethereal cross-margin delta probe dry-run only; no signature or order submission." if dry_run
+    return "Ethereal cross-margin delta probe submitted and confirmed by readback." if status == "submitted_and_confirmed"
+    return "Ethereal cross-margin delta probe submit accepted but readback did not confirm expected delta." if status.to_s.start_with?("submitted_but")
+
+    submit_response&.dig(:message) || status
+  end
+
+  def round_trip_delta_probe_message(decrease_result:, increase_result:, dry_run:)
+    return "Ethereal cross-margin delta round-trip dry-run only; no signature or order submission." if dry_run
+    return "Ethereal delta decrease did not confirm; increase leg was not submitted." unless decrease_result.status == "submitted_and_confirmed"
+    return "Ethereal cross-margin delta round-trip completed and confirmed." if increase_result&.status == "submitted_and_confirmed"
+
+    increase_result&.receipt&.dig(:final_message) || "Ethereal delta increase leg did not confirm."
+  end
+
+  def manual_action_required?(status)
+    !status.in?(%w[dry_run submitted_and_confirmed])
+  end
 
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, current_position: current_position, max_slippage: max_slippage)
@@ -411,6 +614,12 @@ class EtherealHedgeExecutionService
       margin_mode: "cross",
       side: order.dig(:summary, :side),
       reduce_only: order.dig(:summary, :reduce_only),
+      probe_direction: order.dig(:summary, :probe_direction),
+      delta_probe: order.dig(:summary, :delta_probe),
+      close_reopen: order.dig(:summary, :close_reopen),
+      full_close: order.dig(:summary, :full_close),
+      before_short_eth: order.dig(:summary, :before_short_eth),
+      expected_after_short_eth: order.dig(:summary, :expected_after_short_eth),
       rounded_size_eth: order.dig(:summary, :rounded_size_eth),
       estimated_notional_usd: order.dig(:summary, :estimated_notional_usd),
       estimated_effective_leverage: order.dig(:summary, :estimated_effective_leverage),
