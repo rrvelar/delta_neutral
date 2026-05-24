@@ -307,6 +307,167 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_match "increase leg was not submitted", result.receipt.fetch(:final_message)
   end
 
+  test "close probe dry-run close only builds buy reduce-only full-size close" do
+    service = build_service
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_only",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: nil,
+      max_slippage: "0.01",
+      dry_run: true
+    )
+
+    close = result.receipt.fetch(:close_payload_summary)
+    assert_equal "dry_run", result.status
+    assert_equal "buy", close.fetch(:side)
+    assert_equal true, close.fetch(:reduce_only)
+    assert_equal "0.56", close.fetch(:rounded_size_eth)
+    assert_equal "0.0", close.fetch(:expected_after_short_eth)
+    assert_nil result.receipt[:reopen_payload_summary]
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
+  test "close probe dry-run close reopen builds close then target sell reopen" do
+    service = build_service
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_reopen",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: nil,
+      max_slippage: "0.01",
+      dry_run: true
+    )
+
+    close = result.receipt.fetch(:close_payload_summary)
+    reopen = result.receipt.fetch(:reopen_payload_summary)
+    assert_equal "buy", close.fetch(:side)
+    assert_equal true, close.fetch(:reduce_only)
+    assert_equal "sell", reopen.fetch(:side)
+    assert_equal false, reopen.fetch(:reduce_only)
+    assert_equal "0.8", reopen.fetch(:rounded_size_eth)
+    assert_equal "0.8", reopen.fetch(:expected_after_short_eth)
+  end
+
+  test "close probe live mode refuses without explicit env gate and confirmation" do
+    service = build_service(signer_post: ->(*) { raise "signer should not be called" })
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_only",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: "wrong",
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED must be true"
+    assert_includes result.blockers, "submitted confirmation must equal #{EtherealHedgeExecutionService::CLOSE_PROBE_CONFIRMATION}"
+  end
+
+  test "close probe close only success requires flat readback" do
+    submitted = []
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:read_position) { |symbol:| nil }
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED" => "true" },
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, payload) {
+        submitted << payload
+        { status: "SUBMITTED", id: "eth-close-1" }
+      }
+    )
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_only",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::CLOSE_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal 1, submitted.size
+    assert_equal true, submitted.first.dig(:data, :reduceOnly)
+    assert_equal 0, submitted.first.dig(:data, :side)
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_nil result.receipt[:reopen_submit_classification]
+    assert_no_match(/0xsig|private_key|authorization|cookie/i, result.receipt.to_json)
+  end
+
+  test "close reopen does not submit reopen unless flat readback is confirmed" do
+    submitted = []
+    venue = FakeVenue.new(position: ethereal_short("0.5607"))
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED" => "true" },
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, payload) {
+        submitted << payload
+        { status: "SUBMITTED", id: "eth-close-1" }
+      }
+    )
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_reopen",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::CLOSE_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_equal 1, submitted.size
+    assert_nil result.receipt[:reopen_submit_classification]
+  end
+
+  test "close reopen success requires final target short readback" do
+    submitted = []
+    reads = [ nil, ethereal_short("0.8") ]
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:read_position) { |symbol:| reads.shift }
+    service = build_service(
+      env_extra: { "AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED" => "true" },
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, payload) {
+        order_id = submitted.empty? ? "eth-close-1" : "eth-open-1"
+        submitted << payload
+        { status: "SUBMITTED", id: order_id }
+      }
+    )
+
+    result = service.close_reopen_probe(
+      position: fake_position,
+      mode: "close_reopen",
+      target_size_eth: "0.8",
+      current_position: ethereal_short("0.5607"),
+      confirmation: EtherealHedgeExecutionService::CLOSE_PROBE_CONFIRMATION,
+      max_slippage: "0.01",
+      dry_run: false
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal 2, submitted.size
+    assert_equal true, submitted.first.dig(:data, :reduceOnly)
+    assert_equal false, submitted.second.dig(:data, :reduceOnly)
+    assert_equal "0.8", result.receipt.fetch(:final_readback).fetch(:short_size)
+    assert_equal 2, result.receipt.fetch(:orders_placed)
+    assert_equal [ "eth-close-1", "eth-open-1" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
   test "signer request uses external eip712 endpoint and includes parity diagnostics" do
     signer_calls = []
     venue = FakeVenue.new(position: ethereal_short("0.5"))

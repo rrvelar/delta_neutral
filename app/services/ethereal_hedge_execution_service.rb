@@ -7,6 +7,7 @@ class EtherealHedgeExecutionService
   EXCHANGE_SYMBOL = "ETHUSD".freeze
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_ETHEREAL_ORDERS".freeze
   DELTA_PROBE_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_ETHEREAL_DELTA_PROBE_ORDERS".freeze
+  CLOSE_PROBE_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_ETHEREAL_CLOSE_PROBE_ORDERS".freeze
   ETHUSD_ONCHAIN_ID = 2
   ETHUSD_TICK_SIZE = BigDecimal("0.1")
   ETHUSD_LOT_SIZE = BigDecimal("0.0001")
@@ -146,6 +147,70 @@ class EtherealHedgeExecutionService
       dry_run: false
     )
     round_trip_delta_probe_result(position: position, initial_position: current_position, decrease_result: decrease, increase_result: increase, dry_run: false)
+  end
+
+  def close_reopen_probe(position:, mode:, target_size_eth:, current_position:, confirmation:, max_slippage:, dry_run: true)
+    mode = mode.to_s
+    close_size = short_size(current_position)
+    close_order = annotate_close_probe_order(
+      build_order_preview(position: position, action: "close", size_eth: close_size, current_position: current_position, max_slippage: max_slippage),
+      mode: mode,
+      leg: "close",
+      expected_after_short_eth: BigDecimal("0")
+    )
+    reopen_order = nil
+    if mode == "close_reopen"
+      target = @venue.round_order_size(target_size_eth)
+      reopen_order = annotate_close_probe_order(
+        build_order_preview(position: position, action: "open", size_eth: target, current_position: nil, max_slippage: max_slippage),
+        mode: mode,
+        leg: "reopen",
+        expected_after_short_eth: target
+      )
+    end
+    blockers = close_probe_position_blockers(mode: mode, current_position: current_position, close_order: close_order, reopen_order: reopen_order)
+
+    if dry_run
+      return close_reopen_probe_result(
+        status: "dry_run",
+        blockers: blockers,
+        position: position,
+        mode: mode,
+        dry_run: true,
+        before_position: current_position,
+        close_order: close_order,
+        close_submit: nil,
+        close_poll: nil,
+        flat_position: nil,
+        reopen_order: reopen_order,
+        reopen_submit: nil,
+        reopen_poll: nil,
+        final_position: mode == "close_reopen" ? synthetic_position_after_probe(nil, reopen_order&.dig(:summary, :expected_after_short_eth)) : nil
+      )
+    end
+
+    blockers.concat(close_probe_live_blockers(position: position, confirmation: confirmation, current_position: current_position, close_order: close_order, reopen_order: reopen_order))
+    blockers = blockers.uniq
+    return close_reopen_probe_result(status: "blocked_before_submit", blockers: blockers, position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, reopen_order: reopen_order) if blockers.any?
+
+    close_leg = submit_probe_leg(order: close_order)
+    return close_reopen_probe_result(status: close_leg[:status], blockers: close_leg[:blockers], position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, close_submit: close_leg[:submit], reopen_order: reopen_order) unless close_leg[:status] == "submitted"
+
+    close_poll = poll_post_submit_readback(expected_short: BigDecimal("0"), action: "close")
+    unless close_poll[:confirmed]
+      return close_reopen_probe_result(status: "submitted_but_readback_pending", blockers: [], position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, close_submit: close_leg[:submit], close_poll: close_poll, reopen_order: reopen_order)
+    end
+    return close_reopen_probe_result(status: "submitted_and_confirmed", blockers: [], position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, close_submit: close_leg[:submit], close_poll: close_poll, flat_position: close_poll[:position], reopen_order: nil, final_position: close_poll[:position]) if mode == "close_only"
+
+    reopen_leg = submit_probe_leg(order: reopen_order)
+    return close_reopen_probe_result(status: "failed_after_close_manual_action_required", blockers: reopen_leg[:blockers], position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, close_submit: close_leg[:submit], close_poll: close_poll, flat_position: close_poll[:position], reopen_order: reopen_order, reopen_submit: reopen_leg[:submit]) unless reopen_leg[:status] == "submitted"
+
+    expected_reopen = BigDecimal(reopen_order.dig(:summary, :expected_after_short_eth).to_s)
+    reopen_poll = poll_post_submit_readback(expected_short: expected_reopen, action: "open")
+    status = reopen_poll[:confirmed] ? "submitted_and_confirmed" : "submitted_but_readback_pending"
+    close_reopen_probe_result(status: status, blockers: [], position: position, mode: mode, dry_run: false, before_position: current_position, close_order: close_order, close_submit: close_leg[:submit], close_poll: close_poll, flat_position: close_poll[:position], reopen_order: reopen_order, reopen_submit: reopen_leg[:submit], reopen_poll: reopen_poll, final_position: reopen_poll[:position])
+  rescue => e
+    close_reopen_probe_result(status: "failed_before_submit", blockers: [ "#{e.class}: #{e.message}" ], position: position, mode: mode, dry_run: dry_run, before_position: current_position, close_order: close_order, reopen_order: reopen_order)
   end
 
   def build_order_preview(position:, action:, size_eth:, current_position:, max_slippage:)
@@ -359,6 +424,114 @@ class EtherealHedgeExecutionService
 
   def manual_action_required?(status)
     !status.in?(%w[dry_run submitted_and_confirmed])
+  end
+
+  def annotate_close_probe_order(order, mode:, leg:, expected_after_short_eth:)
+    summary = order.fetch(:summary).merge(
+      action: "cross_close_reopen_probe",
+      probe_mode: mode,
+      probe_leg: leg,
+      close_reopen_probe: true,
+      expected_after_short_eth: decimal_string(expected_after_short_eth)
+    )
+    warnings = order.fetch(:warnings) + [
+      "Ethereal close probe uses cross-margin reduce-only close and optional target reopen; no hedge target change."
+    ]
+    order.merge(summary: summary, warnings: warnings.uniq)
+  end
+
+  def close_probe_position_blockers(mode:, current_position:, close_order:, reopen_order:)
+    blockers = []
+    blockers << "mode must be close_only or close_reopen" unless mode.in?(%w[close_only close_reopen])
+    blockers << "current Ethereal readback is unavailable" if current_position == :unavailable || current_position.nil?
+    blockers << "current Ethereal position must be a cross-margin short" unless cross_short_position?(current_position)
+    blockers << "close order size must be positive" unless BigDecimal(close_order.dig(:summary, :rounded_size_eth).to_s).positive?
+    blockers << "close order must be buy reduce-only" unless close_order.dig(:summary, :side) == "buy" && close_order.dig(:summary, :reduce_only) == true
+    if mode == "close_reopen"
+      blockers << "reopen target size must be positive" unless BigDecimal(reopen_order&.dig(:summary, :rounded_size_eth).to_s).positive?
+      blockers << "reopen order must be sell non-reduce-only" unless reopen_order&.dig(:summary, :side) == "sell" && reopen_order&.dig(:summary, :reduce_only) == false
+    end
+    blockers.concat(close_order.fetch(:blockers, []))
+    blockers.concat(reopen_order.fetch(:blockers, [])) if reopen_order
+    blockers.uniq
+  end
+
+  def close_probe_live_blockers(position:, confirmation:, current_position:, close_order:, reopen_order:)
+    blockers = []
+    blockers << "AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED must be true" unless close_probe_enabled?
+    blockers << "submitted confirmation must equal #{CLOSE_PROBE_CONFIRMATION}" unless confirmation.to_s == CLOSE_PROBE_CONFIRMATION
+    blockers << "position must be active" unless position.active?
+    blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
+    blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
+    blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required" unless ethereal_subaccount_configured?
+    blockers << "ETHEREAL_API_BASE_URL is required" if @env["ETHEREAL_API_BASE_URL"].blank?
+    blockers << "Ethereal signer service URL is required" if signer_url.blank?
+    blockers << "Ethereal signer service does not advertise Ethereal support" if signer_url.present? && !signer_supports_ethereal?
+    blockers.concat(close_probe_position_blockers(mode: close_order.dig(:summary, :probe_mode), current_position: current_position, close_order: close_order, reopen_order: reopen_order))
+    blockers.uniq
+  end
+
+  def close_probe_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["AERODROME_ETHEREAL_CLOSE_PROBE_ENABLED"])
+  end
+
+  def submit_probe_leg(order:)
+    signing = sign(order.fetch(:typed_data), order: order)
+    unless signing[:status] == "signed"
+      return { status: "failed_before_submit", blockers: [ signing[:reason] || "Ethereal signer did not return a signature" ], submit: nil }
+    end
+
+    payload = order.fetch(:submit_payload).deep_dup
+    payload[:signature] = signing.fetch(:signature)
+    parsed = parse_submit_response(post_order(payload))
+    return { status: "failed_before_submit", blockers: [ parsed[:message] ], submit: parsed } unless parsed[:status] == "submitted"
+
+    { status: "submitted", blockers: [], submit: parsed }
+  end
+
+  def close_reopen_probe_result(status:, blockers:, position:, mode:, dry_run:, before_position:, close_order:, close_submit: nil, close_poll: nil, flat_position: nil, reopen_order: nil, reopen_submit: nil, reopen_poll: nil, final_position: nil)
+    receipt = {
+      timestamp: @now.call.utc.iso8601,
+      action: "cross_close_reopen_probe",
+      venue: "ethereal",
+      mode: mode,
+      dry_run: dry_run,
+      position_id: position.id,
+      source: position.respond_to?(:position_source) ? position.position_source : nil,
+      source_external_id: position.respond_to?(:external_id) ? position.external_id : nil,
+      before_readback: serialize_position(before_position),
+      close_payload_summary: sanitized_order_summary(close_order),
+      close_submit_classification: close_submit,
+      close_poll_attempts: close_poll&.fetch(:attempts, []),
+      flat_readback: serialize_position(flat_position),
+      reopen_payload_summary: sanitized_order_summary(reopen_order),
+      reopen_submit_classification: reopen_submit,
+      reopen_poll_attempts: reopen_poll&.fetch(:attempts, []),
+      final_readback: serialize_position(final_position),
+      final_status: status,
+      final_message: close_reopen_probe_message(status: status, mode: mode, dry_run: dry_run),
+      orders_placed: probe_orders_placed(close_submit, reopen_submit),
+      signatures_created: probe_orders_placed(close_submit, reopen_submit),
+      exchange_order_ids: [ close_submit&.dig(:exchange_order_id), reopen_submit&.dig(:exchange_order_id) ].compact,
+      manual_action_required: manual_action_required?(status),
+      blockers: unique_messages(blockers),
+      warnings: unique_messages(close_order.fetch(:warnings, []) + (reopen_order&.fetch(:warnings, []) || []))
+    }.compact
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def probe_orders_placed(close_submit, reopen_submit)
+    [ close_submit, reopen_submit ].compact.count { |submit| submit[:status] == "submitted" }
+  end
+
+  def close_reopen_probe_message(status:, mode:, dry_run:)
+    return "Ethereal close/reopen probe dry-run only; no signature or order submission." if dry_run
+    return "Ethereal close-only probe submitted and confirmed flat by readback." if status == "submitted_and_confirmed" && mode == "close_only"
+    return "Ethereal close/reopen probe submitted and confirmed by readback." if status == "submitted_and_confirmed"
+    return "Ethereal close probe submit accepted but flat readback was not confirmed; reopen was not submitted." if status == "submitted_but_readback_pending" && mode == "close_reopen"
+    return "Ethereal close confirmed flat but reopen failed; manual action required." if status == "failed_after_close_manual_action_required"
+
+    status
   end
 
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)

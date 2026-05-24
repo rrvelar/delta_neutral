@@ -153,6 +153,44 @@ namespace :ethereal do
     abort("Ethereal delta probe did not pass: #{result.status}") unless result.status.in?(%w[dry_run submitted_and_confirmed])
   end
 
+  desc "Controlled Ethereal full close and optional reopen live verification path; dry-run by default"
+  task close_reopen_live_check: :environment do
+    mode = (ENV["mode"] || ENV["MODE"] || "close_only").to_s.downcase
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
+    position = ethereal_delta_probe_position
+    current_position = ethereal_delta_probe_current_position
+    target_size = ethereal_close_probe_target_size(position)
+    service = ethereal_delta_probe_service(current_position)
+
+    result = service.close_reopen_probe(
+      position: position,
+      mode: mode,
+      target_size_eth: target_size,
+      current_position: current_position,
+      confirmation: confirmation,
+      max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01",
+      dry_run: dry_run
+    )
+
+    receipt_path = Rails.root.join("storage", "ethereal_close_reopen_live_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    FileUtils.mkdir_p(receipt_path.dirname)
+    File.open(receipt_path, "a") { |file| file.puts(JSON.generate(result.receipt)) }
+
+    puts JSON.pretty_generate(result.receipt)
+    puts "Receipt appended to #{receipt_path}"
+    abort("Ethereal close/reopen probe did not pass: #{result.status}") unless result.status.in?(%w[dry_run submitted_and_confirmed])
+  end
+
+  def ethereal_close_probe_target_size(position)
+    hedge = position.hedge
+    valuation = PositionValuation.current(position)
+    exposure = valuation.weth_exposure || position.mellow_weth_exposure
+    return BigDecimal("0") unless hedge && exposure
+
+    BigDecimal(exposure.to_s) * BigDecimal(hedge.target.to_s)
+  end
+
   def ethereal_delta_probe_position
     return ethereal_delta_probe_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_ETHEREAL_READBACK"])
 
@@ -160,9 +198,9 @@ namespace :ethereal do
   end
 
   def ethereal_delta_probe_mock_position
-    hedge = Struct.new(:id, keyword_init: true) do
+    hedge = Struct.new(:id, :target, keyword_init: true) do
       def ethereal_execution? = true
-    end.new(id: ENV["HEDGE_ID"] || 3)
+    end.new(id: ENV["HEDGE_ID"] || 3, target: BigDecimal("1.0"))
     Struct.new(:id, :hedge, :asset0_price_usd, :external_id, keyword_init: true) do
       def active? = true
       def mellow_autopilot? = true
@@ -171,6 +209,8 @@ namespace :ethereal do
       def mellow_weth_exposure = BigDecimal("0.5607")
       def mellow_usdc_exposure = BigDecimal("240")
       def mellow_current_value_usd = BigDecimal("1417.47")
+      def mellow_metadata_hash = { "hedge_ready" => true, "last_probe_confidence" => "high" }
+      def entry_value_usd = BigDecimal("1417.47")
     end.new(
       id: ENV["position_id"] || ENV["POSITION_ID"] || 3,
       hedge: hedge,
