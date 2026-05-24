@@ -64,6 +64,24 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "submitted confirmation must equal #{EtherealHedgeExecutionService::CONFIRMATION}"
   end
 
+  test "live preflight deduplicates missing linked signer blocker" do
+    service = build_service
+    service.instance_variable_set(:@env, service.instance_variable_get(:@env).except("ETHEREAL_LINKED_SIGNER_ADDRESS"))
+
+    report = service.preflight(
+      position: fake_position,
+      action: "open",
+      size_eth: "0.1",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_equal 1, report.fetch(:blockers).count { |blocker| blocker == "ETHEREAL_LINKED_SIGNER_ADDRESS is required" }
+    assert_not_includes report.fetch(:blockers), "ETHEREAL_LINKED_SIGNER_ADDRESS is required for Ethereal order payloads"
+    assert_equal report.fetch(:blockers).uniq, report.fetch(:blockers)
+  end
+
   test "accepted submit requires readback confirmation before success" do
     reads = [ ethereal_short("0.5"), ethereal_short("0.55") ]
     venue = FakeVenue.new(position: nil)

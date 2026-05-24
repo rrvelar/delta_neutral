@@ -59,7 +59,7 @@ class EtherealHedgeExecutionService
       submitted: false,
       manual_action_required: blockers.any?,
       next_action: blockers.any? ? "Resolve Ethereal live blockers before submitting." : "Submit through dashboard live action with exact Ethereal confirmation.",
-      blockers: blockers,
+      blockers: unique_messages(blockers),
       warnings: order.fetch(:warnings)
     }
   end
@@ -198,10 +198,11 @@ class EtherealHedgeExecutionService
     blockers << "current Ethereal readback is unavailable" if current_position == :unavailable
     blockers << "current Ethereal position is long; manual action required" if position_size(current_position).positive?
     blockers << "target size is zero" if action.to_s == "open" && !BigDecimal(size_eth.to_s).positive?
-    blockers.uniq
+    unique_messages(blockers)
   end
 
   def result(status, blockers, order, position, action, pre_position, submit_response, post_position, readback_poll)
+    blockers = unique_messages(blockers)
     receipt = {
       timestamp: @now.call.utc.iso8601,
       action: action,
@@ -394,9 +395,8 @@ class EtherealHedgeExecutionService
     blockers << "Ethereal mark/limit price is unavailable" unless price&.positive?
     blockers << "ETHEREAL_ONCHAIN_ID is required for Ethereal order payloads" unless ethereal_onchain_id.positive?
     blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required for Ethereal order payloads" unless ethereal_subaccount_configured?
-    blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required for Ethereal order payloads" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
     blockers << mapping_error if mapping_error.present?
-    blockers
+    unique_messages(blockers)
   end
 
   def sanitized_order_summary(order)
@@ -497,6 +497,10 @@ class EtherealHedgeExecutionService
 
   def ethereal_subaccount_configured?
     @env["ETHEREAL_SUBACCOUNT_ID"].present? || @env["ETHEREAL_SUBACCOUNT_NAME"].present?
+  end
+
+  def unique_messages(messages)
+    messages.compact.map(&:to_s).reject(&:blank?).uniq
   end
 
   def mapped_uuid_subaccount(value)

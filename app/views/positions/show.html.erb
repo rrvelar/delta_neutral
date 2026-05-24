@@ -292,7 +292,7 @@
                 <div class="mt-3 rounded-lg border border-yellow-900/60 bg-yellow-950/20 p-3 text-xs text-yellow-100">
                   <p class="font-medium text-yellow-200">Venue blockers</p>
                   <ul class="mt-2 space-y-1">
-                    <% selected_adapter.blockers.each do |blocker| %>
+                    <% selected_adapter.blockers.uniq.each do |blocker| %>
                       <li class="break-words whitespace-normal">- <%= blocker %></li>
                     <% end %>
                   </ul>
@@ -301,7 +301,7 @@
               <% if @selected_hedge_venue_dashboard.present? %>
                 <% venue_dashboard = @selected_hedge_venue_dashboard %>
                 <% preflight = venue_dashboard[:live_preflight] || {} %>
-                <% live_blockers = preflight[:blockers] || [] %>
+                <% live_blockers = (preflight[:blockers] || []).uniq %>
                 <%
                   live_status, live_detail =
                     if selected_adapter.venue_name == "Ethereal"
@@ -481,7 +481,7 @@
                 <% action_visible = action_state[:visible] %>
                 <% if selected_venue.in?(%w[nado ethereal]) && @selected_hedge_venue_dashboard.present? %>
                   <% venue_action_preflight = (@selected_hedge_venue_dashboard[:action_live_preflights] || {})[key] || {} %>
-                  <% venue_button_blockers = (venue_action_preflight[:blockers] || []).reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
+                  <% venue_button_blockers = (venue_action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
                   <% action_visible = case key
                     when :open then @selected_hedge_venue_dashboard[:next_action] == "open"
                     when :rebalance then @selected_hedge_venue_dashboard[:next_action].in?([ "increase short", "reduce short" ])
@@ -490,7 +490,7 @@
                     end %>
                   <% action_state = {
                     live_enabled: selected_adapter.live_enabled? && venue_button_blockers.blank?,
-                    blockers: venue_action_preflight[:blockers] || [],
+                    blockers: (venue_action_preflight[:blockers] || []).uniq,
                     label: label
                   } %>
                   <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION %>
