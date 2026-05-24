@@ -52,14 +52,14 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
     assert_equal "2500.5", price.fetch(:mark_price)
   end
 
-  test "position normalizes short side as negative signed size" do
+  test "position normalizes signed negative size as short" do
     stub_product
     stub_market_price
     stub_request(:get, "#{API_BASE}/v1/position/active")
       .with(query: { subaccountId: SUBACCOUNT_ID, productId: PRODUCT_ID })
       .to_return(status: 200, body: { data: {
         id: "pos-1",
-        size: "0.42",
+        size: "-0.42",
         side: 1,
         cost: "-1050",
         unrealizedPnl: "12.5",
@@ -72,6 +72,24 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
     assert_equal BigDecimal("-0.42"), position.signed_size
     assert_equal BigDecimal("0.42"), position.short_size
     assert_equal BigDecimal("2500.5"), position.mark_price
+  end
+
+  test "position prefers signed raw size over numeric side" do
+    stub_product
+    stub_market_price
+    stub_request(:get, "#{API_BASE}/v1/position/active")
+      .with(query: { subaccountId: SUBACCOUNT_ID, productId: PRODUCT_ID })
+      .to_return(status: 200, body: { data: {
+        id: "pos-1",
+        size: "0.42",
+        side: 1,
+        cost: "1050"
+      } }.to_json)
+
+    position = enabled_probe.get_position
+
+    assert_equal BigDecimal("0.42"), position.signed_size
+    assert_equal BigDecimal("0"), position.short_size
   end
 
   test "position returns unsupported without subaccount id" do

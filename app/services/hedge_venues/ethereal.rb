@@ -53,7 +53,8 @@ module HedgeVenues
         current_short_eth: position&.dig(:short_size),
         current_side: position&.dig(:side),
         margin_mode: "cross",
-        effective_leverage: position&.dig(:effective_leverage)
+        effective_leverage: position&.dig(:effective_leverage),
+        warnings: (Array(health[:warnings]) + Array(position&.dig(:warnings))).uniq
       ).reject { |_key, value| value.nil? }
     rescue => e
       { venue: venue_name, mode: mode, status: "unavailable", blockers: blockers, warnings: warnings + [ e.message ] }
@@ -119,7 +120,8 @@ module HedgeVenues
     def normalize_position(snapshot)
       source = snapshot.respond_to?(:to_h) ? snapshot.to_h : snapshot.as_json
       source = source.to_h.with_indifferent_access
-      signed_size = decimal_or_nil(source[:signed_size])
+      raw_size = raw_position_size(source)
+      signed_size = raw_size || decimal_or_nil(source[:signed_size])
       short_size = decimal_or_nil(source[:short_size])
       signed_size ||= short_size&.positive? ? -short_size : BigDecimal("0")
       return nil if signed_size.zero?
@@ -129,6 +131,7 @@ module HedgeVenues
       account_value = decimal_or_nil(account[:account_value_usd]) || decimal_or_nil(account[:collateral_usd])
       effective = notional && account_value&.positive? ? notional.abs / account_value : nil
       side = signed_size.negative? ? "short" : "long"
+      position_warnings = raw_side_size_warnings(source, signed_size)
       {
         venue: venue_name,
         symbol: "ETH-PERP",
@@ -146,7 +149,8 @@ module HedgeVenues
         withdrawable_usd: account[:withdrawable_usd],
         effective_leverage: effective&.to_s("F"),
         raw: source[:raw],
-        status: source[:status]
+        status: source[:status],
+        warnings: position_warnings.presence
       }.compact
     end
 
@@ -183,6 +187,35 @@ module HedgeVenues
 
     def decimal_string_or_value(value)
       value.is_a?(BigDecimal) ? value.to_s("F") : value
+    end
+
+    def raw_position_size(source)
+      raw = source[:raw]
+      return nil unless raw.respond_to?(:[])
+
+      decimal_or_nil(raw[:size] || raw["size"])
+    end
+
+    def raw_side_size_warnings(source, signed_size)
+      raw = source[:raw]
+      return [] unless raw.respond_to?(:[])
+
+      raw_side = raw[:side] || raw["side"]
+      side_direction = raw_side_direction(raw_side)
+      size_direction = signed_size.negative? ? "short" : "long"
+      return [] unless side_direction && side_direction != size_direction
+
+      [ "Ethereal raw side=#{raw_side.inspect} disagrees with signed size #{signed_size.to_s('F')}; using signed size as source of truth." ]
+    end
+
+    def raw_side_direction(value)
+      return nil if value.nil?
+
+      text = value.to_s.downcase
+      return "short" if text.in?(%w[1 short sell])
+      return "long" if text.in?(%w[0 long buy])
+
+      nil
     end
 
     def decimal_or_nil(value)

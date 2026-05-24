@@ -60,6 +60,37 @@ module HedgeVenues
       assert_not state.key?(:raw)
     end
 
+    test "ethereal read position treats negative raw size as short even when numeric side is present" do
+      venue = HedgeVenues::Ethereal.new(env: ethereal_readonly_env, probe: ethereal_probe_with_position(raw_size: "-0.5607", raw_side: 1))
+
+      position = venue.read_position(symbol: "ETH")
+      state = venue.account_state
+
+      assert_equal "short", position.fetch(:side)
+      assert_equal "-0.5607", position.fetch(:size)
+      assert_equal "0.5607", position.fetch(:short_size)
+      assert_equal "cross", position.fetch(:margin_mode)
+      assert_nil position[:warnings]
+      assert_equal "0.5607", state.fetch(:current_short_eth)
+      assert_equal "short", state.fetch(:current_side)
+      assert_equal 1, state.fetch(:hedge_positions_count)
+    end
+
+    test "ethereal read position treats positive raw size as long and warns on side disagreement" do
+      venue = HedgeVenues::Ethereal.new(env: ethereal_readonly_env, probe: ethereal_probe_with_position(raw_size: "0.5607", raw_side: 1))
+
+      position = venue.read_position(symbol: "ETH")
+      state = venue.account_state
+
+      assert_equal "long", position.fetch(:side)
+      assert_equal "0.5607", position.fetch(:size)
+      assert_equal "0", position.fetch(:short_size)
+      assert_match "disagrees with signed size", position.fetch(:warnings).first
+      assert_equal "0", state.fetch(:current_short_eth)
+      assert_equal "long", state.fetch(:current_side)
+      assert_match "disagrees with signed size", state.fetch(:warnings).last
+    end
+
     test "nado preview is dry run only and rounds size to increment" do
       venue = HedgeVenues::Nado.new(env: { "NADO_SIZE_INCREMENT" => "0.01" })
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")
@@ -1317,6 +1348,41 @@ module HedgeVenues
         "NADO_GATEWAY_QUERY_BASE_URL" => "https://nado.example/v1",
         "NADO_ACCOUNT_SUBACCOUNT" => "0xsubaccount"
       }
+    end
+
+    def ethereal_readonly_env
+      {
+        "ETHEREAL_READ_ONLY_ENABLED" => "true",
+        "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+        "ETHEREAL_SUBACCOUNT_ID" => "primary"
+      }
+    end
+
+    def ethereal_probe_with_position(raw_size:, raw_side:)
+      account_health = HedgeBackends::AccountHealth.new(
+        backend: "ethereal",
+        collateral: "USD",
+        account_value_usd: "2000",
+        withdrawable_usd: "1500",
+        margin_used_usd: "500",
+        status: "ok"
+      )
+      raw = { "size" => raw_size, "side" => raw_side }
+      snapshot = HedgeBackends::PositionSnapshot.new(
+        backend: "ethereal",
+        asset: "ETH",
+        market: "ETHUSD",
+        signed_size: raw_side.to_i == 1 ? BigDecimal(raw_size).abs : BigDecimal(raw_size),
+        short_size: "0",
+        mark_price: "2100",
+        position_value: "1178.87",
+        raw: raw,
+        status: "ok"
+      )
+      Object.new.tap do |probe|
+        probe.define_singleton_method(:get_position) { |_symbol| snapshot }
+        probe.define_singleton_method(:account_health) { account_health }
+      end
     end
 
     def nado_cross_margin_response(amount:)

@@ -95,8 +95,7 @@ module HedgeBackends
       position = response["data"].is_a?(Hash) ? response["data"] : response
       return zero_position(asset, product, subaccount_id, response) if position.blank? || position["id"].blank?
 
-      size = decimal_or_nil(position["size"])
-      signed_size = position["side"].to_i == 1 && size ? -size : size
+      signed_size = signed_position_size(position)
       short_size = signed_size&.negative? ? signed_size.abs : BigDecimal("0")
       mark_price = decimal_or_nil(get_mark_price(asset)[:mark_price])
 
@@ -312,6 +311,13 @@ module HedgeBackends
 
     def collateral_token?(token_name)
       %w[USD USDE USDe].include?(token_name.to_s)
+    end
+
+    def signed_position_size(position)
+      size = decimal_or_nil(position["size"])
+      return size if size&.nonzero?
+
+      position["side"].to_i == 1 && size ? -size : size
     end
 
     def decimal_or_nil(value)
