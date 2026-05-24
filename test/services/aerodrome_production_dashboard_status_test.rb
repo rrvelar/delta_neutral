@@ -172,6 +172,48 @@ class AerodromeProductionDashboardStatusTest < ActiveSupport::TestCase
     position&.destroy
   end
 
+  test "handles Ethereal string numeric readback without serializer errors" do
+    position = create_mellow_position(
+      user_weth_exposure: "0.56279",
+      user_usdc_exposure: "100",
+      user_total_value_usd: "1262.0"
+    )
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.01", active: true, execution_venue: "ethereal")
+    ethereal_position = {
+      venue: "Ethereal",
+      symbol: "ETH-PERP",
+      side: "short",
+      size: "-0.5607",
+      short_size: "0.5607",
+      margin_mode: "cross",
+      mark_price: "2102.5",
+      notional_usd: "1178.87175",
+      effective_leverage: "0.589435875",
+      status: "ok"
+    }
+
+    with_env(@env) do
+      report = AerodromeProductionDashboardStatus.new(
+        position: position,
+        hedge_venue_adapter: VenueReadMock.new(ethereal_position)
+      ).report
+
+      assert_equal "ethereal", report.fetch(:execution_venue)
+      assert_equal "Ethereal", report.fetch(:execution_venue_name)
+      assert_equal "0.5607", report.fetch(:current_short_eth)
+      assert_equal "0.00209", report.fetch(:drift_eth)
+      assert_equal false, report.fetch(:rebalance_needed_now)
+      assert_equal "cross", report.fetch(:margin_mode)
+      assert_equal "2102.5", report.fetch(:mark_price)
+      assert_equal "1178.87175", report.fetch(:current_venue_notional_usd)
+      assert_equal "0.589435875", report.fetch(:current_venue_position).fetch(:effective_leverage)
+      assert_equal "0.5607", report.fetch(:current_venue_position).fetch(:short_size)
+      assert_nil report.fetch(:current_hyperliquid_eth_position)
+    end
+  ensure
+    position&.destroy
+  end
+
   private
 
   class HyperliquidReadMock

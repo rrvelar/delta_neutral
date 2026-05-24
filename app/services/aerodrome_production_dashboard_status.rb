@@ -36,14 +36,14 @@ class AerodromeProductionDashboardStatus
       target_hedge_notional_usd: target && eth_price ? (target * eth_price).to_s("F") : nil,
       current_short_eth: current_short.to_s("F"),
       current_venue_short_eth: current_short.to_s("F"),
-      current_short_notional_usd: current_notional_usd(eth_position, current_short)&.to_s("F"),
-      current_venue_notional_usd: current_notional_usd(eth_position, current_short)&.to_s("F"),
+      current_short_notional_usd: decimal_to_plain_string(current_notional_usd(eth_position, current_short)),
+      current_venue_notional_usd: decimal_to_plain_string(current_notional_usd(eth_position, current_short)),
       drift_eth: drift&.to_s("F"),
       drift_notional_usd: drift_usd&.to_s("F"),
       margin_mode: eth_position&.dig(:margin_mode),
-      isolated_margin_usd: eth_position&.dig(:isolated_margin_usd)&.to_s("F"),
-      entry_price: eth_position&.dig(:entry_price)&.to_s("F"),
-      mark_price: eth_position&.dig(:mark_price)&.to_s("F"),
+      isolated_margin_usd: decimal_to_plain_string(eth_position&.dig(:isolated_margin_usd)),
+      entry_price: decimal_to_plain_string(eth_position&.dig(:entry_price)),
+      mark_price: decimal_to_plain_string(eth_position&.dig(:mark_price)),
       venue_hedge_unrealized_pnl_usd: venue_hedge_unrealized_pnl(eth_position)&.to_s("F"),
       venue_hedge_pnl_available: venue_hedge_unrealized_pnl(eth_position).present?,
       venue_hedge_pnl_message: venue_hedge_pnl_message(eth_position),
@@ -229,6 +229,14 @@ class AerodromeProductionDashboardStatus
     nil
   end
 
+  def decimal_to_plain_string(value)
+    return nil if value.blank?
+
+    BigDecimal(value.to_s).to_s("F")
+  rescue ArgumentError
+    nil
+  end
+
   def rebalance_needed?(target:, drift:)
     tolerance = target && @hedge ? target * @hedge.tolerance : nil
     drift && tolerance ? drift.abs > tolerance : false
@@ -272,8 +280,8 @@ class AerodromeProductionDashboardStatus
       symbol: position[:symbol],
       product_id: position[:product_id],
       side: position[:side],
-      size: BigDecimal(position.fetch(:size).to_s).to_s("F"),
-      short_size: position[:short_size]&.to_s("F"),
+      size: decimal_to_plain_string(position.fetch(:size)),
+      short_size: decimal_to_plain_string(position[:short_size]),
       margin_mode: position[:margin_mode],
       entry_price: decimal_hash_value(position, :entry_price)&.to_s("F"),
       mark_price: decimal_hash_value(position, :mark_price)&.to_s("F"),

@@ -422,6 +422,49 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action='#{hedge_open_position_path(position)}'] input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 
+  test "show selected Ethereal venue renders current short when readback values are strings" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    with_env(
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "false",
+      "ETHEREAL_READ_ONLY_ENABLED" => "true",
+      "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+      "ETHEREAL_SUBACCOUNT_ID" => "0x7072696d61727900000000000000000000000000000000000000000000000000",
+      "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
+      "ETHEREAL_ONCHAIN_ID" => "2",
+      "ETHEREAL_LOT_SIZE" => "0.0001",
+      "ETHEREAL_TICK_SIZE" => "0.1",
+      "EXECUTION_SIGNER_URL" => "http://signer.example"
+    ) do
+      stub_ethereal_readback(
+        position: position,
+        active_position: {
+          id: "ethereal-pos-1",
+          size: "-0.5607",
+          side: 1,
+          cost: "-1178.87175",
+          unrealizedPnl: "1.25"
+        }
+      )
+      stub_request(:get, "https://ethereal.example/v1/product/market-price?productIds=2")
+        .to_return(status: 200, body: { data: [ { productId: 2, oraclePrice: "2102.5" } ] }.to_json)
+      stub_request(:get, "https://ethereal.example/v1/rpc/config")
+        .to_return(status: 200, body: { domain: {} }.to_json)
+      stub_request(:get, "http://signer.example/health")
+        .to_return(status: 200, body: { ok: true, supported_exchanges: [ "Nado", "Ethereal" ], supported_actions: [ "place_order" ] }.to_json)
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position, hedge_venue: "ethereal")
+      end
+    end
+
+    assert_response :success
+    assert_match "Current Ethereal ETH-PERP position", response.body
+    assert_match "Current Ethereal ETH short", response.body
+    assert_match "0.560700", response.body
+    assert_no_match "current Ethereal position is long", response.body
+  end
+
   test "show selected Nado venue renders live gated mode and disabled live actions" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
@@ -1460,6 +1503,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
             id: 2,
             onchainId: 2,
             displayTicker: "ETHUSD",
+            ticker: "ETHUSD",
             lotSize: "0.0001",
             tickSize: "0.1",
             status: "active",
