@@ -36,7 +36,14 @@ namespace :ethereal do
         "ETHEREAL_LOT_SIZE" => ENV.fetch("ETHEREAL_LOT_SIZE", "0.0001"),
         "ETHEREAL_TICK_SIZE" => ENV.fetch("ETHEREAL_TICK_SIZE", "0.1")
       ),
-      http_get: ->(_uri) { Struct.new(:body).new({ domain: EtherealHedgeExecutionService::DOMAIN }.to_json) },
+      http_get: ->(uri) {
+        body = if uri.to_s.include?("/v1/subaccount/")
+          { id: ENV["ETHEREAL_SUBACCOUNT_ID"], name: ENV.fetch("ETHEREAL_SUBACCOUNT_NAME", "0x7072696d61727900000000000000000000000000000000000000000000000000") }
+        else
+          { domain: EtherealHedgeExecutionService::DOMAIN }
+        end
+        Struct.new(:body).new(body.to_json)
+      },
       sleeper: ->(_) { }
     )
 

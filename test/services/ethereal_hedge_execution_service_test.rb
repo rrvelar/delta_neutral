@@ -119,7 +119,7 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal "0x0000000000000000000000000000000000000001", payload.fetch(:expected_signer_address)
   end
 
-  test "uuid subaccount is resolved through Ethereal subaccount name endpoint" do
+  test "uuid subaccount is resolved through GET subaccount id response name" do
     uuid = "5a1f8999-73f3-426d-9532-41014a7a66aa"
     subaccount = "0x7072696d61727900000000000000000000000000000000000000000000000000"
     get_calls = []
@@ -144,8 +144,61 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     order = service.build_order_preview(position: fake_position, action: "open", size_eth: "0.01", current_position: nil, max_slippage: "0.01")
 
     assert_includes get_calls.first, "/v1/subaccount/#{uuid}"
+    assert get_calls.none? { |url| url.include?("#{uuid}.name") || url.include?("#{uuid}/name") }
     assert_equal subaccount, order.dig(:submit_payload, :data, :subaccount)
     assert_equal subaccount, order.dig(:typed_data, :message, :subaccount)
+  end
+
+  test "explicit subaccount name override must be non-zero bytes32" do
+    service = build_service
+    service.instance_variable_set(:@env, service.instance_variable_get(:@env).merge(
+      "ETHEREAL_SUBACCOUNT_NAME" => "0x#{"00" * 32}"
+    ))
+
+    report = service.preflight(
+      position: fake_position,
+      action: "open",
+      size_eth: "0.01",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_includes report.fetch(:blockers), "Ethereal signed subaccount mapping unavailable/zero; source=ETHEREAL_SUBACCOUNT_NAME"
+  end
+
+  test "missing uuid name fails closed without suffix endpoint" do
+    uuid = "5a1f8999-73f3-426d-9532-41014a7a66aa"
+    get_calls = []
+    service = EtherealHedgeExecutionService.new(
+      env: {
+        "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+        "ETHEREAL_SUBACCOUNT_ID" => uuid,
+        "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
+        "ETHEREAL_ONCHAIN_ID" => "2",
+        "ETHEREAL_LOT_SIZE" => "0.0001",
+        "ETHEREAL_TICK_SIZE" => "0.1"
+      },
+      venue: FakeVenue.new(position: nil),
+      http_get: ->(uri) {
+        get_calls << uri.to_s
+        Struct.new(:body).new({ id: uuid }.to_json)
+      },
+      sleeper: ->(_) { }
+    )
+
+    report = service.preflight(
+      position: fake_position,
+      action: "open",
+      size_eth: "0.01",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_includes report.fetch(:blockers), "Ethereal signed subaccount mapping unavailable/zero; source=GET /v1/subaccount/{id} response.name"
+    assert get_calls.any? { |url| url.include?("/v1/subaccount/#{uuid}") }
+    assert get_calls.none? { |url| url.include?("#{uuid}.name") || url.include?("#{uuid}/name") }
   end
 
   private

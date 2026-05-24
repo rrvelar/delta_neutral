@@ -95,7 +95,19 @@ class EtherealHedgeExecutionService
     account_value = decimal_or_nil(account_state[:account_value_usd]) || decimal_or_nil(account_state[:collateral_usd])
     effective = account_value&.positive? && notional ? notional.abs / account_value : nil
     client_order_id = ethereal_client_order_id("#{position.id}#{action}#{@now.call.to_i}#{rounded_size.to_s('F').delete('.')}")
-    typed_data = build_typed_data(quantity: rounded_size, price: price, side: side, reduce_only: reduce_only)
+    mapping_error = nil
+    typed_data = begin
+      build_typed_data(quantity: rounded_size, price: price, side: side, reduce_only: reduce_only)
+    rescue => e
+      mapping_error = e.message
+      build_typed_data(
+        quantity: rounded_size,
+        price: price,
+        side: side,
+        reduce_only: reduce_only,
+        subaccount: zero_bytes32
+      )
+    end
     submit_payload = build_submit_payload(typed_data: typed_data, quantity: rounded_size, price: price, client_order_id: client_order_id, signature: "PENDING_EXTERNAL_SIGNER")
 
     {
@@ -120,7 +132,7 @@ class EtherealHedgeExecutionService
         client_order_id: client_order_id,
         onchain_id: ethereal_onchain_id
       },
-      blockers: preview_blockers(rounded_size: rounded_size, price: price),
+      blockers: preview_blockers(rounded_size: rounded_size, price: price, mapping_error: mapping_error),
       warnings: [ "Ethereal uses cross margin only; effective leverage is estimated from notional / account value." ]
     }
   end
@@ -247,11 +259,11 @@ class EtherealHedgeExecutionService
     end
   end
 
-  def build_typed_data(quantity:, price:, side:, reduce_only:)
+  def build_typed_data(quantity:, price:, side:, reduce_only:, subaccount: nil)
     now = @now.call
     message = {
       sender: @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].presence || "0x0000000000000000000000000000000000000000",
-      subaccount: trade_subaccount,
+      subaccount: subaccount || trade_subaccount,
       quantity: scaled_decimal(quantity, 9).to_s,
       price: scaled_decimal(price, 9).to_s,
       reduceOnly: reduce_only,
@@ -375,13 +387,14 @@ class EtherealHedgeExecutionService
     { status: "rejected", message: "Ethereal rejected order: #{status} #{body[:message] || body[:error]}", raw_response: body }
   end
 
-  def preview_blockers(rounded_size:, price:)
+  def preview_blockers(rounded_size:, price:, mapping_error:)
     blockers = []
     blockers << "rounded Ethereal order size is zero" unless rounded_size.positive?
     blockers << "Ethereal mark/limit price is unavailable" unless price&.positive?
     blockers << "ETHEREAL_ONCHAIN_ID is required for Ethereal order payloads" unless ethereal_onchain_id.positive?
     blockers << "ETHEREAL_SUBACCOUNT_ID is required for Ethereal order payloads" if @env["ETHEREAL_SUBACCOUNT_ID"].blank?
     blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required for Ethereal order payloads" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
+    blockers << mapping_error if mapping_error.present?
     blockers
   end
 
@@ -470,8 +483,11 @@ class EtherealHedgeExecutionService
   end
 
   def trade_subaccount
+    override = @env["ETHEREAL_SUBACCOUNT_NAME"].presence
+    return validated_bytes32_subaccount(override, source: "ETHEREAL_SUBACCOUNT_NAME") if override
+
     value = @env["ETHEREAL_SUBACCOUNT_ID"].to_s
-    return "0x#{value.delete_prefix('0x').downcase}" if value.start_with?("0x") && value.delete_prefix("0x").length == 64
+    return validated_bytes32_subaccount(value, source: "ETHEREAL_SUBACCOUNT_ID") if bytes32?(value)
     return mapped_uuid_subaccount(value) if uuid?(value)
 
     encoded = value.bytes.map { |byte| byte.to_s(16).rjust(2, "0") }.join
@@ -482,10 +498,24 @@ class EtherealHedgeExecutionService
     response = @http_get.call(uri_for("/v1/subaccount/#{value}"))
     body = response.respond_to?(:body) ? JSON.parse(response.body) : response
     data = body["data"].is_a?(Hash) ? body["data"] : body
-    name = data["name"].to_s
-    return "0x#{name.delete_prefix('0x').downcase}" if name.start_with?("0x") && name.delete_prefix("0x").length == 64
+    validated_bytes32_subaccount(data["name"].to_s, source: "GET /v1/subaccount/{id} response.name")
+  end
 
-    raise "Ethereal signed subaccount mapping unavailable/zero; source=GET_/v1/subaccount/{id}.name"
+  def validated_bytes32_subaccount(value, source:)
+    normalized = "0x#{value.to_s.delete_prefix('0x').downcase}" if bytes32?(value)
+    return normalized if normalized.present? && normalized != zero_bytes32
+
+    raise "Ethereal signed subaccount mapping unavailable/zero; source=#{source}"
+  end
+
+  def bytes32?(value)
+    text = value.to_s
+    cleaned = text.delete_prefix("0x")
+    text.start_with?("0x") && cleaned.length == 64 && cleaned.match?(/\A[0-9a-f]+\z/i)
+  end
+
+  def zero_bytes32
+    "0x#{"00" * 32}"
   end
 
   def uuid?(value)
