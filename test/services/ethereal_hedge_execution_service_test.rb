@@ -64,6 +64,54 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "submitted confirmation must equal #{EtherealHedgeExecutionService::CONFIRMATION}"
   end
 
+  test "live preflight requires signer health to advertise Ethereal support" do
+    service = build_service(
+      http_get: ->(uri) {
+        body = if uri.to_s.end_with?("/health")
+          { ok: true, supported_exchanges: [ "Nado" ], supported_actions: [ "place_order" ] }
+        else
+          { domain: EtherealHedgeExecutionService::DOMAIN }
+        end
+        Struct.new(:body).new(body.to_json)
+      }
+    )
+
+    report = service.preflight(
+      position: fake_position,
+      action: "open",
+      size_eth: "0.1",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_includes report.fetch(:blockers), "Ethereal signer service does not advertise Ethereal support"
+  end
+
+  test "live preflight accepts mocked signer health with Ethereal support" do
+    service = build_service(
+      http_get: ->(uri) {
+        body = if uri.to_s.end_with?("/health")
+          { ok: true, supported_exchanges: [ "Nado", "Ethereal" ], supported_actions: [ "place_order" ] }
+        else
+          { domain: EtherealHedgeExecutionService::DOMAIN }
+        end
+        Struct.new(:body).new(body.to_json)
+      }
+    )
+
+    report = service.preflight(
+      position: fake_position,
+      action: "open",
+      size_eth: "0.1",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_not_includes report.fetch(:blockers), "Ethereal signer service does not advertise Ethereal support"
+  end
+
   test "live preflight deduplicates missing linked signer blocker" do
     service = build_service
     service.instance_variable_set(:@env, service.instance_variable_get(:@env).except("ETHEREAL_LINKED_SIGNER_ADDRESS"))
@@ -221,7 +269,7 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
 
   private
 
-  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil)
+  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil)
     EtherealHedgeExecutionService.new(
       env: {
         "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
@@ -234,7 +282,14 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
         "EXECUTION_SIGNER_URL" => "http://127.0.0.1:8787/sign/eip712"
       },
       venue: venue,
-      http_get: ->(_uri) { Struct.new(:body).new({ domain: EtherealHedgeExecutionService::DOMAIN }.to_json) },
+      http_get: http_get || ->(uri) {
+        body = if uri.to_s.end_with?("/health")
+          { ok: true, supported_exchanges: [ "Nado", "Ethereal" ], supported_actions: [ "place_order" ] }
+        else
+          { domain: EtherealHedgeExecutionService::DOMAIN }
+        end
+        Struct.new(:body).new(body.to_json)
+      },
       http_post: http_post,
       signer_post: signer_post,
       now: -> { Time.zone.local(2026, 5, 24, 12, 0, 0) },

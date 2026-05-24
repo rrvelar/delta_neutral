@@ -195,6 +195,7 @@ class EtherealHedgeExecutionService
     blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required" unless ethereal_subaccount_configured?
     blockers << "ETHEREAL_API_BASE_URL is required" if @env["ETHEREAL_API_BASE_URL"].blank?
     blockers << "Ethereal signer service URL is required" if signer_url.blank?
+    blockers << "Ethereal signer service does not advertise Ethereal support" if signer_url.present? && !signer_supports_ethereal?
     blockers << "current Ethereal readback is unavailable" if current_position == :unavailable
     blockers << "current Ethereal position is long; manual action required" if position_size(current_position).positive?
     blockers << "target size is zero" if action.to_s == "open" && !BigDecimal(size_eth.to_s).positive?
@@ -583,6 +584,27 @@ class EtherealHedgeExecutionService
     return URI(signer_url) if signer_url.to_s.end_with?("/sign/eip712")
 
     URI.join(signer_url.end_with?("/") ? signer_url : "#{signer_url}/", "sign/eip712")
+  end
+
+  def signer_supports_ethereal?
+    return true unless @signer_post.is_a?(Method)
+
+    response = @http_get.call(signer_health_uri)
+    return false unless response.respond_to?(:body)
+
+    body = JSON.parse(response.body)
+    body["ok"] == true &&
+      Array(body["supported_exchanges"]).map(&:to_s).include?("Ethereal") &&
+      Array(body["supported_actions"]).map(&:to_s).include?("place_order")
+  rescue
+    false
+  end
+
+  def signer_health_uri
+    raw = signer_url.to_s
+    return URI(raw.sub(%r{/sign/eip712/?\z}, "/health")) if raw.end_with?("/sign/eip712")
+
+    URI.join(raw.end_with?("/") ? raw : "#{raw}/", "health")
   end
 
   def http_get(uri)
