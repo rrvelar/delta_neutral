@@ -357,6 +357,71 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "code", text: AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION
   end
 
+  test "show selected Ethereal venue enables confirmation input when live gates pass except confirmation" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    with_env(
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+      "ETHEREAL_READ_ONLY_ENABLED" => "true",
+      "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+      "ETHEREAL_SUBACCOUNT_ID" => "0x7072696d61727900000000000000000000000000000000000000000000000000",
+      "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
+      "ETHEREAL_ONCHAIN_ID" => "2",
+      "ETHEREAL_LOT_SIZE" => "0.0001",
+      "ETHEREAL_TICK_SIZE" => "0.1",
+      "EXECUTION_SIGNER_URL" => "http://signer.example"
+    ) do
+      stub_ethereal_readback(position: position, active_position: nil)
+      stub_request(:get, "https://ethereal.example/v1/rpc/config")
+        .to_return(status: 200, body: { domain: {} }.to_json)
+      stub_request(:get, "http://signer.example/health")
+        .to_return(status: 200, body: { ok: true, supported_exchanges: [ "Nado", "Ethereal" ], supported_actions: [ "place_order" ] }.to_json)
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position, hedge_venue: "ethereal")
+      end
+    end
+
+    assert_response :success
+    assert_match "submitted confirmation must equal #{AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION}", response.body
+    assert_no_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation']:not([disabled])"
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][data-required-confirmation='#{AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION}']"
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][oninput*='requiredConfirmation']"
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
+  test "show selected Ethereal venue keeps confirmation input disabled when live flag false" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    with_env(
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "false",
+      "ETHEREAL_READ_ONLY_ENABLED" => "true",
+      "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+      "ETHEREAL_SUBACCOUNT_ID" => "0x7072696d61727900000000000000000000000000000000000000000000000000",
+      "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
+      "ETHEREAL_ONCHAIN_ID" => "2",
+      "ETHEREAL_LOT_SIZE" => "0.0001",
+      "ETHEREAL_TICK_SIZE" => "0.1",
+      "EXECUTION_SIGNER_URL" => "http://signer.example"
+    ) do
+      stub_ethereal_readback(position: position, active_position: nil)
+      stub_request(:get, "https://ethereal.example/v1/rpc/config")
+        .to_return(status: 200, body: { domain: {} }.to_json)
+      stub_request(:get, "http://signer.example/health")
+        .to_return(status: 200, body: { ok: true, supported_exchanges: [ "Nado", "Ethereal" ], supported_actions: [ "place_order" ] }.to_json)
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position, hedge_venue: "ethereal")
+      end
+    end
+
+    assert_response :success
+    assert_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][disabled='disabled']"
+    assert_select "form[action='#{hedge_open_position_path(position)}'] input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
   test "show selected Nado venue renders live gated mode and disabled live actions" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
@@ -1384,6 +1449,37 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       "AERODROME_HEDGE_PAUSED" => "false",
       "HYPERLIQUID_TESTNET" => "false"
     ) { yield }
+  end
+
+  def stub_ethereal_readback(position:, active_position:)
+    subaccount = ENV.fetch("ETHEREAL_SUBACCOUNT_ID")
+    stub_request(:get, "https://ethereal.example/v1/product?limit=100&ticker=ETHUSD")
+      .to_return(status: 200, body: {
+        data: [
+          {
+            id: 2,
+            onchainId: 2,
+            displayTicker: "ETHUSD",
+            lotSize: "0.0001",
+            tickSize: "0.1",
+            status: "active",
+            quoteTokenName: "USD"
+          }
+        ]
+      }.to_json)
+    stub_request(:get, "https://ethereal.example/v1/position/active?productId=2&subaccountId=#{subaccount}")
+      .to_return(status: 200, body: { data: active_position }.to_json)
+    stub_request(:get, "https://ethereal.example/v1/subaccount/balance?subaccountId=#{subaccount}")
+      .to_return(status: 200, body: {
+        data: [
+          {
+            tokenName: "USD",
+            amount: position.total_value_usd.to_s,
+            available: position.total_value_usd.to_s,
+            totalUsed: "0"
+          }
+        ]
+      }.to_json)
   end
 
   def base_wallet

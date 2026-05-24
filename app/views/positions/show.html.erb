@@ -270,7 +270,7 @@
             <p class="text-gray-400 text-xs mt-1">Preview buttons are dry-run. Live buttons submit only one explicit action and remain blocked unless all dashboard live gates are configured.</p>
             <% selected_venue = @selected_hedge_venue || HedgeVenues::DEFAULT %>
             <% selected_adapter = @selected_hedge_venue_adapter || HedgeVenues.build(selected_venue) %>
-            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT || (selected_venue == "nado" && selected_adapter.live_supported? && selected_adapter.live_enabled?) %>
+            <% venue_live_actions_enabled = selected_venue == HedgeVenues::DEFAULT || (selected_venue.in?(%w[nado ethereal]) && selected_adapter.live_supported? && selected_adapter.live_enabled?) %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
               <%= form_with url: hedge_venue_position_path(@position), method: :patch, class: "flex flex-col sm:flex-row gap-3 sm:items-end" do |form| %>
                 <div class="flex-1">
@@ -352,7 +352,7 @@
                       <p class="text-gray-500">Margin mode</p>
                       <% mode = venue_dashboard.dig(:current_venue_position, :margin_mode).to_s %>
                       <p class="mt-1 truncate text-gray-100 font-medium"><%= mode.humanize %><%= mode == "isolated" ? " 1.0x" : "" %></p>
-                      <p class="mt-1 text-gray-500">Desired: isolated 1.0x</p>
+                      <p class="mt-1 text-gray-500">Desired: <%= selected_adapter.venue_name == "Ethereal" ? "cross only" : "isolated 1.0x" %></p>
                     </div>
                   <% end %>
                   <% if venue_dashboard.dig(:current_venue_position, :isolated_margin_usd).present? %>
@@ -496,6 +496,9 @@
                   <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION %>
                 <% end %>
                 <% live_enabled = action_state[:live_enabled] %>
+                <% confirmation_input_enabled = action_visible && live_enabled && venue_live_actions_enabled %>
+                <% confirmation_input_id = "dashboard-hedge-confirmation-#{key}" %>
+                <% live_submit_id = "dashboard-hedge-live-submit-#{key}" %>
                 <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
                   <div class="flex items-center justify-between gap-2">
                     <p class="text-white font-medium"><%= label %></p>
@@ -518,8 +521,19 @@
                   </div>
                   <%= form_with url: live_path, method: :post, class: "mt-3" do |form| %>
                     <%= form.hidden_field :hedge_venue, value: selected_venue %>
-                    <%= form.text_field :dashboard_hedge_confirmation, placeholder: required_phrase, value: "", autocomplete: "off", disabled: !action_visible || !live_enabled || !venue_live_actions_enabled, class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
-                    <%= form.submit "#{label} Live", disabled: !action_visible || !live_enabled || !venue_live_actions_enabled, class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
+                    <%= form.text_field :dashboard_hedge_confirmation,
+                      id: confirmation_input_id,
+                      placeholder: required_phrase,
+                      value: "",
+                      autocomplete: "off",
+                      disabled: !confirmation_input_enabled,
+                      data: { required_confirmation: required_phrase, live_submit_id: live_submit_id },
+                      oninput: "document.getElementById(this.dataset.liveSubmitId).disabled = this.value !== this.dataset.requiredConfirmation",
+                      class: "w-full bg-gray-950 border border-gray-700 rounded-lg px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600 disabled:border-gray-800" %>
+                    <%= form.submit "#{label} Live",
+                      id: live_submit_id,
+                      disabled: true,
+                      class: "mt-2 w-full bg-red-900/70 hover:bg-red-800 disabled:bg-gray-900 disabled:text-gray-600 text-red-100 border border-red-700 disabled:border-gray-800 px-3 py-2 rounded-lg text-xs font-semibold transition" %>
                   <% end %>
                   <% unless venue_live_actions_enabled %>
                     <p class="text-yellow-200 text-xs mt-2">Live submit is disabled for <%= selected_adapter.venue_name %>; previews do not create orders.</p>
