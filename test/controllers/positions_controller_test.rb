@@ -325,6 +325,38 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 
+  test "show selected Ethereal venue uses Ethereal preflight without stale Hyperliquid blockers" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "nado")
+
+    with_env(
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "false",
+      "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
+      "ETHEREAL_SUBACCOUNT_ID" => "022f3030-69bb-4599-83e9-00ab5d109c19",
+      "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
+      "ETHEREAL_ONCHAIN_ID" => "2",
+      "ETHEREAL_LOT_SIZE" => "0.0001",
+      "ETHEREAL_TICK_SIZE" => "0.1"
+    ) do
+      stub_request(:get, "https://ethereal.example/v1/subaccount/022f3030-69bb-4599-83e9-00ab5d109c19")
+        .to_return(status: 200, body: { name: "0x7072696d61727900000000000000000000000000000000000000000000000000" }.to_json)
+      stub_request(:get, "https://ethereal.example/v1/rpc/config")
+        .to_return(status: 200, body: { domain: {} }.to_json)
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position, hedge_venue: "ethereal")
+      end
+    end
+
+    assert_response :success
+    assert_match "Ethereal uses cross margin only", response.body
+    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true", response.body
+    assert_match "Current active hedge venue is Nado; opening Ethereal would create a second hedge unless migration is intended.", response.body
+    assert_no_match "Ethereal live submit adapter is not wired in delta_neutral", response.body
+    assert_no_match "Hyperliquid conflicting hedge check is not wired", response.body
+    assert_no_match "AERODROME_HEDGE_PAUSED must be false", response.body
+    assert_select "code", text: AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION
+  end
+
   test "show selected Nado venue renders live gated mode and disabled live actions" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)

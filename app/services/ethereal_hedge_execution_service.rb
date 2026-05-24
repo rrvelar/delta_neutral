@@ -187,11 +187,12 @@ class EtherealHedgeExecutionService
   def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
     blockers = order.fetch(:blockers).dup
     blockers << "selected hedge execution venue must be ethereal" unless position.hedge&.ethereal_execution?
+    blockers << "Current active hedge venue is #{HedgeVenues.label(position.hedge.execution_venue)}; opening Ethereal would create a second hedge unless migration is intended." if position.hedge && !position.hedge.ethereal_execution?
     blockers << "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true" unless @venue.live_enabled?
     blockers << "submitted confirmation must equal #{CONFIRMATION}" if require_confirmation && confirmation.to_s != CONFIRMATION
     blockers << "active hedge-ready Mellow position is required" unless position.active? && (!position.mellow_autopilot? || position.hedge_ready?)
     blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
-    blockers << "ETHEREAL_SUBACCOUNT_ID is required" if @env["ETHEREAL_SUBACCOUNT_ID"].blank?
+    blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required" unless ethereal_subaccount_configured?
     blockers << "ETHEREAL_API_BASE_URL is required" if @env["ETHEREAL_API_BASE_URL"].blank?
     blockers << "Ethereal signer service URL is required" if signer_url.blank?
     blockers << "current Ethereal readback is unavailable" if current_position == :unavailable
@@ -345,7 +346,7 @@ class EtherealHedgeExecutionService
       size_base: order.dig(:summary, :rounded_size_eth),
       price: order.dig(:summary, :price),
       reduce_only: order.dig(:summary, :reduce_only),
-      subaccount_id: @env["ETHEREAL_SUBACCOUNT_ID"],
+      subaccount_id: @env["ETHEREAL_SUBACCOUNT_ID"].presence || @env["ETHEREAL_SUBACCOUNT_NAME"],
       typed_data: typed_data,
       typed_data_hash: typed_data_hash(typed_data),
       expected_signer_address: @env["ETHEREAL_LINKED_SIGNER_ADDRESS"],
@@ -392,7 +393,7 @@ class EtherealHedgeExecutionService
     blockers << "rounded Ethereal order size is zero" unless rounded_size.positive?
     blockers << "Ethereal mark/limit price is unavailable" unless price&.positive?
     blockers << "ETHEREAL_ONCHAIN_ID is required for Ethereal order payloads" unless ethereal_onchain_id.positive?
-    blockers << "ETHEREAL_SUBACCOUNT_ID is required for Ethereal order payloads" if @env["ETHEREAL_SUBACCOUNT_ID"].blank?
+    blockers << "ETHEREAL_SUBACCOUNT_ID or ETHEREAL_SUBACCOUNT_NAME is required for Ethereal order payloads" unless ethereal_subaccount_configured?
     blockers << "ETHEREAL_LINKED_SIGNER_ADDRESS is required for Ethereal order payloads" if @env["ETHEREAL_LINKED_SIGNER_ADDRESS"].blank?
     blockers << mapping_error if mapping_error.present?
     blockers
@@ -492,6 +493,10 @@ class EtherealHedgeExecutionService
 
     encoded = value.bytes.map { |byte| byte.to_s(16).rjust(2, "0") }.join
     "0x#{encoded.ljust(64, '0')}"
+  end
+
+  def ethereal_subaccount_configured?
+    @env["ETHEREAL_SUBACCOUNT_ID"].present? || @env["ETHEREAL_SUBACCOUNT_NAME"].present?
   end
 
   def mapped_uuid_subaccount(value)

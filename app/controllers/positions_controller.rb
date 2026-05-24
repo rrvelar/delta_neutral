@@ -264,6 +264,17 @@ class PositionsController < ApplicationController
       )
     end
 
+    if @selected_hedge_venue == "ethereal"
+      return EtherealHedgeExecutionService.new(venue: @selected_hedge_venue_adapter).preflight(
+        position: @position,
+        action: action,
+        size_eth: selected_venue_action_size(action: action, target: target, current_short: current_short, drift: drift),
+        current_position: current_position,
+        confirmation: nil,
+        max_slippage: max_slippage
+      )
+    end
+
     @selected_hedge_venue_adapter.single_venue_preflight(
       position: @position,
       action: action,

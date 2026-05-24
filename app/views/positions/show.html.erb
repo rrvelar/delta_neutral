@@ -479,9 +479,9 @@
               ].each do |key, preview_path, live_path, label, required_phrase| %>
                 <% action_state = dashboard_actions[key] || {} %>
                 <% action_visible = action_state[:visible] %>
-                <% if selected_venue == "nado" && @selected_hedge_venue_dashboard.present? %>
-                  <% nado_preflight = (@selected_hedge_venue_dashboard[:action_live_preflights] || {})[key] || {} %>
-                  <% nado_button_blockers = (nado_preflight[:blockers] || []).reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
+                <% if selected_venue.in?(%w[nado ethereal]) && @selected_hedge_venue_dashboard.present? %>
+                  <% venue_action_preflight = (@selected_hedge_venue_dashboard[:action_live_preflights] || {})[key] || {} %>
+                  <% venue_button_blockers = (venue_action_preflight[:blockers] || []).reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
                   <% action_visible = case key
                     when :open then @selected_hedge_venue_dashboard[:next_action] == "open"
                     when :rebalance then @selected_hedge_venue_dashboard[:next_action].in?([ "increase short", "reduce short" ])
@@ -489,11 +489,11 @@
                     else false
                     end %>
                   <% action_state = {
-                    live_enabled: selected_adapter.live_enabled? && nado_button_blockers.blank?,
-                    blockers: nado_preflight[:blockers] || [],
+                    live_enabled: selected_adapter.live_enabled? && venue_button_blockers.blank?,
+                    blockers: venue_action_preflight[:blockers] || [],
                     label: label
                   } %>
-                  <% required_phrase = AerodromeDashboardHedgeAction::NADO_CONFIRMATION %>
+                  <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION %>
                 <% end %>
                 <% live_enabled = action_state[:live_enabled] %>
                 <div class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
