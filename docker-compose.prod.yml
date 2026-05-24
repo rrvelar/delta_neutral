@@ -2,7 +2,7 @@ services:
   web:
     build: .
     ports:
-      - "43080:80"
+      - "127.0.0.1:43080:80"
     restart: unless-stopped
     env_file:
       - .env.production
