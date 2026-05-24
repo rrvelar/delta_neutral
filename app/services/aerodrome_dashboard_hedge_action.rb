@@ -1,10 +1,11 @@
 class AerodromeDashboardHedgeAction
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_HYPERLIQUID_ORDERS"
   NADO_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS"
+  ETHEREAL_CONFIRMATION = EtherealHedgeExecutionService::CONFIRMATION
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
-  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, nado_service_factory: nil, log_dir: nil)
+  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, nado_service_factory: nil, ethereal_service_factory: nil, log_dir: nil)
     @position = position
     @hedge = position.hedge
     @action = action.to_s
@@ -15,6 +16,7 @@ class AerodromeDashboardHedgeAction
     @hedge_sync_runner = hedge_sync_runner || ->(hedge_id) { HedgeSyncJob.perform_now(hedge_id) }
     @emergency_close_factory = emergency_close_factory || method(:default_emergency_close)
     @nado_service_factory = nado_service_factory
+    @ethereal_service_factory = ethereal_service_factory
     @log_dir = log_dir || Rails.root.join("storage", "aerodrome_dashboard_hedge_actions")
     @warnings = []
   end
@@ -80,6 +82,8 @@ class AerodromeDashboardHedgeAction
     if @execute
       execution_result = if @venue_key == "nado"
         run_nado_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
+      elsif @venue_key == "ethereal"
+        run_ethereal_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
       elsif @action == "close"
         run_emergency_close
       else
@@ -208,7 +212,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def execution_gate_blockers
-    return [] if @venue_key == "nado"
+    return [] if @venue_key.in?(%w[nado ethereal])
 
     self.class.execution_gate_blockers(
       action: @action,
@@ -228,10 +232,16 @@ class AerodromeDashboardHedgeAction
       max_slippage: max_slippage
     ).fetch(:blockers) if @venue_key == "nado"
 
-    [
-      "#{venue.venue_name} is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid",
-      *single_venue_preflight(target: target, drift: nil, current_short: current_short, before_position: before_position).fetch(:blockers)
-    ].uniq
+    return ethereal_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: ethereal_action_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ).fetch(:blockers) if @venue_key == "ethereal"
+
+    single_venue_preflight(target: target, drift: nil, current_short: current_short, before_position: before_position).fetch(:blockers).uniq
   end
 
   def run_emergency_close
@@ -256,6 +266,20 @@ class AerodromeDashboardHedgeAction
     result.receipt
   end
 
+  def run_ethereal_action(target:, current_short:, drift:, before_position:)
+    size = preflight_target_size(target: target, drift: drift, current_short: current_short)
+    result = if @action == "close"
+      ethereal_service.close_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "open"
+      ethereal_service.open_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "rebalance"
+      ethereal_service.rebalance_short(position: @position, delta_eth: drift, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    else
+      EtherealHedgeExecutionService::Result.new("blocked_before_submit", [ "unsupported Ethereal action" ], [], {})
+    end
+    result.receipt
+  end
+
   def execution_status(execution_result)
     return "submitted" unless execution_result.is_a?(Hash)
     return "submitted" unless execution_result.key?(:final_status)
@@ -276,11 +300,12 @@ class AerodromeDashboardHedgeAction
 
   def current_eth_position
     return nado_service.read_position if @venue_key == "nado"
+    return ethereal_service.read_position if @venue_key == "ethereal"
 
     venue.read_position(symbol: "ETH")
   rescue => e
     @warnings << "current #{venue.venue_name} ETH readback unavailable: #{e.class}: #{e.message}"
-    return :unavailable if @venue_key == "nado"
+    return :unavailable if @venue_key.in?(%w[nado ethereal])
 
     nil
   end
@@ -319,6 +344,15 @@ class AerodromeDashboardHedgeAction
       max_slippage: max_slippage
     ) if @venue_key == "nado"
 
+    return ethereal_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: ethereal_action_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ) if @venue_key == "ethereal"
+
     single_venue_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position)
   end
 
@@ -352,12 +386,22 @@ class AerodromeDashboardHedgeAction
     preflight_target_size(target: target, drift: drift, current_short: current_short)
   end
 
+  def ethereal_action_size(target:, drift:, current_short:)
+    return drift || BigDecimal("0") if @action == "rebalance"
+
+    preflight_target_size(target: target, drift: drift, current_short: current_short)
+  end
+
   def max_slippage
     ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
   end
 
   def nado_service
     @nado_service ||= @nado_service_factory ? @nado_service_factory.call : NadoHedgeExecutionService.new(venue: venue)
+  end
+
+  def ethereal_service
+    @ethereal_service ||= @ethereal_service_factory ? @ethereal_service_factory.call : EtherealHedgeExecutionService.new(venue: venue)
   end
 
   def target_short

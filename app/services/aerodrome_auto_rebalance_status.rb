@@ -144,7 +144,7 @@ class AerodromeAutoRebalanceStatus
   def auto_rebalance_status(blockers:, hedge:)
     return "blocked" if blockers.any?
     return "disabled" if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
-    return "disabled" if execution_venue == "ethereal"
+    return "disabled" if execution_venue == "ethereal" && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
     return "paused" if !hedge || !bool_env("AERODROME_HEDGE_ENABLED") || bool_env("AERODROME_HEDGE_PAUSED", default: true)
 
     "active"
@@ -182,7 +182,7 @@ class AerodromeAutoRebalanceStatus
   end
 
   def ethereal_status_blockers(blockers, rebalance_needed:)
-    blockers << "rebalance needed but Ethereal auto-rebalance is not implemented" if rebalance_needed
+    blockers << "rebalance needed but AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED is not true" if rebalance_needed && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
     blockers
   end
 
@@ -191,7 +191,9 @@ class AerodromeAutoRebalanceStatus
     if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
       return "Manual Nado hedge is active; automatic Nado rebalance is disabled."
     end
-    return "Ethereal is read-only/dry-run; automatic rebalance is not implemented." if execution_venue == "ethereal"
+    if execution_venue == "ethereal" && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+      return "Manual Ethereal hedge actions are available when live gates pass; automatic Ethereal rebalance is disabled."
+    end
     return "Current hedge is within tolerance; no automatic rebalance is needed." unless rebalance_needed
 
     nil
@@ -209,6 +211,7 @@ class AerodromeAutoRebalanceStatus
   def ethereal_env_gates
     {
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED", nil),
+      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", nil),
       "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
     }

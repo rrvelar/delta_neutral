@@ -156,19 +156,12 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
     assert_equal "unsupported", metadata.result_status
   end
 
-  test "ethereal probe is not referenced by production execution files" do
-    production_files = %w[
-      app/services/hyperliquid_service.rb
-      app/jobs/hedge_sync_job.rb
-      app/services/aerodrome_production_live_runner.rb
-      app/services/aerodrome_live_emergency_close.rb
-      app/services/aerodrome_approved_open_position.rb
-      app/services/aerodrome_watchdog_check.rb
-    ]
+  test "ethereal read only probe remains get only even with live execution service present" do
+    source = Rails.root.join("app/services/hedge_backends/ethereal_read_only_probe.rb").read
 
-    production_files.each do |path|
-      assert_no_match "EtherealReadOnlyProbe", Rails.root.join(path).read, "#{path} must not wire Ethereal into production"
-    end
+    assert_no_match "Net::HTTP::Post", source
+    assert_no_match "post_json", source
+    assert_match "get_json", source
   end
 
   private

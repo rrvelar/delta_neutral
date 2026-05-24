@@ -50,7 +50,7 @@ class HedgeSyncJob < ApplicationJob
         end
 
         if hedge.ethereal_execution?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — ethereal live rebalance is not implemented")
+          sync_ethereal_aerodrome_hedge(hedge)
           next
         end
 
@@ -221,6 +221,86 @@ class HedgeSyncJob < ApplicationJob
       message: nado_rebalance_message(result),
       order_side: nado_receipt_order_side(result.receipt),
       reduce_only: nado_receipt_reduce_only(result.receipt),
+      exchange_order_id: result.receipt[:exchange_order_id],
+      receipt_path: receipt_path
+    )
+  end
+
+  def sync_ethereal_aerodrome_hedge(hedge)
+    unless ethereal_auto_rebalance_enabled?
+      Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true")
+      return
+    end
+
+    readiness_errors = aerodrome_readiness_errors(hedge)
+    if readiness_errors.any?
+      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
+      return
+    end
+
+    valuation = PositionValuation.current(hedge.position)
+    weth_exposure = valuation.weth_exposure
+    unless weth_exposure
+      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — Mellow WETH pro-rata exposure unavailable")
+      return
+    end
+
+    target_short = weth_exposure * hedge.target
+    price = nado_eth_price(hedge.position, valuation)
+    safety_errors = nado_safety_errors(target_short: target_short, price: price)
+    if safety_errors.any?
+      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — #{safety_errors.join(', ')}")
+      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: safety_errors.join("; "))
+      return
+    end
+
+    service = EtherealHedgeExecutionService.new
+    current_position = service.read_position
+    if current_position == :unavailable
+      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "Ethereal readback unavailable")
+      return
+    end
+
+    current_size = ethereal_position_size(current_position)
+    if current_size.positive?
+      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "current Ethereal position is long; manual action required")
+      return
+    end
+
+    current_short = current_size.negative? ? current_size.abs : BigDecimal("0")
+    delta = target_short - current_short
+    tolerance = target_short * hedge.tolerance
+    if delta.abs <= tolerance
+      Rails.logger.debug { "[HedgeSyncJob] Ethereal hedge #{hedge.id}: within tolerance, no rebalance needed" }
+      return
+    end
+
+    preview = service.build_order_preview(position: hedge.position, action: "rebalance", size_eth: delta, max_slippage: nado_max_slippage, current_position: current_position)
+    rounded_size = BigDecimal(preview.dig(:summary, :rounded_size_eth).to_s)
+    if rounded_size.zero?
+      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — rounded order size is zero")
+      return
+    end
+
+    result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
+    result = service.reconcile_pending_result(result)
+    receipt_path = write_ethereal_receipt(result.receipt)
+    status = if result.status == "submitted_and_confirmed"
+      ShortRebalance::STATUS_SUCCESS
+    elsif result.status.to_s.start_with?("submitted_but")
+      ShortRebalance::STATUS_PENDING
+    else
+      ShortRebalance::STATUS_FAILED
+    end
+    after_short = ethereal_readback_short(result.receipt[:post_submit_readback], fallback: current_short)
+    record_ethereal_rebalance(
+      hedge,
+      old_short: current_short,
+      new_short: after_short,
+      status: status,
+      message: ethereal_rebalance_message(result),
+      order_side: result.receipt.dig(:submitted_order_summary, :side),
+      reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
       exchange_order_id: result.receipt[:exchange_order_id],
       receipt_path: receipt_path
     )
@@ -524,6 +604,10 @@ class HedgeSyncJob < ApplicationJob
     ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false"))
   end
 
+  def ethereal_auto_rebalance_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", "false"))
+  end
+
   def nado_max_slippage
     ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
   end
@@ -537,6 +621,23 @@ class HedgeSyncJob < ApplicationJob
   end
 
   def nado_readback_short(readback, fallback:)
+    return fallback unless readback.is_a?(Hash)
+
+    size = BigDecimal(readback.fetch(:size).to_s)
+    size.negative? ? size.abs : BigDecimal("0")
+  rescue ArgumentError, KeyError
+    fallback
+  end
+
+  def ethereal_position_size(position)
+    return BigDecimal("0") unless position && position != :unavailable
+
+    BigDecimal(position.fetch(:size).to_s)
+  rescue ArgumentError, KeyError
+    BigDecimal("0")
+  end
+
+  def ethereal_readback_short(readback, fallback:)
     return fallback unless readback.is_a?(Hash)
 
     size = BigDecimal(readback.fetch(:size).to_s)
@@ -578,7 +679,31 @@ class HedgeSyncJob < ApplicationJob
     )
   end
 
+  def record_ethereal_rebalance(hedge, old_short:, new_short:, status:, message: nil, order_side: nil, reduce_only: nil, exchange_order_id: nil, receipt_path: nil)
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: old_short,
+      new_short_size: new_short,
+      realized_pnl: BigDecimal("0"),
+      status: status,
+      message: message,
+      rebalanced_at: Time.current,
+      venue: "ethereal",
+      order_side: order_side,
+      reduce_only: reduce_only,
+      exchange_order_id: exchange_order_id,
+      receipt_path: receipt_path
+    )
+  end
+
   def nado_rebalance_message(result)
+    result.blockers.presence&.join("; ") ||
+      result.receipt[:final_message].presence ||
+      result.receipt.dig(:submit_response_classification, :message).presence ||
+      result.receipt[:final_status]
+  end
+
+  def ethereal_rebalance_message(result)
     result.blockers.presence&.join("; ") ||
       result.receipt[:final_message].presence ||
       result.receipt.dig(:submit_response_classification, :message).presence ||
@@ -601,6 +726,15 @@ class HedgeSyncJob < ApplicationJob
     FileUtils.mkdir_p(dir)
     path = dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
     event = receipt.merge(event: "nado_auto_rebalance", timestamp: Time.current.iso8601, receipt_path: path.to_s)
+    File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
+    path.to_s
+  end
+
+  def write_ethereal_receipt(receipt)
+    dir = Rails.root.join("storage", "ethereal_hedge_rebalances")
+    FileUtils.mkdir_p(dir)
+    path = dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    event = receipt.merge(event: "ethereal_auto_rebalance", timestamp: Time.current.iso8601, receipt_path: path.to_s)
     File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
     path.to_s
   end

@@ -9,12 +9,6 @@ module HedgeBackends
       ETHEREAL_PRIVATE_KEY ETHEREAL_SIGNING_KEY ETHEREAL_TRADING_KEY
       ETHEREAL_ORDER_ENABLED ETHEREAL_CLOSE_ENABLED ETHEREAL_LIVE_APPROVED
     ].freeze
-    PRODUCTION_FILES = %w[
-      app/jobs/hedge_sync_job.rb
-      app/services/hyperliquid_service.rb
-      app/services/aerodrome_production_live_runner.rb
-      app/services/aerodrome_live_emergency_close.rb
-    ].freeze
     DANGEROUS_POLICY_ENDPOINTS = [
       "POST /v1/order",
       "POST /v1/order/cancel",
@@ -26,7 +20,7 @@ module HedgeBackends
       checks = [
         dangerous_methods_absent,
         forbidden_env_vars_absent,
-        production_files_do_not_reference_ethereal,
+        hyperliquid_service_not_wired_to_ethereal,
         no_schema_or_migration_diff,
         no_tracked_observations,
         dangerous_endpoints_classified,
@@ -63,9 +57,9 @@ module HedgeBackends
       check("forbidden Ethereal env vars absent", found.empty?, found.join(", "))
     end
 
-    def production_files_do_not_reference_ethereal
-      found = PRODUCTION_FILES.select { |path| Rails.root.join(path).read.match?(/Ethereal|ETHEREAL|HedgeBackends/) }
-      check("production files do not reference Ethereal", found.empty?, found.join(", "))
+    def hyperliquid_service_not_wired_to_ethereal
+      found = [ "app/services/hyperliquid_service.rb" ].select { |path| Rails.root.join(path).read.match?(/Ethereal|ETHEREAL|HedgeBackends/) }
+      check("Hyperliquid service does not reference Ethereal", found.empty?, found.join(", "))
     end
 
     def no_schema_or_migration_diff

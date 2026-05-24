@@ -310,7 +310,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Nado", response.body
   end
 
-  test "show selected Ethereal venue renders read-only dry-run mode and disabled live actions" do
+  test "show selected Ethereal venue renders cross margin live gated mode and disabled live actions" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
 
@@ -320,8 +320,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Ethereal"
-    assert_match "Dry-run/read-only only; live submit not enabled for Ethereal.", response.body
-    assert_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
+    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true for Ethereal live submit.", response.body
+    assert_match "Ethereal uses cross margin only", response.body
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 

@@ -7,7 +7,7 @@ module HedgeVenues
       assert_instance_of HedgeVenues::Hyperliquid, HedgeVenues.build(nil)
     end
 
-    test "ethereal preview is dry run only and reports missing config blockers" do
+    test "ethereal preview is cross margin live gated and reports missing config blockers" do
       venue = HedgeVenues::Ethereal.new(env: {})
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")
 
@@ -15,8 +15,9 @@ module HedgeVenues
       assert_equal "read_only_dry_run", preview.fetch(:mode)
       assert_equal false, preview.fetch(:submit_enabled)
       assert_equal false, preview.fetch(:order_submission)
-      assert_equal "ethereal_eip712_trade_order_preview", preview.fetch(:payload).fetch(:schema)
-      assert_includes preview.fetch(:blockers), "Dry-run/read-only only; live submit not enabled for Ethereal."
+      assert_equal "ethereal_eip712_trade_order", preview.fetch(:payload).fetch(:schema)
+      assert_equal "cross", preview.fetch(:payload).fetch(:margin_mode)
+      assert_includes preview.fetch(:blockers), "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true for Ethereal live submit."
       assert_includes preview.fetch(:blockers), "ETHEREAL_READ_ONLY_ENABLED is not true"
       assert_includes preview.fetch(:blockers), "ETHEREAL_API_BASE_URL is required for Ethereal read-only account/position checks"
       assert_includes preview.fetch(:blockers), "ETHEREAL_SUBACCOUNT_ID is required for Ethereal position readback"
@@ -47,7 +48,7 @@ module HedgeVenues
       assert_equal Hash, state.class
       assert_equal "Ethereal", state.fetch(:venue)
       assert_equal "read_only_dry_run", state.fetch(:mode)
-      assert_equal false, state.fetch(:live_supported)
+      assert_equal true, state.fetch(:live_supported)
       assert_equal false, state.fetch(:live_enabled)
       assert_equal "ok", state.fetch(:status)
       assert_equal "USD", state.fetch(:collateral)

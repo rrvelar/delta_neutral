@@ -94,10 +94,10 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
 
       assert_equal "blocked", report.fetch(:status)
       assert_equal "ethereal", report.fetch(:hedge_venue)
-      assert_includes report.fetch(:blockers), "Ethereal is read-only/dry-run only; live dashboard actions are only routed to Hyperliquid"
+      assert_includes report.fetch(:blockers), "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true"
       assert_empty runner.calls
       assert_equal false, report.fetch(:hyperliquid_execution)
-      assert_equal "ethereal_eip712_trade_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+      assert_equal "ethereal_eip712_trade_order", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
     end
   end
 
@@ -140,7 +140,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       assert_includes report.fetch(:warnings), "Position is inactive; preview is informational only."
       assert_equal false, report.fetch(:orders_enabled)
       assert_equal false, report.fetch(:hyperliquid_execution)
-      assert_equal "ethereal_eip712_trade_order_preview", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
+      assert_equal "ethereal_eip712_trade_order", report.fetch(:hedge_venue_preview).fetch(:payload).fetch(:schema)
     end
   end
 
@@ -233,8 +233,8 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       ).report
 
       assert_equal "blocked", report.fetch(:status)
-      assert_includes report.fetch(:blockers), "submitted confirmation must equal CONFIRM_ETHEREAL"
-      assert_includes report.fetch(:blockers), "Ethereal live submit adapter is not wired in delta_neutral"
+      assert_includes report.fetch(:blockers), "submitted confirmation must equal #{EtherealHedgeExecutionService::CONFIRMATION}"
+      assert_includes report.fetch(:blockers), "selected hedge execution venue must be ethereal"
       assert_empty runner.calls
     end
   end

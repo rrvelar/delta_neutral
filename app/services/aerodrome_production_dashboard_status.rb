@@ -197,7 +197,8 @@ class AerodromeProductionDashboardStatus
   end
 
   def venue_hedge_unrealized_pnl(position)
-    return nil unless execution_venue == "nado" && position&.dig(:side) == "short"
+    return nil unless execution_venue.in?(%w[nado ethereal]) && position&.dig(:side) == "short"
+    return decimal_hash_value(position, :unrealized_pnl_usd) if execution_venue == "ethereal" && position[:unrealized_pnl_usd].present?
 
     entry_price = decimal_hash_value(position, :entry_price)
     mark_price = decimal_hash_value(position, :mark_price)
@@ -208,10 +209,13 @@ class AerodromeProductionDashboardStatus
   end
 
   def venue_hedge_pnl_message(position)
-    return nil unless execution_venue == "nado"
-    return "Nado hedge PnL unavailable: no ETH-PERP position readback." unless position
-    return "Nado hedge PnL unavailable: readback missing entry price." if position[:entry_price].blank?
-    return "Nado hedge PnL unavailable: readback missing mark price." if position[:mark_price].blank?
+    return nil unless execution_venue.in?(%w[nado ethereal])
+
+    venue = HedgeVenues.label(execution_venue)
+    return "#{venue} hedge PnL unavailable: no ETH-PERP position readback." unless position
+    return nil if execution_venue == "ethereal" && position[:unrealized_pnl_usd].present?
+    return "#{venue} hedge PnL unavailable: readback missing entry price." if position[:entry_price].blank?
+    return "#{venue} hedge PnL unavailable: readback missing mark price." if position[:mark_price].blank?
 
     nil
   end
@@ -271,10 +275,12 @@ class AerodromeProductionDashboardStatus
       size: BigDecimal(position.fetch(:size).to_s).to_s("F"),
       short_size: position[:short_size]&.to_s("F"),
       margin_mode: position[:margin_mode],
-      entry_price: position[:entry_price]&.to_s("F"),
-      mark_price: position[:mark_price]&.to_s("F"),
-      notional_usd: position[:notional_usd]&.to_s("F"),
-      isolated_margin_usd: position[:isolated_margin_usd]&.to_s("F"),
+      entry_price: decimal_hash_value(position, :entry_price)&.to_s("F"),
+      mark_price: decimal_hash_value(position, :mark_price)&.to_s("F"),
+      notional_usd: decimal_hash_value(position, :notional_usd)&.to_s("F"),
+      isolated_margin_usd: decimal_hash_value(position, :isolated_margin_usd)&.to_s("F"),
+      account_value_usd: decimal_hash_value(position, :account_value_usd)&.to_s("F"),
+      effective_leverage: decimal_hash_value(position, :effective_leverage)&.to_s("F"),
       status: position[:status]
     }.compact
   end

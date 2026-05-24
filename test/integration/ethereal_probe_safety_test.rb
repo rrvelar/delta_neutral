@@ -15,23 +15,17 @@ class EtherealProbeSafetyTest < ActiveSupport::TestCase
     ETHEREAL_ORDER_ENABLED ETHEREAL_CLOSE_ENABLED ETHEREAL_LIVE_APPROVED
   ].freeze
 
-  test "production runtime files do not reference Ethereal" do
-    production_files = %w[
-      app/jobs/hedge_sync_job.rb
-      app/services/aerodrome_production_live_runner.rb
-      app/services/aerodrome_live_emergency_close.rb
-      app/services/hyperliquid_service.rb
-    ]
-
-    production_files.each do |path|
-      assert_no_match(/Ethereal|ETHEREAL|HedgeBackends/, Rails.root.join(path).read, "#{path} must not route production to Ethereal")
-    end
+  test "ethereal production routing is isolated from hyperliquid service" do
+    assert_match(/sync_ethereal_aerodrome_hedge/, Rails.root.join("app/jobs/hedge_sync_job.rb").read)
+    assert_no_match(/Ethereal|ETHEREAL/, Rails.root.join("app/services/hyperliquid_service.rb").read)
   end
 
-  test "production runner tasks do not mention Ethereal" do
-    aerodrome_tasks = Rails.root.join("lib/tasks/aerodrome.rake").read
+  test "ethereal task is no-live payload check only" do
+    task_source = Rails.root.join("lib/tasks/ethereal.rake").read
 
-    assert_no_match(/Ethereal|ETHEREAL/, aerodrome_tasks)
+    assert_match(/hedge_payload_check/, task_source)
+    assert_no_match(/sign\(/, task_source)
+    assert_no_match(/post_order|POST \/v1\/order/, task_source)
   end
 
   test "ethereal read only probe does not define dangerous methods" do

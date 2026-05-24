@@ -305,7 +305,13 @@
                 <%
                   live_status, live_detail =
                     if selected_adapter.venue_name == "Ethereal"
-                      [ "Read-only dry run", "Live submit is not implemented for Ethereal." ]
+                      if selected_adapter.live_enabled? && live_blockers.blank?
+                        [ "Live ready", "Ethereal cross-margin submit path is wired and required gates are satisfied." ]
+                      elsif selected_adapter.live_supported?
+                        [ "Live gated", "Ethereal uses cross margin only; live submit requires Ethereal env gates, signer, and exact confirmation." ]
+                      else
+                        [ "Unavailable", "Live submit is not available for Ethereal." ]
+                      end
                     elsif selected_adapter.live_supported? && selected_adapter.live_enabled? && live_blockers.blank?
                       [ "Live ready", "Nado submit path is wired and required gates are satisfied." ]
                     elsif selected_adapter.live_supported?
@@ -334,6 +340,13 @@
                     <p class="mt-2 text-gray-400 break-words whitespace-normal"><%= live_detail %></p>
                     <p class="mt-2 text-gray-500">Next action: <span class="text-gray-200"><%= venue_dashboard[:next_action] || "unavailable" %></span></p>
                   </div>
+                  <% if selected_adapter.venue_name == "Ethereal" %>
+                    <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                      <p class="text-gray-500">Ethereal margin</p>
+                      <p class="mt-1 text-gray-100 font-medium">Cross only</p>
+                      <p class="mt-2 text-gray-400 break-words whitespace-normal">Effective leverage is estimated from position notional divided by account collateral.</p>
+                    </div>
+                  <% end %>
                   <% if venue_dashboard.dig(:current_venue_position, :margin_mode).present? %>
                     <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                       <p class="text-gray-500">Margin mode</p>
