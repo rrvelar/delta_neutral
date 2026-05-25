@@ -23,6 +23,9 @@ class MellowUiParityRewards
     :selector_name,
     :verified_selector,
     :wallet_address,
+    :call_from,
+    :call_to,
+    :wallet_arg,
     :raw_result,
     :raw_amount,
     :decimals,
@@ -48,7 +51,8 @@ class MellowUiParityRewards
     wallet = submitted_wallet
     return unavailable("Mellow submitted wallet is unavailable for UI-parity reward read") if wallet.blank?
 
-    raw_result = eth_call(@contract_address, call_data(wallet))
+    normalized_wallet = normalize_address(wallet)
+    raw_result = eth_call(from: normalized_wallet, to: @contract_address, data: call_data(normalized_wallet))
     raw_amount = uint_from_result(raw_result)
     amount = decimal_amount(raw_amount, DECIMALS)
     status, confidence, stop_reason = classify(amount)
@@ -62,7 +66,10 @@ class MellowUiParityRewards
       selector: SELECTOR,
       selector_name: SELECTOR_NAME,
       verified_selector: verified_selector?,
-      wallet_address: normalize_address(wallet),
+      wallet_address: normalized_wallet,
+      call_from: normalized_wallet,
+      call_to: @contract_address,
+      wallet_arg: normalized_wallet,
       raw_result: raw_result,
       raw_amount: raw_amount,
       decimals: DECIMALS,
@@ -131,13 +138,13 @@ class MellowUiParityRewards
     true
   end
 
-  def eth_call(to, data)
+  def eth_call(from:, to:, data:)
     response = Net::HTTP.post(
       URI(@rpc_url),
       {
         jsonrpc: "2.0",
         method: "eth_call",
-        params: [ { to: normalize_address(to), data: data }, "latest" ],
+        params: [ { from: normalize_address(from), to: normalize_address(to), data: data }, "latest" ],
         id: 1
       }.to_json,
       "Content-Type" => "application/json"
@@ -167,6 +174,9 @@ class MellowUiParityRewards
       selector_name: SELECTOR_NAME,
       verified_selector: verified_selector?,
       wallet_address: submitted_wallet,
+      call_from: submitted_wallet,
+      call_to: @contract_address,
+      wallet_arg: submitted_wallet,
       raw_result: nil,
       raw_amount: nil,
       decimals: DECIMALS,

@@ -54,6 +54,9 @@ class AerodromeRewardsCheck
       ui_parity_selector: @mellow_reward_diagnostics&.fetch(:ui_parity_selector, nil) || @mellow_ui_parity_result&.selector,
       ui_parity_selector_name: @mellow_reward_diagnostics&.fetch(:ui_parity_selector_name, nil) || @mellow_ui_parity_result&.selector_name,
       ui_parity_verified_selector: @mellow_reward_diagnostics&.fetch(:ui_parity_verified_selector, nil) || @mellow_ui_parity_result&.verified_selector,
+      ui_parity_call_from: @mellow_ui_parity_result&.call_from,
+      ui_parity_call_to: @mellow_ui_parity_result&.call_to,
+      ui_parity_wallet_arg: @mellow_ui_parity_result&.wallet_arg,
       ui_parity_raw_result: @mellow_ui_parity_result&.raw_result,
       ui_parity_decoded_aero: decimal_string(@mellow_ui_parity_result&.amount),
       ui_parity_delta: decimal_string(@mellow_ui_parity_result&.expected_delta),
@@ -400,7 +403,10 @@ class AerodromeRewardsCheck
       ui_parity_contract_role: result.contract_role,
       ui_parity_selector: result.selector,
       ui_parity_selector_name: result.selector_name,
-      ui_parity_verified_selector: result.verified_selector
+      ui_parity_verified_selector: result.verified_selector,
+      ui_parity_call_from: result.call_from,
+      ui_parity_call_to: result.call_to,
+      ui_parity_wallet_arg: result.wallet_arg
     }
 
     AerodromeRewardsService::RewardData.new(

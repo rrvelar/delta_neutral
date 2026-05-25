@@ -40,6 +40,20 @@ class MellowUiParityRewardsTest < ActiveSupport::TestCase
     assert_equal "0x79ee54f7000000000000000000000000e8a204e487a026c353cb1438c8d43aaf1e47d644", service.call_data(WALLET)
   end
 
+  test "eth_call payload includes from submitted wallet" do
+    position = create_mellow_position
+    stub_ui_parity_rpc(RAW_RESULT)
+
+    MellowUiParityRewards.new(position: position, rpc_url: RPC_URL, expected_aero: "25.25").read
+
+    assert_requested :post, RPC_URL do |request|
+      call = JSON.parse(request.body).fetch("params").first
+      assert_equal WALLET.downcase, call.fetch("from")
+      assert_equal MellowUiParityRewards::CONTRACT_ADDRESS, call.fetch("to")
+      assert_equal "0x79ee54f7000000000000000000000000e8a204e487a026c353cb1438c8d43aaf1e47d644", call.fetch("data")
+    end
+  end
+
   private
 
   def stub_ui_parity_rpc(result)
