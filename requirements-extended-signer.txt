@@ -1,2 +1,1 @@
-# Phase 2.5 Extended Stark signer skeleton has no runtime dependency yet.
-# Add the verified Stark signing dependency here only after SDK parity is proven.
+fast-stark-crypto

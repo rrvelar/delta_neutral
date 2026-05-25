@@ -533,9 +533,9 @@ signing algorithm is verified against the official SDK.
   price, crossing price, expiration, fee, IOC assumption, and a blocked external
   signer request summary.
 - `scripts/extended_stark_signer.py` is a separate sidecar skeleton. It exposes
-  `/health` and `/sign/extended_order`, but `/sign/extended_order` refuses to
-  sign because the Stark order hash/signature implementation is not verified
-  yet.
+  `/health` and `/sign/extended_order`. Signing stays opt-in behind
+  `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true`; the systemd template keeps
+  it false.
 - `bin/rails extended:mainnet_lifecycle_check` builds manual mainnet lifecycle
   dry-run receipts for `open_only`, `delta_round_trip`, and `close_reopen`.
 
@@ -582,15 +582,54 @@ Extended must use a separate signer from the existing EIP-712 signer:
 - Template: `docs/templates/delta-neutral-extended-signer.service`
 - Script: `scripts/extended_stark_signer.py`
 - Key file env: `EXTENDED_STARK_PRIVATE_KEY_FILE`
+- Algorithm env: `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=false` by default
 - Key file should be outside the repo, root-owned, and `0600`.
 
 The sidecar advertises Extended support only when:
 
 - `EXTENDED_SIGNER_ENABLED=true`
 - `EXTENDED_STARK_PRIVATE_KEY_FILE` exists
+- `fast-stark-crypto` is installed
+- `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true`
 
-Even then it refuses signing until the exact SDK Stark hash/signature path is
-ported and tested.
+Rails live probes still remain blocked by their own gates and by the explicit
+mainnet lifecycle blocker until a separate task removes it after operator
+review.
+
+### Stark Signing Verification
+
+The signer algorithm is tested against the official `x10xchange/python_sdk`
+market-order vector from commit `b7e7c64`:
+
+- SDK file: `tests/perpetual/order_object/test_market_order_object.py`
+- SDK implementation files:
+  - `x10/perpetual/order_object.py`
+  - `x10/perpetual/order_object_settlement.py`
+  - `x10/core/stark_account.py`
+
+The deterministic vector uses dummy SDK keys only:
+
+- market: `BTC-USD`
+- side: `SELL`
+- qty: `0.00100000`
+- price: `49625.0`
+- nonce: `1473459052`
+- vault: `10002`
+- domain: `Perpetuals/v0/SN_SEPOLIA/revision 1`
+
+Expected SDK values:
+
+- order id/hash:
+  `2580220688642480426946040763258220762106230673118492731878319591751617419967`
+- signature `r`:
+  `0x28af719b8c9619fadd151a0f9c269058b3240ae2e08ab14e6fa15b8ea081dc6`
+- signature `s`:
+  `0x78c518768fe71c8583aee78e756de66ffed2170171fec10da03edc5e9a3d241`
+- debugging amounts:
+  `collateralAmount=49625000`, `feeAmount=24813`,
+  `syntheticAmount=-1000`
+
+No real API key or Stark key is used by this test.
 
 ### Operator Checklist
 
