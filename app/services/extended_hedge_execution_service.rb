@@ -3,11 +3,12 @@ class ExtendedHedgeExecutionService
 
   BLOCKERS = [
     "Extended live disabled.",
-    "Extended signing/order submit not implemented."
+    "Extended submit endpoint integration not implemented."
   ].freeze
 
-  def initialize(venue: HedgeVenues::Extended.new)
+  def initialize(venue: HedgeVenues::Extended.new, signer_client: ExtendedStarkSignerClient.new)
     @venue = venue
+    @signer_client = signer_client
   end
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
@@ -30,7 +31,8 @@ class ExtendedHedgeExecutionService
       submitted: false,
       manual_action_required: true,
       next_action: "Extended is read-only scaffold only; do not submit orders.",
-      blockers: (@venue.blockers + BLOCKERS).uniq,
+      signer_health: sanitized_signer_health,
+      blockers: preflight_blockers,
       warnings: @venue.warnings
     }
   end
@@ -106,5 +108,23 @@ class ExtendedHedgeExecutionService
     BigDecimal(value.to_s).to_s("F")
   rescue ArgumentError
     nil
+  end
+
+  def preflight_blockers
+    blockers = (@venue.blockers + BLOCKERS).uniq
+    health = signer_health
+    blockers << "EXTENDED_SIGNER_URL missing" if health[:reason] == "EXTENDED_SIGNER_URL missing"
+    blockers << "Extended Stark signer unhealthy: #{health[:reason]}" unless ActiveModel::Type::Boolean.new.cast(health[:ok])
+    blockers << "Extended Stark signer verified_algorithm=false" unless ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
+    blockers << "Extended Stark signer signing_enabled=false" unless ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
+    blockers.uniq
+  end
+
+  def signer_health
+    @signer_health ||= @signer_client.health.with_indifferent_access
+  end
+
+  def sanitized_signer_health
+    signer_health.to_h.except(:api_key, :private_key, :signature, "api_key", "private_key", "signature")
   end
 end

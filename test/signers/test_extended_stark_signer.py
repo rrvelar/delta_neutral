@@ -54,8 +54,52 @@ class ExtendedStarkSignerTest(unittest.TestCase):
         payload = extended_stark_signer.health_payload({})
 
         self.assertFalse(payload["ok"])
+        self.assertEqual("delta-neutral-extended-stark-signer", payload["signer_id"])
         self.assertEqual([], payload["supported_exchanges"])
         self.assertEqual([], payload["supported_actions"])
+        self.assertFalse(payload["verified_algorithm"])
+        self.assertFalse(payload["signing_enabled"])
+
+    def test_health_with_algorithm_flag_false_reports_unverified(self):
+        with tempfile.NamedTemporaryFile("w") as key_file:
+            key_file.write(SDK_MARKET_SELL_VECTOR["private_key"])
+            key_file.flush()
+            payload = extended_stark_signer.health_payload(
+                {
+                    "EXTENDED_SIGNER_ENABLED": "true",
+                    "EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM": "false",
+                    "EXTENDED_STARK_PRIVATE_KEY_FILE": key_file.name,
+                    "EXTENDED_STARK_PUBLIC_KEY": SDK_MARKET_SELL_VECTOR["order"]["starkPublicKey"],
+                }
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verified_algorithm"])
+        self.assertFalse(payload["signing_enabled"])
+        self.assertEqual([], payload["supported_exchanges"])
+        self.assertNotIn(SDK_MARKET_SELL_VECTOR["order"]["starkPublicKey"], str(payload))
+
+    def test_health_with_verified_flag_and_dummy_key_advertises_support(self):
+        if extended_stark_signer.get_order_msg_hash is None or extended_stark_signer.stark_sign is None:
+            self.skipTest("fast-stark-crypto is not installed")
+        with tempfile.NamedTemporaryFile("w") as key_file:
+            key_file.write(SDK_MARKET_SELL_VECTOR["private_key"])
+            key_file.flush()
+            payload = extended_stark_signer.health_payload(
+                {
+                    "EXTENDED_SIGNER_ENABLED": "true",
+                    "EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM": "true",
+                    "EXTENDED_STARK_PRIVATE_KEY_FILE": key_file.name,
+                    "EXTENDED_STARK_PUBLIC_KEY": SDK_MARKET_SELL_VECTOR["order"]["starkPublicKey"],
+                }
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verified_algorithm"])
+        self.assertTrue(payload["signing_enabled"])
+        self.assertEqual(["Extended"], payload["supported_exchanges"])
+        self.assertEqual(["sign_extended_order"], payload["supported_actions"])
+        self.assertEqual("0x61c5e7e8...ef76f466", payload["stark_public_key"])
 
     def test_validate_order_requires_signing_fields(self):
         error = extended_stark_signer.validate_order_shape({"order": {"market": "BTC-USD"}})

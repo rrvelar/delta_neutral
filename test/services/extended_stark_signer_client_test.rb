@@ -18,11 +18,31 @@ class ExtendedStarkSignerClientTest < ActiveSupport::TestCase
         Struct.new(:body).new({
           ok: true,
           supported_exchanges: [ "Extended" ],
-          supported_actions: [ "sign_extended_order" ]
+          supported_actions: [ "sign_extended_order" ],
+          verified_algorithm: true,
+          signing_enabled: true
         }.to_json)
       }
     )
 
     assert_predicate client, :supports_extended_order_signing?
+  end
+
+  test "signer support rejects unverified algorithm" do
+    client = ExtendedStarkSignerClient.new(
+      env: { "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid" },
+      http_get: ->(_uri) {
+        Struct.new(:body).new({
+          ok: true,
+          supported_exchanges: [ "Extended" ],
+          supported_actions: [ "sign_extended_order" ],
+          verified_algorithm: false,
+          signing_enabled: true
+        }.to_json)
+      }
+    )
+
+    assert_equal false, client.supports_extended_order_signing?
+    assert_not client.verified_algorithm?
   end
 end

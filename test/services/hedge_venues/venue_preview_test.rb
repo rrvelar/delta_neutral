@@ -37,7 +37,7 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
       assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing"
       assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing"
-      assert_includes state.fetch(:blockers), "Extended signing/order submit not implemented."
+      assert_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
       assert_includes state.fetch(:warnings), "Extended read-only scaffold."
       assert_nil venue.read_position(symbol: "ETH")
     end
@@ -105,11 +105,76 @@ module HedgeVenues
 
       [ open, rebalance, close ].each do |result|
         assert_equal "blocked_before_submit", result.status
-        assert_includes result.blockers, "Extended signing/order submit not implemented."
+        assert_includes result.blockers, "Extended submit endpoint integration not implemented."
         assert_equal 0, result.receipt.fetch(:orders_submitted)
         assert_equal 0, result.receipt.fetch(:signatures_created)
         assert_equal false, result.receipt.fetch(:submitted)
       end
+    end
+
+    test "extended preflight reports signer algorithm blocker only when health is unverified" do
+      venue = HedgeVenues::Extended.new(env: {})
+      signer = Struct.new(:health, keyword_init: true).new(
+        health: {
+          ok: false,
+          reason: "algorithm disabled",
+          verified_algorithm: false,
+          signing_enabled: false,
+          supported_exchanges: [],
+          supported_actions: []
+        }.with_indifferent_access
+      )
+      service = ExtendedHedgeExecutionService.new(venue: venue, signer_client: signer)
+      position = Struct.new(:id).new(3)
+
+      report = service.preflight(
+        position: position,
+        action: "open",
+        size_eth: "0.01",
+        current_position: nil,
+        confirmation: nil,
+        max_slippage: "0.01"
+      )
+
+      assert_includes report.fetch(:blockers), "Extended Stark signer unhealthy: algorithm disabled"
+      assert_includes report.fetch(:blockers), "Extended Stark signer verified_algorithm=false"
+      assert_includes report.fetch(:blockers), "Extended Stark signer signing_enabled=false"
+      assert_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
+      assert_no_match(/private_key=|0x[a-f0-9]{40,}|authorization|cookie/i, report.to_json)
+    end
+
+    test "extended preflight removes algorithm blocker when signer advertises verified algorithm" do
+      venue = HedgeVenues::Extended.new(env: {})
+      signer = Struct.new(:health, keyword_init: true).new(
+        health: {
+          ok: true,
+          reason: "ok",
+          signer_id: "dummy-extended",
+          supported_exchanges: [ "Extended" ],
+          supported_actions: [ "sign_extended_order" ],
+          verified_algorithm: true,
+          signing_enabled: true,
+          stark_public_key: "0x1234...abcd"
+        }.with_indifferent_access
+      )
+      service = ExtendedHedgeExecutionService.new(venue: venue, signer_client: signer)
+      position = Struct.new(:id).new(3)
+
+      report = service.preflight(
+        position: position,
+        action: "open",
+        size_eth: "0.01",
+        current_position: nil,
+        confirmation: nil,
+        max_slippage: "0.01"
+      )
+
+      assert_not_includes report.fetch(:blockers), "Extended Stark signer verified_algorithm=false"
+      assert_not_includes report.fetch(:blockers), "Extended Stark signer signing_enabled=false"
+      assert_not report.fetch(:blockers).any? { |blocker| blocker.to_s.start_with?("Extended Stark signer unhealthy") }
+      assert_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
+      assert_equal true, report.dig(:signer_health, "verified_algorithm")
+      assert_equal false, report.fetch(:submitted)
     end
 
     def assert_extended_intent(preview, action:, side:, reduce_only:, rounded_size:)

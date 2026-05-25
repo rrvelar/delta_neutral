@@ -87,15 +87,19 @@ def health_payload(env: dict[str, str]) -> dict[str, Any]:
     key_file = env.get("EXTENDED_STARK_PRIVATE_KEY_FILE")
     key_available = bool(key_file and Path(key_file).is_file())
     dependencies_available = bool(get_order_msg_hash and stark_sign)
-    ok = bool(enabled and key_available and dependencies_available and algorithm_enabled)
+    verified_algorithm = bool(dependencies_available and algorithm_enabled)
+    signing_enabled = bool(enabled and key_available and verified_algorithm)
     return {
-        "ok": ok,
+        "ok": signing_enabled,
+        "signer_id": env.get("EXTENDED_SIGNER_ID", "delta-neutral-extended-stark-signer"),
         "mode": "extended_stark_external" if enabled else "disabled",
-        "reason": "ok" if ok else "signer disabled, dependency unavailable, algorithm disabled, or Stark key file unavailable",
-        "supported_exchanges": ["Extended"] if ok else [],
-        "supported_actions": ["sign_extended_order"] if ok else [],
-        "stark_public_key": env.get("EXTENDED_STARK_PUBLIC_KEY"),
-        "signing_algorithm_verified": dependencies_available,
+        "reason": "ok" if signing_enabled else "signer disabled, dependency unavailable, algorithm disabled, or Stark key file unavailable",
+        "supported_exchanges": ["Extended"] if signing_enabled else [],
+        "supported_actions": ["sign_extended_order"] if signing_enabled else [],
+        "stark_public_key": _redact_public_key(env.get("EXTENDED_STARK_PUBLIC_KEY")),
+        "verified_algorithm": verified_algorithm,
+        "signing_enabled": signing_enabled,
+        "signing_algorithm_verified": verified_algorithm,
         "signing_algorithm_enabled": algorithm_enabled,
     }
 
@@ -215,6 +219,14 @@ def _to_stark_amount(value: Decimal, resolution: Decimal, rounding_context: deci
 
 def _hex_int(value: Any) -> str:
     return hex(int(str(value), 16))
+
+
+def _redact_public_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) <= 18:
+        return value
+    return f"{value[:10]}...{value[-8:]}"
 
 
 def _blocked(classification: str, reason: str) -> dict[str, Any]:

@@ -132,7 +132,7 @@ module HedgeVenues
     def blockers
       (config_blockers + market_metadata_blockers + [
         "Extended live disabled.",
-        "Extended signing/order submit not implemented.",
+        "Extended submit endpoint integration not implemented.",
         "Extended auto-rebalance disabled."
       ]).uniq
     end
@@ -141,7 +141,7 @@ module HedgeVenues
       [
         "Extended read-only scaffold.",
         "Live disabled.",
-        "Signing/order submit not implemented.",
+        "Submit/cancel endpoint integration not implemented.",
         "Extended requires a separate Stark signer sidecar before any Phase 3+ live test."
       ]
     end

@@ -428,7 +428,7 @@ fail-closed and cannot trade:
 2. Confirm the selected venue panel says:
    - `Extended read-only scaffold`
    - `Live disabled`
-   - `Signing/order submit not implemented`
+   - `Submit/cancel endpoint integration not implemented`
 3. Confirm live buttons are disabled and preflight blockers include missing
    Extended config when no Extended env is present.
 4. Run `bin/rails ethereal:hedge_payload_check` to verify the existing Ethereal
@@ -499,7 +499,7 @@ adds clear blockers. This avoids pretending a future order is submit-ready.
 ### What still blocks live
 
 - `Extended live disabled.`
-- `Extended signing/order submit not implemented.`
+- `Extended submit endpoint integration not implemented.`
 - `Extended auto-rebalance disabled.`
 - Missing API/account/vault/client/Stark public key config.
 - Missing market metadata.
@@ -543,11 +543,10 @@ signing algorithm is verified against the official SDK.
 
 - No Extended auto-rebalance.
 - No submit/cancel endpoint calls.
-- No Stark signature creation.
+- No Rails-side Stark signature creation.
 - No Stark private key in Rails.
-- No live order can pass because the implementation adds:
-  `Extended Stark order hash/signature algorithm is not verified; live submit
-  remains disabled.`
+- No live order can pass because the implementation keeps
+  `Extended submit endpoint integration not implemented.` as a hard blocker.
 
 ### Required Mainnet Read-Only Env
 
@@ -585,7 +584,9 @@ Extended must use a separate signer from the existing EIP-712 signer:
 - Algorithm env: `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=false` by default
 - Key file should be outside the repo, root-owned, and `0600`.
 
-The sidecar advertises Extended support only when:
+The sidecar `/health` reports `ok`, `signer_id`, `supported_exchanges`,
+`supported_actions`, redacted `stark_public_key`, `verified_algorithm`, and
+`signing_enabled`. It advertises Extended support only when:
 
 - `EXTENDED_SIGNER_ENABLED=true`
 - `EXTENDED_STARK_PRIVATE_KEY_FILE` exists
@@ -593,8 +594,8 @@ The sidecar advertises Extended support only when:
 - `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true`
 
 Rails live probes still remain blocked by their own gates and by the explicit
-mainnet lifecycle blocker until a separate task removes it after operator
-review.
+`Extended submit endpoint integration not implemented.` blocker until a
+separate task wires submit/readback after operator review.
 
 ### Stark Signing Verification
 

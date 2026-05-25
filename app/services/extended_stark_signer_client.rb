@@ -17,9 +17,19 @@ class ExtendedStarkSignerClient
 
   def supports_extended_order_signing?
     payload = health
-    ActiveModel::Type::Boolean.new.cast(payload[:ok]) &&
+    !!(ActiveModel::Type::Boolean.new.cast(payload[:ok]) &&
       Array.wrap(payload[:supported_exchanges]).include?("Extended") &&
-      Array.wrap(payload[:supported_actions]).include?("sign_extended_order")
+      Array.wrap(payload[:supported_actions]).include?("sign_extended_order") &&
+      verified_algorithm? &&
+      signing_enabled?)
+  end
+
+  def verified_algorithm?
+    ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
+  end
+
+  def signing_enabled?
+    ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
   end
 
   private

@@ -68,7 +68,8 @@ class ExtendedMainnetLifecycleCheck
     blockers << "mode must be one of #{MODES.join(', ')}" unless mode.in?(MODES)
     blockers.concat(@venue.blockers)
     blockers.concat(orders.flat_map { |order| order.fetch(:blockers, []) })
-    blockers << "Extended Stark order hash/signature algorithm is not verified; live submit remains disabled."
+    blockers << "Extended Stark signer verified_algorithm=false" unless signer_verified_algorithm?
+    blockers << "Extended submit endpoint integration not implemented."
     blockers.uniq
   end
 
@@ -132,5 +133,13 @@ class ExtendedMainnetLifecycleCheck
 
   def bool_env(key)
     ActiveModel::Type::Boolean.new.cast(@env[key])
+  end
+
+  def signer_verified_algorithm?
+    return @signer_client.verified_algorithm? if @signer_client.respond_to?(:verified_algorithm?)
+
+    ActiveModel::Type::Boolean.new.cast(@signer_client.health[:verified_algorithm])
+  rescue
+    false
   end
 end

@@ -53,7 +53,8 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
 
     assert_equal "blocked_before_submit", result.status
     assert_includes result.blockers, "Extended signer health must advertise Extended/sign_extended_order support"
-    assert_includes result.blockers, "Extended Stark order hash/signature algorithm is not verified; live submit remains disabled."
+    assert_includes result.blockers, "Extended Stark signer verified_algorithm=false"
+    assert_includes result.blockers, "Extended submit endpoint integration not implemented."
   end
 
   test "dry run builds lifecycle payloads and submits nothing" do
@@ -80,6 +81,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     venue = HedgeVenues::Extended.new(env: env, api_client: fake_api_client)
     signer_client ||= Struct.new(:health, keyword_init: true) do
       def supports_extended_order_signing? = false
+      def verified_algorithm? = false
     end.new(health: { ok: false, reason: "not configured" })
     ExtendedMainnetLifecycleCheck.new(env: env, venue: venue, signer_client: signer_client)
   end
