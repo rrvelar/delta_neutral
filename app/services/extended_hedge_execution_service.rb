@@ -11,6 +11,7 @@ class ExtendedHedgeExecutionService
   end
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
+    preview = dry_run_preview(action: action, size_eth: size_eth, max_slippage: max_slippage)
     {
       venue: "Extended",
       mode: @venue.mode,
@@ -19,12 +20,13 @@ class ExtendedHedgeExecutionService
       action: action.to_s,
       position_id: position.id,
       target_hedge_size_eth: decimal_string(size_eth),
-      rounded_order_size_eth: decimal_string(@venue.round_order_size(size_eth)),
+      rounded_order_size_eth: preview.dig(:payload, :rounded_size_eth),
       estimated_notional_usd: nil,
-      intended_side: action.to_s == "close" || BigDecimal(size_eth.to_s).negative? ? "buy_reduce_only" : "sell_short",
+      intended_side: intended_side(action: action, size_eth: size_eth),
       margin_mode: "unverified",
       current_venue_position: current_position,
       max_slippage: max_slippage.to_s,
+      order_intent: preview[:payload],
       submitted: false,
       manual_action_required: true,
       next_action: "Extended is read-only scaffold only; do not submit orders.",
@@ -45,7 +47,43 @@ class ExtendedHedgeExecutionService
     blocked_result("close")
   end
 
+  def open_short_preview(size_eth:, max_slippage: nil)
+    @venue.open_short_preview(symbol: "ETH", size_eth: size_eth, max_slippage: max_slippage)
+  end
+
+  def increase_short_preview(size_eth:, max_slippage: nil)
+    @venue.rebalance_preview(symbol: "ETH", delta_eth: size_eth, max_slippage: max_slippage)
+  end
+
+  def decrease_short_preview(size_eth:, max_slippage: nil)
+    @venue.rebalance_preview(symbol: "ETH", delta_eth: -BigDecimal(size_eth.to_s), max_slippage: max_slippage)
+  end
+
+  def close_short_preview(size_eth:)
+    @venue.close_preview(symbol: "ETH", size_eth: size_eth)
+  end
+
   private
+
+  def dry_run_preview(action:, size_eth:, max_slippage:)
+    case action.to_s
+    when "open"
+      open_short_preview(size_eth: size_eth, max_slippage: max_slippage)
+    when "close"
+      close_short_preview(size_eth: size_eth)
+    else
+      value = BigDecimal(size_eth.to_s)
+      value.negative? ? decrease_short_preview(size_eth: value.abs, max_slippage: max_slippage) : increase_short_preview(size_eth: value, max_slippage: max_slippage)
+    end
+  end
+
+  def intended_side(action:, size_eth:)
+    return "buy_reduce_only" if action.to_s == "close"
+
+    BigDecimal(size_eth.to_s).negative? ? "buy_reduce_only" : "sell_short"
+  rescue ArgumentError
+    "unknown"
+  end
 
   def blocked_result(action)
     Result.new(

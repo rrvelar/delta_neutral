@@ -8,6 +8,11 @@ module HedgeVenues
       "EXTENDED_CLIENT_ID" => "EXTENDED_CLIENT_ID missing",
       "EXTENDED_STARK_PUBLIC_KEY" => "EXTENDED_STARK_PUBLIC_KEY missing"
     }.freeze
+    REQUIRED_MARKET_METADATA = {
+      "EXTENDED_MARKET_SYMBOL" => "EXTENDED_MARKET_SYMBOL missing",
+      "EXTENDED_SIZE_INCREMENT" => "EXTENDED_SIZE_INCREMENT missing",
+      "EXTENDED_PRICE_INCREMENT" => "EXTENDED_PRICE_INCREMENT missing"
+    }.freeze
 
     def venue_name
       "Extended"
@@ -35,6 +40,23 @@ module HedgeVenues
 
     def read_position(symbol:)
       nil
+    end
+
+    def open_short_preview(symbol:, size_eth:, max_slippage:)
+      dry_run_preview(action: "open_short", symbol: symbol, size_eth: size_eth, max_slippage: max_slippage, reduce_only: false)
+    end
+
+    def rebalance_preview(symbol:, delta_eth:, max_slippage:)
+      delta = BigDecimal(delta_eth.to_s)
+      if delta.negative?
+        dry_run_preview(action: "decrease_short", symbol: symbol, size_eth: delta.abs, max_slippage: max_slippage, reduce_only: true)
+      else
+        dry_run_preview(action: "increase_short", symbol: symbol, size_eth: delta, max_slippage: max_slippage, reduce_only: false)
+      end
+    end
+
+    def close_preview(symbol:, size_eth:)
+      dry_run_preview(action: "close_short", symbol: symbol, size_eth: size_eth, max_slippage: nil, reduce_only: true)
     end
 
     def normalize_position(snapshot)
@@ -75,13 +97,14 @@ module HedgeVenues
         live_enabled: false,
         market_symbol: market_symbol,
         margin_mode: "unverified",
+        market_metadata_available: market_metadata_available?,
         blockers: blockers,
         warnings: warnings
       }
     end
 
     def blockers
-      (config_blockers + [
+      (config_blockers + market_metadata_blockers + [
         "Extended live disabled.",
         "Extended signing/order submit not implemented.",
         "Extended auto-rebalance disabled."
@@ -99,20 +122,35 @@ module HedgeVenues
 
     private
 
-    def payload(action:, symbol:, size_eth:, max_slippage:, reduce_only:)
-      super.merge(
-        schema: "extended_read_only_scaffold",
-        endpoint: nil,
-        body_shape: nil,
-        market_symbol: market_symbol,
-        margin_mode: "unverified",
-        side: reduce_only ? "buy" : "sell",
+    def dry_run_preview(action:, symbol:, size_eth:, max_slippage:, reduce_only:)
+      requested_size = decimal_or_nil(size_eth)
+      rounded_size = rounded_order_size_or_nil(requested_size)
+      {
+        venue: venue_name,
+        mode: mode,
+        live_mode_state: live_mode_state,
+        live_supported: live_supported?,
+        live_enabled: live_enabled?,
+        action: action,
+        symbol: symbol,
+        requested_size_eth: decimal_string_or_unknown(requested_size),
+        rounded_size_eth: rounded_size ? rounded_size.to_s("F") : "unknown",
+        max_slippage: max_slippage&.to_s,
         reduce_only: reduce_only,
-        order_submission: false,
+        submit_enabled: false,
         signature_required: false,
-        signing_implemented: false,
-        submit_implemented: false
-      )
+        order_submission: false,
+        payload: order_intent_payload(
+          action: action,
+          symbol: symbol,
+          requested_size: requested_size,
+          rounded_size: rounded_size,
+          max_slippage: max_slippage,
+          reduce_only: reduce_only
+        ),
+        blockers: blockers,
+        warnings: warnings
+      }
     end
 
     def configured?
@@ -125,8 +163,60 @@ module HedgeVenues
       end
     end
 
+    def market_metadata_available?
+      market_metadata_blockers.empty?
+    end
+
+    def market_metadata_blockers
+      REQUIRED_MARKET_METADATA.filter_map do |key, message|
+        message if env[key].blank?
+      end
+    end
+
     def market_symbol
       env["EXTENDED_MARKET_SYMBOL"].presence || "ETH-USD"
+    end
+
+    def order_intent_payload(action:, symbol:, requested_size:, rounded_size:, max_slippage:, reduce_only:)
+      side = reduce_only ? "buy" : "sell"
+      {
+        schema: "extended_dry_run_order_intent",
+        body_shape: "extended_order_intent_summary",
+        venue: venue_name,
+        market_symbol: market_symbol,
+        symbol: symbol,
+        action: action,
+        side: side,
+        extended_side: side.upcase,
+        reduce_only: reduce_only,
+        requested_size_eth: decimal_string_or_unknown(requested_size),
+        rounded_size_eth: rounded_size ? rounded_size.to_s("F") : "unknown",
+        size_increment: env["EXTENDED_SIZE_INCREMENT"].presence || "required_later",
+        price_increment: env["EXTENDED_PRICE_INCREMENT"].presence || "required_later",
+        price: "required_later",
+        crossing_price: "required_later",
+        order_type_assumption: "market-like crossing IOC limit; Extended requires an explicit worst accepted price",
+        time_in_force: "IOC_required_later",
+        expiration: "required_later",
+        fee: "required_later",
+        max_slippage: max_slippage&.to_s,
+        margin_mode: "unverified",
+        submit_endpoint: nil,
+        future_submit_endpoint: "POST /user/order",
+        order_submission: false,
+        signature_required: false,
+        stark_signature_created: false,
+        signing_implemented: false,
+        submit_implemented: false,
+        cancel_implemented: false
+      }
+    end
+
+    def rounded_order_size_or_nil(size)
+      increment = decimal_or_nil(env["EXTENDED_SIZE_INCREMENT"])
+      return nil unless size && increment&.positive?
+
+      (size / increment).floor * increment
     end
 
     def normalized_side(raw_side, size)
@@ -150,6 +240,10 @@ module HedgeVenues
 
     def decimal_string_or_value(value)
       value.is_a?(BigDecimal) ? value.to_s("F") : value
+    end
+
+    def decimal_string_or_unknown(value)
+      value ? value.to_s("F") : "unknown"
     end
   end
 end

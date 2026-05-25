@@ -461,3 +461,53 @@ Ethereal and should not be extended to hold Stark trading keys. A separate Stark
 sidecar keeps the key boundary explicit, lets the implementation reuse the
 official Python SDK hashing/signing semantics, and avoids storing Stark private
 keys in Rails.
+
+## Phase 2 Dry-Run Order Intent Scaffold
+
+Phase 2 adds Extended order intent previews only. It still cannot sign, submit,
+cancel, or auto-rebalance Extended orders.
+
+The scaffold now builds normalized intent summaries for operator review:
+
+- `open_short`: `SELL`, `reduceOnly: false`
+- `increase_short`: `SELL`, `reduceOnly: false`
+- `decrease_short`: `BUY`, `reduceOnly: true`
+- `close_short`: `BUY`, `reduceOnly: true`
+
+This follows the docs/SDK side mapping described above: selling ETH-USD
+perpetuals opens or increases a short; buying decreases or closes an existing
+short. Decrease and close intents are always marked reduce-only.
+
+The preview intentionally marks live-required fields as `required_later`:
+
+- explicit worst accepted crossing price;
+- IOC/market-like order construction;
+- expiration;
+- fee;
+- Stark settlement signature;
+- final submit body.
+
+Market metadata is required before the preview can show rounded order size:
+
+- `EXTENDED_MARKET_SYMBOL`
+- `EXTENDED_SIZE_INCREMENT`
+- `EXTENDED_PRICE_INCREMENT`
+
+If that metadata is absent, the preview shows `rounded_size_eth: "unknown"` and
+adds clear blockers. This avoids pretending a future order is submit-ready.
+
+### What still blocks live
+
+- `Extended live disabled.`
+- `Extended signing/order submit not implemented.`
+- `Extended auto-rebalance disabled.`
+- Missing API/account/vault/client/Stark public key config.
+- Missing market metadata.
+- No Stark signer sidecar.
+- No order submit/cancel implementation.
+- No WebSocket/account confirmation loop.
+
+The payload includes `future_submit_endpoint: "POST /user/order"` only as a
+documentation hint. `submit_endpoint` remains `nil`, `order_submission` is
+`false`, `stark_signature_created` is `false`, and live service receipts keep
+`orders_submitted: 0` and `signatures_created: 0`.

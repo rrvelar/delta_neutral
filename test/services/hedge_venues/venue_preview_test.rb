@@ -21,9 +21,12 @@ module HedgeVenues
       assert_equal false, preview.fetch(:submit_enabled)
       assert_equal false, preview.fetch(:order_submission)
       assert_equal false, preview.fetch(:signature_required)
-      assert_equal "extended_read_only_scaffold", preview.fetch(:payload).fetch(:schema)
+      assert_equal "extended_dry_run_order_intent", preview.fetch(:payload).fetch(:schema)
       assert_equal false, preview.fetch(:payload).fetch(:submit_implemented)
       assert_equal false, preview.fetch(:payload).fetch(:signing_implemented)
+      assert_equal false, preview.fetch(:payload).fetch(:stark_signature_created)
+      assert_equal "sell", preview.fetch(:payload).fetch(:side)
+      assert_equal false, preview.fetch(:payload).fetch(:reduce_only)
       assert_equal "not_configured", state.fetch(:status)
       assert_includes state.fetch(:blockers), "EXTENDED_API_BASE_URL missing"
       assert_includes state.fetch(:blockers), "EXTENDED_API_KEY missing"
@@ -31,9 +34,65 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_VAULT_NUMBER missing"
       assert_includes state.fetch(:blockers), "EXTENDED_CLIENT_ID missing"
       assert_includes state.fetch(:blockers), "EXTENDED_STARK_PUBLIC_KEY missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing"
       assert_includes state.fetch(:blockers), "Extended signing/order submit not implemented."
       assert_includes state.fetch(:warnings), "Extended read-only scaffold."
       assert_nil venue.read_position(symbol: "ETH")
+    end
+
+    test "extended dry run previews map sides and reduce only flags" do
+      venue = HedgeVenues::Extended.new(
+        env: {
+          "EXTENDED_MARKET_SYMBOL" => "ETH-USD",
+          "EXTENDED_SIZE_INCREMENT" => "0.0001",
+          "EXTENDED_PRICE_INCREMENT" => "0.1"
+        }
+      )
+
+      open = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.12345"), max_slippage: "0.01")
+      increase = venue.rebalance_preview(symbol: "ETH", delta_eth: BigDecimal("0.05009"), max_slippage: "0.01")
+      decrease = venue.rebalance_preview(symbol: "ETH", delta_eth: BigDecimal("-0.02009"), max_slippage: "0.01")
+      close = venue.close_preview(symbol: "ETH", size_eth: BigDecimal("0.12345"))
+
+      assert_extended_intent(open, action: "open_short", side: "sell", reduce_only: false, rounded_size: "0.1234")
+      assert_extended_intent(increase, action: "increase_short", side: "sell", reduce_only: false, rounded_size: "0.05")
+      assert_extended_intent(decrease, action: "decrease_short", side: "buy", reduce_only: true, rounded_size: "0.02")
+      assert_extended_intent(close, action: "close_short", side: "buy", reduce_only: true, rounded_size: "0.1234")
+    end
+
+    test "extended dry run preview reports unknown rounding when market metadata is missing" do
+      venue = HedgeVenues::Extended.new(env: {})
+      preview = venue.rebalance_preview(symbol: "ETH", delta_eth: BigDecimal("-0.02"), max_slippage: "0.01")
+
+      assert_equal "unknown", preview.fetch(:rounded_size_eth)
+      assert_equal "unknown", preview.fetch(:payload).fetch(:rounded_size_eth)
+      assert_equal "required_later", preview.fetch(:payload).fetch(:size_increment)
+      assert_equal "required_later", preview.fetch(:payload).fetch(:price_increment)
+      assert_includes preview.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
+      assert_includes preview.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing"
+      assert_includes preview.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing"
+    end
+
+    test "extended execution service exposes dry run previews but live remains blocked" do
+      venue = HedgeVenues::Extended.new(
+        env: {
+          "EXTENDED_MARKET_SYMBOL" => "ETH-USD",
+          "EXTENDED_SIZE_INCREMENT" => "0.0001",
+          "EXTENDED_PRICE_INCREMENT" => "0.1"
+        }
+      )
+      service = ExtendedHedgeExecutionService.new(venue: venue)
+
+      decrease = service.decrease_short_preview(size_eth: BigDecimal("0.005"), max_slippage: "0.01")
+      result = service.rebalance_short
+
+      assert_extended_intent(decrease, action: "decrease_short", side: "buy", reduce_only: true, rounded_size: "0.005")
+      assert_equal "blocked_before_submit", result.status
+      assert_equal 0, result.receipt.fetch(:orders_submitted)
+      assert_equal 0, result.receipt.fetch(:signatures_created)
+      assert_equal false, result.receipt.fetch(:submitted)
     end
 
     test "extended execution service blocks all live actions without signing or submitting" do
@@ -51,6 +110,23 @@ module HedgeVenues
         assert_equal 0, result.receipt.fetch(:signatures_created)
         assert_equal false, result.receipt.fetch(:submitted)
       end
+    end
+
+    def assert_extended_intent(preview, action:, side:, reduce_only:, rounded_size:)
+      payload = preview.fetch(:payload)
+      assert_equal "extended_dry_run_order_intent", payload.fetch(:schema)
+      assert_equal action, payload.fetch(:action)
+      assert_equal side, payload.fetch(:side)
+      assert_equal side.upcase, payload.fetch(:extended_side)
+      assert_equal reduce_only, payload.fetch(:reduce_only)
+      assert_equal rounded_size, payload.fetch(:rounded_size_eth)
+      assert_equal false, payload.fetch(:order_submission)
+      assert_equal false, payload.fetch(:signature_required)
+      assert_equal false, payload.fetch(:stark_signature_created)
+      assert_equal false, payload.fetch(:submit_implemented)
+      assert_equal false, payload.fetch(:cancel_implemented)
+      assert_nil payload.fetch(:submit_endpoint)
+      assert_equal "POST /user/order", payload.fetch(:future_submit_endpoint)
     end
 
     test "extended normalized read only position shape maps short fields" do
