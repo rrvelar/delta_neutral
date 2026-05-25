@@ -227,6 +227,62 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     end
   end
 
+  test "Mellow UI parity rewards become high confidence estimate when expected value matches" do
+    position = create_mellow_position(user_share_percent: "0.156")
+    add_share_token(position)
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) { |_pool| "0x1111111111111111111111111111111111111111" }
+    stub_request(:post, "https://base.example.com/rpc").to_return(
+      status: 200,
+      body: { jsonrpc: "2.0", id: 1, result: "0x000000000000000000000000000000000000000000000001618d43063904a59c" }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_AERO_TOKEN_ADDRESS" => "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5",
+      "BASE_RPC_URL" => "https://base.example.com/rpc",
+      "EXPECTED_AERO" => "25.25"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, slipstream_service: owner_reader(nil), position: position).report
+
+      assert_equal "estimated", report.fetch(:value_state)
+      assert_equal "mellow_ui_parity_eth_call", report.fetch(:reward_source)
+      assert_equal "high", report.fetch(:source_confidence)
+      assert_equal "direct_deposit", report.fetch(:reward_scope)
+      assert_equal "25.476092361110234524", report.fetch(:claimable_aero)
+      assert_equal "12.738046180555117262", report.fetch(:claimable_aero_usd)
+    end
+  end
+
+  test "Mellow UI parity mismatch remains excluded from PnL" do
+    position = create_mellow_position(user_share_percent: "0.156")
+    add_share_token(position)
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) { |_pool| "0x1111111111111111111111111111111111111111" }
+    stub_request(:post, "https://base.example.com/rpc").to_return(
+      status: 200,
+      body: { jsonrpc: "2.0", id: 1, result: "0x000000000000000000000000000000000000000000000001618d43063904a59c" }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5",
+      "BASE_RPC_URL" => "https://base.example.com/rpc",
+      "EXPECTED_AERO" => "1"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, slipstream_service: owner_reader(nil), position: position).report
+
+      assert_equal "unverified_mismatch", report.fetch(:value_state)
+      assert_equal "mellow_ui_parity_eth_call", report.fetch(:reward_source)
+      assert_match "Unverified", report.fetch(:stop_reason)
+    end
+  end
+
   test "verified zero reward read is explicit" do
     position = create_aerodrome_position
     reward_data = AerodromeRewardsService::RewardData.new(
@@ -482,6 +538,11 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     Object.new.tap do |object|
       object.define_singleton_method(:owner_of) { |_token_id| owner }
     end
+  end
+
+  def add_share_token(position)
+    metadata = position.mellow_metadata_hash.merge("share_token" => MellowUiParityRewards::CONTRACT_ADDRESS)
+    position.update!(mellow_metadata: JSON.generate(metadata))
   end
 
   def stub_aero_price_rpc

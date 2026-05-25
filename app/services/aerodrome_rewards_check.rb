@@ -40,6 +40,7 @@ class AerodromeRewardsCheck
       exposure_derived_share: decimal_string(context[:exposure_derived_share]),
       pro_rata_fraction_used: decimal_string(context[:pro_rata_fraction_used]),
       reward_scope: context[:reward_scope],
+      reward_source: @mellow_reward_source,
       source_confidence: context[:source_confidence],
       raw_gauge_earned: @mellow_reward_diagnostics&.fetch(:raw_gauge_earned, nil),
       raw_aero_amount_before_pro_rata: decimal_string(@mellow_reward_diagnostics&.fetch(:raw_aero_amount_before_pro_rata, nil)),
@@ -48,6 +49,16 @@ class AerodromeRewardsCheck
       reward_account_address: @mellow_reward_diagnostics&.fetch(:reward_account_address, nil),
       reward_token_decimals: @mellow_reward_diagnostics&.fetch(:reward_token_decimals, nil),
       reward_read_attempts: @mellow_reward_diagnostics&.fetch(:reward_read_attempts, nil),
+      ui_parity_contract_address: @mellow_reward_diagnostics&.fetch(:ui_parity_contract_address, nil) || @mellow_ui_parity_result&.contract_address,
+      ui_parity_contract_role: @mellow_reward_diagnostics&.fetch(:ui_parity_contract_role, nil) || @mellow_ui_parity_result&.contract_role,
+      ui_parity_selector: @mellow_reward_diagnostics&.fetch(:ui_parity_selector, nil) || @mellow_ui_parity_result&.selector,
+      ui_parity_selector_name: @mellow_reward_diagnostics&.fetch(:ui_parity_selector_name, nil) || @mellow_ui_parity_result&.selector_name,
+      ui_parity_verified_selector: @mellow_reward_diagnostics&.fetch(:ui_parity_verified_selector, nil) || @mellow_ui_parity_result&.verified_selector,
+      ui_parity_raw_result: @mellow_ui_parity_result&.raw_result,
+      ui_parity_decoded_aero: decimal_string(@mellow_ui_parity_result&.amount),
+      ui_parity_delta: decimal_string(@mellow_ui_parity_result&.expected_delta),
+      ui_parity_delta_percent: decimal_string(@mellow_ui_parity_result&.expected_delta_percent),
+      candidate_reward_sources: candidate_reward_sources,
       expected_aero: decimal_string(expected_aero),
       expected_aero_delta: decimal_string(expected_aero_delta(reward_data)),
       expected_aero_delta_percent: decimal_string(expected_aero_delta_percent(reward_data)),
@@ -152,6 +163,13 @@ class AerodromeRewardsCheck
 
     gauge_address = rewards_service.gauge_for_pool(position.pool_address)
     owner_address = token.strategy_level ? strategy_token_owner(token.token_id) : nil
+    ui_parity = token.strategy_level ? read_mellow_ui_parity_rewards(position) : nil
+    if ui_parity && ui_parity.status.in?(%w[estimated verified_zero unverified_match unverified_mismatch])
+      reward_data = mellow_ui_parity_reward_data(position: position, token: token, gauge_address: gauge_address, result: ui_parity)
+      @checks << { name: "Mellow UI-parity reward read", status: reward_data.status, value: ui_parity.contract_address }
+      return reward_data
+    end
+
     if token.strategy_level && same_address?(owner_address, gauge_address)
       reward_data = mellow_gauge_owner_reward_data(
         position: position,
@@ -356,6 +374,75 @@ class AerodromeRewardsCheck
     BigDecimal(raw.to_s) / (BigDecimal("10")**Integer(decimals))
   end
 
+  def read_mellow_ui_parity_rewards(position)
+    return nil if position.mellow_metadata_hash["share_token"].blank? && ENV["MELLOW_UI_PARITY_REWARDS_ENABLED"].to_s.downcase != "true"
+
+    @mellow_ui_parity_result = MellowUiParityRewards.new(position: position).read
+  rescue MellowUiParityRewards::Error => e
+    @warnings << "Mellow UI-parity reward read unavailable: #{e.message}"
+    nil
+  end
+
+  def mellow_ui_parity_reward_data(position:, token:, gauge_address:, result:)
+    @mellow_reward_scope = "direct_deposit"
+    @mellow_source_confidence = result.confidence
+    @mellow_pro_rata_fraction_used = BigDecimal("1")
+    @mellow_reward_source = result.source
+    @mellow_reward_value_state_override = result.status if result.status.in?(%w[unverified_match unverified_mismatch])
+    @mellow_reward_diagnostics = {
+      raw_gauge_earned: result.raw_amount,
+      raw_aero_amount_before_pro_rata: result.amount,
+      reward_read_method: result.selector_name,
+      reward_account_address: result.wallet_address,
+      reward_token_decimals: result.decimals,
+      reward_read_attempts: [ { method: result.selector_name, raw: result.raw_amount, error: result.stop_reason } ],
+      ui_parity_contract_address: result.contract_address,
+      ui_parity_contract_role: result.contract_role,
+      ui_parity_selector: result.selector,
+      ui_parity_selector_name: result.selector_name,
+      ui_parity_verified_selector: result.verified_selector
+    }
+
+    AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: gauge_address,
+      depositor_address: result.wallet_address,
+      account_address: result.wallet_address,
+      token_id: token.display_token_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
+      reward_token_address: ENV["AERODROME_AERO_TOKEN_ADDRESS"].presence,
+      claimable_aero_raw: result.raw_amount,
+      claimable_aero: result.amount,
+      claimable_aero_usd: nil,
+      warnings: token.warnings + [ "Mellow UI-parity AERO rewards estimate from #{result.selector_name}; claiming is not implemented." ],
+      blockers: []
+    )
+  end
+
+  def candidate_reward_sources
+    sources = []
+    if @mellow_ui_parity_result
+      sources << {
+        source: @mellow_ui_parity_result.source,
+        status: @mellow_ui_parity_result.status,
+        confidence: @mellow_ui_parity_result.confidence,
+        amount: decimal_string(@mellow_ui_parity_result.amount),
+        stop_reason: @mellow_ui_parity_result.stop_reason
+      }
+    end
+    if @mellow_reward_diagnostics
+      sources << {
+        source: "aerodrome_cl_gauge",
+        method: @mellow_reward_diagnostics[:reward_read_method],
+        amount: decimal_string(@mellow_reward_diagnostics[:raw_aero_amount_before_pro_rata])
+      }
+    end
+    sources
+  end
+
   def price_service
     @price_service ||= AerodromeAeroUsdPrice.new
   end
@@ -379,6 +466,7 @@ class AerodromeRewardsCheck
   def reward_value_state(reward_data, price_data, context)
     return "unavailable" unless reward_data&.claimable_aero
     return "unavailable" if context[:strategy_level_estimate] && reward_data.status != "detected"
+    return @mellow_reward_value_state_override if @mellow_reward_value_state_override
 
     claimable = BigDecimal(reward_data.claimable_aero.to_s)
     return "verified_zero" if claimable.zero?
