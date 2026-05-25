@@ -314,6 +314,8 @@ class PositionsController < ApplicationController
         claimable_by_app: false,
         aero_usd_price: nil,
         aero_usd_price_source: "unavailable",
+        value_state: "unavailable",
+        stop_reason: "AERODROME_REWARDS_ENABLED is not true",
         warnings: [ "AERODROME_REWARDS_ENABLED is not true" ]
       }
     end
@@ -332,6 +334,8 @@ class PositionsController < ApplicationController
       token_id: @position.external_id,
       aero_usd_price: nil,
       aero_usd_price_source: "unavailable",
+      value_state: "unavailable",
+      stop_reason: e.message,
       warnings: [ e.message ]
     }
   end
@@ -352,6 +356,8 @@ class PositionsController < ApplicationController
         strategy_level_estimate: @position.mellow_autopilot?,
         fee_label: @position.mellow_autopilot? ? "Mellow pro-rata LP fee estimate" : "Unclaimed fees USD estimate",
         collect_enabled_by_app: false,
+        value_state: "unavailable",
+        stop_reason: "AERODROME_FEES_ENABLED is not true",
         warnings: [ "AERODROME_FEES_ENABLED is not true" ]
       }
     end
@@ -369,6 +375,8 @@ class PositionsController < ApplicationController
       fee1_amount: nil,
       fee1_usd: nil,
       total_fees_usd: nil,
+      value_state: "unavailable",
+      stop_reason: e.message,
       warnings: [ e.message ]
     }
   end

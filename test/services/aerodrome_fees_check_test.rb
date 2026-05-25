@@ -35,6 +35,7 @@ class AerodromeFeesCheckTest < ActiveSupport::TestCase
       assert_equal "3.5", report.fetch(:fee1_amount)
       assert_equal "3.5", report.fetch(:fee1_usd)
       assert_equal "23.5", report.fetch(:total_fees_usd)
+      assert_equal "estimated", report.fetch(:value_state)
     end
   end
 
@@ -62,8 +63,36 @@ class AerodromeFeesCheckTest < ActiveSupport::TestCase
       assert_equal "WARN", report.fetch(:status)
       assert_equal "unavailable", report.fetch(:fee_source)
       assert_nil report.fetch(:total_fees_usd)
+      assert_equal "unavailable", report.fetch(:value_state)
       assert_includes report.fetch(:warnings), "fee read for staked Slipstream NFT is not verified; CL gauge staking receives emissions instead of LP fees"
     end
+  end
+
+  test "verified zero fee read is explicit" do
+    position = create_aerodrome_position
+    fees_service = Object.new
+    fees_service.define_singleton_method(:fees_for_position) do |_position|
+      AerodromeFeesService::FeeData.new(
+        status: "detected",
+        fee_source: AerodromeFeesService::SOURCE,
+        token_id: position.external_id,
+        pool_address: position.pool_address,
+        fee0_symbol: "WETH",
+        fee0_amount: BigDecimal("0"),
+        fee0_usd: BigDecimal("0"),
+        fee1_symbol: "USDC",
+        fee1_amount: BigDecimal("0"),
+        fee1_usd: BigDecimal("0"),
+        total_fees_usd: BigDecimal("0"),
+        warnings: [],
+        blockers: []
+      )
+    end
+
+    report = AerodromeFeesCheck.new(fees_service: fees_service).report
+
+    assert_equal "verified_zero", report.fetch(:value_state)
+    assert_equal "0.0", report.fetch(:total_fees_usd)
   end
 
   private

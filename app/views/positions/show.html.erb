@@ -46,6 +46,10 @@ end %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% rewards_report = @aerodrome_rewards_report || {} %>
 <% fees_report = @aerodrome_fees_report || {} %>
+<% reward_value_state = rewards_report[:value_state].presence || (rewards_report[:claimable_aero_usd].present? ? (rewards_report[:claimable_aero_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
+<% fee_value_state = fees_report[:value_state].presence || (fees_report[:total_fees_usd].present? ? (fees_report[:total_fees_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
+<% rewards_usable = %w[estimated verified_zero detected].include?(reward_value_state) %>
+<% fees_usable = %w[estimated verified_zero detected].include?(fee_value_state) %>
 <% hedge_preview = aerodrome ? aerodrome_hedge_preview_for(@position) : nil %>
 <% latest_snap = @pnl_snapshots.first %>
 <% pool_unrealized = position_valuation.pool_delta_usd %>
@@ -62,9 +66,9 @@ elsif hedge_unrealized_available
   hedge_unrealized
 end %>
 <% total_pnl = total_unrealized ? total_unrealized + hedge_realized : nil %>
-<% rewards_pnl = rewards_report.fetch(:claimable_aero_usd, nil).presence %>
+<% rewards_pnl = reward_value_state == "verified_zero" ? "0" : (rewards_usable ? rewards_report.fetch(:claimable_aero_usd, nil).presence : nil) %>
 <% rewards_pnl = BigDecimal(rewards_pnl.to_s) if rewards_pnl %>
-<% fees_pnl = fees_report.fetch(:total_fees_usd, nil).presence %>
+<% fees_pnl = fee_value_state == "verified_zero" ? "0" : (fees_usable ? fees_report.fetch(:total_fees_usd, nil).presence : nil) %>
 <% fees_pnl = BigDecimal(fees_pnl.to_s) if fees_pnl %>
 <% total_pnl_with_rewards = total_pnl && rewards_pnl ? total_pnl + rewards_pnl : nil %>
 <% total_pnl_with_rewards_and_fees = total_pnl_with_rewards && fees_pnl ? total_pnl_with_rewards + fees_pnl : nil %>
@@ -378,10 +382,26 @@ end %>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Excluding Rewards / Fees</p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total unrealized</p><p class="mt-2 text-xl font-semibold <%= (total_unrealized || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_unrealized ? format_usd(total_unrealized) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Pool <%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %> / Hedge <%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Realized</p><p class="mt-2 text-xl font-semibold <%= hedge_realized >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= format_usd(hedge_realized) %></p></div>
-              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO rewards estimate" : "AERO rewards estimate" %></p><p class="mt-2 text-xl font-semibold text-white"><%= rewards_pnl ? format_usd(rewards_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= rewards_report[:warnings]&.first.presence || "Claiming is not implemented." %></p></div>
-              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= fees_report[:fee_label].presence || "LP fees estimate" %></p><p class="mt-2 text-xl font-semibold text-white"><%= fees_pnl ? format_usd(fees_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= fees_report[:warnings]&.first.presence || "Collecting is not implemented." %></p></div>
-              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Including Unclaimed AERO Rewards Estimate</p><p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards ? format_usd(total_pnl_with_rewards) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Unclaimed rewards are not realized until claimed/sold.</p></div>
-              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Including Rewards + LP Fees Estimate</p><p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards_and_fees || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards_and_fees ? format_usd(total_pnl_with_rewards_and_fees) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= total_pnl_with_rewards ? "Rewards included when priced." : "Reward/fee estimates unavailable. Including fees unavailable." %></p></div>
+              <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+                <p class="text-xs text-gray-500"><%= rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO rewards estimate" : "AERO rewards estimate" %></p>
+                <p class="mt-2 text-xl font-semibold text-white"><%= rewards_pnl ? format_usd(rewards_pnl) : "Unavailable" %></p>
+                <p class="mt-1 break-words text-xs text-gray-500" title="<%= rewards_report[:stop_reason] || rewards_report[:warnings]&.first %>"><%= reward_value_state == "verified_zero" ? "Verified zero from readable reward source." : (reward_value_state == "estimated" ? "Strategy-level read-only estimate." : (rewards_report[:stop_reason].presence || rewards_report[:warnings]&.first.presence || "Claiming is not implemented.")) %></p>
+              </div>
+              <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+                <p class="text-xs text-gray-500"><%= fees_report[:fee_label].presence || "LP fees estimate" %></p>
+                <p class="mt-2 text-xl font-semibold text-white"><%= fees_pnl ? format_usd(fees_pnl) : "Unavailable" %></p>
+                <p class="mt-1 break-words text-xs text-gray-500" title="<%= fees_report[:stop_reason] || fees_report[:warnings]&.first %>"><%= fee_value_state == "verified_zero" ? "Verified zero from readable fee source." : (fee_value_state == "estimated" ? "Strategy-level read-only estimate." : (fees_report[:stop_reason].presence || fees_report[:warnings]&.first.presence || "Collecting is not implemented.")) %></p>
+              </div>
+              <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+                <p class="text-xs text-gray-500">Total PnL Including Unclaimed AERO Rewards Estimate</p>
+                <p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards ? format_usd(total_pnl_with_rewards) : "Unavailable" %></p>
+                <p class="mt-1 break-words text-xs text-gray-500"><%= rewards_pnl ? "Pool + hedge + reward estimate. Unclaimed rewards are not realized until claimed/sold." : "Base only; rewards unavailable." %></p>
+              </div>
+              <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+                <p class="text-xs text-gray-500">Total PnL Including Rewards + LP Fees Estimate</p>
+                <p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards_and_fees || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards_and_fees ? format_usd(total_pnl_with_rewards_and_fees) : "Unavailable" %></p>
+                <p class="mt-1 break-words text-xs text-gray-500"><%= total_pnl_with_rewards_and_fees ? "Pool + hedge + reward and LP fee estimates." : "Rewards or LP fee estimate unavailable; combined total not shown. Including fees unavailable." %></p>
+              </div>
             </div>
             <% if pnl_execution_venue.in?(%w[nado ethereal]) %>
               <p class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400">
@@ -407,6 +427,8 @@ end %>
                   <p class="mt-1 text-xs text-gray-500">Read-only. Claiming is not implemented. Rewards are not included in Total PnL.</p>
                   <dl class="mt-3 space-y-2 text-sm">
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Status</dt><dd class="text-right text-white"><%= rewards_report[:status].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Value state</dt><dd class="text-right text-white"><%= reward_value_state %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Stop reason</dt><dd class="break-words text-right text-white" title="<%= rewards_report[:stop_reason] %>"><%= rewards_report[:stop_reason].presence || "none" %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Gauge status</dt><dd class="text-right text-white"><%= rewards_report[:gauge_status].presence || "unavailable" %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Token source</dt><dd class="break-all text-right text-white"><%= rewards_report[:token_source].presence || "unavailable" %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= rewards_report[:reward_label].presence || "Claimable AERO" %></dt><dd class="text-right text-white"><%= format_venue_eth_amount(rewards_report[:claimable_aero]) %></dd></div>
@@ -429,6 +451,8 @@ end %>
                   <p class="mt-1 text-xs text-gray-500">Unclaimed fees are not realized PnL until collected.</p>
                   <dl class="mt-3 space-y-2 text-sm">
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Status</dt><dd class="text-right text-white"><%= fees_report[:status].presence || "unavailable" %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Value state</dt><dd class="text-right text-white"><%= fee_value_state %></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-gray-500">Stop reason</dt><dd class="break-words text-right text-white" title="<%= fees_report[:stop_reason] %>"><%= fees_report[:stop_reason].presence || "none" %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Fee source</dt><dd class="break-all text-right text-white"><%= fees_report[:fee_source].presence || "unavailable" %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500">Token ID</dt><dd class="break-all text-right text-white"><%= fees_report[:token_id].presence || @position.external_id %></dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-gray-500"><%= fees_report[:fee0_symbol].presence || @position.asset0 %> fees</dt><dd class="text-right text-white"><%= format_venue_eth_amount(fees_report[:fee0_amount]) %> <%= fees_report[:fee0_symbol] %> / <%= format_venue_usd_amount(fees_report[:fee0_usd]) %></dd></div>

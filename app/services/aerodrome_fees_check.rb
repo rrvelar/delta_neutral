@@ -36,6 +36,8 @@ class AerodromeFeesCheck
       fee1_amount: decimal_string(fee_data&.fee1_amount),
       fee1_usd: decimal_string(fee_data&.fee1_usd),
       total_fees_usd: decimal_string(fee_data&.total_fees_usd),
+      value_state: fee_value_state(fee_data),
+      stop_reason: fee_stop_reason(fee_data),
       blockers: @blockers,
       warnings: @warnings,
       next_steps: next_steps
@@ -145,6 +147,20 @@ class AerodromeFeesCheck
     return nil if value.nil?
 
     BigDecimal(value.to_s).to_s("F")
+  end
+
+  def fee_value_state(fee_data)
+    return "unavailable" unless fee_data&.total_fees_usd
+
+    BigDecimal(fee_data.total_fees_usd.to_s).zero? ? "verified_zero" : "estimated"
+  rescue ArgumentError
+    "unavailable"
+  end
+
+  def fee_stop_reason(fee_data)
+    return nil if fee_value_state(fee_data) != "unavailable"
+
+    fee_data&.warnings&.first || "LP fee estimate is unavailable."
   end
 
   def next_steps

@@ -19,6 +19,8 @@ class AerodromeRewardsCheck
     merge_reward_messages(reward_data)
     @warnings.concat(price_data.warnings)
     claimable_aero_usd = claimable_aero_usd(reward_data, price_data)
+    value_state = reward_value_state(reward_data, price_data, context)
+    stop_reason = reward_stop_reason(reward_data, context)
 
     {
       safety_banner: BANNER,
@@ -52,6 +54,8 @@ class AerodromeRewardsCheck
       aero_usd_price: decimal_string(price_data.price),
       aero_usd_price_source: price_data.source,
       claimable_aero_usd: decimal_string(claimable_aero_usd),
+      value_state: value_state,
+      stop_reason: stop_reason,
       checks: @checks,
       blockers: @blockers,
       warnings: @warnings,
@@ -86,6 +90,7 @@ class AerodromeRewardsCheck
       token_source: token.source,
       strategy_level_estimate: token.strategy_level,
       pro_rata_share: token.pro_rata_share,
+      token_unavailable_reason: token.unavailable_reason,
       reward_label: token.strategy_level ? "Mellow pro-rata AERO rewards estimate" : "Claimable AERO",
       claimable_by_app: false,
       position_wallet_address: position.wallet.address,
@@ -170,6 +175,26 @@ class AerodromeRewardsCheck
   end
 
   def pro_rate_mellow_rewards(reward_data, token)
+    if reward_data.status == "not_staked"
+      return AerodromeRewardsService::RewardData.new(
+        status: "unavailable",
+        pool_address: reward_data.pool_address,
+        gauge_address: reward_data.gauge_address,
+        depositor_address: reward_data.depositor_address,
+        account_address: reward_data.account_address,
+        token_id: token.display_token_id,
+        staked: false,
+        staked_token_ids: reward_data.staked_token_ids,
+        reward_rate_raw: reward_data.reward_rate_raw,
+        reward_token_address: reward_data.reward_token_address,
+        claimable_aero_raw: nil,
+        claimable_aero: nil,
+        claimable_aero_usd: nil,
+        warnings: reward_data.warnings + token.warnings + [ "No direct gauge stake detected for strategy token; rewards may be handled by Mellow strategy or unavailable to this app." ],
+        blockers: reward_data.blockers
+      )
+    end
+
     AerodromeRewardsService::RewardData.new(
       status: reward_data.status,
       pool_address: reward_data.pool_address,
@@ -232,6 +257,34 @@ class AerodromeRewardsCheck
     return nil unless reward_data&.claimable_aero && price_data.price
 
     reward_data.claimable_aero * price_data.price
+  end
+
+  def reward_value_state(reward_data, price_data, context)
+    return "unavailable" unless reward_data&.claimable_aero
+    return "unavailable" if context[:strategy_level_estimate] && reward_data.status != "detected"
+
+    claimable = BigDecimal(reward_data.claimable_aero.to_s)
+    return "verified_zero" if claimable.zero?
+    return "unavailable" unless price_data.price
+
+    context[:strategy_level_estimate] ? "estimated" : "detected"
+  rescue ArgumentError
+    "unavailable"
+  end
+
+  def reward_stop_reason(reward_data, context)
+    return context[:token_unavailable_reason] if context[:token_unavailable_reason].present?
+    if reward_data&.claimable_aero && BigDecimal(reward_data.claimable_aero.to_s).positive? && reward_data.claimable_aero_usd.nil?
+      return "Missing AERO USD price; reward amount is available but USD estimate is unavailable."
+    end
+    if reward_data && reward_data.status != "detected"
+      direct_mellow_reason = reward_data.warnings.find { |warning| warning.to_s.start_with?("No direct gauge stake detected") }
+      return direct_mellow_reason || reward_data.warnings.first
+    end
+
+    nil
+  rescue ArgumentError
+    "Reward amount could not be parsed."
   end
 
   def rewards_enabled?

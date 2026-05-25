@@ -125,7 +125,73 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       assert_equal "1.25", report.fetch(:claimable_aero)
       assert_equal 1_250_000_000_000_000_000, report.fetch(:claimable_aero_raw)
       assert_equal "0.625", report.fetch(:claimable_aero_usd)
+      assert_equal "estimated", report.fetch(:value_state)
       assert_includes report.fetch(:warnings), "Mellow rewards/fees are read-only pro-rata estimates from the observed strategy token; claiming/collecting is not implemented."
+    end
+  end
+
+  test "Mellow strategy token not staked in direct gauge is unavailable instead of verified zero" do
+    position = create_mellow_position(user_share_percent: "1.25")
+    strategy_reward_data = AerodromeRewardsService::RewardData.new(
+      status: "not_staked",
+      pool_address: position.pool_address,
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
+      account_address: position.wallet.address,
+      token_id: "71261528",
+      staked: false,
+      staked_token_ids: [],
+      reward_rate_raw: nil,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 0,
+      claimable_aero: BigDecimal("0"),
+      claimable_aero_usd: nil,
+      warnings: [ "position NFT 71261528 is not staked in discovered CL gauge" ],
+      blockers: []
+    )
+    service = reward_service_stub(position, strategy_reward_data, expected_token_id: "71261528")
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, position: position).report
+
+      assert_equal "WARN", report.fetch(:status)
+      assert_equal "unavailable", report.fetch(:value_state)
+      assert_nil report.fetch(:claimable_aero)
+      assert_nil report.fetch(:claimable_aero_usd)
+      assert_match "No direct gauge stake detected", report.fetch(:stop_reason)
+    end
+  end
+
+  test "verified zero reward read is explicit" do
+    position = create_aerodrome_position
+    reward_data = AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: "0x1111111111111111111111111111111111111111",
+      depositor_address: position.wallet.address,
+      account_address: position.wallet.address,
+      token_id: position.external_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: 0,
+      reward_token_address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      claimable_aero_raw: 0,
+      claimable_aero: BigDecimal("0"),
+      claimable_aero_usd: nil,
+      warnings: [],
+      blockers: []
+    )
+    service = reward_service_stub(position, reward_data)
+
+    with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5", "AERODROME_REWARDS_ENABLED" => "true") do
+      report = AerodromeRewardsCheck.new(rewards_service: service).report
+
+      assert_equal "verified_zero", report.fetch(:value_state)
+      assert_equal "0.0", report.fetch(:claimable_aero)
     end
   end
 
