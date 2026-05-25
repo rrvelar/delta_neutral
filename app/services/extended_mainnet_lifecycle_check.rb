@@ -92,6 +92,7 @@ class ExtendedMainnetLifecycleCheck
       position_id: position.id,
       timestamp: @now.call.utc.iso8601,
       current_position: current_position,
+      read_only_account_diagnostics: @venue.read_only_account_diagnostics(current_position: current_position),
       market_metadata: @venue.market_metadata_diagnostics,
       order_payload_summaries: orders.map { |order| order[:payload] },
       signer_health: sanitize_signer_health(signer_health),
@@ -107,8 +108,15 @@ class ExtendedMainnetLifecycleCheck
 
   def capped_size(size_eth)
     requested = BigDecimal(size_eth.to_s)
-    cap = BigDecimal(@env.fetch("EXTENDED_PROBE_MAX_SIZE_ETH", "0.005").to_s)
+    cap = BigDecimal((@env["EXTENDED_PROBE_MAX_SIZE_ETH"].presence || default_probe_max_size).to_s)
     [ requested, cap ].min
+  end
+
+  def default_probe_max_size
+    min_size = BigDecimal(@venue.market_metadata_diagnostics[:min_size].to_s)
+    [ BigDecimal("0.005"), min_size ].max
+  rescue ArgumentError
+    BigDecimal("0.005")
   end
 
   def target_size(position)

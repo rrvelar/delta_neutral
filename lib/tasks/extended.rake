@@ -3,7 +3,7 @@ namespace :extended do
   task mainnet_lifecycle_check: :environment do
     mode = (ENV["mode"] || ENV["MODE"] || "open_only").to_s.downcase
     dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
-    size_eth = BigDecimal((ENV["size_eth"] || ENV["SIZE_ETH"] || "0.005").to_s)
+    size_eth = BigDecimal((ENV["size_eth"] || ENV["SIZE_ETH"] || "0.01").to_s)
     confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
     position = extended_probe_position
     env = extended_probe_env

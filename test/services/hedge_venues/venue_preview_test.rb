@@ -165,6 +165,83 @@ module HedgeVenues
       assert_equal "env", payload.fetch(:price_increment_source)
     end
 
+    test "extended dry run blocks requested size below discovered min size" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT"),
+        api_client: metadata_api_client(
+          "data" => {
+            "name" => "ETH-USD",
+            "tradingConfig" => {
+              "minOrderSize" => "0.01",
+              "minOrderSizeChange" => "0.001",
+              "minPriceChange" => "0.1"
+            },
+            "marketStats" => { "markPrice" => "2120" }
+          }
+        )
+      )
+
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.005"), max_slippage: "0.01")
+      payload = preview.fetch(:payload)
+
+      assert_equal "0.005", payload.fetch(:requested_size_eth)
+      assert_equal "0.005", payload.fetch(:rounded_size_eth)
+      assert_equal "0.01", payload.fetch(:min_size)
+      assert_equal false, payload.fetch(:size_valid)
+      assert_equal true, payload.fetch(:notional_valid)
+      assert_includes preview.fetch(:blockers), "requested size 0.005 is below Extended min order size 0.01"
+    end
+
+    test "extended dry run passes discovered min size validation at minimum size" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT"),
+        api_client: metadata_api_client(
+          "data" => {
+            "name" => "ETH-USD",
+            "tradingConfig" => {
+              "minOrderSize" => "0.01",
+              "minOrderSizeChange" => "0.001",
+              "minPriceChange" => "0.1"
+            },
+            "marketStats" => { "markPrice" => "2120" }
+          }
+        )
+      )
+
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.01"), max_slippage: "0.01")
+      payload = preview.fetch(:payload)
+
+      assert_equal "0.01", payload.fetch(:rounded_size_eth)
+      assert_equal true, payload.fetch(:size_valid)
+      assert_not_includes preview.fetch(:blockers), "requested size 0.01 is below Extended min order size 0.01"
+    end
+
+    test "extended dry run validates discovered min notional when available" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT"),
+        api_client: metadata_api_client(
+          "data" => {
+            "name" => "ETH-USD",
+            "tradingConfig" => {
+              "minOrderSize" => "0.001",
+              "minOrderSizeChange" => "0.001",
+              "minPriceChange" => "0.1",
+              "minOrderValue" => "25"
+            },
+            "marketStats" => { "markPrice" => "2120" }
+          }
+        )
+      )
+
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.01"), max_slippage: "0.01")
+      payload = preview.fetch(:payload)
+
+      assert_equal "25.0", payload.fetch(:min_notional)
+      assert_equal "21.2", payload.fetch(:estimated_notional_usd)
+      assert_equal false, payload.fetch(:notional_valid)
+      assert_includes preview.fetch(:blockers), "estimated notional 21.2 is below Extended min notional 25.0"
+    end
+
     test "extended execution service exposes dry run previews but live remains blocked" do
       venue = HedgeVenues::Extended.new(
         env: {

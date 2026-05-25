@@ -57,6 +57,24 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_includes result.blockers, "Extended submit endpoint integration not implemented."
   end
 
+  test "live mode refuses below min size before any signing or submit" do
+    result = build_service(api_client: min_size_api_client).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.005",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    summary = result.receipt.fetch(:order_payload_summaries).first
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "requested size 0.005 is below Extended min order size 0.01"
+    assert_equal false, summary.fetch(:size_valid)
+    assert_equal "0.01", summary.fetch(:min_size)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   test "dry run builds lifecycle payloads and submits nothing" do
     result = build_service.run(
       position: fake_position,
@@ -73,15 +91,21 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal "ETH-USD", result.receipt.dig(:market_metadata, :requested_market_symbol)
     assert_equal "env", result.receipt.dig(:market_metadata, :size_increment_source)
     assert_equal "env", result.receipt.dig(:market_metadata, :price_increment_source)
+    assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :account_read_attempted)
+    assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :positions_read_attempted)
+    assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :open_orders_read_attempted)
+    assert_equal "5000.0", result.receipt.dig(:read_only_account_diagnostics, :account_value_usd)
+    assert_equal "position_present", result.receipt.dig(:read_only_account_diagnostics, :current_position_status)
     assert_equal 0, result.receipt.fetch(:orders_placed)
     assert_equal 0, result.receipt.fetch(:signatures_created)
     assert_equal false, result.receipt.fetch(:submitted)
+    assert_no_match(/api-secret|authorization|cookie/i, result.receipt.to_json)
   end
 
   private
 
-  def build_service(env: extended_env, signer_client: nil)
-    venue = HedgeVenues::Extended.new(env: env, api_client: fake_api_client)
+  def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client)
+    venue = HedgeVenues::Extended.new(env: env, api_client: api_client)
     signer_client ||= Struct.new(:health, keyword_init: true) do
       def supports_extended_order_signing? = false
       def verified_algorithm? = false
@@ -103,6 +127,32 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       def account_info = { status: "ACTIVE", accountId: "acct" }
       def market(market:) = { name: market, active: true }
       def open_orders(market:) = []
+    end.new
+  end
+
+  def min_size_api_client
+    Class.new do
+      def positions(market:)
+        []
+      end
+
+      def balance = { equity: "5000", balance: "5000" }
+      def account_info = { status: "ACTIVE", accountId: "acct" }
+      def open_orders(market:) = []
+
+      def market(market:)
+        {
+          data: {
+            name: market,
+            tradingConfig: {
+              minOrderSize: "0.01",
+              minOrderSizeChange: "0.001",
+              minPriceChange: "0.1"
+            },
+            marketStats: { markPrice: "2120" }
+          }
+        }
+      end
     end.new
   end
 

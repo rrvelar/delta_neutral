@@ -503,6 +503,13 @@ The same response is used for optional diagnostics:
 
 If that metadata is absent, the preview shows `rounded_size_eth: "unknown"` and
 adds clear blockers. This avoids pretending a future order is submit-ready.
+When metadata includes `tradingConfig.minOrderSize` or a min-notional field,
+the dry-run preview validates the requested/rounded size against those limits.
+Dry-run still prints the preview, but below-min orders carry blockers such as
+`requested size 0.005 is below Extended min order size 0.01`; live mode inherits
+the same blocker before any signer or submit path can run. The lifecycle task
+defaults `size_eth` to `0.01`; operators must pass `size_eth` at or above the
+discovered `min_size` and should not rely on implicit rounding up.
 
 ### What still blocks live
 

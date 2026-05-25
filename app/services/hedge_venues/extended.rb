@@ -119,6 +119,11 @@ module HedgeVenues
         current_side: current_position&.fetch(:side, nil),
         account_value_usd: account_value&.to_s("F"),
         collateral_usd: collateral&.to_s("F"),
+        read_only_diagnostics: read_only_account_diagnostics(
+          account_info: account_info,
+          balance: balance,
+          current_position: current_position
+        ),
         market_metadata_available: market_metadata_available?,
         market_metadata: market_metadata_diagnostics(raw_market: market),
         open_orders_count: open_orders_count,
@@ -147,6 +152,32 @@ module HedgeVenues
       }.compact
     end
 
+    def read_only_account_diagnostics(account_info: nil, balance: nil, current_position: nil, open_orders: nil)
+      account_info = read_only_call(:account_info) if account_info.nil? && configured?
+      balance = read_only_call(:balance) if balance.nil? && configured?
+      current_position = read_position(symbol: "ETH") if current_position.nil? && configured?
+      open_orders = read_only_call(:open_orders, market: market_symbol) if open_orders.nil? && configured?
+      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
+      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+
+      {
+        account_read_attempted: configured?,
+        balance_read_attempted: configured?,
+        positions_read_attempted: configured?,
+        open_orders_read_attempted: configured?,
+        account_read_status: read_status(account_info),
+        balance_read_status: read_status(balance),
+        positions_read_status: configured? ? "attempted" : "not_configured",
+        open_orders_read_status: read_status(open_orders),
+        account_value_usd: account_value&.to_s("F"),
+        collateral_usd: collateral&.to_s("F"),
+        current_position_status: current_position ? "position_present" : "no_position",
+        current_position_side: current_position&.fetch(:side, nil),
+        current_short_eth: current_position&.fetch(:short_size, nil),
+        open_orders_count: open_orders.nil? ? nil : array_payload(open_orders).size
+      }.compact
+    end
+
     def blockers
       (config_blockers + market_metadata_blockers + [
         "Extended live disabled.",
@@ -171,6 +202,7 @@ module HedgeVenues
     def dry_run_preview(action:, symbol:, size_eth:, max_slippage:, reduce_only:)
       requested_size = decimal_or_nil(size_eth)
       rounded_size = rounded_order_size_or_nil(requested_size)
+      validation = order_size_validation(requested_size: requested_size, rounded_size: rounded_size)
       {
         venue: venue_name,
         mode: mode,
@@ -191,11 +223,12 @@ module HedgeVenues
           symbol: symbol,
           requested_size: requested_size,
           rounded_size: rounded_size,
+          validation: validation,
           max_slippage: max_slippage,
           reduce_only: reduce_only
         ),
-        blockers: blockers,
-        warnings: warnings
+        blockers: (blockers + validation[:blockers]).uniq,
+        warnings: (warnings + validation[:warnings]).uniq
       }
     end
 
@@ -226,7 +259,7 @@ module HedgeVenues
       env["EXTENDED_MARKET_SYMBOL"].presence || "ETH-USD"
     end
 
-    def order_intent_payload(action:, symbol:, requested_size:, rounded_size:, max_slippage:, reduce_only:)
+    def order_intent_payload(action:, symbol:, requested_size:, rounded_size:, validation:, max_slippage:, reduce_only:)
       side = reduce_only ? "buy" : "sell"
       {
         schema: "extended_dry_run_order_intent",
@@ -240,6 +273,12 @@ module HedgeVenues
         reduce_only: reduce_only,
         requested_size_eth: decimal_string_or_unknown(requested_size),
         rounded_size_eth: rounded_size ? rounded_size.to_s("F") : "unknown",
+        min_size: validation[:min_size],
+        min_notional: validation[:min_notional],
+        estimated_notional_usd: validation[:estimated_notional_usd],
+        size_valid: validation[:size_valid],
+        notional_valid: validation[:notional_valid],
+        validation_blockers: validation[:blockers],
         size_increment: size_increment&.to_s("F") || "required_later",
         size_increment_source: size_increment_source,
         price_increment: price_increment&.to_s("F") || "required_later",
@@ -272,6 +311,34 @@ module HedgeVenues
         signing_implemented: false,
         submit_implemented: false,
         cancel_implemented: false
+      }
+    end
+
+    def order_size_validation(requested_size:, rounded_size:)
+      metadata = discovered_market_metadata
+      min_size = decimal_or_nil(metadata[:min_size])
+      min_notional = decimal_or_nil(metadata[:min_notional])
+      mark_price = decimal_or_nil(metadata[:mark_price])
+      validation_size = rounded_size || requested_size
+      estimated_notional = validation_size && mark_price ? validation_size.abs * mark_price : nil
+      blockers = []
+
+      if min_size&.positive? && validation_size && validation_size.abs < min_size
+        blockers << "requested size #{validation_size.to_s('F')} is below Extended min order size #{min_size.to_s('F')}"
+      end
+
+      if min_notional&.positive? && estimated_notional && estimated_notional < min_notional
+        blockers << "estimated notional #{estimated_notional.to_s('F')} is below Extended min notional #{min_notional.to_s('F')}"
+      end
+
+      {
+        min_size: min_size&.to_s("F"),
+        min_notional: min_notional&.to_s("F"),
+        estimated_notional_usd: estimated_notional&.to_s("F"),
+        size_valid: blockers.none? { |blocker| blocker.include?("min order size") },
+        notional_valid: blockers.none? { |blocker| blocker.include?("min notional") },
+        blockers: blockers,
+        warnings: blockers
       }
     end
 
@@ -371,6 +438,14 @@ module HedgeVenues
         account_value_usd: account_value&.to_s("F"),
         collateral_usd: collateral&.to_s("F")
       }.compact
+    end
+
+    def read_status(payload)
+      return "not_configured" unless configured?
+      return "not_attempted" if payload.nil?
+      return "error" if payload.is_a?(Hash) && payload["error"].present?
+
+      "ok"
     end
 
     def size_increment(metadata = discovered_market_metadata)
