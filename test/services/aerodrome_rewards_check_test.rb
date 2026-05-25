@@ -257,7 +257,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     end
   end
 
-  test "Mellow UI parity mismatch remains excluded from PnL" do
+  test "Mellow UI parity expected mismatch remains included unless strict" do
     position = create_mellow_position(user_share_percent: "0.156")
     add_share_token(position)
     service = Object.new
@@ -274,6 +274,34 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5",
       "BASE_RPC_URL" => "https://base.example.com/rpc",
       "EXPECTED_AERO" => "1"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: service, slipstream_service: owner_reader(nil), position: position).report
+
+      assert_equal "estimated", report.fetch(:value_state)
+      assert_equal "mellow_ui_parity_eth_call", report.fetch(:reward_source)
+      assert_nil report.fetch(:stop_reason)
+      assert report.fetch(:expected_aero_delta_percent).to_d.abs > 5
+    end
+  end
+
+  test "Mellow UI parity expected mismatch is excluded when strict" do
+    position = create_mellow_position(user_share_percent: "0.156")
+    add_share_token(position)
+    service = Object.new
+    service.define_singleton_method(:gauge_for_pool) { |_pool| "0x1111111111111111111111111111111111111111" }
+    stub_request(:post, "https://base.example.com/rpc").to_return(
+      status: 200,
+      body: { jsonrpc: "2.0", id: 1, result: "0x000000000000000000000000000000000000000000000001618d43063904a59c" }.to_json,
+      headers: { "Content-Type" => "application/json" }
+    )
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5",
+      "BASE_RPC_URL" => "https://base.example.com/rpc",
+      "EXPECTED_AERO" => "1",
+      "STRICT_EXPECTED_AERO" => "true"
     ) do
       report = AerodromeRewardsCheck.new(rewards_service: service, slipstream_service: owner_reader(nil), position: position).report
 

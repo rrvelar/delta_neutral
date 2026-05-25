@@ -22,15 +22,38 @@ class MellowUiParityRewardsTest < ActiveSupport::TestCase
     assert result.expected_delta_percent.abs < 5
   end
 
-  test "mismatch against expected AERO is unverified and excluded" do
+  test "mismatch against expected AERO is diagnostic by default" do
     position = create_mellow_position
     stub_ui_parity_rpc(RAW_RESULT)
 
     result = MellowUiParityRewards.new(position: position, rpc_url: RPC_URL, expected_aero: "1").read
 
+    assert_equal "estimated", result.status
+    assert_equal "high", result.confidence
+    assert result.expected_delta_percent.abs > 5
+  end
+
+  test "strict expected AERO mismatch is unverified and excluded" do
+    position = create_mellow_position
+    stub_ui_parity_rpc(RAW_RESULT)
+
+    with_env("STRICT_EXPECTED_AERO" => "true") do
+      result = MellowUiParityRewards.new(position: position, rpc_url: RPC_URL, expected_aero: "1").read
+
+      assert_equal "unverified_mismatch", result.status
+      assert_equal "low", result.confidence
+      assert_match "does not match", result.stop_reason
+    end
+  end
+
+  test "zero result remains unverified mismatch" do
+    position = create_mellow_position
+    stub_ui_parity_rpc("0x#{"0".rjust(64, "0")}")
+
+    result = MellowUiParityRewards.new(position: position, rpc_url: RPC_URL, expected_aero: "25.25").read
+
     assert_equal "unverified_mismatch", result.status
     assert_equal "low", result.confidence
-    assert_match "does not match", result.stop_reason
   end
 
   test "encodes submitted wallet argument" do
@@ -62,6 +85,14 @@ class MellowUiParityRewardsTest < ActiveSupport::TestCase
       body: { jsonrpc: "2.0", id: 1, result: result }.to_json,
       headers: { "Content-Type" => "application/json" }
     )
+  end
+
+  def with_env(values)
+    old_values = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    old_values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
   def create_mellow_position

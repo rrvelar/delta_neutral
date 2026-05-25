@@ -109,7 +109,10 @@ class MellowUiParityRewards
   def classify(amount)
     return [ "unavailable", "low", "Mellow UI-parity reward read returned no amount." ] unless amount
 
-    if expected_delta_percent(amount)&.abs&.> BigDecimal("5")
+    return [ "unverified_mismatch", "low", "Mellow UI-parity reward read returned zero while EXPECTED_AERO is positive." ] if amount.zero? && @expected_aero&.positive?
+
+    expected_delta_percent_value = expected_delta_percent(amount)
+    if strict_expected_aero? && expected_delta_percent_value && expected_delta_percent_value.abs > BigDecimal("5")
       return [ "unverified_mismatch", "low", "Unverified — does not match Mellow UI reference." ]
     end
 
@@ -124,6 +127,10 @@ class MellowUiParityRewards
     return nil unless @expected_aero && amount
 
     amount - @expected_aero
+  end
+
+  def strict_expected_aero?
+    ENV["STRICT_EXPECTED_AERO"].to_s.downcase == "true"
   end
 
   def expected_delta_percent(amount)

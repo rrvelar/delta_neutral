@@ -477,7 +477,8 @@ class AerodromeRewardsCheck
     claimable = BigDecimal(reward_data.claimable_aero.to_s)
     return "verified_zero" if claimable.zero?
     return "unverified_mismatch" if context[:source_confidence] == "low"
-    return "unverified_mismatch" if expected_aero_delta_percent(reward_data)&.abs&.> BigDecimal("5")
+    expected_delta_percent_value = expected_aero_delta_percent(reward_data)
+    return "unverified_mismatch" if strict_expected_aero? && expected_delta_percent_value && expected_delta_percent_value.abs > BigDecimal("5")
     return "unavailable" unless price_data.price
 
     context[:strategy_level_estimate] ? "estimated" : "detected"
@@ -492,7 +493,8 @@ class AerodromeRewardsCheck
     if reward_data&.claimable_aero && BigDecimal(reward_data.claimable_aero.to_s).positive? && claimable_aero_usd.nil?
       return "Missing AERO USD price; reward amount is available but USD estimate is unavailable."
     end
-    if expected_aero_delta_percent(reward_data)&.abs&.> BigDecimal("5")
+    expected_delta_percent_value = expected_aero_delta_percent(reward_data)
+    if strict_expected_aero? && expected_delta_percent_value && expected_delta_percent_value.abs > BigDecimal("5")
       return "Unverified — differs from Mellow UI reference by more than 5%."
     end
     if reward_data && reward_data.status != "detected"
@@ -516,6 +518,10 @@ class AerodromeRewardsCheck
     raw ? BigDecimal(raw) : nil
   rescue ArgumentError
     nil
+  end
+
+  def strict_expected_aero?
+    ENV["STRICT_EXPECTED_AERO"].to_s.downcase == "true"
   end
 
   def expected_aero_delta(reward_data)
