@@ -51,6 +51,7 @@ class HedgeSyncJob < ApplicationJob
         end
 
         if hedge.ethereal_execution?
+          EtherealPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
           sync_ethereal_aerodrome_hedge(hedge)
           next
         end

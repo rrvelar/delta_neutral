@@ -1,4 +1,26 @@
 namespace :ethereal do
+  desc "Read-only reconciliation for pending Ethereal ShortRebalance records"
+  task reconcile_pending_rebalances: :environment do
+    scope = ShortRebalance.where(venue: "ethereal", status: ShortRebalance::STATUS_PENDING)
+    scope = scope.where(hedge_id: ENV["HEDGE_ID"]) if ENV["HEDGE_ID"].present?
+    reconciler = EtherealPendingRebalanceReconciler.new
+    results = scope.includes(:hedge).order(:rebalanced_at, :id).map do |rebalance|
+      before = rebalance.status
+      reconciled = reconciler.reconcile(rebalance)
+      rebalance.reload
+      {
+        id: rebalance.id,
+        hedge_id: rebalance.hedge_id,
+        before_status: before,
+        after_status: rebalance.status,
+        new_short_size: rebalance.new_short_size&.to_s("F"),
+        message: rebalance.message,
+        reconciled: reconciled.present? && rebalance.status == ShortRebalance::STATUS_SUCCESS
+      }
+    end
+    puts JSON.pretty_generate({ checked: results.size, results: results, orders_submitted: 0, signatures_created: 0 })
+  end
+
   desc "Build Ethereal hedge order payloads without signing or submitting"
   task hedge_payload_check: :environment do
     position_id = ENV.fetch("POSITION_ID", nil)
