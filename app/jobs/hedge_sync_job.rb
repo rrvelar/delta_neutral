@@ -56,6 +56,11 @@ class HedgeSyncJob < ApplicationJob
           next
         end
 
+        if hedge.extended_execution?
+          Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — Extended is read-only scaffold; live and auto rebalance are not implemented")
+          next
+        end
+
         unless aerodrome_hedge_enabled?
           Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
           next

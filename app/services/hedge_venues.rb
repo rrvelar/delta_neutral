@@ -1,10 +1,11 @@
 module HedgeVenues
   DEFAULT = "hyperliquid".freeze
-  KEYS = %w[hyperliquid ethereal nado].freeze
+  KEYS = %w[hyperliquid ethereal nado extended].freeze
   LABELS = {
     "hyperliquid" => "Hyperliquid",
     "ethereal" => "Ethereal",
-    "nado" => "Nado"
+    "nado" => "Nado",
+    "extended" => "Extended"
   }.freeze
 
   def self.normalize(value)
@@ -26,6 +27,8 @@ module HedgeVenues
       Ethereal.new(**kwargs)
     when "nado"
       Nado.new(**kwargs)
+    when "extended"
+      Extended.new(**kwargs)
     else
       Hyperliquid.new(**kwargs)
     end

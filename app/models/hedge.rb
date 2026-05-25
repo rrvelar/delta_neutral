@@ -8,7 +8,7 @@
 # The +asset0_hl_account+ and +asset1_hl_account+ columns store the subaccount
 # address; +nil+ means the short lives on the main account.
 class Hedge < ApplicationRecord
-  EXECUTION_VENUES = %w[hyperliquid nado ethereal].freeze
+  EXECUTION_VENUES = %w[hyperliquid nado ethereal extended].freeze
   DEFAULT_EXECUTION_VENUE = "hyperliquid".freeze
 
   belongs_to :position
@@ -36,6 +36,10 @@ class Hedge < ApplicationRecord
 
   def ethereal_execution?
     execution_venue == "ethereal"
+  end
+
+  def extended_execution?
+    execution_venue == "extended"
   end
 
   # Returns the Hyperliquid account address assigned for the given asset index.

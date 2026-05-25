@@ -133,6 +133,7 @@ class AerodromeAutoRebalanceStatus
     blockers << "current target hedge unavailable" if hedge && target_short(hedge).nil?
     return nado_status_blockers(blockers, rebalance_needed: rebalance_needed) if execution_venue == "nado"
     return ethereal_status_blockers(blockers, rebalance_needed: rebalance_needed) if execution_venue == "ethereal"
+    return extended_status_blockers(blockers, rebalance_needed: rebalance_needed) if execution_venue == "extended"
 
     blockers << "rebalance needed but AERODROME_HEDGE_ENABLED is not true" if rebalance_needed && !bool_env("AERODROME_HEDGE_ENABLED")
     blockers << "rebalance needed but AERODROME_HEDGE_PAUSED is true" if rebalance_needed && bool_env("AERODROME_HEDGE_PAUSED", default: true)
@@ -145,6 +146,7 @@ class AerodromeAutoRebalanceStatus
     return "blocked" if blockers.any?
     return "disabled" if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     return "disabled" if execution_venue == "ethereal" && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    return "disabled" if execution_venue == "extended"
     return "paused" if !hedge || !bool_env("AERODROME_HEDGE_ENABLED") || bool_env("AERODROME_HEDGE_PAUSED", default: true)
 
     "active"
@@ -153,6 +155,7 @@ class AerodromeAutoRebalanceStatus
   def env_gates
     return nado_env_gates if execution_venue == "nado"
     return ethereal_env_gates if execution_venue == "ethereal"
+    return extended_env_gates if execution_venue == "extended"
 
     {
       "AERODROME_HEDGE_ENABLED" => ENV.fetch("AERODROME_HEDGE_ENABLED", nil),
@@ -186,6 +189,11 @@ class AerodromeAutoRebalanceStatus
     blockers
   end
 
+  def extended_status_blockers(blockers, rebalance_needed:)
+    blockers << "Extended auto-rebalance is not implemented." if rebalance_needed
+    blockers
+  end
+
   def auto_rebalance_message(hedge:, rebalance_needed:)
     return nil unless hedge
     if execution_venue == "nado" && !bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
@@ -194,6 +202,7 @@ class AerodromeAutoRebalanceStatus
     if execution_venue == "ethereal" && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
       return "Manual Ethereal hedge actions are available when live gates pass; automatic Ethereal rebalance is disabled."
     end
+    return "Extended is read-only scaffold only; automatic Extended rebalance is disabled." if execution_venue == "extended"
     return "Current hedge is within tolerance; no automatic rebalance is needed." unless rebalance_needed
 
     nil
@@ -214,6 +223,14 @@ class AerodromeAutoRebalanceStatus
       "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", nil),
       "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
+    }
+  end
+
+  def extended_env_gates
+    {
+      "EXTENDED_ENABLED" => ENV.fetch("EXTENDED_ENABLED", nil),
+      "EXTENDED_LIVE_ENABLED" => ENV.fetch("EXTENDED_LIVE_ENABLED", nil),
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => ENV.fetch("EXTENDED_AUTO_REBALANCE_ENABLED", nil)
     }
   end
 end

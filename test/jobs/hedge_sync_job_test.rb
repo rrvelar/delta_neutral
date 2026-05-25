@@ -212,6 +212,17 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "extended hedge sync skips without Hyperliquid or Extended order execution" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      assert_no_difference "ShortRebalance.count" do
+        HedgeSyncJob.perform_now(hedge.id)
+      end
+    end
+  end
+
   test "nado hedge sync increases short from Mellow target and readback" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" })

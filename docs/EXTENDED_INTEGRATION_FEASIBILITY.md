@@ -407,12 +407,57 @@ Proposed env names, not added to real env in this task:
 
 ## Optional No-Live Scaffold Recommendation
 
-No code scaffold was added in this research pass. The next safe code change is a
-Phase 1 read-only scaffold with mocked tests only. It should prove:
+Phase 1 scaffold was added after the initial research pass. It is intentionally
+fail-closed and cannot trade:
 
-- Extended disabled by default.
-- Missing API key/account/vault config produces blockers.
-- Read-only GETs parse market, account, balance, position, and open orders.
-- No `POST`, signing, Stark key loading, or live submit code exists.
+- `HedgeVenues::Extended` is available as a future venue option.
+- `ExtendedHedgeExecutionService` only returns blocked results.
+- Missing API key/account/vault/client/Stark public key config produces
+  dashboard blockers.
+- No `POST`, signing, Stark key loading, order submit, order cancel, or live
+  auto-rebalance code exists.
+- `HedgeSyncJob` explicitly skips Extended hedges so they cannot fall through to
+  Hyperliquid execution.
 - Nado and Ethereal behavior remains unchanged.
 
+## Phase 1 Runbook
+
+### How to verify Extended is safely disabled
+
+1. Open `/positions/:id?hedge_venue=extended`.
+2. Confirm the selected venue panel says:
+   - `Extended read-only scaffold`
+   - `Live disabled`
+   - `Signing/order submit not implemented`
+3. Confirm live buttons are disabled and preflight blockers include missing
+   Extended config when no Extended env is present.
+4. Run `bin/rails ethereal:hedge_payload_check` to verify the existing Ethereal
+   no-live check remains unaffected.
+
+### Credentials needed later
+
+Future read-only Phase 1.5/2 work will need non-committed, non-logged config:
+
+- `EXTENDED_API_BASE_URL`
+- `EXTENDED_STREAM_URL`
+- `EXTENDED_API_KEY`
+- `EXTENDED_ACCOUNT_ID`
+- `EXTENDED_VAULT_NUMBER`
+- `EXTENDED_CLIENT_ID`
+- `EXTENDED_STARK_PUBLIC_KEY`
+- `EXTENDED_NETWORK`
+- `EXTENDED_MARKET_SYMBOL`
+
+Future Phase 3+ live work additionally needs:
+
+- `EXTENDED_STARK_PRIVATE_KEY_FILE`
+- explicit testnet/live gates and operator confirmation
+
+### Why a Stark signer sidecar is required for Phase 3+
+
+Extended order authorization uses Stark order hashes and Stark signatures. The
+existing `delta-neutral-eip712-signer` signs EIP-712 typed data for Nado and
+Ethereal and should not be extended to hold Stark trading keys. A separate Stark
+sidecar keeps the key boundary explicit, lets the implementation reuse the
+official Python SDK hashing/signing semantics, and avoids storing Stark private
+keys in Rails.

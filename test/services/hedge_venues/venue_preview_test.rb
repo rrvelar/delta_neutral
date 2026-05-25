@@ -7,6 +7,84 @@ module HedgeVenues
       assert_instance_of HedgeVenues::Hyperliquid, HedgeVenues.build(nil)
     end
 
+    test "extended venue is read only scaffold and disabled by default" do
+      venue = HedgeVenues::Extended.new(env: {})
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")
+      state = venue.account_state
+
+      assert_equal "extended", HedgeVenues.normalize("extended")
+      assert_equal "Extended", HedgeVenues.label("extended")
+      assert_equal "Extended", preview.fetch(:venue)
+      assert_equal "read_only_scaffold", preview.fetch(:mode)
+      assert_equal false, preview.fetch(:live_supported)
+      assert_equal false, preview.fetch(:live_enabled)
+      assert_equal false, preview.fetch(:submit_enabled)
+      assert_equal false, preview.fetch(:order_submission)
+      assert_equal false, preview.fetch(:signature_required)
+      assert_equal "extended_read_only_scaffold", preview.fetch(:payload).fetch(:schema)
+      assert_equal false, preview.fetch(:payload).fetch(:submit_implemented)
+      assert_equal false, preview.fetch(:payload).fetch(:signing_implemented)
+      assert_equal "not_configured", state.fetch(:status)
+      assert_includes state.fetch(:blockers), "EXTENDED_API_BASE_URL missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_API_KEY missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_ACCOUNT_ID missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_VAULT_NUMBER missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_CLIENT_ID missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_STARK_PUBLIC_KEY missing"
+      assert_includes state.fetch(:blockers), "Extended signing/order submit not implemented."
+      assert_includes state.fetch(:warnings), "Extended read-only scaffold."
+      assert_nil venue.read_position(symbol: "ETH")
+    end
+
+    test "extended execution service blocks all live actions without signing or submitting" do
+      venue = HedgeVenues::Extended.new(env: {})
+      service = ExtendedHedgeExecutionService.new(venue: venue)
+
+      open = service.open_short
+      rebalance = service.rebalance_short
+      close = service.close_short
+
+      [ open, rebalance, close ].each do |result|
+        assert_equal "blocked_before_submit", result.status
+        assert_includes result.blockers, "Extended signing/order submit not implemented."
+        assert_equal 0, result.receipt.fetch(:orders_submitted)
+        assert_equal 0, result.receipt.fetch(:signatures_created)
+        assert_equal false, result.receipt.fetch(:submitted)
+      end
+    end
+
+    test "extended normalized read only position shape maps short fields" do
+      venue = HedgeVenues::Extended.new(env: { "EXTENDED_MARKET_SYMBOL" => "ETH-USD" })
+
+      position = venue.normalize_position(
+        market: "ETH-USD",
+        side: "SHORT",
+        size: "-0.25",
+        value: "520",
+        open_price: "2100",
+        mark_price: "2080",
+        unrealised_pnl: "5",
+        equity: "1000",
+        margin_mode: "cross",
+        status: "OPENED"
+      )
+
+      assert_equal "Extended", position.fetch(:venue)
+      assert_equal "ETH-PERP", position.fetch(:symbol)
+      assert_equal "ETH-USD", position.fetch(:market_symbol)
+      assert_equal "short", position.fetch(:side)
+      assert_equal "-0.25", position.fetch(:size)
+      assert_equal "0.25", position.fetch(:short_size)
+      assert_equal "520.0", position.fetch(:notional_usd)
+      assert_equal "2100.0", position.fetch(:entry_price)
+      assert_equal "2080.0", position.fetch(:mark_price)
+      assert_equal "5.0", position.fetch(:unrealized_pnl_usd)
+      assert_equal "1000.0", position.fetch(:account_value_usd)
+      assert_equal "0.52", position.fetch(:effective_leverage)
+      assert_equal "cross", position.fetch(:margin_mode)
+      assert_equal "OPENED", position.fetch(:status)
+    end
+
     test "ethereal preview is cross margin live gated and reports missing config blockers" do
       venue = HedgeVenues::Ethereal.new(env: {})
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")

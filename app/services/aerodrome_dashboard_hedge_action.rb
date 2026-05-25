@@ -201,7 +201,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def read_only_venue_preview?
-    !@execute && %w[ethereal nado].include?(@venue_key)
+    !@execute && %w[ethereal nado extended].include?(@venue_key)
   end
 
   def append_informational_preview_warnings
@@ -240,6 +240,15 @@ class AerodromeDashboardHedgeAction
       confirmation: @confirmation,
       max_slippage: max_slippage
     ).fetch(:blockers) if @venue_key == "ethereal"
+
+    return extended_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ).fetch(:blockers) if @venue_key == "extended"
 
     single_venue_preflight(target: target, drift: nil, current_short: current_short, before_position: before_position).fetch(:blockers).uniq
   end
@@ -353,6 +362,15 @@ class AerodromeDashboardHedgeAction
       max_slippage: max_slippage
     ) if @venue_key == "ethereal"
 
+    return extended_service.preflight(
+      position: @position,
+      action: @action,
+      size_eth: preflight_target_size(target: target, drift: drift, current_short: current_short),
+      current_position: before_position,
+      confirmation: @confirmation,
+      max_slippage: max_slippage
+    ) if @venue_key == "extended"
+
     single_venue_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position)
   end
 
@@ -402,6 +420,10 @@ class AerodromeDashboardHedgeAction
 
   def ethereal_service
     @ethereal_service ||= @ethereal_service_factory ? @ethereal_service_factory.call : EtherealHedgeExecutionService.new(venue: venue)
+  end
+
+  def extended_service
+    @extended_service ||= ExtendedHedgeExecutionService.new(venue: venue)
   end
 
   def target_short

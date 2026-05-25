@@ -286,6 +286,39 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "option[selected='selected']", text: "Hyperliquid"
     assert_match "Ethereal", response.body
     assert_match "Nado", response.body
+    assert_match "Extended", response.body
+  end
+
+  test "show selected Extended venue renders fail closed read only scaffold" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_select "option[selected='selected']", text: "Extended"
+    assert_match "Extended read-only scaffold", response.body
+    assert_match "Live disabled", response.body
+    assert_match "Signing/order submit not implemented", response.body
+    assert_match "EXTENDED_API_BASE_URL missing", response.body
+    assert_match "EXTENDED_API_KEY missing", response.body
+    assert_match "EXTENDED_ACCOUNT_ID missing", response.body
+    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+  end
+
+  test "extended live dashboard action is blocked and does not submit or sign" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      post hedge_open_position_path(position), params: { hedge_venue: "extended", dashboard_hedge_confirmation: "anything" }
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "extended")
+    assert_match "Open blocked on Extended", flash[:alert]
+    assert_match "Extended signing/order submit not implemented", flash[:alert]
   end
 
   test "show selected Ethereal venue renders cross margin live gated mode and disabled live actions" do
