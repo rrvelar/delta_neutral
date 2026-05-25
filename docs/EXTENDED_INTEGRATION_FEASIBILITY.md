@@ -511,3 +511,99 @@ The payload includes `future_submit_endpoint: "POST /user/order"` only as a
 documentation hint. `submit_endpoint` remains `nil`, `order_submission` is
 `false`, `stark_signature_created` is `false`, and live service receipts keep
 `orders_submitted: 0` and `signatures_created: 0`.
+
+## Minimal Mainnet Foundation
+
+The implementation now follows a mainnet-first, fail-closed path. There is no
+mandatory testnet phase, but live Extended trading remains disabled until an
+operator provides credentials, explicitly enables probe gates, and the Stark
+signing algorithm is verified against the official SDK.
+
+### Implemented
+
+- `ExtendedApiClient` performs read-only REST calls with `X-Api-Key`.
+- `HedgeVenues::Extended` can read account info, balance, positions, open
+  orders, and ETH market metadata when env config is present.
+- Extended position readback normalizes to the same dashboard shape used by
+  other venues: `side`, `short_size`, `size`, `entry_price`, `mark_price`,
+  `notional_usd`, `unrealized_pnl_usd`, `account_value_usd`,
+  `collateral_usd`, `effective_leverage`, and `margin_mode`.
+- Dry-run order intent summaries now include future signing fields:
+  `client_id`, `vault_number`, `account_id`, redacted Stark public key, nonce,
+  price, crossing price, expiration, fee, IOC assumption, and a blocked external
+  signer request summary.
+- `scripts/extended_stark_signer.py` is a separate sidecar skeleton. It exposes
+  `/health` and `/sign/extended_order`, but `/sign/extended_order` refuses to
+  sign because the Stark order hash/signature implementation is not verified
+  yet.
+- `bin/rails extended:mainnet_lifecycle_check` builds manual mainnet lifecycle
+  dry-run receipts for `open_only`, `delta_round_trip`, and `close_reopen`.
+
+### Still Blocked
+
+- No Extended auto-rebalance.
+- No submit/cancel endpoint calls.
+- No Stark signature creation.
+- No Stark private key in Rails.
+- No live order can pass because the implementation adds:
+  `Extended Stark order hash/signature algorithm is not verified; live submit
+  remains disabled.`
+
+### Required Mainnet Read-Only Env
+
+These values are read from operator-provided environment only. Do not commit
+real values:
+
+- `EXTENDED_API_BASE_URL=https://api.starknet.extended.exchange/api/v1`
+- `EXTENDED_API_KEY`
+- `EXTENDED_ACCOUNT_ID`
+- `EXTENDED_VAULT_NUMBER`
+- `EXTENDED_CLIENT_ID`
+- `EXTENDED_STARK_PUBLIC_KEY`
+- `EXTENDED_MARKET_SYMBOL=ETH-USD`
+- `EXTENDED_SIZE_INCREMENT`
+- `EXTENDED_PRICE_INCREMENT`
+
+### Required Live Probe Env
+
+These still do not bypass the current signer-algorithm blocker:
+
+- `EXTENDED_MAINNET_PROBE_ENABLED=true`
+- `EXTENDED_LIVE_ENABLED=true`
+- `EXTENDED_SIGNER_URL=http://172.18.0.1:8776`
+- `EXTENDED_PROBE_MAX_SIZE_ETH=0.005`
+- exact confirmation:
+  `I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
+
+### Stark Signer Key File Model
+
+Extended must use a separate signer from the existing EIP-712 signer:
+
+- Template: `docs/templates/delta-neutral-extended-signer.service`
+- Script: `scripts/extended_stark_signer.py`
+- Key file env: `EXTENDED_STARK_PRIVATE_KEY_FILE`
+- Key file should be outside the repo, root-owned, and `0600`.
+
+The sidecar advertises Extended support only when:
+
+- `EXTENDED_SIGNER_ENABLED=true`
+- `EXTENDED_STARK_PRIVATE_KEY_FILE` exists
+
+Even then it refuses signing until the exact SDK Stark hash/signature path is
+ported and tested.
+
+### Operator Checklist
+
+1. Keep production hedge venue on Ethereal.
+2. Add read-only Extended env values outside the repo.
+3. Open `/positions/:id?hedge_venue=extended` and verify normalized readback.
+4. Run:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=open_only`
+5. Confirm receipts show `orders_placed: 0` and `signatures_created: 0`.
+6. Do not enable live probe until signer algorithm parity is implemented.
+
+### Rollback
+
+Unset Extended env vars or select another hedge venue. `HedgeSyncJob` still
+skips Extended auto-rebalance, and the lifecycle task does not mutate hedge
+state.

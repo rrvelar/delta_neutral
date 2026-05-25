@@ -161,6 +161,48 @@ module HedgeVenues
       assert_equal "OPENED", position.fetch(:status)
     end
 
+    test "extended read only fixture normalizes a short position from api client" do
+      api_client = Class.new do
+        def positions(market:)
+          [ { "market" => market, "side" => "SHORT", "size" => "0.42", "value" => "882", "openPrice" => "2120", "markPrice" => "2100", "unrealisedPnl" => "8", "status" => "OPEN" } ]
+        end
+
+        def balance = { "equity" => "5000", "balance" => "5000" }
+        def account_info = { "status" => "ACTIVE" }
+        def market(market:) = { "name" => market, "active" => true }
+        def open_orders(market:) = []
+      end.new
+      venue = HedgeVenues::Extended.new(env: extended_config_env, api_client: api_client)
+
+      position = venue.read_position(symbol: "ETH")
+      state = venue.account_state
+
+      assert_equal "Extended", position.fetch(:venue)
+      assert_equal "ETH-USD", position.fetch(:market_symbol)
+      assert_equal "short", position.fetch(:side)
+      assert_equal "-0.42", position.fetch(:size)
+      assert_equal "0.42", position.fetch(:short_size)
+      assert_equal "882.0", position.fetch(:notional_usd)
+      assert_equal "5000.0", position.fetch(:account_value_usd)
+      assert_equal "read_only", state.fetch(:status)
+      assert_equal "0.42", state.fetch(:current_short_eth)
+      assert_equal 0, state.fetch(:open_orders_count)
+    end
+
+    def extended_config_env
+      {
+        "EXTENDED_API_BASE_URL" => "https://api.starknet.extended.exchange/api/v1",
+        "EXTENDED_API_KEY" => "redacted-test-key",
+        "EXTENDED_ACCOUNT_ID" => "account",
+        "EXTENDED_VAULT_NUMBER" => "123",
+        "EXTENDED_CLIENT_ID" => "client",
+        "EXTENDED_STARK_PUBLIC_KEY" => "0xpublic",
+        "EXTENDED_MARKET_SYMBOL" => "ETH-USD",
+        "EXTENDED_SIZE_INCREMENT" => "0.0001",
+        "EXTENDED_PRICE_INCREMENT" => "0.1"
+      }
+    end
+
     test "ethereal preview is cross margin live gated and reports missing config blockers" do
       venue = HedgeVenues::Ethereal.new(env: {})
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")

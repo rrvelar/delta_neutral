@@ -1,0 +1,24 @@
+[Unit]
+Description=Delta Neutral external Extended Stark signer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/delta_neutral
+Environment=EXTENDED_SIGNER_ENABLED=false
+Environment=EXTENDED_SIGNER_HOST=172.18.0.1
+Environment=EXTENDED_SIGNER_PORT=8776
+Environment=EXTENDED_STARK_PRIVATE_KEY_FILE=/etc/delta-neutral/keys/extended-stark.key
+Environment=EXTENDED_STARK_PUBLIC_KEY=
+ExecStart=/opt/delta_neutral/extended-signer-venv/bin/python /opt/delta_neutral/scripts/extended_stark_signer.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/delta_neutral/log /opt/delta_neutral/tmp
+
+[Install]
+WantedBy=multi-user.target

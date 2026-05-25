@@ -14,6 +14,11 @@ module HedgeVenues
       "EXTENDED_PRICE_INCREMENT" => "EXTENDED_PRICE_INCREMENT missing"
     }.freeze
 
+    def initialize(env: ENV, api_client: nil, **kwargs)
+      super(env: env, **kwargs)
+      @api_client = api_client || ExtendedApiClient.new(env: env)
+    end
+
     def venue_name
       "Extended"
     end
@@ -39,7 +44,15 @@ module HedgeVenues
     end
 
     def read_position(symbol:)
-      nil
+      return nil if config_blockers.any?
+
+      positions = array_payload(read_only_call(:positions, market: market_symbol))
+      row = positions.filter_map { |item| normalize_position_row(item) }.find do |position|
+        position[:market_symbol].to_s.casecmp?(market_symbol) && position[:side].in?(%w[short long])
+      end
+      return nil unless row
+
+      row.merge(account_value_fields)
     end
 
     def open_short_preview(symbol:, size_eth:, max_slippage:)
@@ -89,15 +102,28 @@ module HedgeVenues
     end
 
     def account_state
+      account_info = read_only_call(:account_info)
+      balance = read_only_call(:balance)
+      market = read_only_call(:market, market: market_symbol)
+      current_position = read_position(symbol: "ETH")
+      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
+      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+
       {
         venue: venue_name,
         mode: mode,
-        status: configured? ? "read_only_scaffold" : "not_configured",
+        status: account_state_status(account_info: account_info, balance: balance, market: market),
         live_supported: false,
         live_enabled: false,
         market_symbol: market_symbol,
-        margin_mode: "unverified",
+        margin_mode: current_position&.fetch(:margin_mode, nil) || "unverified",
+        current_short_eth: current_position&.fetch(:short_size, nil),
+        current_side: current_position&.fetch(:side, nil),
+        account_value_usd: account_value&.to_s("F"),
+        collateral_usd: collateral&.to_s("F"),
         market_metadata_available: market_metadata_available?,
+        market_metadata: safe_market_metadata(market),
+        open_orders_count: open_orders_count,
         blockers: blockers,
         warnings: warnings
       }
@@ -121,6 +147,8 @@ module HedgeVenues
     end
 
     private
+
+    attr_reader :api_client
 
     def dry_run_preview(action:, symbol:, size_eth:, max_slippage:, reduce_only:)
       requested_size = decimal_or_nil(size_eth)
@@ -199,10 +227,21 @@ module HedgeVenues
         time_in_force: "IOC_required_later",
         expiration: "required_later",
         fee: "required_later",
+        client_id: env["EXTENDED_CLIENT_ID"].presence || "required_later",
+        vault_number: env["EXTENDED_VAULT_NUMBER"].presence || "required_later",
+        account_id: env["EXTENDED_ACCOUNT_ID"].presence || "required_later",
+        stark_public_key: redacted(env["EXTENDED_STARK_PUBLIC_KEY"]),
+        nonce: "required_later",
         max_slippage: max_slippage&.to_s,
         margin_mode: "unverified",
         submit_endpoint: nil,
         future_submit_endpoint: "POST /user/order",
+        signer_request: {
+          schema: "extended_stark_order_sign_request",
+          status: "blocked_hash_algorithm_not_verified",
+          signer_boundary: "external_extended_stark_signer",
+          private_key_in_rails: false
+        },
         order_submission: false,
         signature_required: false,
         stark_signature_created: false,
@@ -221,11 +260,11 @@ module HedgeVenues
 
     def normalized_side(raw_side, size)
       return "short" if size&.negative?
-      return "long" if size&.positive?
 
       text = raw_side.to_s.downcase
       return "short" if text.in?(%w[short sell])
       return "long" if text.in?(%w[long buy])
+      return "long" if size&.positive?
 
       "flat"
     end
@@ -244,6 +283,108 @@ module HedgeVenues
 
     def decimal_string_or_unknown(value)
       value ? value.to_s("F") : "unknown"
+    end
+
+    def read_only_call(method_name, **kwargs)
+      return nil if config_blockers.any?
+
+      api_client.public_send(method_name, **kwargs)
+    rescue => e
+      { "error" => "#{e.class}: #{e.message}" }
+    end
+
+    def account_state_status(account_info:, balance:, market:)
+      return "not_configured" if config_blockers.any?
+      return "read_only_error" if [ account_info, balance, market ].any? { |value| value.is_a?(Hash) && value["error"].present? }
+
+      "read_only"
+    end
+
+    def open_orders_count
+      orders = read_only_call(:open_orders, market: market_symbol)
+      orders = array_payload(orders)
+
+      orders.size
+    end
+
+    def normalize_position_row(row)
+      source = row.to_h.with_indifferent_access
+      market = value_from(source, :market, :symbol, :marketName)
+      return nil if market.present? && !market.to_s.casecmp?(market_symbol)
+
+      normalize_position(
+        market: market || market_symbol,
+        side: value_from(source, :side, :direction),
+        size: signed_size_from(source),
+        notional_usd: value_from(source, :notional_usd, :value, :positionValue),
+        entry_price: value_from(source, :entry_price, :openPrice, :averageOpenPrice),
+        mark_price: value_from(source, :mark_price, :markPrice),
+        unrealized_pnl_usd: value_from(source, :unrealized_pnl_usd, :unrealisedPnl, :unrealizedPnl),
+        margin_mode: value_from(source, :margin_mode, :marginMode) || "unverified",
+        status: value_from(source, :status),
+        raw: safe_raw_position(source)
+      )
+    end
+
+    def signed_size_from(source)
+      size = decimal_or_nil(value_from(source, :size, :qty, :quantity))
+      return nil unless size
+
+      side = value_from(source, :side, :direction).to_s.downcase
+      return -size.abs if side.in?(%w[short sell])
+      return size.abs if side.in?(%w[long buy])
+
+      size
+    end
+
+    def account_value_fields
+      balance = read_only_call(:balance)
+      return {} unless balance.is_a?(Hash)
+
+      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
+      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+      {
+        account_value_usd: account_value&.to_s("F"),
+        collateral_usd: collateral&.to_s("F")
+      }.compact
+    end
+
+    def safe_market_metadata(market)
+      return nil unless market.is_a?(Hash)
+
+      {
+        name: value_from(market, :name, :market),
+        active: value_from(market, :active, :status),
+        mark_price: value_from(market, :markPrice, :mark_price, :marketStats, :stats)
+      }.compact
+    end
+
+    def safe_raw_position(source)
+      source.except(:apiKey, :api_key, :signature, :starkPrivateKey, :stark_private_key)
+    end
+
+    def value_from(source, *keys)
+      keys.each do |key|
+        return source[key] if source.respond_to?(:key?) && source.key?(key)
+        return source[key.to_s] if source.respond_to?(:key?) && source.key?(key.to_s)
+      end
+      nil
+    end
+
+    def redacted(value)
+      value.present? ? "<redacted>" : "required_later"
+    end
+
+    def array_payload(payload)
+      return payload if payload.is_a?(Array)
+      return payload["data"] if payload.is_a?(Hash) && payload["data"].is_a?(Array)
+      return payload[:data] if payload.is_a?(Hash) && payload[:data].is_a?(Array)
+      return payload["positions"] if payload.is_a?(Hash) && payload["positions"].is_a?(Array)
+      return payload[:positions] if payload.is_a?(Hash) && payload[:positions].is_a?(Array)
+      return payload["orders"] if payload.is_a?(Hash) && payload["orders"].is_a?(Array)
+      return payload[:orders] if payload.is_a?(Hash) && payload[:orders].is_a?(Array)
+
+      []
     end
   end
 end
