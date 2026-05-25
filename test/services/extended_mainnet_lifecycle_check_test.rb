@@ -70,6 +70,9 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal "dry_run", result.status
     assert_equal [ "buy", "sell" ], summaries.map { |summary| summary.fetch(:side) }
     assert_equal [ true, false ], summaries.map { |summary| summary.fetch(:reduce_only) }
+    assert_equal "ETH-USD", result.receipt.dig(:market_metadata, :requested_market_symbol)
+    assert_equal "env", result.receipt.dig(:market_metadata, :size_increment_source)
+    assert_equal "env", result.receipt.dig(:market_metadata, :price_increment_source)
     assert_equal 0, result.receipt.fetch(:orders_placed)
     assert_equal 0, result.receipt.fetch(:signatures_created)
     assert_equal false, result.receipt.fetch(:submitted)

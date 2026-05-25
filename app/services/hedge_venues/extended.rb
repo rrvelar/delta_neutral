@@ -9,9 +9,7 @@ module HedgeVenues
       "EXTENDED_STARK_PUBLIC_KEY" => "EXTENDED_STARK_PUBLIC_KEY missing"
     }.freeze
     REQUIRED_MARKET_METADATA = {
-      "EXTENDED_MARKET_SYMBOL" => "EXTENDED_MARKET_SYMBOL missing",
-      "EXTENDED_SIZE_INCREMENT" => "EXTENDED_SIZE_INCREMENT missing",
-      "EXTENDED_PRICE_INCREMENT" => "EXTENDED_PRICE_INCREMENT missing"
+      "EXTENDED_MARKET_SYMBOL" => "EXTENDED_MARKET_SYMBOL missing"
     }.freeze
 
     def initialize(env: ENV, api_client: nil, **kwargs)
@@ -122,11 +120,31 @@ module HedgeVenues
         account_value_usd: account_value&.to_s("F"),
         collateral_usd: collateral&.to_s("F"),
         market_metadata_available: market_metadata_available?,
-        market_metadata: safe_market_metadata(market),
+        market_metadata: market_metadata_diagnostics(raw_market: market),
         open_orders_count: open_orders_count,
         blockers: blockers,
         warnings: warnings
       }
+    end
+
+    def market_metadata_diagnostics(raw_market: nil)
+      metadata = raw_market ? normalize_market_metadata(raw_market) : discovered_market_metadata
+      {
+        source: metadata[:source],
+        requested_market_symbol: market_symbol,
+        matched_market_symbol: metadata[:market_symbol],
+        size_increment: size_increment(metadata)&.to_s("F"),
+        size_increment_source: size_increment_source(metadata),
+        price_increment: price_increment(metadata)&.to_s("F"),
+        price_increment_source: price_increment_source(metadata),
+        min_size: metadata[:min_size],
+        min_notional: metadata[:min_notional],
+        mark_price: metadata[:mark_price],
+        response_keys: metadata[:response_keys],
+        market_keys: metadata[:market_keys],
+        trading_config_keys: metadata[:trading_config_keys],
+        l2_config_keys: metadata[:l2_config_keys]
+      }.compact
     end
 
     def blockers
@@ -196,9 +214,12 @@ module HedgeVenues
     end
 
     def market_metadata_blockers
-      REQUIRED_MARKET_METADATA.filter_map do |key, message|
+      blockers = REQUIRED_MARKET_METADATA.filter_map do |key, message|
         message if env[key].blank?
       end
+      blockers << "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata" unless size_increment
+      blockers << "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata" unless price_increment
+      blockers
     end
 
     def market_symbol
@@ -219,8 +240,11 @@ module HedgeVenues
         reduce_only: reduce_only,
         requested_size_eth: decimal_string_or_unknown(requested_size),
         rounded_size_eth: rounded_size ? rounded_size.to_s("F") : "unknown",
-        size_increment: env["EXTENDED_SIZE_INCREMENT"].presence || "required_later",
-        price_increment: env["EXTENDED_PRICE_INCREMENT"].presence || "required_later",
+        size_increment: size_increment&.to_s("F") || "required_later",
+        size_increment_source: size_increment_source,
+        price_increment: price_increment&.to_s("F") || "required_later",
+        price_increment_source: price_increment_source,
+        market_metadata: market_metadata_diagnostics,
         price: "required_later",
         crossing_price: "required_later",
         order_type_assumption: "market-like crossing IOC limit; Extended requires an explicit worst accepted price",
@@ -252,7 +276,7 @@ module HedgeVenues
     end
 
     def rounded_order_size_or_nil(size)
-      increment = decimal_or_nil(env["EXTENDED_SIZE_INCREMENT"])
+      increment = size_increment
       return nil unless size && increment&.positive?
 
       (size / increment).floor * increment
@@ -349,14 +373,105 @@ module HedgeVenues
       }.compact
     end
 
-    def safe_market_metadata(market)
-      return nil unless market.is_a?(Hash)
+    def size_increment(metadata = discovered_market_metadata)
+      decimal_or_nil(env["EXTENDED_SIZE_INCREMENT"]) || decimal_or_nil(metadata[:size_increment])
+    end
+
+    def price_increment(metadata = discovered_market_metadata)
+      decimal_or_nil(env["EXTENDED_PRICE_INCREMENT"]) || decimal_or_nil(metadata[:price_increment])
+    end
+
+    def size_increment_source(metadata = discovered_market_metadata)
+      return "env" if decimal_or_nil(env["EXTENDED_SIZE_INCREMENT"])
+      return metadata[:source] if metadata[:size_increment].present?
+
+      "missing"
+    end
+
+    def price_increment_source(metadata = discovered_market_metadata)
+      return "env" if decimal_or_nil(env["EXTENDED_PRICE_INCREMENT"])
+      return metadata[:source] if metadata[:price_increment].present?
+
+      "missing"
+    end
+
+    def discovered_market_metadata
+      @discovered_market_metadata ||= normalize_market_metadata(read_only_call(:market, market: market_symbol))
+    end
+
+    def normalize_market_metadata(raw)
+      return empty_market_metadata(raw) unless raw.is_a?(Hash) || raw.is_a?(Array)
+
+      response = raw.is_a?(Hash) ? raw.with_indifferent_access : raw
+      candidates = market_candidates(response)
+      selected = candidates.find { |item| market_name(item).to_s.casecmp?(market_symbol) } || candidates.first
+      return empty_market_metadata(raw) unless selected
+
+      market = selected.to_h.with_indifferent_access
+      trading = nested_hash(market, :tradingConfig, :trading_config)
+      stats = nested_hash(market, :marketStats, :market_stats)
+      l2_config = nested_hash(market, :l2Config, :l2_config)
 
       {
-        name: value_from(market, :name, :market),
+        source: "extended_api_market_metadata",
+        market_symbol: market_name(market),
         active: value_from(market, :active, :status),
-        mark_price: value_from(market, :markPrice, :mark_price, :marketStats, :stats)
+        mark_price: value_from(market, :markPrice, :mark_price) || value_from(stats, :markPrice, :mark_price),
+        size_increment: value_from(market, :sizeIncrement, :size_increment, :quantityStep, :quantity_step, :qtyStep, :qty_step, :stepSize, :step_size) ||
+          value_from(trading, :minOrderSizeChange, :min_order_size_change, :sizeIncrement, :size_increment, :quantityStep, :quantity_step, :qtyStep, :qty_step, :stepSize, :step_size),
+        price_increment: value_from(market, :priceIncrement, :price_increment, :tickSize, :tick_size, :priceTick, :price_tick) ||
+          value_from(trading, :minPriceChange, :min_price_change, :priceIncrement, :price_increment, :tickSize, :tick_size, :priceTick, :price_tick),
+        min_size: value_from(market, :minOrderSize, :min_order_size, :minSize, :min_size, :minQty, :min_qty, :minQuantity, :min_quantity) ||
+          value_from(trading, :minOrderSize, :min_order_size, :minSize, :min_size, :minQty, :min_qty, :minQuantity, :min_quantity),
+        min_notional: value_from(market, :minOrderValue, :min_order_value, :minNotional, :min_notional, :minTradeValue, :min_trade_value, :minMarketOrderValue, :min_market_order_value) ||
+          value_from(trading, :minOrderValue, :min_order_value, :minNotional, :min_notional, :minTradeValue, :min_trade_value, :minMarketOrderValue, :min_market_order_value),
+        response_keys: safe_keys(response),
+        market_keys: safe_keys(market),
+        trading_config_keys: safe_keys(trading),
+        l2_config_keys: safe_keys(l2_config)
       }.compact
+    end
+
+    def empty_market_metadata(raw)
+      {
+        source: raw.is_a?(Hash) && raw["error"].present? ? "extended_api_error" : "missing",
+        response_keys: safe_keys(raw)
+      }.compact
+    end
+
+    def market_candidates(response)
+      return response if response.is_a?(Array)
+      return nested_market_candidates(response[:data]) if response[:data].present?
+      return nested_market_candidates(response[:result]) if response[:result].present?
+      return response[:markets] if response[:markets].is_a?(Array)
+      return [ response[:market] ] if response[:market].is_a?(Hash)
+      return response.values if response.values.all? { |value| value.is_a?(Hash) }
+
+      [ response ]
+    end
+
+    def nested_market_candidates(value)
+      return value if value.is_a?(Array)
+      return value[:markets] if value.is_a?(Hash) && value[:markets].is_a?(Array)
+      return value.values if value.is_a?(Hash) && value.values.all? { |item| item.is_a?(Hash) }
+      return [ value ] if value.is_a?(Hash)
+
+      []
+    end
+
+    def market_name(market)
+      value_from(market, :name, :market, :symbol, :marketName, :market_name)
+    end
+
+    def nested_hash(source, *keys)
+      value = value_from(source, *keys)
+      value.is_a?(Hash) ? value.with_indifferent_access : {}
+    end
+
+    def safe_keys(value)
+      return [] unless value.respond_to?(:keys)
+
+      value.keys.map(&:to_s).reject { |key| key.match?(/api|key|secret|signature|private/i) }.sort
     end
 
     def safe_raw_position(source)

@@ -487,11 +487,19 @@ The preview intentionally marks live-required fields as `required_later`:
 - Stark settlement signature;
 - final submit body.
 
-Market metadata is required before the preview can show rounded order size:
+Market metadata is required before the preview can show rounded order size. The
+operator can provide manual overrides, but Rails now first attempts to discover
+the values from the read-only Extended market metadata response:
 
 - `EXTENDED_MARKET_SYMBOL`
-- `EXTENDED_SIZE_INCREMENT`
-- `EXTENDED_PRICE_INCREMENT`
+- `EXTENDED_SIZE_INCREMENT` override, otherwise `tradingConfig.minOrderSizeChange`
+- `EXTENDED_PRICE_INCREMENT` override, otherwise `tradingConfig.minPriceChange`
+
+The same response is used for optional diagnostics:
+
+- `tradingConfig.minOrderSize` -> minimum order size
+- `tradingConfig.minOrderValue` / `minNotional` variants -> minimum notional
+- `marketStats.markPrice` -> read-only mark price
 
 If that metadata is absent, the preview shows `rounded_size_eth: "unknown"` and
 adds clear blockers. This avoids pretending a future order is submit-ready.
@@ -560,8 +568,10 @@ real values:
 - `EXTENDED_CLIENT_ID`
 - `EXTENDED_STARK_PUBLIC_KEY`
 - `EXTENDED_MARKET_SYMBOL=ETH-USD`
-- `EXTENDED_SIZE_INCREMENT`
-- `EXTENDED_PRICE_INCREMENT`
+- `EXTENDED_SIZE_INCREMENT` optional override when the API does not return
+  `tradingConfig.minOrderSizeChange`
+- `EXTENDED_PRICE_INCREMENT` optional override when the API does not return
+  `tradingConfig.minPriceChange`
 
 ### Required Live Probe Env
 

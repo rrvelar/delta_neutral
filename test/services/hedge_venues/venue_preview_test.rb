@@ -35,8 +35,8 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_CLIENT_ID missing"
       assert_includes state.fetch(:blockers), "EXTENDED_STARK_PUBLIC_KEY missing"
       assert_includes state.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
-      assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing"
-      assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing"
+      assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
+      assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
       assert_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
       assert_includes state.fetch(:warnings), "Extended read-only scaffold."
       assert_nil venue.read_position(symbol: "ETH")
@@ -71,8 +71,98 @@ module HedgeVenues
       assert_equal "required_later", preview.fetch(:payload).fetch(:size_increment)
       assert_equal "required_later", preview.fetch(:payload).fetch(:price_increment)
       assert_includes preview.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
-      assert_includes preview.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing"
-      assert_includes preview.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing"
+      assert_includes preview.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
+      assert_includes preview.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
+    end
+
+    test "extended market metadata discovers increments from trading config" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT"),
+        api_client: metadata_api_client(
+          "data" => [
+            { "name" => "BTC-USD", "tradingConfig" => { "minOrderSizeChange" => "0.001", "minPriceChange" => "1" } },
+            {
+              "name" => "ETH-USD",
+              "active" => true,
+              "tradingConfig" => {
+                "minOrderSize" => "0.0001",
+                "minOrderSizeChange" => "0.0001",
+                "minPriceChange" => "0.1",
+                "minOrderValue" => "10"
+              },
+              "marketStats" => { "markPrice" => "2100.5" },
+              "l2Config" => { "syntheticAssetId" => "0x455448" }
+            }
+          ]
+        )
+      )
+
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.12345"), max_slippage: "0.01")
+      payload = preview.fetch(:payload)
+      metadata = payload.fetch(:market_metadata)
+
+      assert_equal "0.1234", preview.fetch(:rounded_size_eth)
+      assert_equal "0.0001", payload.fetch(:size_increment)
+      assert_equal "extended_api_market_metadata", payload.fetch(:size_increment_source)
+      assert_equal "0.1", payload.fetch(:price_increment)
+      assert_equal "extended_api_market_metadata", payload.fetch(:price_increment_source)
+      assert_equal "ETH-USD", metadata.fetch(:matched_market_symbol)
+      assert_equal "0.0001", metadata.fetch(:min_size)
+      assert_equal "10", metadata.fetch(:min_notional)
+      assert_equal "2100.5", metadata.fetch(:mark_price)
+      assert_not_includes preview.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
+      assert_not_includes preview.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
+    end
+
+    test "extended missing market metadata keeps blockers and prints safe response keys" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT"),
+        api_client: metadata_api_client(
+          "data" => {
+            "name" => "ETH-USD",
+            "apiKey" => "must-not-leak",
+            "tradingConfig" => { "unsupportedField" => "1" }
+          }
+        )
+      )
+
+      state = venue.account_state
+      metadata = state.fetch(:market_metadata)
+
+      assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
+      assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
+      assert_equal "extended_api_market_metadata", metadata.fetch(:source)
+      assert_includes metadata.fetch(:response_keys), "data"
+      assert_includes metadata.fetch(:market_keys), "name"
+      assert_includes metadata.fetch(:trading_config_keys), "unsupportedField"
+      assert_no_match(/must-not-leak|apiKey/i, state.to_json)
+    end
+
+    test "extended market metadata env overrides win over api increments" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.merge(
+          "EXTENDED_SIZE_INCREMENT" => "0.001",
+          "EXTENDED_PRICE_INCREMENT" => "0.5"
+        ),
+        api_client: metadata_api_client(
+          "data" => {
+            "name" => "ETH-USD",
+            "tradingConfig" => {
+              "minOrderSizeChange" => "0.0001",
+              "minPriceChange" => "0.1"
+            }
+          }
+        )
+      )
+
+      preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.12345"), max_slippage: "0.01")
+      payload = preview.fetch(:payload)
+
+      assert_equal "0.123", preview.fetch(:rounded_size_eth)
+      assert_equal "0.001", payload.fetch(:size_increment)
+      assert_equal "env", payload.fetch(:size_increment_source)
+      assert_equal "0.5", payload.fetch(:price_increment)
+      assert_equal "env", payload.fetch(:price_increment_source)
     end
 
     test "extended execution service exposes dry run previews but live remains blocked" do
@@ -266,6 +356,23 @@ module HedgeVenues
         "EXTENDED_SIZE_INCREMENT" => "0.0001",
         "EXTENDED_PRICE_INCREMENT" => "0.1"
       }
+    end
+
+    def metadata_api_client(market_payload)
+      Class.new do
+        define_method(:initialize) do |payload|
+          @payload = payload
+        end
+
+        def positions(market:) = []
+        def balance = { "equity" => "5000", "balance" => "5000" }
+        def account_info = { "status" => "ACTIVE" }
+        def open_orders(market:) = []
+
+        define_method(:market) do |market:|
+          @payload
+        end
+      end.new(market_payload)
     end
 
     test "ethereal preview is cross margin live gated and reports missing config blockers" do

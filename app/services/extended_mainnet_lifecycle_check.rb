@@ -92,6 +92,7 @@ class ExtendedMainnetLifecycleCheck
       position_id: position.id,
       timestamp: @now.call.utc.iso8601,
       current_position: current_position,
+      market_metadata: @venue.market_metadata_diagnostics,
       order_payload_summaries: orders.map { |order| order[:payload] },
       signer_health: sanitize_signer_health(signer_health),
       orders_placed: 0,
