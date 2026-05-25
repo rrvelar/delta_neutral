@@ -421,6 +421,63 @@ module HedgeVenues
       assert_equal 0, state.fetch(:open_orders_count)
     end
 
+    test "extended account state parses documented balance data payload" do
+      api_client = Class.new do
+        def positions(market:) = []
+        def balance = { "status" => "OK", "data" => { "collateralName" => "USDC", "balance" => "13500", "equity" => "12000", "availableForTrade" => "1200" } }
+        def account_info = { "status" => "ACTIVE" }
+        def market(market:) = { "name" => market, "active" => true }
+        def open_orders(market:) = []
+      end.new
+      venue = HedgeVenues::Extended.new(env: extended_config_env, api_client: api_client)
+
+      state = venue.account_state
+      diagnostics = state.fetch(:read_only_diagnostics)
+
+      assert_equal "read_only", state.fetch(:status)
+      assert_equal "12000.0", state.fetch(:account_value_usd)
+      assert_equal "13500.0", state.fetch(:collateral_usd)
+      assert_equal "ok", diagnostics.fetch(:balance_read_status)
+      assert_includes diagnostics.fetch(:balance_data_keys), "equity"
+      assert_no_match(/redacted-test-key|authorization|cookie/i, state.to_json)
+    end
+
+    test "extended balance 404 is classified as unsupported zero balance not read only error" do
+      api_client = Class.new do
+        def positions(market:) = []
+        def balance = { "error" => "HTTP 404", "http_status" => 404, "message" => "balance not found", "response_keys" => [ "message", "status" ] }
+        def account_info = { "status" => "ACTIVE" }
+        def market(market:) = { "name" => market, "active" => true }
+        def open_orders(market:) = []
+      end.new
+      venue = HedgeVenues::Extended.new(env: extended_config_env, api_client: api_client)
+
+      state = venue.account_state
+      diagnostics = state.fetch(:read_only_diagnostics)
+
+      assert_equal "read_only", state.fetch(:status)
+      assert_equal "unsupported", diagnostics.fetch(:balance_read_status)
+      assert_equal 404, diagnostics.fetch(:balance_http_status)
+      assert_equal "Extended balance endpoint returned HTTP 404; docs state this means the user's balance is 0.", diagnostics.fetch(:balance_stop_reason)
+    end
+
+    test "extended account info fallback fills collateral when balance is unsupported" do
+      api_client = Class.new do
+        def positions(market:) = []
+        def balance = { "error" => "HTTP 404", "http_status" => 404, "message" => "balance not found" }
+        def account_info = { "status" => "ACTIVE", "data" => { "equity" => "100", "balance" => "125" } }
+        def market(market:) = { "name" => market, "active" => true }
+        def open_orders(market:) = []
+      end.new
+      venue = HedgeVenues::Extended.new(env: extended_config_env, api_client: api_client)
+
+      state = venue.account_state
+
+      assert_equal "read_only", state.fetch(:status)
+      assert_equal "100.0", state.fetch(:account_value_usd)
+      assert_equal "125.0", state.fetch(:collateral_usd)
+    end
+
     def extended_config_env
       {
         "EXTENDED_API_BASE_URL" => "https://api.starknet.extended.exchange/api/v1",

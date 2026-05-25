@@ -48,7 +48,23 @@ class ExtendedApiClient
     uri = URI.join(api_base_url, path.delete_prefix("/"))
     uri.query = URI.encode_www_form(params) if params.present?
     response = @http_get.call(uri, headers)
-    JSON.parse(response.body)
+    payload = parse_body(response.body)
+    return payload unless response.respond_to?(:code) && !response.is_a?(Net::HTTPSuccess)
+
+    http_status = response.code.to_i
+    {
+      "error" => "HTTP #{http_status}",
+      "http_status" => http_status,
+      "body_status" => payload.is_a?(Hash) ? payload["status"] : nil,
+      "message" => payload.is_a?(Hash) ? payload["message"] || payload["error"] : nil,
+      "response_keys" => safe_keys(payload)
+    }.compact
+  end
+
+  def parse_body(body)
+    JSON.parse(body)
+  rescue JSON::ParserError => e
+    { "error" => "#{e.class}: #{e.message}" }
   end
 
   def http_get(uri, headers)
@@ -68,5 +84,11 @@ class ExtendedApiClient
 
   def api_base_url
     @env.fetch("EXTENDED_API_BASE_URL").end_with?("/") ? @env.fetch("EXTENDED_API_BASE_URL") : "#{@env.fetch('EXTENDED_API_BASE_URL')}/"
+  end
+
+  def safe_keys(value)
+    return [] unless value.respond_to?(:keys)
+
+    value.keys.map(&:to_s).reject { |key| key.match?(/api|key|secret|signature|private|authorization|cookie/i) }.sort
   end
 end

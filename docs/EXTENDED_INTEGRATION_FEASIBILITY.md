@@ -539,6 +539,11 @@ signing algorithm is verified against the official SDK.
 - `ExtendedApiClient` performs read-only REST calls with `X-Api-Key`.
 - `HedgeVenues::Extended` can read account info, balance, positions, open
   orders, and ETH market metadata when env config is present.
+- Balance/equity uses `GET /api/v1/user/balance`. Extended docs state this
+  endpoint returns 404 when the user's balance is zero, so Rails classifies a
+  balance 404 as `unsupported`/zero-balance in diagnostics rather than as a
+  fatal read-only account error. Successful balance responses are parsed from
+  `data.equity` and `data.balance`.
 - Extended position readback normalizes to the same dashboard shape used by
   other venues: `side`, `short_size`, `size`, `entry_price`, `mark_price`,
   `notional_usd`, `unrealized_pnl_usd`, `account_value_usd`,

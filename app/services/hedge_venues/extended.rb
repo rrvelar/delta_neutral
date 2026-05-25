@@ -104,8 +104,7 @@ module HedgeVenues
       balance = read_only_call(:balance)
       market = read_only_call(:market, market: market_symbol)
       current_position = read_position(symbol: "ETH")
-      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
-      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+      account_values = account_value_fields_from(balance: balance, account_info: account_info)
 
       {
         venue: venue_name,
@@ -117,8 +116,8 @@ module HedgeVenues
         margin_mode: current_position&.fetch(:margin_mode, nil) || "unverified",
         current_short_eth: current_position&.fetch(:short_size, nil),
         current_side: current_position&.fetch(:side, nil),
-        account_value_usd: account_value&.to_s("F"),
-        collateral_usd: collateral&.to_s("F"),
+        account_value_usd: account_values[:account_value_usd],
+        collateral_usd: account_values[:collateral_usd],
         read_only_diagnostics: read_only_account_diagnostics(
           account_info: account_info,
           balance: balance,
@@ -157,8 +156,7 @@ module HedgeVenues
       balance = read_only_call(:balance) if balance.nil? && configured?
       current_position = read_position(symbol: "ETH") if current_position.nil? && configured?
       open_orders = read_only_call(:open_orders, market: market_symbol) if open_orders.nil? && configured?
-      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
-      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+      account_values = account_value_fields_from(balance: balance, account_info: account_info)
 
       {
         account_read_attempted: configured?,
@@ -167,10 +165,14 @@ module HedgeVenues
         open_orders_read_attempted: configured?,
         account_read_status: read_status(account_info),
         balance_read_status: read_status(balance),
+        balance_http_status: balance_http_status(balance),
+        balance_stop_reason: balance_stop_reason(balance),
+        balance_response_keys: safe_keys(balance),
+        balance_data_keys: safe_keys(data_payload(balance)),
         positions_read_status: configured? ? "attempted" : "not_configured",
         open_orders_read_status: read_status(open_orders),
-        account_value_usd: account_value&.to_s("F"),
-        collateral_usd: collateral&.to_s("F"),
+        account_value_usd: account_values[:account_value_usd],
+        collateral_usd: account_values[:collateral_usd],
         current_position_status: current_position ? "position_present" : "no_position",
         current_position_side: current_position&.fetch(:side, nil),
         current_short_eth: current_position&.fetch(:short_size, nil),
@@ -386,7 +388,9 @@ module HedgeVenues
 
     def account_state_status(account_info:, balance:, market:)
       return "not_configured" if config_blockers.any?
-      return "read_only_error" if [ account_info, balance, market ].any? { |value| value.is_a?(Hash) && value["error"].present? }
+      return "read_only_error" if account_info.is_a?(Hash) && account_info["error"].present?
+      return "read_only_error" if market.is_a?(Hash) && market["error"].present?
+      return "read_only_error" if balance.is_a?(Hash) && balance["error"].present? && read_status(balance) != "unsupported"
 
       "read_only"
     end
@@ -430,10 +434,16 @@ module HedgeVenues
 
     def account_value_fields
       balance = read_only_call(:balance)
-      return {} unless balance.is_a?(Hash)
+      account_value_fields_from(balance: balance, account_info: nil)
+    end
 
-      account_value = decimal_or_nil(value_from(balance, :equity, :accountValue, :account_value, :balance))
-      collateral = decimal_or_nil(value_from(balance, :balance, :collateral, :equity))
+    def account_value_fields_from(balance:, account_info:)
+      source = data_payload(balance)
+      source = data_payload(account_info) unless source.is_a?(Hash) && balance_fields_present?(source)
+      return {} unless source.is_a?(Hash)
+
+      account_value = decimal_or_nil(value_from(source, :equity, :accountValue, :account_value))
+      collateral = decimal_or_nil(value_from(source, :balance, :collateral, :collateralBalance, :walletBalance))
       {
         account_value_usd: account_value&.to_s("F"),
         collateral_usd: collateral&.to_s("F")
@@ -443,9 +453,39 @@ module HedgeVenues
     def read_status(payload)
       return "not_configured" unless configured?
       return "not_attempted" if payload.nil?
+      return "unsupported" if balance_not_found?(payload)
       return "error" if payload.is_a?(Hash) && payload["error"].present?
 
       "ok"
+    end
+
+    def balance_stop_reason(payload)
+      return "Extended balance endpoint returned HTTP 404; docs state this means the user's balance is 0." if balance_not_found?(payload)
+      return payload["message"].presence || payload["error"] if payload.is_a?(Hash) && payload["error"].present?
+
+      nil
+    end
+
+    def balance_http_status(payload)
+      payload["http_status"] if payload.is_a?(Hash)
+    end
+
+    def balance_not_found?(payload)
+      payload.is_a?(Hash) && payload["http_status"].to_i == 404
+    end
+
+    def data_payload(payload)
+      return nil unless payload.is_a?(Hash)
+      return payload.with_indifferent_access unless payload.key?("data") || payload.key?(:data)
+
+      data = value_from(payload, :data)
+      data.is_a?(Hash) ? data.with_indifferent_access : data
+    end
+
+    def balance_fields_present?(source)
+      [ :equity, :accountValue, :account_value, :balance, :collateral, :collateralBalance, :walletBalance ].any? do |key|
+        source.respond_to?(:key?) && (source.key?(key) || source.key?(key.to_s))
+      end
     end
 
     def size_increment(metadata = discovered_market_metadata)
