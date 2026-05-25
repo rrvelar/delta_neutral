@@ -3,6 +3,50 @@ require "test_helper"
 class WalletSyncJobTest < ActiveSupport::TestCase
   include ServiceStubs
 
+  class RaisingAerodromeService
+    def initialize(error)
+      @error = error
+    end
+
+    def fetch_position(_token_id)
+      raise @error
+    end
+  end
+
+  class FailingIfCalledAerodromeService
+    def fetch_position(token_id)
+      raise "fetch_position should not be called for #{token_id}"
+    end
+  end
+
+  class CapturingLogger
+    attr_reader :errors, :warnings, :infos
+
+    def initialize
+      @errors = []
+      @warnings = []
+      @infos = []
+    end
+
+    def debug
+      yield if block_given?
+    end
+
+    def info(message = nil)
+      @infos << (message || yield)
+    end
+
+    def warn(message = nil)
+      @warnings << (message || yield)
+    end
+
+    def error(message)
+      @errors << message
+    end
+
+    def info? = false
+  end
+
   setup do
     ENV["UNISWAP_SUBGRAPH_URL"] ||= "https://api.thegraph.com/subgraphs/test"
     ENV["THEGRAPH_API_KEY"] ||= "test-key"
@@ -172,6 +216,81 @@ class WalletSyncJobTest < ActiveSupport::TestCase
 
     service.verify
     assert_predicate mellow.reload, :active?
+  end
+
+  test "Aerodrome nonexistent token ownerOf revert is skipped and wallet sync continues" do
+    wallet = base_wallet
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    stale = wallet.positions.create!(
+      user: wallet.user,
+      dex: aerodrome_dex,
+      source: Position::SOURCE_AERODROME_DIRECT,
+      external_id: "5016",
+      pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",
+      asset0: "WETH",
+      asset1: "USDC",
+      active: true
+    )
+    logger = CapturingLogger.new
+    error = AerodromeSlipstreamService::RpcError.new("Aerodrome RPC error: execution reverted: ERC721: owner query for nonexistent token")
+
+    stub_uniswap_positions(wallet.address, [])
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "5016"
+    ) do
+      Rails.stub(:logger, logger) do
+        AerodromeSlipstreamService.stub(:new, -> { RaisingAerodromeService.new(error) }) do
+          WalletSyncJob.perform_now(wallet.id)
+        end
+      end
+    end
+
+    assert_not stale.reload.active?
+    assert_empty logger.errors
+    assert_includes logger.warnings.join("\n"), "reason=nonexistent_token"
+  end
+
+  test "Aerodrome unrelated RPC errors still surface through wallet failure log" do
+    wallet = base_wallet
+    logger = CapturingLogger.new
+    error = AerodromeSlipstreamService::RpcError.new("Aerodrome RPC error: execution reverted: rate limited")
+
+    stub_uniswap_positions(wallet.address, [])
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "5016"
+    ) do
+      Rails.stub(:logger, logger) do
+        AerodromeSlipstreamService.stub(:new, -> { RaisingAerodromeService.new(error) }) do
+          WalletSyncJob.perform_now(wallet.id)
+        end
+      end
+    end
+
+    assert_includes logger.errors.join("\n"), "WalletSyncJob failed for wallet #{wallet.id}: Aerodrome RPC error: execution reverted: rate limited"
+  end
+
+  test "Aerodrome configured Mellow synthetic id does not trigger direct ERC721 ownerOf" do
+    wallet = base_wallet
+    logger = CapturingLogger.new
+
+    stub_uniswap_positions(wallet.address, [])
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "mellow:71261528"
+    ) do
+      Rails.stub(:logger, logger) do
+        AerodromeSlipstreamService.stub(:new, -> { FailingIfCalledAerodromeService.new }) do
+          assert_no_difference "Position.count" do
+            WalletSyncJob.perform_now(wallet.id)
+          end
+        end
+      end
+    end
+
+    assert_empty logger.errors
+    assert_includes logger.warnings.join("\n"), "reason=not_direct_slipstream_token_id"
   end
 
   test "Aerodrome missing config fails safely only when read-only is enabled" do

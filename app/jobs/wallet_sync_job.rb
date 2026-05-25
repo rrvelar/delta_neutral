@@ -93,7 +93,20 @@ class WalletSyncJob < ApplicationJob
     active_external_ids = []
 
     token_ids.each do |token_id|
-      position_data = aerodrome.fetch_position(token_id)
+      unless direct_slipstream_token_id?(token_id)
+        Rails.logger.warn("WalletSyncJob: skipping Aerodrome token #{token_id} for wallet #{wallet.id}; source=configured_token_ids reason=not_direct_slipstream_token_id")
+        next
+      end
+
+      begin
+        position_data = aerodrome.fetch_position(token_id)
+      rescue AerodromeSlipstreamService::RpcError => e
+        raise unless nonexistent_aerodrome_token_error?(e)
+
+        Rails.logger.warn("WalletSyncJob: skipping Aerodrome token #{token_id} for wallet #{wallet.id}; source=direct_slipstream reason=nonexistent_token")
+        next
+      end
+
       unless position_data.owner_address.casecmp?(wallet.address)
         Rails.logger.debug { "[WalletSyncJob] Aerodrome token #{token_id} is not owned by wallet #{wallet.id}" }
         next
@@ -128,6 +141,14 @@ class WalletSyncJob < ApplicationJob
 
   def aerodrome_token_ids
     ENV["AERODROME_SLIPSTREAM_TOKEN_IDS"].to_s.split(",").map(&:strip).compact_blank
+  end
+
+  def direct_slipstream_token_id?(token_id)
+    token_id.to_s.match?(/\A\d+\z/)
+  end
+
+  def nonexistent_aerodrome_token_error?(error)
+    error.message.include?("ERC721: owner query for nonexistent token")
   end
 
   def aerodrome_amount_attributes(position_data)
