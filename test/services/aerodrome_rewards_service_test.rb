@@ -100,6 +100,42 @@ class AerodromeRewardsServiceTest < ActiveSupport::TestCase
     assert_match "stakedContains unsupported", result.warnings.first
   end
 
+  test "discovers staking account from CLGauge Deposit event for token id" do
+    service = AerodromeRewardsService.new(rpc_url: RPC_URL, voter_address: VOTER, aero_token_address: AERO)
+    staker = "0x5555555555555555555555555555555555555555"
+    stub_rpc_sequence(
+      {
+        result: [
+          {
+            "address" => GAUGE,
+            "topics" => [
+              AerodromeRewardsService::DEPOSIT_EVENT_TOPIC,
+              "0x#{word(staker)}",
+              "0x#{uint_word(5016)}"
+            ],
+            "data" => "0x#{uint_word(123)}"
+          }
+        ]
+      }
+    )
+
+    assert_equal staker, service.deposited_account_for_token(GAUGE, 5016)
+  end
+
+  test "claimable fallback tries rewards mapping when earned fails" do
+    service = AerodromeRewardsService.new(rpc_url: RPC_URL, voter_address: VOTER, aero_token_address: AERO)
+    stub_rpc_sequence(
+      { error: { code: -32000, message: "execution reverted: NA" } },
+      { result: "0x#{uint_word(42)}" }
+    )
+
+    result = service.claimable_for_staked_token(gauge_address: GAUGE, token_id: 5016, account_address: ACCOUNT)
+
+    assert_equal "CLGauge.rewards(uint256)", result.fetch(:method)
+    assert_equal 42, result.fetch(:raw)
+    assert_nil result.fetch(:error)
+  end
+
   test "missing voter config fails clearly" do
     error = assert_raises(AerodromeRewardsService::ConfigError) do
       AerodromeRewardsService.new(rpc_url: RPC_URL)

@@ -12,6 +12,7 @@ class AerodromeRewardsService
   end
 
   ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+  DEPOSIT_EVENT_TOPIC = "0x#{Eth::Util.keccak256('Deposit(address,uint256,uint128)').unpack1('H*')}"
 
   RewardData = Data.define(
     :status,
@@ -147,6 +148,36 @@ class AerodromeRewardsService
     raise RpcError, "CLGauge earned unsupported or failed: #{e.message}"
   end
 
+  def claimable_for_staked_token(gauge_address:, token_id:, account_address: nil)
+    attempts = []
+
+    if account_address.present?
+      attempts << read_claimable_with_earned(gauge_address, account_address, token_id)
+      return attempts.last.merge(attempts: attempts) if attempts.last[:error].blank?
+    end
+
+    attempts << read_claimable_with_rewards(gauge_address, token_id)
+    return attempts.last.merge(attempts: attempts) if attempts.last[:error].blank?
+
+    attempts.last.merge(attempts: attempts)
+  end
+
+  def deposited_account_for_token(gauge_address, token_id)
+    logs = eth_get_logs(
+      address: normalize_address(gauge_address),
+      topics: [ DEPOSIT_EVENT_TOPIC, nil, "0x#{uint256_word(token_id)}" ]
+    )
+    log = logs.last
+    return nil unless log
+
+    topics = log.fetch("topics", [])
+    return nil unless topics[1].is_a?(String)
+
+    decode_address(topics[1].delete_prefix("0x").rjust(64, "0"))
+  rescue KeyError, DecodeError, RpcError => e
+    raise RpcError, "CLGauge Deposit event lookup failed: #{e.message}"
+  end
+
   def reward_token(gauge_address)
     decode_address(single_word_call(gauge_address, SELECTORS.fetch(:reward_token)))
   rescue RpcError
@@ -235,6 +266,73 @@ class AerodromeRewardsService
     result
   rescue JSON::ParserError => e
     raise DecodeError, "Aerodrome rewards RPC response is not valid JSON: #{e.message}"
+  end
+
+  def eth_get_logs(address:, topics:)
+    response = Net::HTTP.post(
+      URI(@rpc_url),
+      {
+        jsonrpc: "2.0",
+        method: "eth_getLogs",
+        params: [
+          {
+            fromBlock: "0x0",
+            toBlock: "latest",
+            address: address,
+            topics: topics
+          }
+        ],
+        id: 1
+      }.to_json,
+      "Content-Type" => "application/json"
+    )
+    raise RpcError, "Aerodrome rewards RPC request failed: HTTP #{response.code} #{response.body}" unless response.is_a?(Net::HTTPSuccess)
+
+    parsed = JSON.parse(response.body)
+    raise RpcError, "Aerodrome rewards RPC error: #{parsed.dig('error', 'message')}" if parsed["error"]
+
+    result = parsed["result"]
+    raise DecodeError, "Aerodrome rewards log response missing result" unless result.is_a?(Array)
+
+    result
+  rescue JSON::ParserError => e
+    raise DecodeError, "Aerodrome rewards log response is not valid JSON: #{e.message}"
+  end
+
+  def read_claimable_with_earned(gauge_address, account_address, token_id)
+    {
+      method: "CLGauge.earned(address,uint256)",
+      account_address: normalize_address(account_address),
+      reward_token_address: nil,
+      raw: earned(gauge_address, account_address, token_id),
+      error: nil
+    }
+  rescue Error => e
+    {
+      method: "CLGauge.earned(address,uint256)",
+      account_address: account_address,
+      reward_token_address: nil,
+      raw: nil,
+      error: e.message
+    }
+  end
+
+  def read_claimable_with_rewards(gauge_address, token_id)
+    {
+      method: "CLGauge.rewards(uint256)",
+      account_address: nil,
+      reward_token_address: nil,
+      raw: rewards(gauge_address, token_id),
+      error: nil
+    }
+  rescue Error => e
+    {
+      method: "CLGauge.rewards(uint256)",
+      account_address: nil,
+      reward_token_address: nil,
+      raw: nil,
+      error: e.message
+    }
   end
 
   def single_word_call(to, data)

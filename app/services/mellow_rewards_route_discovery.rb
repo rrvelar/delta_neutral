@@ -10,6 +10,8 @@ class MellowRewardsRouteDiscovery
     :strategy_token_staked_in_gauge,
     :direct_depositor_staked,
     :reward_read_method,
+    :reward_token_address,
+    :reward_read_error,
     :reward_route_status,
     :fee_route_status,
     :pro_rata_share,
@@ -35,7 +37,11 @@ class MellowRewardsRouteDiscovery
     direct_depositor_staked = read_staked(gauge, token.token_id)
     strategy_token_staked = owner_is_gauge || direct_depositor_staked
     reward_read = if strategy_token_staked
-      read_gauge_rewards(gauge: gauge, token_id: token.token_id, account: owner_is_gauge ? gauge : depositor_address)
+      read_gauge_rewards(
+        gauge: gauge,
+        token_id: token.token_id,
+        account: owner_is_gauge ? deposited_account_for_token(gauge, token.token_id) : depositor_address
+      )
     else
       { method: "CLGauge.earned(address,uint256)", raw: nil, error: nil }
     end
@@ -56,6 +62,8 @@ class MellowRewardsRouteDiscovery
       strategy_token_staked_in_gauge: strategy_token_staked,
       direct_depositor_staked: direct_depositor_staked,
       reward_read_method: reward_read[:method],
+      reward_token_address: reward_read[:reward_token_address],
+      reward_read_error: reward_read[:error],
       reward_route_status: route_status,
       fee_route_status: token.strategy_level ? "verified_zero" : "unavailable",
       pro_rata_share: token.pro_rata_share,
@@ -78,6 +86,8 @@ class MellowRewardsRouteDiscovery
       strategy_token_staked_in_gauge: nil,
       direct_depositor_staked: nil,
       reward_read_method: nil,
+      reward_token_address: nil,
+      reward_read_error: nil,
       reward_route_status: "unavailable",
       fee_route_status: "unavailable",
       pro_rata_share: token.pro_rata_share,
@@ -116,14 +126,19 @@ class MellowRewardsRouteDiscovery
   end
 
   def read_gauge_rewards(gauge:, token_id:, account:)
-    method = "CLGauge.earned(address,uint256)"
+    method = account.present? ? "CLGauge.earned(address,uint256)" : "CLGauge.rewards(uint256)"
     return { method: method, raw: nil, error: "gauge unavailable" } if gauge.blank?
-    return { method: method, raw: nil, error: "reward account unavailable" } if account.blank?
     return { method: method, raw: nil, error: "rewards service unavailable" } if rewards_service.nil?
 
-    { method: method, raw: rewards_service.earned(gauge, account, token_id), error: nil }
+    reward_token = safe_reward_token(gauge)
+    result = rewards_service.claimable_for_staked_token(
+      gauge_address: gauge,
+      token_id: token_id,
+      account_address: account
+    )
+    result.merge(reward_token_address: reward_token)
   rescue AerodromeRewardsService::Error => e
-    { method: method, raw: nil, error: e.message }
+    { method: method, raw: nil, error: e.message, reward_token_address: nil }
   end
 
   def reward_route_status(gauge:, strategy_token_staked:, reward_read:)
@@ -132,7 +147,7 @@ class MellowRewardsRouteDiscovery
       return [ "unavailable", "No direct gauge stake detected for strategy token; rewards may be handled by Mellow strategy or unavailable to this app." ]
     end
     if reward_read[:error].present?
-      return [ "unavailable", "Strategy token is staked in gauge, but reward read method is unavailable/failed: #{reward_read[:error]}" ]
+      return [ "unavailable", "Strategy token is staked in gauge, but no supported reward read method succeeded: #{reward_read[:error]}" ]
     end
     return [ "verified_zero", nil ] if BigDecimal(reward_read[:raw].to_s).zero?
 
@@ -147,6 +162,20 @@ class MellowRewardsRouteDiscovery
 
   def depositor_address
     ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || @position.wallet.address
+  end
+
+  def deposited_account_for_token(gauge, token_id)
+    rewards_service.deposited_account_for_token(gauge, token_id)
+  rescue AerodromeRewardsService::Error => e
+    @warnings << "strategy token gauge depositor lookup unavailable: #{e.message}"
+    nil
+  end
+
+  def safe_reward_token(gauge)
+    rewards_service.reward_token(gauge)
+  rescue AerodromeRewardsService::Error => e
+    @warnings << "gauge reward token lookup unavailable: #{e.message}"
+    nil
   end
 
   def slipstream_service

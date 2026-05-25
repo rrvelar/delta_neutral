@@ -222,7 +222,7 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       report = AerodromeRewardsCheck.new(rewards_service: rewards, slipstream_service: slipstream, position: position).report
 
       assert_equal "unavailable", report.fetch(:value_state)
-      assert_match "Strategy token is staked in gauge, but reward read method is unavailable/failed", report.fetch(:stop_reason)
+      assert_match "Strategy token is staked in gauge, but no supported reward read method succeeded", report.fetch(:stop_reason)
       assert_nil report.fetch(:claimable_aero)
     end
   end
@@ -461,13 +461,19 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       end
       object.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
       object.define_singleton_method(:reward_decimals) { |_reward_token| 18 }
-      object.define_singleton_method(:earned) do |received_gauge, account, token_id|
+      object.define_singleton_method(:deposited_account_for_token) do |received_gauge, token_id|
         raise "unexpected gauge" unless received_gauge == gauge
-        raise "unexpected account" unless account == gauge
+        raise "unexpected token #{token_id.inspect}" unless token_id == "71261528"
+
+        "0x5555555555555555555555555555555555555555"
+      end
+      object.define_singleton_method(:claimable_for_staked_token) do |gauge_address:, token_id:, account_address:|
+        raise "unexpected gauge" unless gauge_address == gauge
+        raise "unexpected account" unless account_address == "0x5555555555555555555555555555555555555555"
         raise "unexpected token #{token_id.inspect}" unless token_id == "71261528"
         raise raw_earned if raw_earned.is_a?(Exception)
 
-        raw_earned
+        { method: "CLGauge.earned(address,uint256)", raw: raw_earned, error: nil, account_address: account_address }
       end
     end
   end

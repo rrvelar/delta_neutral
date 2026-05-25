@@ -264,8 +264,16 @@ class AerodromeRewardsCheck
   end
 
   def mellow_gauge_owner_reward_data(position:, gauge_address:, account_address:, token:)
+    staking_account = rewards_service.deposited_account_for_token(gauge_address, token.token_id) || account_address
     reward_token = rewards_service.reward_token(gauge_address)
-    raw = rewards_service.earned(gauge_address, account_address, token.token_id)
+    reward_read = rewards_service.claimable_for_staked_token(
+      gauge_address: gauge_address,
+      token_id: token.token_id,
+      account_address: staking_account
+    )
+    raise AerodromeRewardsService::RpcError, reward_read[:error] if reward_read[:error].present?
+
+    raw = reward_read.fetch(:raw)
     decimals = rewards_service.reward_decimals(reward_token)
     amount = decimal_amount(raw, decimals)
     pro_rated_amount = pro_rate_decimal(amount, token.pro_rata_share)
@@ -275,8 +283,8 @@ class AerodromeRewardsCheck
       status: "detected",
       pool_address: position.pool_address,
       gauge_address: gauge_address,
-      depositor_address: account_address,
-      account_address: account_address,
+      depositor_address: staking_account,
+      account_address: staking_account,
       token_id: token.display_token_id,
       staked: true,
       staked_token_ids: nil,
@@ -285,7 +293,7 @@ class AerodromeRewardsCheck
       claimable_aero_raw: pro_rated_raw,
       claimable_aero: pro_rated_amount,
       claimable_aero_usd: nil,
-      warnings: token.warnings + [ "Mellow strategy token ownerOf equals discovered gauge; rewards are read as strategy-level gauge custody and pro-rated." ],
+      warnings: token.warnings + [ "Mellow strategy token ownerOf equals discovered gauge; rewards are read from #{reward_read.fetch(:method)} for strategy-level custody and pro-rated." ],
       blockers: []
     )
   rescue AerodromeRewardsService::Error => e
@@ -303,7 +311,7 @@ class AerodromeRewardsCheck
       claimable_aero_raw: nil,
       claimable_aero: nil,
       claimable_aero_usd: nil,
-      warnings: token.warnings + [ "Strategy token is staked in gauge, but reward read method is unavailable/failed: #{e.message}" ],
+      warnings: token.warnings + [ "Strategy token is staked in gauge, but no supported reward read method succeeded: #{e.message}" ],
       blockers: []
     )
   end

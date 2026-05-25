@@ -30,6 +30,8 @@ namespace :mellow do
     puts "direct_depositor_staked: #{discovery.direct_depositor_staked.nil? ? 'unavailable' : discovery.direct_depositor_staked}"
     puts "gauge_stake_status: #{discovery.gauge_staked.nil? ? 'unavailable' : discovery.gauge_staked}"
     puts "reward_read_method_attempted: #{discovery.reward_read_method || 'unavailable'}"
+    puts "reward_token_address: #{discovery.reward_token_address || rewards[:reward_token_address] || 'unavailable'}"
+    puts "reward_read_reverted: #{discovery.reward_read_error.present?}"
     puts "reward_route_status: #{rewards[:value_state] || discovery.reward_route_status}"
     puts "reward_stop_reason: #{rewards[:stop_reason] || discovery.stop_reason || 'none'}"
     puts "fee_route_status: #{fees[:value_state] || discovery.fee_route_status}"

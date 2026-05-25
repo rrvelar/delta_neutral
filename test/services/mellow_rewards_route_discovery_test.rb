@@ -26,7 +26,10 @@ class MellowRewardsRouteDiscoveryTest < ActiveSupport::TestCase
     rewards = Object.new
     rewards.define_singleton_method(:gauge_for_pool) { |_pool| "0x1111111111111111111111111111111111111111" }
     rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| true }
-    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| 100 }
+    rewards.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
+    rewards.define_singleton_method(:claimable_for_staked_token) do |gauge_address:, token_id:, account_address:|
+      { method: "CLGauge.earned(address,uint256)", raw: 100, error: nil, account_address: account_address }
+    end
 
     report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
 
@@ -43,7 +46,15 @@ class MellowRewardsRouteDiscoveryTest < ActiveSupport::TestCase
     rewards = Object.new
     rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
     rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
-    rewards.define_singleton_method(:earned) { |_gauge, account, _token_id| account == gauge ? 100 : raise("unexpected account") }
+    rewards.define_singleton_method(:deposited_account_for_token) { |_gauge, _token_id| "0x5555555555555555555555555555555555555555" }
+    rewards.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
+    rewards.define_singleton_method(:claimable_for_staked_token) do |gauge_address:, token_id:, account_address:|
+      raise "unexpected gauge" unless gauge_address == gauge
+      raise "unexpected token" unless token_id == "71261528"
+      raise "unexpected account" unless account_address == "0x5555555555555555555555555555555555555555"
+
+      { method: "CLGauge.earned(address,uint256)", raw: 100, error: nil, account_address: account_address }
+    end
 
     report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
 
@@ -61,7 +72,11 @@ class MellowRewardsRouteDiscoveryTest < ActiveSupport::TestCase
     rewards = Object.new
     rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
     rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
-    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| 0 }
+    rewards.define_singleton_method(:deposited_account_for_token) { |_gauge, _token_id| "0x5555555555555555555555555555555555555555" }
+    rewards.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
+    rewards.define_singleton_method(:claimable_for_staked_token) do |gauge_address:, token_id:, account_address:|
+      { method: "CLGauge.earned(address,uint256)", raw: 0, error: nil, account_address: account_address }
+    end
 
     report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
 
@@ -77,13 +92,17 @@ class MellowRewardsRouteDiscoveryTest < ActiveSupport::TestCase
     rewards = Object.new
     rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
     rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
-    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| raise AerodromeRewardsService::RpcError, "earned reverted" }
+    rewards.define_singleton_method(:deposited_account_for_token) { |_gauge, _token_id| "0x5555555555555555555555555555555555555555" }
+    rewards.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
+    rewards.define_singleton_method(:claimable_for_staked_token) do |gauge_address:, token_id:, account_address:|
+      { method: "CLGauge.rewards(uint256)", raw: nil, error: "earned reverted; rewards reverted", account_address: account_address }
+    end
 
     report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
 
     assert_equal true, report.strategy_token_staked_in_gauge
     assert_equal "unavailable", report.reward_route_status
-    assert_match "Strategy token is staked in gauge, but reward read method is unavailable/failed", report.stop_reason
+    assert_match "Strategy token is staked in gauge, but no supported reward read method succeeded", report.stop_reason
   end
 
   private
