@@ -26,12 +26,64 @@ class MellowRewardsRouteDiscoveryTest < ActiveSupport::TestCase
     rewards = Object.new
     rewards.define_singleton_method(:gauge_for_pool) { |_pool| "0x1111111111111111111111111111111111111111" }
     rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| true }
+    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| 100 }
 
     report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
 
     assert_equal true, report.gauge_staked
     assert_equal "estimated", report.reward_route_status
     assert_nil report.stop_reason
+  end
+
+  test "ownerOf equal to gauge marks strategy token staked even when direct depositor is not staked" do
+    position = create_mellow_position
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |_token_id| gauge }
+    rewards = Object.new
+    rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
+    rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
+    rewards.define_singleton_method(:earned) { |_gauge, account, _token_id| account == gauge ? 100 : raise("unexpected account") }
+
+    report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
+
+    assert_equal true, report.strategy_token_staked_in_gauge
+    assert_equal false, report.direct_depositor_staked
+    assert_equal "estimated", report.reward_route_status
+    assert_nil report.stop_reason
+  end
+
+  test "ownerOf equal to gauge with zero reward read is verified zero" do
+    position = create_mellow_position
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |_token_id| gauge }
+    rewards = Object.new
+    rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
+    rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
+    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| 0 }
+
+    report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
+
+    assert_equal true, report.strategy_token_staked_in_gauge
+    assert_equal "verified_zero", report.reward_route_status
+  end
+
+  test "ownerOf equal to gauge with reward read failure is unavailable with precise reason" do
+    position = create_mellow_position
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |_token_id| gauge }
+    rewards = Object.new
+    rewards.define_singleton_method(:gauge_for_pool) { |_pool| gauge }
+    rewards.define_singleton_method(:staked_contains) { |_gauge, _depositor, _token_id| false }
+    rewards.define_singleton_method(:earned) { |_gauge, _account, _token_id| raise AerodromeRewardsService::RpcError, "earned reverted" }
+
+    report = MellowRewardsRouteDiscovery.new(position: position, slipstream_service: slipstream, rewards_service: rewards).report
+
+    assert_equal true, report.strategy_token_staked_in_gauge
+    assert_equal "unavailable", report.reward_route_status
+    assert_match "Strategy token is staked in gauge, but reward read method is unavailable/failed", report.stop_reason
   end
 
   private

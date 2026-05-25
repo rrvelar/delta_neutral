@@ -7,6 +7,9 @@ class MellowRewardsRouteDiscovery
     :owner_address,
     :gauge_address,
     :gauge_staked,
+    :strategy_token_staked_in_gauge,
+    :direct_depositor_staked,
+    :reward_read_method,
     :reward_route_status,
     :fee_route_status,
     :pro_rata_share,
@@ -28,8 +31,19 @@ class MellowRewardsRouteDiscovery
 
     owner = read_owner(token.token_id)
     gauge = read_gauge
-    staked = read_staked(gauge, token.token_id)
-    stop_reason = stop_reason_for(gauge: gauge, staked: staked)
+    owner_is_gauge = same_address?(owner, gauge)
+    direct_depositor_staked = read_staked(gauge, token.token_id)
+    strategy_token_staked = owner_is_gauge || direct_depositor_staked
+    reward_read = if strategy_token_staked
+      read_gauge_rewards(gauge: gauge, token_id: token.token_id, account: owner_is_gauge ? gauge : depositor_address)
+    else
+      { method: "CLGauge.earned(address,uint256)", raw: nil, error: nil }
+    end
+    route_status, stop_reason = reward_route_status(
+      gauge: gauge,
+      strategy_token_staked: strategy_token_staked,
+      reward_read: reward_read
+    )
 
     Result.new(
       position_id: @position.id,
@@ -38,9 +52,12 @@ class MellowRewardsRouteDiscovery
       resolved_strategy_token_id: token.token_id,
       owner_address: owner,
       gauge_address: gauge,
-      gauge_staked: staked,
-      reward_route_status: stop_reason ? "unavailable" : "estimated",
-      fee_route_status: token.strategy_level ? "estimated" : "unavailable",
+      gauge_staked: strategy_token_staked,
+      strategy_token_staked_in_gauge: strategy_token_staked,
+      direct_depositor_staked: direct_depositor_staked,
+      reward_read_method: reward_read[:method],
+      reward_route_status: route_status,
+      fee_route_status: token.strategy_level ? "verified_zero" : "unavailable",
       pro_rata_share: token.pro_rata_share,
       stop_reason: stop_reason,
       warnings: @warnings
@@ -58,6 +75,9 @@ class MellowRewardsRouteDiscovery
       owner_address: nil,
       gauge_address: nil,
       gauge_staked: nil,
+      strategy_token_staked_in_gauge: nil,
+      direct_depositor_staked: nil,
+      reward_read_method: nil,
       reward_route_status: "unavailable",
       fee_route_status: "unavailable",
       pro_rata_share: token.pro_rata_share,
@@ -89,19 +109,44 @@ class MellowRewardsRouteDiscovery
   def read_staked(gauge, token_id)
     return nil if gauge.blank? || rewards_service.nil?
 
-    depositor = ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || @position.wallet.address
-    rewards_service.staked_contains(gauge, depositor, token_id)
+    rewards_service.staked_contains(gauge, depositor_address, token_id)
   rescue AerodromeRewardsService::Error => e
-    @warnings << "gauge stake status unavailable: #{e.message}"
+    @warnings << "direct depositor gauge stake status unavailable: #{e.message}"
     nil
   end
 
-  def stop_reason_for(gauge:, staked:)
-    return "No direct CL gauge discovered for strategy pool; Mellow strategy reward route is unavailable to this app." if gauge.blank?
-    return nil if staked
-    return "No direct gauge stake detected for strategy token; rewards may be handled by Mellow strategy or unavailable to this app." if staked == false
+  def read_gauge_rewards(gauge:, token_id:, account:)
+    method = "CLGauge.earned(address,uint256)"
+    return { method: method, raw: nil, error: "gauge unavailable" } if gauge.blank?
+    return { method: method, raw: nil, error: "reward account unavailable" } if account.blank?
+    return { method: method, raw: nil, error: "rewards service unavailable" } if rewards_service.nil?
 
-    "Gauge stake status could not be verified for strategy token; reward route is unavailable."
+    { method: method, raw: rewards_service.earned(gauge, account, token_id), error: nil }
+  rescue AerodromeRewardsService::Error => e
+    { method: method, raw: nil, error: e.message }
+  end
+
+  def reward_route_status(gauge:, strategy_token_staked:, reward_read:)
+    return [ "unavailable", "No direct CL gauge discovered for strategy pool; Mellow strategy reward route is unavailable to this app." ] if gauge.blank?
+    unless strategy_token_staked
+      return [ "unavailable", "No direct gauge stake detected for strategy token; rewards may be handled by Mellow strategy or unavailable to this app." ]
+    end
+    if reward_read[:error].present?
+      return [ "unavailable", "Strategy token is staked in gauge, but reward read method is unavailable/failed: #{reward_read[:error]}" ]
+    end
+    return [ "verified_zero", nil ] if BigDecimal(reward_read[:raw].to_s).zero?
+
+    [ "estimated", nil ]
+  rescue ArgumentError
+    [ "unavailable", "Strategy token is staked in gauge, but reward read method returned an unparseable value." ]
+  end
+
+  def same_address?(left, right)
+    left.present? && right.present? && left.to_s.downcase == right.to_s.downcase
+  end
+
+  def depositor_address
+    ENV["AERODROME_REWARDS_DEPOSITOR_ADDRESS"].presence || @position.wallet.address
   end
 
   def slipstream_service

@@ -2,10 +2,11 @@ class AerodromeRewardsCheck
   BANNER = "AERODROME REWARDS CHECK — READ ONLY"
   DEX_NAME = "aerodrome_slipstream"
 
-  def initialize(rewards_service: nil, price_service: nil, position: nil)
+  def initialize(rewards_service: nil, price_service: nil, position: nil, slipstream_service: nil)
     @rewards_service = rewards_service
     @price_service = price_service
     @position = position
+    @slipstream_service = slipstream_service
     @blockers = []
     @warnings = []
     @checks = []
@@ -20,7 +21,7 @@ class AerodromeRewardsCheck
     @warnings.concat(price_data.warnings)
     claimable_aero_usd = claimable_aero_usd(reward_data, price_data)
     value_state = reward_value_state(reward_data, price_data, context)
-    stop_reason = reward_stop_reason(reward_data, context)
+    stop_reason = reward_stop_reason(reward_data, context, claimable_aero_usd)
 
     {
       safety_banner: BANNER,
@@ -127,6 +128,18 @@ class AerodromeRewardsCheck
     end
 
     gauge_address = rewards_service.gauge_for_pool(position.pool_address)
+    owner_address = token.strategy_level ? strategy_token_owner(token.token_id) : nil
+    if token.strategy_level && same_address?(owner_address, gauge_address)
+      reward_data = mellow_gauge_owner_reward_data(
+        position: position,
+        gauge_address: gauge_address,
+        account_address: owner_address,
+        token: token
+      )
+      @checks << { name: "CL gauge reward read", status: reward_data.status, value: reward_data.gauge_address }
+      return reward_data
+    end
+
     if same_address?(depositor, gauge_address)
       @warnings << "selected depositor is the gauge; set AERODROME_REWARDS_DEPOSITOR_ADDRESS to the staking wallet"
       return gauge_as_depositor_result(position, depositor, gauge_address)
@@ -239,6 +252,66 @@ class AerodromeRewardsCheck
     )
   end
 
+  def slipstream_service
+    @slipstream_service ||= AerodromeSlipstreamService.new
+  end
+
+  def strategy_token_owner(token_id)
+    slipstream_service.owner_of(token_id)
+  rescue AerodromeSlipstreamService::Error => e
+    @warnings << "ownerOf read unavailable for Mellow strategy token: #{e.message}"
+    nil
+  end
+
+  def mellow_gauge_owner_reward_data(position:, gauge_address:, account_address:, token:)
+    reward_token = rewards_service.reward_token(gauge_address)
+    raw = rewards_service.earned(gauge_address, account_address, token.token_id)
+    decimals = rewards_service.reward_decimals(reward_token)
+    amount = decimal_amount(raw, decimals)
+    pro_rated_amount = pro_rate_decimal(amount, token.pro_rata_share)
+    pro_rated_raw = pro_rate_integer(raw, token.pro_rata_share)
+
+    AerodromeRewardsService::RewardData.new(
+      status: "detected",
+      pool_address: position.pool_address,
+      gauge_address: gauge_address,
+      depositor_address: account_address,
+      account_address: account_address,
+      token_id: token.display_token_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
+      reward_token_address: reward_token,
+      claimable_aero_raw: pro_rated_raw,
+      claimable_aero: pro_rated_amount,
+      claimable_aero_usd: nil,
+      warnings: token.warnings + [ "Mellow strategy token ownerOf equals discovered gauge; rewards are read as strategy-level gauge custody and pro-rated." ],
+      blockers: []
+    )
+  rescue AerodromeRewardsService::Error => e
+    AerodromeRewardsService::RewardData.new(
+      status: "unavailable",
+      pool_address: position.pool_address,
+      gauge_address: gauge_address,
+      depositor_address: account_address,
+      account_address: account_address,
+      token_id: token.display_token_id,
+      staked: true,
+      staked_token_ids: nil,
+      reward_rate_raw: nil,
+      reward_token_address: nil,
+      claimable_aero_raw: nil,
+      claimable_aero: nil,
+      claimable_aero_usd: nil,
+      warnings: token.warnings + [ "Strategy token is staked in gauge, but reward read method is unavailable/failed: #{e.message}" ],
+      blockers: []
+    )
+  end
+
+  def decimal_amount(raw, decimals)
+    BigDecimal(raw.to_s) / (BigDecimal("10")**Integer(decimals))
+  end
+
   def price_service
     @price_service ||= AerodromeAeroUsdPrice.new
   end
@@ -272,12 +345,15 @@ class AerodromeRewardsCheck
     "unavailable"
   end
 
-  def reward_stop_reason(reward_data, context)
+  def reward_stop_reason(reward_data, context, claimable_aero_usd)
     return context[:token_unavailable_reason] if context[:token_unavailable_reason].present?
-    if reward_data&.claimable_aero && BigDecimal(reward_data.claimable_aero.to_s).positive? && reward_data.claimable_aero_usd.nil?
+    if reward_data&.claimable_aero && BigDecimal(reward_data.claimable_aero.to_s).positive? && claimable_aero_usd.nil?
       return "Missing AERO USD price; reward amount is available but USD estimate is unavailable."
     end
     if reward_data && reward_data.status != "detected"
+      staked_mellow_reason = reward_data.warnings.find { |warning| warning.to_s.start_with?("Strategy token is staked in gauge") }
+      return staked_mellow_reason if staked_mellow_reason
+
       direct_mellow_reason = reward_data.warnings.find { |warning| warning.to_s.start_with?("No direct gauge stake detected") }
       return direct_mellow_reason || reward_data.warnings.first
     end

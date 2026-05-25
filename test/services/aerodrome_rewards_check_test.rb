@@ -114,7 +114,11 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       "AERODROME_REWARDS_ENABLED" => "true",
       "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5"
     ) do
-      report = AerodromeRewardsCheck.new(rewards_service: service, position: position).report
+      report = AerodromeRewardsCheck.new(
+        rewards_service: service,
+        slipstream_service: owner_reader(nil),
+        position: position
+      ).report
 
       assert_equal "WARN", report.fetch(:status)
       assert_equal "mellow:71261528", report.fetch(:token_id)
@@ -156,13 +160,70 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
       "AERODROME_REWARDS_ENABLED" => "true",
       "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5"
     ) do
-      report = AerodromeRewardsCheck.new(rewards_service: service, position: position).report
+      report = AerodromeRewardsCheck.new(
+        rewards_service: service,
+        slipstream_service: owner_reader(nil),
+        position: position
+      ).report
 
       assert_equal "WARN", report.fetch(:status)
       assert_equal "unavailable", report.fetch(:value_state)
       assert_nil report.fetch(:claimable_aero)
       assert_nil report.fetch(:claimable_aero_usd)
       assert_match "No direct gauge stake detected", report.fetch(:stop_reason)
+    end
+  end
+
+  test "Mellow ownerOf equal to gauge reads strategy rewards and pro-rates nonzero amount" do
+    position = create_mellow_position(user_share_percent: "1.25")
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    rewards = gauge_owner_rewards_service(position: position, gauge: gauge, raw_earned: 100_000_000_000_000_000_000)
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |token_id| token_id == "71261528" ? gauge : raise("unexpected token") }
+
+    with_env(
+      "AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5",
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_AERO_USD_MANUAL_PRICE" => "0.5"
+    ) do
+      report = AerodromeRewardsCheck.new(rewards_service: rewards, slipstream_service: slipstream, position: position).report
+
+      assert_equal "estimated", report.fetch(:value_state)
+      assert_equal "1.25", report.fetch(:claimable_aero)
+      assert_equal "0.625", report.fetch(:claimable_aero_usd)
+      assert_nil report.fetch(:stop_reason)
+      assert_no_match "No direct gauge stake detected", report.fetch(:warnings).join(" ")
+    end
+  end
+
+  test "Mellow ownerOf equal to gauge reads verified zero rewards" do
+    position = create_mellow_position(user_share_percent: "1.25")
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    rewards = gauge_owner_rewards_service(position: position, gauge: gauge, raw_earned: 0)
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |_token_id| gauge }
+
+    with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5", "AERODROME_REWARDS_ENABLED" => "true") do
+      report = AerodromeRewardsCheck.new(rewards_service: rewards, slipstream_service: slipstream, position: position).report
+
+      assert_equal "verified_zero", report.fetch(:value_state)
+      assert_equal "0.0", report.fetch(:claimable_aero)
+    end
+  end
+
+  test "Mellow ownerOf equal to gauge reports reward read failure precisely" do
+    position = create_mellow_position(user_share_percent: "1.25")
+    gauge = "0xf33a96b5932d9e9b9a0eda447abd8c9d48d2e0c8"
+    rewards = gauge_owner_rewards_service(position: position, gauge: gauge, raw_earned: AerodromeRewardsService::RpcError.new("earned reverted"))
+    slipstream = Object.new
+    slipstream.define_singleton_method(:owner_of) { |_token_id| gauge }
+
+    with_env("AERODROME_VOTER_ADDRESS" => "0x16613524e02ad97edfeF371bc883f2f5d6c480a5", "AERODROME_REWARDS_ENABLED" => "true") do
+      report = AerodromeRewardsCheck.new(rewards_service: rewards, slipstream_service: slipstream, position: position).report
+
+      assert_equal "unavailable", report.fetch(:value_state)
+      assert_match "Strategy token is staked in gauge, but reward read method is unavailable/failed", report.fetch(:stop_reason)
+      assert_nil report.fetch(:claimable_aero)
     end
   end
 
@@ -388,6 +449,32 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
 
         reward_data
       end
+    end
+  end
+
+  def gauge_owner_rewards_service(position:, gauge:, raw_earned:)
+    Object.new.tap do |object|
+      object.define_singleton_method(:gauge_for_pool) do |pool_address|
+        raise "unexpected pool" unless pool_address == position.pool_address
+
+        gauge
+      end
+      object.define_singleton_method(:reward_token) { |_gauge| "0x940181a94a35a4569e4529a3cdfb74e38fd98631" }
+      object.define_singleton_method(:reward_decimals) { |_reward_token| 18 }
+      object.define_singleton_method(:earned) do |received_gauge, account, token_id|
+        raise "unexpected gauge" unless received_gauge == gauge
+        raise "unexpected account" unless account == gauge
+        raise "unexpected token #{token_id.inspect}" unless token_id == "71261528"
+        raise raw_earned if raw_earned.is_a?(Exception)
+
+        raw_earned
+      end
+    end
+  end
+
+  def owner_reader(owner)
+    Object.new.tap do |object|
+      object.define_singleton_method(:owner_of) { |_token_id| owner }
     end
   end
 
