@@ -1,0 +1,418 @@
+# Extended Exchange Integration Feasibility
+
+Date checked: 2026-05-25
+
+This document is a research and design artifact only. It does not approve live
+Extended trading, does not add credentials, does not add signing, and does not
+change the current production hedge venue. Current production remains Ethereal;
+Nado is flat and disabled.
+
+## Sources Checked
+
+- Extended API docs: https://api.docs.extended.exchange/
+- Extended technical architecture: https://docs.extended.exchange/about-extended/technical-architecture
+- Extended testnet docs: https://docs.extended.exchange/extended-resources/more/testnet
+- Extended Python SDK: https://github.com/x10xchange/python_sdk
+- SDK files inspected from a temporary clone in `/private/tmp/extended_python_sdk`:
+  - `README.md`
+  - `x10/config.py`
+  - `x10/core/stark_account.py`
+  - `x10/clients/rest/rest_api_client.py`
+  - `x10/clients/rest/modules/account_module.py`
+  - `x10/clients/rest/modules/info_module.py`
+  - `x10/clients/rest/modules/order_management_module.py`
+  - `x10/clients/stream/stream_client.py`
+  - `x10/perpetual/order_object.py`
+  - `x10/perpetual/order_object_settlement.py`
+  - `x10/models/market.py`
+  - `x10/models/position.py`
+  - `x10/models/balance.py`
+  - `x10/models/order.py`
+  - `examples/onboarding_example.py`
+
+## Feasibility Verdict
+
+Extended is feasible as a future delta_neutral hedge venue, but it should not be
+implemented as a direct live Ruby venue first. The safest path is:
+
+1. Documentation-only.
+2. Read-only Ruby adapter.
+3. Dry-run order planning and payload summaries.
+4. Testnet-only proof using a separate Stark signer/SDK sidecar.
+5. Mainnet live only after testnet proves open, increase, decrease, close, and
+   delayed reconciliation.
+
+The main integration risks are key handling, Stark order signing, async order
+confirmation, leverage/margin semantics, and the need to reconcile REST
+acceptance against WebSocket/account readback truth. Extended write access
+requires a Stark private key. Treat it as full trading/funds access.
+
+## Protocol and Architecture
+
+Extended is a perpetuals DEX built on Starknet. Its architecture is a hybrid
+CLOB: order processing, matching, position risk assessment, and transaction
+sequencing occur off-chain, while validation and settlement occur on Starknet.
+Extended docs state that trades and other collateral-affecting state changes are
+validated through Starknet/on-chain health checks.
+
+API hosts verified:
+
+| Network | REST base URL | Stream URL | Signing domain |
+| --- | --- | --- | --- |
+| Mainnet | `https://api.starknet.extended.exchange/api/v1` | `wss://api.starknet.extended.exchange/stream.extended.exchange/v1` | `extended.exchange` |
+| Testnet | `https://api.starknet.sepolia.extended.exchange/api/v1` | `wss://api.starknet.sepolia.extended.exchange/stream.extended.exchange/v1` | `starknet.sepolia.extended.exchange` |
+
+The SDK config uses Starknet domain:
+
+| Network | Domain name | Version | Chain id | Revision |
+| --- | --- | --- | --- | --- |
+| Mainnet | `Perpetuals` | `v0` | `SN_MAIN` | `1` |
+| Testnet | `Perpetuals` | `v0` | `SN_SEPOLIA` | `1` |
+
+## Account, Subaccount, Vault, Client Model
+
+User observations and SDK docs align:
+
+- A connected Ethereum wallet can create up to ten Extended subaccounts.
+- Each subaccount has its own API key, Stark public/private key, and vault
+  number.
+- The SDK represents the trading identity as `StarkPerpetualAccount(vault,
+  private_key, public_key, api_key)`.
+- The `vault` is used as the `collateralPosition` / position id in the signed
+  order settlement payload.
+- The API key authenticates REST and WebSocket access.
+- The Stark private key signs write operations.
+- `accountIndex` is part of the Ethereum typed data used for onboarding /
+  subaccount creation.
+- `clientId` appears in user/referral surfaces and API-management UI. It should
+  be captured as operational metadata, but order signing in the SDK uses vault,
+  Stark key, market metadata, fee, nonce, and Starknet domain rather than
+  `clientId` directly.
+
+Open questions before implementation:
+
+- Whether `clientId` must be included in any production order metadata for this
+  account.
+- Whether account leverage is per-market configurable and whether Extended
+  should be operated at 1x effective leverage or a configured leverage.
+- Whether the UI-created Stark private key is exportable only once. The docs
+  show SDK deterministic derivation from an Ethereum signature, but production
+  recovery must be tested on testnet before relying on it.
+
+## Authentication and Key Model
+
+Extended docs state:
+
+- Read-only operations such as market data, account information, and order
+  history require only an API key.
+- Write operations such as create orders, transfers, and withdrawals require an
+  API key and valid Stark signature.
+- Private WebSocket account updates use header `X-Api-Key: <api key>`.
+
+SDK request header:
+
+- `X-Api-Key` from `x10/utils/http.py`.
+
+Signer recommendation:
+
+- Do not use `delta-neutral-eip712-signer` for Extended. Extended uses Stark
+  order hashes/signatures, not EIP-712 exchange order signing.
+- Add a separate Extended/Stark signer sidecar if live trading is ever built.
+- The sidecar should read `EXTENDED_STARK_PRIVATE_KEY_FILE` from a root-owned
+  `0600` file outside Rails and outside the repo.
+- Rails should send an unsigned canonical order intent or order hash to the
+  sidecar and receive only `(r, s)` plus public key diagnostics.
+- The sidecar must never expose the Stark private key in `/health`, logs,
+  receipts, exceptions, or process args.
+
+Implications:
+
+- Deleting an API key removes REST/WS access for that key but does not remove
+  the Stark private key's signing authority if another API key is created for
+  the same subaccount.
+- Losing a Stark private key can prevent live trading/signing from the bot.
+- Leaking a Stark private key is critical because it can authorize trading,
+  transfers, and withdrawals where supported.
+
+## Read-Only Endpoint Map
+
+All paths below are relative to `/api/v1`.
+
+| Need | Endpoint | Auth | Key fields | delta_neutral mapping |
+| --- | --- | --- | --- | --- |
+| Markets | `GET /info/markets?market={market}` | None | `name`, `type`, `active`, `marketStats.markPrice`, `marketStats.bidPrice`, `marketStats.askPrice`, `tradingConfig.minOrderSize`, `minOrderSizeChange`, `minPriceChange`, `maxMarketOrderValue`, `maxLeverage`, `l2Config` | market symbol, mark price, increments, caps, settlement ids |
+| Market stats | `GET /info/markets/{market}/stats` | None | `lastPrice`, `askPrice`, `bidPrice`, `markPrice`, `indexPrice`, `fundingRate` | mark/price fallback |
+| Order book | `GET /info/markets/{market}/orderbook` | None | bids/asks | crossing IOC price preview |
+| Account details | `GET /user/account/info` | API key | `status`, `l2Key`, `l2Vault`, `accountId`, `description`, `bridgeStarknetAddress` | account configured/active, vault number |
+| Balance | `GET /user/balance` | API key | `balance`, `equity`, `availableForTrade`, `availableForWithdrawal`, `unrealisedPnl`, `initialMargin`, `marginRatio` | collateral/account value, margin, effective leverage denominator |
+| Positions | `GET /user/positions?market={market}&side={side}` | API key | `market`, `status`, `side`, `leverage`, `size`, `value`, `openPrice`, `markPrice`, `unrealisedPnl`, `realisedPnl`, `liquidationPrice` | side, short_size, entry, mark, notional, PnL, leverage |
+| Position history | `GET /user/positions/history` | API key | size/open/exit/realised PnL | lifecycle diagnostics |
+| Open orders | `GET /user/orders?market={market}` | API key | `id`, `externalId`, `status`, `side`, `qty`, `filledQty`, `reduceOnly`, `postOnly`, `timeInForce` | pending order detection and duplicate prevention |
+| Order history | `GET /user/orders/history` | API key | historical order rows | reconciliation diagnostics |
+| Order by id | `GET /user/orders/{order_id}` | API key | order status/filled quantity | REST fallback confirmation |
+| Order by external id | `GET /user/orders/external/{external_id}` | API key | order rows | idempotency/recovery |
+| Trades/fills | `GET /user/trades?market={market}` | API key | `orderId`, `side`, `price`, `qty`, `value`, `fee` | fills, realized fees |
+| Fees | `GET /user/fees?market={market}` | API key | maker/taker fee | required `fee` field for order signing |
+| Current leverage | `GET /user/leverage?market={market}` | API key | `market`, `leverage` | margin/leverage status only |
+| Funding history | `GET /info/{market}/funding` | None | funding rows | optional analytics |
+| Account stream | `GET /stream.extended.exchange/v1/account` | API key | `ORDER`, `TRADE`, `BALANCE`, `POSITION` events | final order/position truth |
+
+Normalized `HedgeVenues::Extended#read_position("ETH")` should return:
+
+```ruby
+{
+  venue: "Extended",
+  symbol: "ETH-PERP",
+  market_symbol: "ETH-USD",
+  side: "short",
+  size: "-0.1234",
+  short_size: "0.1234",
+  margin_mode: "cross_or_configured",
+  entry_price: "...",
+  mark_price: "...",
+  notional_usd: "...",
+  unrealized_pnl_usd: "...",
+  account_value_usd: "...",
+  collateral_usd: "...",
+  effective_leverage: "..."
+}
+```
+
+If Extended exposes true isolated/cross modes in current docs, that must be
+verified before labeling it. The known SDK surfaces per-market leverage; it does
+not prove the same margin model as Nado isolated or Ethereal cross.
+
+## Trading Semantics for Future Work
+
+Market:
+
+- Verify ETH market from `GET /info/markets`; likely `ETH-USD`, but do not
+  hardcode without live read-only confirmation.
+- Use only `type: "PERPETUAL"` markets for hedge positions.
+
+Side mapping:
+
+- `SELL` opens/increases an ETH short.
+- `BUY` decreases/closes an ETH short.
+- Decrease and close must use `reduceOnly: true`.
+
+Order type:
+
+- Extended supports `LIMIT`, `MARKET`, `CONDITIONAL`, and `TPSL`.
+- API market orders must use `timeInForce: "IOC"`.
+- Price is still required as worst accepted price in collateral asset. The docs
+  note that the UI applies a crossing buffer: buys use best ask times
+  `(1 + 1.5%)`, sells use best bid times `(1 - 1.5%)`.
+- For hedge execution, use crossing IOC with explicit worst price and bounded
+  slippage rather than pretending there is a price-free market order.
+
+Order payload fields from docs/SDK:
+
+- `id`: client assigned external order id.
+- `market`: e.g. `ETH-USD` after verification.
+- `type`: `MARKET` or `LIMIT`.
+- `side`: `BUY` or `SELL`.
+- `qty`: base asset quantity.
+- `price`: worst accepted price.
+- `reduceOnly`: boolean.
+- `postOnly`: boolean.
+- `timeInForce`: `IOC` for market-like crossing.
+- `expiryEpochMillis`: epoch ms.
+- `fee`: highest accepted fee decimal, taker for IOC.
+- `nonce`: integer between 1 and `2^31`.
+- `selfTradeProtectionLevel`: `ACCOUNT` by default.
+- `settlement.signature.r/s`, `settlement.starkKey`,
+  `settlement.collateralPosition`.
+
+SDK signing details:
+
+- `create_order_object` builds the API request.
+- `create_order_settlement_data` computes Stark amounts, fee amount, nonce,
+  expiration, and order hash.
+- Buy orders negate collateral amount; sell orders negate synthetic amount in
+  settlement hashing.
+- Settlement expiration is order expiration plus a 14-day buffer in seconds.
+- The Stark signer signs the order hash with the Stark private key.
+
+Confirmation:
+
+- REST `POST /user/order` returns Extended order id and external id after API
+  acceptance.
+- Docs explicitly warn that a REST-accepted order can later be canceled or
+  rejected by the matching engine.
+- Production success must require account WebSocket order/position updates or
+  later REST/readback confirmation. Do not mark success from REST acceptance
+  alone.
+
+## SDK Reuse Assessment
+
+Ruby implementation is reasonable for read-only REST and dashboard formatting.
+Ruby implementation is not the safest first choice for Stark signing/order hash
+construction because the SDK uses `fast_stark_crypto` and StarkEx/Starknet
+domain-specific hashing.
+
+Recommended split:
+
+- Rails:
+  - read-only REST adapter;
+  - normalized current position/account state;
+  - order planning and fail-closed preflight;
+  - receipt storage and `ShortRebalance` records.
+- Python sidecar:
+  - build canonical SDK order object;
+  - sign Stark order hash;
+  - optionally submit in testnet/mainnet phases only after explicit gate;
+  - report redacted payload, hash, signature metadata, and response.
+
+Do not vendor the whole SDK into Rails. Either call a small audited sidecar that
+depends on `x10-python-trading-starknet`, or port only read-only schemas and keep
+signing external.
+
+## Fit Into delta_neutral
+
+Existing patterns to reuse:
+
+- `HedgeVenues::Ethereal` for cross-margin readback/account normalization.
+- `EtherealHedgeExecutionService` for preview, preflight, receipts, readback
+  polling, pending reconciliation, and delta live probes.
+- `NadoPendingRebalanceReconciler` and `EtherealPendingRebalanceReconciler` for
+  delayed confirmation rules.
+- `HedgeSyncJob` venue routing by `hedge.execution_venue`.
+- `ShortRebalance` fields for venue, old/new short, order side, reduce-only,
+  status, message, exchange order id, and receipt path.
+
+Proposed classes:
+
+- `HedgeVenues::Extended`
+  - read-only account and position adapter;
+  - disabled by default;
+  - no submit methods.
+- `ExtendedHedgeExecutionService`
+  - phase 2 dry-run planner only;
+  - no signing or submit in Rails initially;
+  - preflight returns blockers until explicit testnet/live gates exist.
+- `ExtendedPendingRebalanceReconciler`
+  - later, after any live proof; readback-only success rules.
+- `HedgeBackends::ExtendedReadOnlyProbe`
+  - encapsulates REST GETs and redaction.
+- `ExtendedStarkSigner` sidecar
+  - separate from EIP-712 signer;
+  - opt-in testnet/mainnet modes;
+  - file-based key loading only.
+
+Proposed env names, not added to real env in this task:
+
+- `EXTENDED_ENABLED=false`
+- `EXTENDED_NETWORK=testnet|mainnet`
+- `EXTENDED_API_BASE_URL`
+- `EXTENDED_STREAM_URL`
+- `EXTENDED_API_KEY`
+- `EXTENDED_ACCOUNT_ID`
+- `EXTENDED_VAULT_NUMBER`
+- `EXTENDED_CLIENT_ID`
+- `EXTENDED_STARK_PUBLIC_KEY`
+- `EXTENDED_STARK_PRIVATE_KEY_FILE`
+- `EXTENDED_MARKET_SYMBOL=ETH-USD`
+- `EXTENDED_READ_ONLY_ENABLED=false`
+- `EXTENDED_LIVE_ENABLED=false`
+- `EXTENDED_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_TESTNET_LIVE_ENABLED=false`
+- `EXTENDED_LIVE_CONFIRMATION`
+
+## Phased Implementation Plan
+
+### Phase 0 - Documentation Only
+
+- Keep this document as the initial design record.
+- Do not add code that can sign or trade.
+- Do not add credentials.
+- Operator action: verify account model in Extended UI/API with a deleted test
+  key replaced by a fresh read-only/test key only when ready.
+
+### Phase 1 - Read-Only Scaffold
+
+- Add `HedgeVenues::Extended` and `HedgeBackends::ExtendedReadOnlyProbe`.
+- Extended appears in UI only when `EXTENDED_ENABLED=true`.
+- Missing API key/account/vault/market config shows clear blockers.
+- Fetch:
+  - `GET /info/markets?market=ETH-USD`
+  - `GET /user/account/info`
+  - `GET /user/balance`
+  - `GET /user/positions?market=ETH-USD`
+  - `GET /user/orders?market=ETH-USD`
+- Normalize current ETH short.
+- Add tests with mocked HTTP only.
+- No signing, no order building, no submits.
+
+### Phase 2 - Dry-Run Order Payload
+
+- Build intended normalized order summaries:
+  - open/increase short: `SELL`, `reduceOnly=false`;
+  - decrease/close short: `BUY`, `reduceOnly=true`.
+- Use read-only market metadata for tick/lot/min size and fee endpoint for taker
+  fee.
+- Include explicit price/worst-price preview from orderbook.
+- Do not compute Stark signatures in Rails.
+- Do not call `POST /user/order`.
+
+### Phase 3 - Testnet Proof
+
+- Use testnet endpoint only.
+- Use separate testnet API key and Stark key file.
+- Use explicit gate such as `EXTENDED_TESTNET_LIVE_ENABLED=true`.
+- Require exact typed confirmation.
+- Prove:
+  - open tiny ETH short;
+  - delta decrease reduce-only;
+  - delta increase;
+  - full close;
+  - readback after delayed confirmation;
+  - account WebSocket order updates.
+- Store receipts under a testnet-specific path.
+
+### Phase 4 - Mainnet Live
+
+- Only after testnet proof.
+- Add mainnet live gate `EXTENDED_LIVE_ENABLED=true`.
+- Add dashboard selected venue and migration preview.
+- Manual lifecycle first: open, increase, decrease, close.
+- Auto-rebalance remains disabled until manual lifecycle and pending
+  reconciliation are proven.
+- Implement `ExtendedPendingRebalanceReconciler` before auto.
+
+## Safe Defaults
+
+- Extended disabled by default.
+- Extended live disabled by default.
+- Extended auto disabled by default.
+- Missing API key, vault, market, or signer support fails closed.
+- No secrets in logs, UI, receipts, or database.
+- Read-only account data may still be operationally sensitive; redact API key
+  and Stark private key always.
+- Do not use the deleted API key from the manual UI experiment.
+- Do not store a Stark private key in `.env`, Rails credentials, logs, DB, or UI.
+
+## Risks and Blockers
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Stark signing mismatch | Order rejected or worse, wrong order signed | Use SDK sidecar first; testnet proof before mainnet |
+| REST accepted but engine rejects | False success and incorrect hedge state | Require WebSocket/account readback confirmation |
+| Price crossing too aggressive | Bad fills | Explicit slippage cap and worst-price receipt |
+| Wrong ETH market symbol | No-op or wrong market | Verify via `GET /info/markets` before any order plan |
+| Leverage/margin semantics unclear | Unexpected liquidation/margin | Read leverage/balance first; do not call `PATCH /user/leverage` until separately designed |
+| API key deletion/regeneration | Readback outage | Preflight checks and clear dashboard blockers |
+| Stark key leakage | Funds/trading compromise | Dedicated signer sidecar, key file outside repo, redaction tests |
+| Duplicate order during delayed confirmation | Over-hedge | Open-order readback and pending reconciliation before any auto |
+
+## Optional No-Live Scaffold Recommendation
+
+No code scaffold was added in this research pass. The next safe code change is a
+Phase 1 read-only scaffold with mocked tests only. It should prove:
+
+- Extended disabled by default.
+- Missing API key/account/vault config produces blockers.
+- Read-only GETs parse market, account, balance, position, and open orders.
+- No `POST`, signing, Stark key loading, or live submit code exists.
+- Nado and Ethereal behavior remains unchanged.
+
