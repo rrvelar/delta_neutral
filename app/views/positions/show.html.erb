@@ -385,7 +385,7 @@ end %>
               <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
                 <p class="text-xs text-gray-500"><%= rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO rewards estimate" : "AERO rewards estimate" %></p>
                 <p class="mt-2 text-xl font-semibold text-white"><%= rewards_pnl ? format_usd(rewards_pnl) : "Unavailable" %></p>
-                <p class="mt-1 break-words text-xs text-gray-500" title="<%= rewards_report[:stop_reason] || rewards_report[:warnings]&.first %>"><%= reward_value_state == "verified_zero" ? "Verified zero from readable reward source." : (reward_value_state == "estimated" ? "Strategy-level read-only estimate." : (rewards_report[:stop_reason].presence || rewards_report[:warnings]&.first.presence || "Claiming is not implemented.")) %></p>
+                <p class="mt-1 break-words text-xs text-gray-500" title="<%= rewards_report[:stop_reason] || rewards_report[:warnings]&.first %>"><%= reward_value_state == "verified_zero" ? "Verified zero from readable reward source." : (reward_value_state == "estimated" ? "Strategy-level read-only estimate." : (reward_value_state == "unverified_mismatch" ? "Unverified estimate; excluded from Total PnL." : (rewards_report[:stop_reason].presence || rewards_report[:warnings]&.first.presence || "Claiming is not implemented."))) %></p>
               </div>
               <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
                 <p class="text-xs text-gray-500"><%= fees_report[:fee_label].presence || "LP fees estimate" %></p>

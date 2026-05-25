@@ -12,6 +12,17 @@ class MellowRewardsRouteDiscovery
     :reward_read_method,
     :reward_token_address,
     :reward_read_error,
+    :raw_gauge_earned,
+    :raw_aero_amount_before_pro_rata,
+    :reward_token_decimals,
+    :reward_account_address,
+    :reward_read_attempts,
+    :pro_rata_share_raw,
+    :pro_rata_share_interpretation,
+    :exposure_derived_share,
+    :pro_rata_fraction_used,
+    :reward_scope,
+    :source_confidence,
     :reward_route_status,
     :fee_route_status,
     :pro_rata_share,
@@ -64,6 +75,17 @@ class MellowRewardsRouteDiscovery
       reward_read_method: reward_read[:method],
       reward_token_address: reward_read[:reward_token_address],
       reward_read_error: reward_read[:error],
+      raw_gauge_earned: reward_read[:raw],
+      raw_aero_amount_before_pro_rata: decimal_reward_amount(reward_read),
+      reward_token_decimals: reward_read[:reward_token_decimals],
+      reward_account_address: reward_read[:account_address],
+      reward_read_attempts: reward_read[:attempts],
+      pro_rata_share_raw: token.pro_rata_share_raw,
+      pro_rata_share_interpretation: token.pro_rata_share_interpretation,
+      exposure_derived_share: token.exposure_derived_share,
+      pro_rata_fraction_used: token.pro_rata_share,
+      reward_scope: owner_is_gauge ? "unknown" : "strategy_level",
+      source_confidence: owner_is_gauge ? "low" : "high",
       reward_route_status: route_status,
       fee_route_status: token.strategy_level ? "verified_zero" : "unavailable",
       pro_rata_share: token.pro_rata_share,
@@ -88,6 +110,17 @@ class MellowRewardsRouteDiscovery
       reward_read_method: nil,
       reward_token_address: nil,
       reward_read_error: nil,
+      raw_gauge_earned: nil,
+      raw_aero_amount_before_pro_rata: nil,
+      reward_token_decimals: nil,
+      reward_account_address: nil,
+      reward_read_attempts: nil,
+      pro_rata_share_raw: token.pro_rata_share_raw,
+      pro_rata_share_interpretation: token.pro_rata_share_interpretation,
+      exposure_derived_share: token.exposure_derived_share,
+      pro_rata_fraction_used: token.pro_rata_share,
+      reward_scope: "unknown",
+      source_confidence: "low",
       reward_route_status: "unavailable",
       fee_route_status: "unavailable",
       pro_rata_share: token.pro_rata_share,
@@ -131,12 +164,13 @@ class MellowRewardsRouteDiscovery
     return { method: method, raw: nil, error: "rewards service unavailable" } if rewards_service.nil?
 
     reward_token = safe_reward_token(gauge)
+    decimals = reward_token ? safe_reward_decimals(reward_token) : nil
     result = rewards_service.claimable_for_staked_token(
       gauge_address: gauge,
       token_id: token_id,
       account_address: account
     )
-    result.merge(reward_token_address: reward_token)
+    result.merge(reward_token_address: reward_token, reward_token_decimals: decimals)
   rescue AerodromeRewardsService::Error => e
     { method: method, raw: nil, error: e.message, reward_token_address: nil }
   end
@@ -175,6 +209,23 @@ class MellowRewardsRouteDiscovery
     rewards_service.reward_token(gauge)
   rescue AerodromeRewardsService::Error => e
     @warnings << "gauge reward token lookup unavailable: #{e.message}"
+    nil
+  end
+
+  def safe_reward_decimals(reward_token)
+    return nil unless rewards_service.respond_to?(:reward_decimals)
+
+    rewards_service.reward_decimals(reward_token)
+  rescue AerodromeRewardsService::Error => e
+    @warnings << "gauge reward token decimals unavailable: #{e.message}"
+    nil
+  end
+
+  def decimal_reward_amount(reward_read)
+    return nil if reward_read[:raw].nil? || reward_read[:reward_token_decimals].nil?
+
+    BigDecimal(reward_read[:raw].to_s) / (BigDecimal("10")**Integer(reward_read[:reward_token_decimals]))
+  rescue ArgumentError
     nil
   end
 

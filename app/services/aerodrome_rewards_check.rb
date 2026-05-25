@@ -20,6 +20,7 @@ class AerodromeRewardsCheck
     merge_reward_messages(reward_data)
     @warnings.concat(price_data.warnings)
     claimable_aero_usd = claimable_aero_usd(reward_data, price_data)
+    context = apply_mellow_reward_diagnostics(context)
     value_state = reward_value_state(reward_data, price_data, context)
     stop_reason = reward_stop_reason(reward_data, context, claimable_aero_usd)
 
@@ -34,6 +35,22 @@ class AerodromeRewardsCheck
       token_source: context[:token_source],
       strategy_level_estimate: context[:strategy_level_estimate],
       pro_rata_share: decimal_string(context[:pro_rata_share]),
+      pro_rata_share_raw: decimal_string(context[:pro_rata_share_raw]),
+      pro_rata_share_interpretation: context[:pro_rata_share_interpretation],
+      exposure_derived_share: decimal_string(context[:exposure_derived_share]),
+      pro_rata_fraction_used: decimal_string(context[:pro_rata_fraction_used]),
+      reward_scope: context[:reward_scope],
+      source_confidence: context[:source_confidence],
+      raw_gauge_earned: @mellow_reward_diagnostics&.fetch(:raw_gauge_earned, nil),
+      raw_aero_amount_before_pro_rata: decimal_string(@mellow_reward_diagnostics&.fetch(:raw_aero_amount_before_pro_rata, nil)),
+      final_computed_user_aero_amount: decimal_string(reward_data&.claimable_aero),
+      reward_read_method: @mellow_reward_diagnostics&.fetch(:reward_read_method, nil),
+      reward_account_address: @mellow_reward_diagnostics&.fetch(:reward_account_address, nil),
+      reward_token_decimals: @mellow_reward_diagnostics&.fetch(:reward_token_decimals, nil),
+      reward_read_attempts: @mellow_reward_diagnostics&.fetch(:reward_read_attempts, nil),
+      expected_aero: decimal_string(expected_aero),
+      expected_aero_delta: decimal_string(expected_aero_delta(reward_data)),
+      expected_aero_delta_percent: decimal_string(expected_aero_delta_percent(reward_data)),
       reward_label: context[:reward_label],
       claimable_by_app: context[:claimable_by_app],
       position_wallet_address: context[:position_wallet_address],
@@ -91,6 +108,12 @@ class AerodromeRewardsCheck
       token_source: token.source,
       strategy_level_estimate: token.strategy_level,
       pro_rata_share: token.pro_rata_share,
+      pro_rata_share_raw: token.pro_rata_share_raw,
+      pro_rata_share_interpretation: token.pro_rata_share_interpretation,
+      exposure_derived_share: token.exposure_derived_share,
+      pro_rata_fraction_used: token.strategy_level ? token.pro_rata_share : BigDecimal("1"),
+      reward_scope: token.strategy_level ? "strategy_level" : "direct_deposit",
+      source_confidence: "high",
       token_unavailable_reason: token.unavailable_reason,
       reward_label: token.strategy_level ? "Mellow pro-rata AERO rewards estimate" : "Claimable AERO",
       claimable_by_app: false,
@@ -136,6 +159,8 @@ class AerodromeRewardsCheck
         account_address: owner_address,
         token: token
       )
+      @mellow_reward_scope = "unknown"
+      @mellow_source_confidence = "low"
       @checks << { name: "CL gauge reward read", status: reward_data.status, value: reward_data.gauge_address }
       return reward_data
     end
@@ -276,8 +301,19 @@ class AerodromeRewardsCheck
     raw = reward_read.fetch(:raw)
     decimals = rewards_service.reward_decimals(reward_token)
     amount = decimal_amount(raw, decimals)
-    pro_rated_amount = pro_rate_decimal(amount, token.pro_rata_share)
-    pro_rated_raw = pro_rate_integer(raw, token.pro_rata_share)
+    @mellow_reward_scope = "unknown"
+    @mellow_source_confidence = "low"
+    @mellow_pro_rata_fraction_used = token.pro_rata_share
+    @mellow_reward_diagnostics = {
+      raw_gauge_earned: raw,
+      raw_aero_amount_before_pro_rata: amount,
+      reward_read_method: reward_read.fetch(:method),
+      reward_account_address: reward_read[:account_address] || staking_account,
+      reward_token_decimals: decimals,
+      reward_read_attempts: reward_read[:attempts]
+    }
+    pro_rated_amount = pro_rate_decimal(amount, @mellow_pro_rata_fraction_used)
+    pro_rated_raw = pro_rate_integer(raw, @mellow_pro_rata_fraction_used)
 
     AerodromeRewardsService::RewardData.new(
       status: "detected",
@@ -293,7 +329,7 @@ class AerodromeRewardsCheck
       claimable_aero_raw: pro_rated_raw,
       claimable_aero: pro_rated_amount,
       claimable_aero_usd: nil,
-      warnings: token.warnings + [ "Mellow strategy token ownerOf equals discovered gauge; rewards are read from #{reward_read.fetch(:method)} for strategy-level custody and pro-rated." ],
+      warnings: token.warnings + [ "Mellow strategy token ownerOf equals discovered gauge; reward scope is unverified until reconciled with Mellow UI." ],
       blockers: []
     )
   rescue AerodromeRewardsService::Error => e
@@ -346,9 +382,13 @@ class AerodromeRewardsCheck
 
     claimable = BigDecimal(reward_data.claimable_aero.to_s)
     return "verified_zero" if claimable.zero?
+    return "unverified_mismatch" if context[:source_confidence] == "low"
+    return "unverified_mismatch" if expected_aero_delta_percent(reward_data)&.abs&.> BigDecimal("5")
     return "unavailable" unless price_data.price
 
     context[:strategy_level_estimate] ? "estimated" : "detected"
+  rescue KeyError
+    "unavailable"
   rescue ArgumentError
     "unavailable"
   end
@@ -358,6 +398,9 @@ class AerodromeRewardsCheck
     if reward_data&.claimable_aero && BigDecimal(reward_data.claimable_aero.to_s).positive? && claimable_aero_usd.nil?
       return "Missing AERO USD price; reward amount is available but USD estimate is unavailable."
     end
+    if expected_aero_delta_percent(reward_data)&.abs&.> BigDecimal("5")
+      return "Unverified — differs from Mellow UI reference by more than 5%."
+    end
     if reward_data && reward_data.status != "detected"
       staked_mellow_reason = reward_data.warnings.find { |warning| warning.to_s.start_with?("Strategy token is staked in gauge") }
       return staked_mellow_reason if staked_mellow_reason
@@ -365,10 +408,44 @@ class AerodromeRewardsCheck
       direct_mellow_reason = reward_data.warnings.find { |warning| warning.to_s.start_with?("No direct gauge stake detected") }
       return direct_mellow_reason || reward_data.warnings.first
     end
+    if context[:source_confidence] == "low"
+      return "Reward scope is unverified for Mellow gauge-owned strategy token; value is shown for diagnostics but excluded from Total PnL."
+    end
 
     nil
   rescue ArgumentError
     "Reward amount could not be parsed."
+  end
+
+  def expected_aero
+    raw = ENV["EXPECTED_AERO"].presence
+    raw ? BigDecimal(raw) : nil
+  rescue ArgumentError
+    nil
+  end
+
+  def expected_aero_delta(reward_data)
+    return nil unless expected_aero && reward_data&.claimable_aero
+
+    BigDecimal(reward_data.claimable_aero.to_s) - expected_aero
+  end
+
+  def expected_aero_delta_percent(reward_data)
+    return nil unless expected_aero&.positive?
+    delta = expected_aero_delta(reward_data)
+    return nil unless delta
+
+    (delta / expected_aero) * 100
+  end
+
+  def apply_mellow_reward_diagnostics(context)
+    return context unless @mellow_reward_scope
+
+    context.merge(
+      reward_scope: @mellow_reward_scope,
+      source_confidence: @mellow_source_confidence,
+      pro_rata_fraction_used: @mellow_pro_rata_fraction_used
+    )
   end
 
   def rewards_enabled?

@@ -6,6 +6,9 @@ class AerodromePositionTokenResolver
     :source,
     :strategy_level,
     :pro_rata_share,
+    :pro_rata_share_raw,
+    :pro_rata_share_interpretation,
+    :exposure_derived_share,
     :warnings,
     :unavailable_reason
   )
@@ -37,6 +40,9 @@ class AerodromePositionTokenResolver
       source: "direct_slipstream_nft",
       strategy_level: false,
       pro_rata_share: BigDecimal("1"),
+      pro_rata_share_raw: BigDecimal("1"),
+      pro_rata_share_interpretation: "fraction",
+      exposure_derived_share: nil,
       warnings: [],
       unavailable_reason: nil
     )
@@ -55,8 +61,14 @@ class AerodromePositionTokenResolver
       display_token_id: "mellow:#{token_id}",
       source: "mellow_strategy_observed_token",
       strategy_level: true,
-      pro_rata_share: share,
-      warnings: [ "Mellow rewards/fees are read-only pro-rata estimates from the observed strategy token; claiming/collecting is not implemented." ],
+      pro_rata_share: share.fraction,
+      pro_rata_share_raw: share.raw_value,
+      pro_rata_share_interpretation: share.interpretation,
+      exposure_derived_share: share.exposure_fraction,
+      warnings: [
+        "Mellow rewards/fees are read-only pro-rata estimates from the observed strategy token; claiming/collecting is not implemented.",
+        *share.warnings
+      ],
       unavailable_reason: nil
     )
   end
@@ -69,6 +81,9 @@ class AerodromePositionTokenResolver
       source: @position.mellow_autopilot? ? "mellow_strategy_observed_token" : "direct_slipstream_nft",
       strategy_level: @position.mellow_autopilot?,
       pro_rata_share: nil,
+      pro_rata_share_raw: nil,
+      pro_rata_share_interpretation: nil,
+      exposure_derived_share: nil,
       warnings: [ reason ],
       unavailable_reason: reason
     )
@@ -95,9 +110,6 @@ class AerodromePositionTokenResolver
     raw = @position.mellow_metadata_hash["user_share_percent"]
     return nil if raw.blank?
 
-    value = BigDecimal(raw.to_s)
-    value > 1 ? value / 100 : value
-  rescue ArgumentError
-    nil
+    MellowShareFraction.resolve(raw, @position.mellow_metadata_hash)
   end
 end

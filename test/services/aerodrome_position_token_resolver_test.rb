@@ -35,14 +35,20 @@ class AerodromePositionTokenResolverTest < ActiveSupport::TestCase
     position = create_position(
       source: Position::SOURCE_MELLOW_AUTOPILOT,
       external_id: "mellow:old",
-      mellow_metadata: JSON.generate("strategy_token_id" => "71261528", "user_share_percent" => "0.5")
+      mellow_metadata: JSON.generate(
+        "strategy_token_id" => "71261528",
+        "user_share_percent" => "0.5",
+        "user_weth_exposure" => "5",
+        "strategy_total_weth" => "1000"
+      )
     )
 
     result = AerodromePositionTokenResolver.resolve(position)
 
     assert_equal "ok", result.status
     assert_equal "71261528", result.token_id
-    assert_equal BigDecimal("0.5"), result.pro_rata_share
+    assert_equal BigDecimal("0.005"), result.pro_rata_share
+    assert_equal "percent", result.pro_rata_share_interpretation
   end
 
   test "Mellow missing observed strategy token returns unavailable" do

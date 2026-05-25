@@ -188,10 +188,10 @@ class AerodromeRewardsCheckTest < ActiveSupport::TestCase
     ) do
       report = AerodromeRewardsCheck.new(rewards_service: rewards, slipstream_service: slipstream, position: position).report
 
-      assert_equal "estimated", report.fetch(:value_state)
+      assert_equal "unverified_mismatch", report.fetch(:value_state)
       assert_equal "1.25", report.fetch(:claimable_aero)
       assert_equal "0.625", report.fetch(:claimable_aero_usd)
-      assert_nil report.fetch(:stop_reason)
+      assert_match "Reward scope is unverified", report.fetch(:stop_reason)
       assert_no_match "No direct gauge stake detected", report.fetch(:warnings).join(" ")
     end
   end
