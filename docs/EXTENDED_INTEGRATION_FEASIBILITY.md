@@ -1057,3 +1057,18 @@ Continuous Extended auto is allowed only when all of these are true:
 - Extended leverage/margin gate passes
 - account balance/collateral and market metadata are visible
 - `open_orders_count=0`
+
+Production continuous auto uses its own size cap, not the one-shot probe cap:
+
+- `EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH` defaults to `0.10`.
+- `EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE` defaults to `true`.
+- If drift is at or below the auto cap, continuous auto submits the full delta.
+- If drift is above the auto cap and partial auto is enabled, continuous auto
+  submits a capped partial delta and receipts mark
+  `partial_auto_rebalance=true`.
+- If drift is above the auto cap and partial auto is disabled, auto blocks
+  before signing or submitting.
+
+The one-shot/migration caps (`EXTENDED_ONE_SHOT_MAX_SIZE_ETH` and
+`EXTENDED_MIGRATION_REBALANCE_ENABLED`) are not used after production
+`hedge.execution_venue` has been finalized to `extended`.

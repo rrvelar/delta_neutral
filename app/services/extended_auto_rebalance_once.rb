@@ -20,7 +20,8 @@ class ExtendedAutoRebalanceOnce
       current_position: current_position,
       max_slippage: max_slippage,
       probe_mode: probe_mode?(mode: mode, probe: probe),
-      max_size_eth: max_size_eth
+      max_size_eth: max_size_eth,
+      one_shot: one_shot
     )
     conflict_state = conflict_state_for(position: position, dry_run: dry_run)
     blockers = readiness_blockers(
@@ -73,20 +74,22 @@ class ExtendedAutoRebalanceOnce
 
   private
 
-  def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:)
+  def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:, one_shot:)
     valuation = PositionValuation.current(position)
     target = valuation.weth_exposure && position.hedge ? valuation.weth_exposure * position.hedge.target : nil
     current_short = short_size(current_position)
     tolerance = target && position.hedge ? target * position.hedge.tolerance : nil
     delta = target ? target - current_short : nil
     action = intended_action(delta: delta, tolerance: tolerance)
-    cap = one_shot_cap(max_size_eth)
+    cap = one_shot ? one_shot_cap(max_size_eth) : auto_cap
     requested_order_size = order_size_decimal(action: action, delta: delta)
     cap_exceeded = requested_order_size && requested_order_size > cap
-    capped_delta = probe_mode && cap_exceeded ? capped_delta(delta: delta, cap: cap) : delta
+    partial_auto = !one_shot && cap_exceeded == true && auto_partial_allowed?
+    capped_delta = (probe_mode || partial_auto) && cap_exceeded ? capped_delta(delta: delta, cap: cap) : delta
     preview = preview_for(action: action, delta: capped_delta, current_short: current_short, max_slippage: max_slippage)
 
     {
+      source: one_shot ? source_for_one_shot(probe_mode: probe_mode) : "continuous_auto",
       target_short_eth: decimal_string(target),
       current_short_eth: current_short.to_s("F"),
       current_side: current_position&.fetch(:side, nil),
@@ -98,10 +101,13 @@ class ExtendedAutoRebalanceOnce
       capped_order_size_eth: order_size_for(action: action, delta: capped_delta),
       order_size_eth: order_size_for(action: action, delta: capped_delta),
       cap_eth: cap.to_s("F"),
+      auto_max_rebalance_size_eth: one_shot ? nil : cap.to_s("F"),
       probe_mode: probe_mode,
       cap_exceeded: cap_exceeded == true,
       partial_probe: probe_mode && cap_exceeded == true,
+      partial_auto_rebalance: partial_auto,
       migration_mode: migration_mode?,
+      auto_partial_allowed: auto_partial_allowed?,
       intended_order: preview&.fetch(:payload, nil),
       order_validation_blockers: Array(preview&.dig(:payload, :validation_blockers)),
       preview_blockers: preview&.fetch(:blockers, []) || []
@@ -123,11 +129,15 @@ class ExtendedAutoRebalanceOnce
     blockers << "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED must be true" unless bool_env("EXTENDED_ISOLATED_ACCOUNT_CONFIRMED")
     blockers << "Extended account balance/collateral unavailable" if account_state[:account_value_usd].blank? && account_state[:collateral_usd].blank?
     blockers << "Extended market metadata unavailable" unless account_state[:market_metadata_available]
-    blockers << "Extended one-shot requires open_orders_count=0" unless account_state[:open_orders_count].to_i.zero?
+    blockers << "#{one_shot ? 'Extended one-shot' : 'Extended continuous auto'} requires open_orders_count=0" unless account_state[:open_orders_count].to_i.zero?
     blockers << "Current Extended position is long; manual action required" if plan[:current_side].to_s == "long"
-    blockers << "Extended one-shot order size #{plan[:requested_order_size_eth]} exceeds EXTENDED_ONE_SHOT_MAX_SIZE_ETH #{plan[:cap_eth]}; use probe mode or explicit migration gate" if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
-    blockers << "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration" if plan[:cap_exceeded] && !plan[:partial_probe] && !migration_mode?
-    blockers << "Extended probe_rebalance must be a capped partial probe; full target orders require migration mode" if plan[:probe_mode] && !plan[:partial_probe] && plan[:intended_action] != "no_op"
+    if one_shot
+      blockers << "Extended one-shot order size #{plan[:requested_order_size_eth]} exceeds EXTENDED_ONE_SHOT_MAX_SIZE_ETH #{plan[:cap_eth]}; use probe mode or explicit migration gate" if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
+      blockers << "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration" if plan[:cap_exceeded] && !plan[:partial_probe] && !migration_mode?
+      blockers << "Extended probe_rebalance must be a capped partial probe; full target orders require migration mode" if plan[:probe_mode] && !plan[:partial_probe] && plan[:intended_action] != "no_op"
+    else
+      blockers << "Extended continuous auto order size #{plan[:requested_order_size_eth]} exceeds EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH #{plan[:auto_max_rebalance_size_eth]} and EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE is false" if plan[:cap_exceeded] && !plan[:partial_auto_rebalance]
+    end
     blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && !plan[:partial_probe] && position.hedge&.execution_venue != "extended"
     blockers << "Current Nado position must be flat before Extended live rebalance" if conflict_state[:nado_short_eth].to_d.positive?
     blockers.concat(signer_health_blockers(signer_health)) unless dry_run
@@ -138,6 +148,7 @@ class ExtendedAutoRebalanceOnce
     receipt = {
       venue: "extended",
       action: "auto_rebalance_once",
+      source: plan[:source],
       dry_run: dry_run,
       position_id: position.id,
       hedge_id: position.hedge&.id,
@@ -151,9 +162,11 @@ class ExtendedAutoRebalanceOnce
       requested_order_size_eth: plan[:requested_order_size_eth],
       capped_order_size_eth: plan[:capped_order_size_eth],
       cap_eth: plan[:cap_eth],
+      auto_max_rebalance_size_eth: plan[:auto_max_rebalance_size_eth],
       probe_mode: plan[:probe_mode],
       cap_exceeded: plan[:cap_exceeded],
       partial_probe: plan[:partial_probe],
+      partial_auto_rebalance: plan[:partial_auto_rebalance],
       migration_mode: plan[:migration_mode],
       selected_hedge_venue: position.hedge&.execution_venue,
       intended_order: plan[:intended_order],
@@ -230,6 +243,16 @@ class ExtendedAutoRebalanceOnce
     BigDecimal("0.02")
   end
 
+  def auto_cap
+    BigDecimal((@env["EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH"].presence || "0.10").to_s)
+  rescue ArgumentError
+    BigDecimal("0.10")
+  end
+
+  def auto_partial_allowed?
+    ActiveModel::Type::Boolean.new.cast(@env.fetch("EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE", "true"))
+  end
+
   def probe_mode?(mode:, probe:)
     ActiveModel::Type::Boolean.new.cast(probe) || mode.to_s == "probe_rebalance"
   end
@@ -238,10 +261,18 @@ class ExtendedAutoRebalanceOnce
     bool_env("EXTENDED_MIGRATION_REBALANCE_ENABLED") == true
   end
 
+  def source_for_one_shot(probe_mode:)
+    return "one_shot_probe" if probe_mode
+    return "migration" if migration_mode?
+
+    "one_shot"
+  end
+
   def warnings_for(plan)
-    warnings = [ "Extended one-shot auto is manual-only; continuous auto remains separately gated." ]
+    warnings = [ plan[:source] == "continuous_auto" ? "Extended continuous auto is gated by production venue, flat venue conflicts, signer health, and leverage/margin checks." : "Extended one-shot auto is manual-only; continuous auto remains separately gated." ]
     warnings << "Extended probe mode capped the intended order to #{plan[:capped_order_size_eth]} ETH; this is a partial probe, not a full rebalance." if plan[:partial_probe]
-    warnings << "Extended full-target one-shot exceeds probe cap and requires explicit migration mode." if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
+    warnings << "Extended continuous auto capped the intended order to #{plan[:capped_order_size_eth]} ETH; this is a partial auto rebalance." if plan[:partial_auto_rebalance]
+    warnings << "Extended full-target one-shot exceeds probe cap and requires explicit migration mode." if plan[:source] != "continuous_auto" && plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
     warnings
   end
 

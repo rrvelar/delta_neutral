@@ -27,6 +27,22 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
     assert_equal true, result.fetch(:nado_flat)
     assert_equal true, result.fetch(:extended_auto_rebalance_enabled)
     assert_equal true, result.fetch(:extended_live_enabled)
+    assert_equal "no_op", result.fetch(:planned_auto_action)
+    assert_equal "0.1", result.fetch(:auto_max_rebalance_size_eth)
+    assert_equal false, result.fetch(:partial_auto_rebalance)
+    assert_equal false, result.fetch(:auto_can_act)
+  end
+
+  test "readiness reports planned auto action and size when drift is outside tolerance" do
+    result = build_service(extended_short: "0.44").report(position: fake_position)
+
+    assert_equal true, result.fetch(:continuous_auto_ready), result.fetch(:blockers).inspect
+    assert_equal true, result.fetch(:drift_outside_tolerance)
+    assert_equal "increase_short", result.fetch(:planned_auto_action)
+    assert_equal "0.06", result.fetch(:planned_auto_order_size_eth)
+    assert_equal "0.1", result.fetch(:auto_max_rebalance_size_eth)
+    assert_equal false, result.fetch(:partial_auto_rebalance)
+    assert_equal true, result.fetch(:auto_can_act)
   end
 
   test "readiness blocks if Ethereal position exists" do

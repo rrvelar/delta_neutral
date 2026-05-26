@@ -36,7 +36,7 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
   end
 
   test "dry-run decrease builds buy reduce-only order" do
-    result = build_service(api_client: api_client(before_positions: [ extended_short("0.30") ])).run(position: fake_position, dry_run: true)
+    result = build_service(api_client: api_client(before_positions: [ extended_short("0.3") ])).run(position: fake_position, dry_run: true)
 
     order = result.receipt.fetch(:intended_order)
     assert_equal "decrease_short", result.receipt.fetch(:intended_action)
@@ -357,6 +357,98 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal true, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
   end
 
+  test "continuous auto with Extended venue submits full sell under auto cap" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.26") ])
+
+    result = build_service(env: continuous_env.merge("EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.02"), api_client: client, signer_client: signer).run(
+      position: fake_position(target: "1.04"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "continuous_auto", result.receipt.fetch(:source)
+    assert_equal "0.06", result.receipt.fetch(:requested_order_size_eth)
+    assert_equal "0.06", result.receipt.fetch(:capped_order_size_eth)
+    assert_equal "0.1", result.receipt.fetch(:auto_max_rebalance_size_eth)
+    assert_equal false, result.receipt.fetch(:partial_auto_rebalance)
+    assert_not_includes result.blockers, "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration"
+    assert_equal "SELL", client.submitted_payload.fetch("side")
+    assert_equal false, client.submitted_payload.fetch("reduceOnly")
+    assert_equal "0.06", client.submitted_payload.fetch("qty")
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, client.submit_calls
+  end
+
+  test "continuous auto caps large drift when partial auto is allowed" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.3") ])
+
+    result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+      position: fake_position(target: "2.0"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, result.receipt.fetch(:cap_exceeded)
+    assert_equal true, result.receipt.fetch(:partial_auto_rebalance)
+    assert_equal "0.3", result.receipt.fetch(:raw_delta_eth)
+    assert_equal "0.1", result.receipt.fetch(:capped_order_size_eth)
+    assert_equal "0.1", client.submitted_payload.fetch("qty")
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, client.submit_calls
+  end
+
+  test "continuous auto blocks large drift when partial auto is disabled" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(env: continuous_env.merge("EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE" => "false"), api_client: client, signer_client: signer).run(
+      position: fake_position(target: "2.0"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended continuous auto order size 0.3 exceeds EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH 0.1 and EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE is false"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "continuous auto blocks when selected venue is not Extended" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+      position: fake_position(target: "1.04", execution_venue: "ethereal"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Position hedge execution_venue must be extended for Extended live rebalance"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "continuous auto blocks when signer is unhealthy" do
+    signer = CountingSigner.new(ok: false)
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+      position: fake_position(target: "1.04"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended signer health must advertise Extended/sign_extended_order support"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
   test "mocked live one-shot remains pending when readback does not confirm and does not retry" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.20") ])
@@ -516,6 +608,14 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
       "EXTENDED_STARK_PUBLIC_KEY" => "0x1234...abcd",
       "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.1"
     ).except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT")
+  end
+
+  def continuous_env
+    live_env.merge(
+      "EXTENDED_ONE_SHOT_REBALANCE_ENABLED" => "false",
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "true",
+      "EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH" => "0.1"
+    )
   end
 
   def extended_env

@@ -11,6 +11,7 @@ class ExtendedAutoReadiness
 
   def report(position:)
     state = read_state(position)
+    plan = auto_plan(state)
     blockers = readiness_blockers(position: position, state: state)
     {
       venue: "extended",
@@ -24,6 +25,12 @@ class ExtendedAutoReadiness
       drift_eth: decimal_string(state[:drift]),
       tolerance_eth: decimal_string(state[:tolerance]),
       within_tolerance: state[:drift] && state[:tolerance] ? state[:drift].abs <= state[:tolerance] : nil,
+      drift_outside_tolerance: plan[:drift_outside_tolerance],
+      planned_auto_action: plan[:planned_auto_action],
+      planned_auto_order_size_eth: decimal_string(plan[:planned_auto_order_size]),
+      auto_max_rebalance_size_eth: decimal_string(plan[:auto_max_rebalance_size]),
+      partial_auto_rebalance: plan[:partial_auto_rebalance],
+      auto_can_act: blockers.empty? && plan[:planned_auto_action] != "no_op",
       ethereal_short_eth: decimal_string(state[:ethereal_short]),
       ethereal_flat: state[:ethereal_flat],
       nado_short_eth: decimal_string(state[:nado_short]),
@@ -84,6 +91,30 @@ class ExtendedAutoReadiness
     blockers.uniq
   end
 
+  def auto_plan(state)
+    drift = state[:drift]
+    tolerance = state[:tolerance]
+    cap = auto_cap
+    action = if !drift || !tolerance
+      "blocked"
+    elsif drift.abs <= tolerance
+      "no_op"
+    elsif drift.positive?
+      "increase_short"
+    else
+      "decrease_short"
+    end
+    raw_size = %w[increase_short decrease_short].include?(action) ? drift.abs : nil
+    partial = raw_size && raw_size > cap && auto_partial_allowed?
+    {
+      planned_auto_action: action,
+      planned_auto_order_size: partial ? cap : raw_size,
+      auto_max_rebalance_size: cap,
+      partial_auto_rebalance: partial == true,
+      drift_outside_tolerance: %w[increase_short decrease_short].include?(action)
+    }
+  end
+
   def signer_health_blockers(health)
     blockers = []
     blockers << "Extended signer health must advertise Extended/sign_extended_order support" unless ActiveModel::Type::Boolean.new.cast(health[:ok]) && Array.wrap(health[:supported_exchanges]).include?("Extended") && Array.wrap(health[:supported_actions]).include?("sign_extended_order")
@@ -108,7 +139,21 @@ class ExtendedAutoReadiness
   end
 
   def warnings
-    [ "Extended continuous auto remains disabled until EXTENDED_AUTO_REBALANCE_ENABLED is explicitly enabled outside the repo." ]
+    if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      [ "Extended continuous auto is enabled and remains guarded by readback, signer, leverage/margin, and venue-conflict checks." ]
+    else
+      [ "Extended continuous auto remains disabled until EXTENDED_AUTO_REBALANCE_ENABLED is explicitly enabled outside the repo." ]
+    end
+  end
+
+  def auto_cap
+    BigDecimal((@env["EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH"].presence || "0.10").to_s)
+  rescue ArgumentError
+    BigDecimal("0.10")
+  end
+
+  def auto_partial_allowed?
+    ActiveModel::Type::Boolean.new.cast(@env.fetch("EXTENDED_AUTO_ALLOW_PARTIAL_REBALANCE", "true"))
   end
 
   def bool_env(key)
