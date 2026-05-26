@@ -2,8 +2,7 @@ class ExtendedHedgeExecutionService
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
   BLOCKERS = [
-    "Extended live disabled.",
-    "Extended submit endpoint integration not implemented."
+    "Extended live disabled."
   ].freeze
 
   def initialize(venue: HedgeVenues::Extended.new, signer_client: ExtendedStarkSignerClient.new)

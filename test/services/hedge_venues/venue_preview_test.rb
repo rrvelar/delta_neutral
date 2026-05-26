@@ -37,7 +37,7 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_MARKET_SYMBOL missing"
       assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
       assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
-      assert_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
+      assert_not_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
       assert_includes state.fetch(:warnings), "Extended read-only scaffold."
       assert_nil venue.read_position(symbol: "ETH")
     end
@@ -272,7 +272,8 @@ module HedgeVenues
 
       [ open, rebalance, close ].each do |result|
         assert_equal "blocked_before_submit", result.status
-        assert_includes result.blockers, "Extended submit endpoint integration not implemented."
+        assert_includes result.blockers, "Extended live disabled."
+        assert_not_includes result.blockers, "Extended submit endpoint integration not implemented."
         assert_equal 0, result.receipt.fetch(:orders_submitted)
         assert_equal 0, result.receipt.fetch(:signatures_created)
         assert_equal false, result.receipt.fetch(:submitted)
@@ -306,7 +307,7 @@ module HedgeVenues
       assert_includes report.fetch(:blockers), "Extended Stark signer unhealthy: algorithm disabled"
       assert_includes report.fetch(:blockers), "Extended Stark signer verified_algorithm=false"
       assert_includes report.fetch(:blockers), "Extended Stark signer signing_enabled=false"
-      assert_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
+      assert_not_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
       assert_no_match(/private_key=|0x[a-f0-9]{40,}|authorization|cookie/i, report.to_json)
     end
 
@@ -339,7 +340,7 @@ module HedgeVenues
       assert_not_includes report.fetch(:blockers), "Extended Stark signer verified_algorithm=false"
       assert_not_includes report.fetch(:blockers), "Extended Stark signer signing_enabled=false"
       assert_not report.fetch(:blockers).any? { |blocker| blocker.to_s.start_with?("Extended Stark signer unhealthy") }
-      assert_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
+      assert_not_includes report.fetch(:blockers), "Extended submit endpoint integration not implemented."
       assert_equal true, report.dig(:signer_health, "verified_algorithm")
       assert_equal false, report.fetch(:submitted)
     end

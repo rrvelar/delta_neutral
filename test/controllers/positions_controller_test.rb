@@ -301,7 +301,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "option[selected='selected']", text: "Extended"
     assert_match "Extended read-only scaffold", response.body
     assert_match "Live disabled", response.body
-    assert_match "Submit/cancel endpoint integration not implemented", response.body
+    assert_match "Extended order submit is available only through explicit gated mainnet lifecycle checks", response.body
     assert_match "EXTENDED_API_BASE_URL missing", response.body
     assert_match "EXTENDED_API_KEY missing", response.body
     assert_match "EXTENDED_ACCOUNT_ID missing", response.body
@@ -318,7 +318,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to position_path(position, hedge_venue: "extended")
     assert_match "Open blocked on Extended", flash[:alert]
-    assert_match "Extended submit endpoint integration not implemented", flash[:alert]
+    assert_match "Extended live disabled", flash[:alert]
+    assert_no_match "Extended submit endpoint integration not implemented", flash[:alert]
   end
 
   test "show selected Ethereal venue renders cross margin live gated mode and disabled live actions" do
