@@ -34,6 +34,23 @@ class ExtendedApiClientTest < ActiveSupport::TestCase
     assert_no_match(/redacted-test-key|must-not-leak|apiKey/i, payload.to_json)
   end
 
+  test "submit order posts documented endpoint with api key header" do
+    client = ExtendedApiClient.new(
+      env: extended_env,
+      http_post: ->(uri, headers, payload) {
+        assert_equal "/api/v1/user/order", uri.path
+        assert_equal "redacted-test-key", headers.fetch("X-Api-Key")
+        assert_equal "ETH-USD", payload.fetch("market")
+
+        http_response(Net::HTTPOK, "200", { status: "OK", data: { id: 12345 } }.to_json)
+      }
+    )
+
+    payload = client.submit_order({ "market" => "ETH-USD" })
+
+    assert_equal 12345, payload.dig("data", "id")
+  end
+
   private
 
   def extended_env

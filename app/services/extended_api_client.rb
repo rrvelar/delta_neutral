@@ -1,9 +1,10 @@
 require "net/http"
 
 class ExtendedApiClient
-  def initialize(env: ENV, http_get: nil)
+  def initialize(env: ENV, http_get: nil, http_post: nil)
     @env = env
     @http_get = http_get || method(:http_get)
+    @http_post = http_post || method(:http_post)
   end
 
   def configured?
@@ -32,12 +33,20 @@ class ExtendedApiClient
     get("/user/orders", market: market)
   end
 
+  def fees(market:)
+    get("/user/fees", "market[]" => market)
+  end
+
   def market(market:)
     get("/info/markets", market: market)
   end
 
   def market_stats(market:)
     get("/info/markets/#{URI.encode_www_form_component(market)}/stats")
+  end
+
+  def submit_order(payload)
+    post("/user/order", payload)
   end
 
   private
@@ -75,9 +84,37 @@ class ExtendedApiClient
     end
   end
 
+  def post(path, payload)
+    raise ArgumentError, config_blockers.join(", ") unless configured?
+
+    uri = URI.join(api_base_url, path.delete_prefix("/"))
+    response = @http_post.call(uri, headers, payload)
+    parsed = parse_body(response.body)
+    return parsed unless response.respond_to?(:code) && !response.is_a?(Net::HTTPSuccess)
+
+    http_status = response.code.to_i
+    {
+      "error" => "HTTP #{http_status}",
+      "http_status" => http_status,
+      "body_status" => parsed.is_a?(Hash) ? parsed["status"] : nil,
+      "message" => parsed.is_a?(Hash) ? parsed["message"] || parsed["error"] : nil,
+      "response_keys" => safe_keys(parsed)
+    }.compact
+  end
+
+  def http_post(uri, headers, payload)
+    request = Net::HTTP::Post.new(uri)
+    headers.each { |key, value| request[key] = value }
+    request.body = JSON.generate(payload)
+    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+      http.request(request)
+    end
+  end
+
   def headers
     {
       "Accept" => "application/json",
+      "Content-Type" => "application/json",
       "X-Api-Key" => @env.fetch("EXTENDED_API_KEY", "")
     }
   end

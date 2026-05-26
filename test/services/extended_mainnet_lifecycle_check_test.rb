@@ -16,7 +16,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     result = build_service.run(
       position: fake_position,
       mode: "open_only",
-      size_eth: "0.005",
+      size_eth: "0.01",
       confirmation: "wrong",
       dry_run: false
     )
@@ -30,6 +30,27 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/api-secret|stark-private|authorization|cookie/i, result.receipt.to_json)
   end
 
+  test "missing confirmation blocks before signer or submit" do
+    signer = CountingSigner.new(ok: true)
+    api_client = live_api_client
+    result = build_service(
+      env: live_env,
+      api_client: api_client,
+      signer_client: signer
+    ).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: "wrong",
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "submitted confirmation must equal #{ExtendedMainnetLifecycleCheck::CONFIRMATION}"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
   test "live mode refuses without signer health even when gates are present" do
     signer = Struct.new(:health, keyword_init: true) do
       def supports_extended_order_signing? = false
@@ -40,13 +61,14 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         "EXTENDED_LIVE_ENABLED" => "true",
         "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid"
       ),
-      signer_client: signer
+      signer_client: signer,
+      api_client: live_api_client
     )
 
     result = service.run(
       position: fake_position,
       mode: "open_only",
-      size_eth: "0.005",
+      size_eth: "0.01",
       confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
       dry_run: false
     )
@@ -54,7 +76,32 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal "blocked_before_submit", result.status
     assert_includes result.blockers, "Extended signer health must advertise Extended/sign_extended_order support"
     assert_includes result.blockers, "Extended Stark signer verified_algorithm=false"
-    assert_includes result.blockers, "Extended submit endpoint integration not implemented."
+  end
+
+  test "live mode refuses when signer algorithm is unverified" do
+    result = build_service(env: live_env, api_client: live_api_client, signer_client: CountingSigner.new(ok: false, verified_algorithm: false, signing_enabled: true)).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended Stark signer verified_algorithm=false"
+  end
+
+  test "live mode refuses when signer signing is disabled" do
+    result = build_service(env: live_env, api_client: live_api_client, signer_client: CountingSigner.new(ok: false, verified_algorithm: true, signing_enabled: false)).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended Stark signer signing_enabled=false"
   end
 
   test "live mode refuses below min size before any signing or submit" do
@@ -102,15 +149,121 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/api-secret|authorization|cookie/i, result.receipt.to_json)
   end
 
+  test "live open submits exactly one order and requires readback confirmation" do
+    api_client = live_api_client(after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ])
+    signer = CountingSigner.new(ok: true)
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal true, result.receipt.fetch(:submitted)
+    assert_equal "SELL", api_client.submitted_payload.fetch("side")
+    assert_equal false, api_client.submitted_payload.fetch("reduceOnly")
+    assert_equal "MARKET", api_client.submitted_payload.fetch("type")
+    assert_equal "IOC", api_client.submitted_payload.fetch("timeInForce")
+    assert_equal "2098.8", api_client.submitted_payload.fetch("price")
+    assert_equal "abc123", result.receipt.fetch(:exchange_order_id)
+    assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
+  end
+
+  test "live open accepted without readback is pending" do
+    api_client = live_api_client
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true), sleeper: ->(_) { }).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
+  end
+
+  test "live open blocks when current position exists" do
+    api_client = live_api_client(before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01" } ])
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true)).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "open_only live probe requires no current Extended position"
+    assert_equal 0, api_client.submit_calls
+  end
+
+  test "live open blocks when open orders exist" do
+    api_client = live_api_client(open_orders: [ { id: 1, market: "ETH-USD" } ])
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true)).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "open_only live probe requires open_orders_count=0"
+    assert_equal 0, api_client.submit_calls
+  end
+
   private
 
-  def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client)
+  CountingSigner = Struct.new(:ok, :verified_algorithm, :signing_enabled, :sign_calls, keyword_init: true) do
+    def initialize(**kwargs)
+      super(**{ ok: true, verified_algorithm: true, signing_enabled: true, sign_calls: 0 }.merge(kwargs))
+    end
+
+    def health
+      {
+        ok: ok,
+        reason: ok ? "ok" : "disabled",
+        supported_exchanges: ok ? [ "Extended" ] : [],
+        supported_actions: ok ? [ "sign_extended_order" ] : [],
+        verified_algorithm: verified_algorithm,
+        signing_enabled: signing_enabled,
+        stark_public_key: "0x1234...abcd"
+      }.with_indifferent_access
+    end
+
+    def supports_extended_order_signing?
+      ok && verified_algorithm && signing_enabled
+    end
+
+    def verified_algorithm? = verified_algorithm
+
+    def sign_order(order)
+      self.sign_calls += 1
+      {
+        status: "signed",
+        order_id: "signed-order-id",
+        settlement: { signature: { r: "0xsignature-r", s: "0xsignature-s" }, starkKey: order.fetch("starkPublicKey"), collateralPosition: order.fetch("vault") },
+        debuggingAmounts: { collateralAmount: "21200000", feeAmount: "10600", syntheticAmount: "-10000" }
+      }.with_indifferent_access
+    end
+  end
+
+  def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client, sleeper: ->(_) { })
     venue = HedgeVenues::Extended.new(env: env, api_client: api_client)
     signer_client ||= Struct.new(:health, keyword_init: true) do
       def supports_extended_order_signing? = false
       def verified_algorithm? = false
     end.new(health: { ok: false, reason: "not configured" })
-    ExtendedMainnetLifecycleCheck.new(env: env, venue: venue, signer_client: signer_client)
+    ExtendedMainnetLifecycleCheck.new(env: env, venue: venue, signer_client: signer_client, sleeper: sleeper)
   end
 
   def fake_position
@@ -154,6 +307,60 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         }
       end
     end.new
+  end
+
+  def live_api_client(before_positions: [], after_positions: [], open_orders: [])
+    Class.new do
+      attr_reader :submit_calls, :submitted_payload
+
+      define_method(:initialize) do |before_rows, after_rows, orders|
+        @before_rows = before_rows
+        @after_rows = after_rows
+        @orders = orders
+        @submit_calls = 0
+      end
+
+      def positions(market:)
+        @submit_calls.positive? ? @after_rows : @before_rows
+      end
+
+      def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
+      def account_info = { "status" => "ACTIVE", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
+      def open_orders(market:) = @orders
+      def fees(market:) = { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
+
+      def market(market:)
+        {
+          data: {
+            name: market,
+            tradingConfig: { minOrderSize: "0.01", minOrderSizeChange: "0.001", minPriceChange: "0.1" },
+            marketStats: { markPrice: "2120" },
+            l2Config: {
+              collateralId: "0x31857064564ed0ff978e687456963cba09c2c6985d8f9300a1de4962fafa054",
+              syntheticId: "0x4554482d3800000000000000000000",
+              collateralResolution: 1000000,
+              syntheticResolution: 1000000
+            }
+          }
+        }
+      end
+
+      def submit_order(payload)
+        @submit_calls += 1
+        @submitted_payload = payload
+        { "status" => "OK", "data" => { "id" => "abc123" } }
+      end
+    end.new(before_positions, after_positions, open_orders)
+  end
+
+  def live_env
+    extended_env.merge(
+      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+      "EXTENDED_LIVE_ENABLED" => "true",
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid",
+      "EXTENDED_STARK_PUBLIC_KEY" => "0x1234...abcd"
+    ).except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT")
   end
 
   def extended_env

@@ -45,4 +45,21 @@ class ExtendedStarkSignerClientTest < ActiveSupport::TestCase
     assert_equal false, client.supports_extended_order_signing?
     assert_not client.verified_algorithm?
   end
+
+  test "sign order posts to signer endpoint" do
+    client = ExtendedStarkSignerClient.new(
+      env: { "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid" },
+      http_post: ->(uri, payload) {
+        assert_equal "/sign/extended_order", uri.path
+        assert_equal "ETH-USD", payload.dig(:order, "market")
+
+        Struct.new(:body).new({ status: "signed", order_id: "123", settlement: { signature: { r: "0x1", s: "0x2" } } }.to_json)
+      }
+    )
+
+    response = client.sign_order({ "market" => "ETH-USD" })
+
+    assert_equal "signed", response.fetch(:status)
+    assert_equal "123", response.fetch(:order_id)
+  end
 end

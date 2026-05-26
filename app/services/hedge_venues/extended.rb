@@ -144,6 +144,10 @@ module HedgeVenues
         min_size: metadata[:min_size],
         min_notional: metadata[:min_notional],
         mark_price: metadata[:mark_price],
+        collateral_asset_id_present: metadata[:collateral_asset_id].present?,
+        synthetic_asset_id_present: metadata[:synthetic_asset_id].present?,
+        collateral_resolution: metadata[:collateral_resolution],
+        synthetic_resolution: metadata[:synthetic_resolution],
         response_keys: metadata[:response_keys],
         market_keys: metadata[:market_keys],
         trading_config_keys: metadata[:trading_config_keys],
@@ -178,6 +182,58 @@ module HedgeVenues
         current_short_eth: current_position&.fetch(:short_size, nil),
         open_orders_count: open_orders.nil? ? nil : array_payload(open_orders).size
       }.compact
+    end
+
+    def extended_live_order(preview:, now: Time.current)
+      payload = preview.fetch(:payload)
+      side = payload.fetch(:extended_side)
+      qty = payload.fetch(:rounded_size_eth)
+      price = worst_accepted_price(side: side, max_slippage: payload[:max_slippage])
+      metadata = discovered_market_metadata
+      {
+        "market" => market_symbol,
+        "type" => "MARKET",
+        "side" => side,
+        "qty" => qty,
+        "price" => price&.to_s("F"),
+        "reduceOnly" => payload.fetch(:reduce_only),
+        "postOnly" => false,
+        "timeInForce" => "IOC",
+        "expiryEpochMillis" => ((now.to_f + 14.days.to_f) * 1000).ceil,
+        "fee" => taker_fee_rate.to_s("F"),
+        "nonce" => nonce_millis(now),
+        "selfTradeProtectionLevel" => "ACCOUNT",
+        "vault" => env["EXTENDED_VAULT_NUMBER"].to_s,
+        "starkPublicKey" => env["EXTENDED_STARK_PUBLIC_KEY"].to_s,
+        "syntheticAssetId" => metadata[:synthetic_asset_id],
+        "syntheticResolution" => metadata[:synthetic_resolution].to_s,
+        "collateralAssetId" => metadata[:collateral_asset_id],
+        "collateralResolution" => metadata[:collateral_resolution].to_s,
+        "starknetDomain" => starknet_domain
+      }.compact
+    end
+
+    def live_order_blockers(preview:)
+      payload = preview.fetch(:payload)
+      metadata = discovered_market_metadata
+      blockers = []
+      blockers.concat(payload.fetch(:validation_blockers, []))
+      blockers << "Extended rounded order size unavailable." if payload[:rounded_size_eth] == "unknown"
+      blockers << "Extended mark price unavailable for crossing price." unless decimal_or_nil(metadata[:mark_price])
+      blockers << "Extended taker fee unavailable." unless taker_fee_rate
+      blockers << "Extended l2Config.syntheticId missing from market metadata." if metadata[:synthetic_asset_id].blank?
+      blockers << "Extended l2Config.collateralId missing from market metadata." if metadata[:collateral_asset_id].blank?
+      blockers << "Extended l2Config.syntheticResolution missing from market metadata." if metadata[:synthetic_resolution].blank?
+      blockers << "Extended l2Config.collateralResolution missing from market metadata." if metadata[:collateral_resolution].blank?
+      blockers
+    end
+
+    def live_readiness_blockers
+      (config_blockers + market_metadata_blockers).uniq
+    end
+
+    def submit_order(payload)
+      api_client.submit_order(payload)
     end
 
     def blockers
@@ -287,7 +343,7 @@ module HedgeVenues
         price_increment_source: price_increment_source,
         market_metadata: market_metadata_diagnostics,
         price: "required_later",
-        crossing_price: "required_later",
+        crossing_price: worst_accepted_price(side: side.upcase, max_slippage: max_slippage)&.to_s("F") || "required_later",
         order_type_assumption: "market-like crossing IOC limit; Extended requires an explicit worst accepted price",
         time_in_force: "IOC_required_later",
         expiration: "required_later",
@@ -314,6 +370,22 @@ module HedgeVenues
         submit_implemented: false,
         cancel_implemented: false
       }
+    end
+
+    def worst_accepted_price(side:, max_slippage:)
+      mark = decimal_or_nil(discovered_market_metadata[:mark_price])
+      increment = price_increment
+      slippage = decimal_or_nil(max_slippage) || BigDecimal("0.01")
+      return nil unless mark&.positive? && increment&.positive?
+
+      raw = side.to_s.upcase == "BUY" ? mark * (1 + slippage) : mark * (1 - slippage)
+      quotient = raw / increment
+      rounded = if side.to_s.upcase == "BUY"
+        quotient.ceil * increment
+      else
+        quotient.floor * increment
+      end
+      rounded.positive? ? rounded : increment
     end
 
     def order_size_validation(requested_size:, rounded_size:)
@@ -532,6 +604,10 @@ module HedgeVenues
         market_symbol: market_name(market),
         active: value_from(market, :active, :status),
         mark_price: value_from(market, :markPrice, :mark_price) || value_from(stats, :markPrice, :mark_price),
+        collateral_asset_id: value_from(l2_config, :collateralId, :collateral_id),
+        synthetic_asset_id: value_from(l2_config, :syntheticId, :synthetic_id),
+        collateral_resolution: value_from(l2_config, :collateralResolution, :collateral_resolution),
+        synthetic_resolution: value_from(l2_config, :syntheticResolution, :synthetic_resolution),
         size_increment: value_from(market, :sizeIncrement, :size_increment, :quantityStep, :quantity_step, :qtyStep, :qty_step, :stepSize, :step_size) ||
           value_from(trading, :minOrderSizeChange, :min_order_size_change, :sizeIncrement, :size_increment, :quantityStep, :quantity_step, :qtyStep, :qty_step, :stepSize, :step_size),
         price_increment: value_from(market, :priceIncrement, :price_increment, :tickSize, :tick_size, :priceTick, :price_tick) ||
@@ -603,6 +679,33 @@ module HedgeVenues
 
     def redacted(value)
       value.present? ? "<redacted>" : "required_later"
+    end
+
+    def taker_fee_rate
+      decimal_or_nil(env["EXTENDED_TAKER_FEE_RATE"]) || fee_rate_from_api || BigDecimal("0.0005")
+    end
+
+    def fee_rate_from_api
+      fees = read_only_call(:fees, market: market_symbol)
+      rows = array_payload(fees)
+      row = rows.find { |item| value_from(item, :market).to_s.casecmp?(market_symbol) } || rows.first
+      decimal_or_nil(value_from(row.to_h.with_indifferent_access, :takerFeeRate, :taker_fee_rate)) if row
+    rescue
+      nil
+    end
+
+    def starknet_domain
+      chain_id = env["EXTENDED_NETWORK"].to_s.downcase == "testnet" ? "SN_SEPOLIA" : "SN_MAIN"
+      {
+        "name" => "Perpetuals",
+        "version" => "v0",
+        "chainId" => chain_id,
+        "revision" => "1"
+      }
+    end
+
+    def nonce_millis(now)
+      (now.to_f * 1000).to_i
     end
 
     def array_payload(payload)

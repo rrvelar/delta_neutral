@@ -25,13 +25,18 @@ namespace :extended do
 
     puts JSON.pretty_generate(result.receipt)
     puts "Receipt appended to #{receipt_path}"
-    abort("Extended mainnet lifecycle check did not pass: #{result.status}") unless result.status == "dry_run"
+    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "submitted_but_readback_pending", "blocked_before_submit" ]
+    abort("Extended mainnet lifecycle check did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 
   def extended_probe_position
     return extended_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_EXTENDED_READBACK"])
 
     Position.find(ENV["position_id"] || ENV["POSITION_ID"] || 3)
+  rescue ActiveRecord::RecordNotFound
+    raise unless ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+
+    extended_mock_position
   end
 
   def extended_probe_env
