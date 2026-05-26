@@ -48,6 +48,29 @@ class ExtendedPendingRebalanceReconcilerTest < ActiveSupport::TestCase
     assert_equal ShortRebalance::STATUS_PENDING, rebalance.reload.status
   end
 
+  test "pending Extended close reconciles when later readback is flat" do
+    hedge = extended_hedge
+    rebalance = pending_rebalance(hedge, expected_short: "0")
+    venue = StaticExtendedVenue.new(position: nil)
+
+    result = ExtendedPendingRebalanceReconciler.new(venue: venue).reconcile(rebalance)
+
+    assert_equal rebalance, result
+    assert_equal 1, venue.read_calls
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.reload.status
+    assert_equal BigDecimal("0"), rebalance.new_short_size
+  end
+
+  test "flat Extended state with no pending rows does not trigger reconciliation readback" do
+    hedge = extended_hedge
+    venue = StaticExtendedVenue.new(position: nil)
+
+    result = ExtendedPendingRebalanceReconciler.new(venue: venue).reconcile_for_hedge(hedge)
+
+    assert_empty result
+    assert_equal 0, venue.read_calls
+  end
+
   private
 
   def extended_hedge

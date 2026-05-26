@@ -246,10 +246,12 @@ module HedgeVenues
 
     def warnings
       [
-        "Extended manual mainnet lifecycle is available only through explicit live gates.",
+        "Manual live supported; auto disabled.",
+        "Signer must be running; key stored outside Rails.",
+        "Use close_only after probe.",
         live_enabled? ? "Extended live gate is enabled; dashboard actions still require exact confirmation." : "Live disabled.",
         "Extended order submit is available only through explicit gated mainnet lifecycle checks.",
-        "Extended requires a separate Stark signer sidecar before any Phase 3+ live test."
+        "Extended requires a separate Stark signer sidecar."
       ]
     end
 

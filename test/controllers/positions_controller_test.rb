@@ -308,6 +308,27 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
   end
 
+  test "show selected Extended venue renders flat readback and open order count" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+    stub_extended_read_only_flat
+
+    with_env(extended_dashboard_env) do
+      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+        get position_path(position, hedge_venue: "extended")
+      end
+    end
+
+    assert_response :success
+    assert_match "Manual live supported; auto disabled", response.body
+    assert_match "Signer must be running; key stored outside Rails", response.body
+    assert_match "Use close_only after probe", response.body
+    assert_match "Extended position", response.body
+    assert_match "no_position", response.body
+    assert_match "Open orders", response.body
+    assert_match "0", response.body
+  end
+
   test "extended live dashboard action is blocked and does not submit or sign" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -1578,6 +1599,47 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       "AERODROME_HEDGE_PAUSED" => "false",
       "HYPERLIQUID_TESTNET" => "false"
     ) { yield }
+  end
+
+  def extended_dashboard_env
+    {
+      "EXTENDED_API_BASE_URL" => "https://extended.example/api/v1",
+      "EXTENDED_API_KEY" => "test-api-key",
+      "EXTENDED_ACCOUNT_ID" => "acct",
+      "EXTENDED_VAULT_NUMBER" => "123",
+      "EXTENDED_CLIENT_ID" => "client",
+      "EXTENDED_STARK_PUBLIC_KEY" => "0xpublic",
+      "EXTENDED_MARKET_SYMBOL" => "ETH-USD",
+      "EXTENDED_LIVE_ENABLED" => "false",
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false"
+    }
+  end
+
+  def stub_extended_read_only_flat
+    stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/positions\?market=ETH-USD\z})
+      .to_return(status: 200, body: [].to_json)
+    stub_request(:get, "https://extended.example/api/v1/user/account/info")
+      .to_return(status: 200, body: { status: "ACTIVE", data: { accountId: "acct" } }.to_json)
+    stub_request(:get, "https://extended.example/api/v1/user/balance")
+      .to_return(status: 200, body: { data: { equity: "1999.79", balance: "1999.79" } }.to_json)
+    stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/orders\?market=ETH-USD\z})
+      .to_return(status: 200, body: [].to_json)
+    stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/fees\?market%5B%5D=ETH-USD\z})
+      .to_return(status: 200, body: { data: [ { market: "ETH-USD", takerFeeRate: "0.0005" } ] }.to_json)
+    stub_request(:get, %r{\Ahttps://extended\.example/api/v1/info/markets\?market=ETH-USD\z})
+      .to_return(status: 200, body: {
+        data: {
+          name: "ETH-USD",
+          tradingConfig: { minOrderSize: "0.01", minOrderSizeChange: "0.001", minPriceChange: "0.1" },
+          marketStats: { markPrice: "2120" },
+          l2Config: {
+            collateralId: "0xcollateral",
+            syntheticId: "0xsynthetic",
+            collateralResolution: 1_000_000,
+            syntheticResolution: 1_000_000
+          }
+        }
+      }.to_json)
   end
 
   def stub_ethereal_readback(position:, active_position:)

@@ -660,6 +660,21 @@ Success criteria used by the lifecycle task:
 - If submit is accepted but readback does not confirm, status remains
   `submitted_but_readback_pending`.
 
+Exact live gates used for the successful probes:
+
+- `EXTENDED_MAINNET_PROBE_ENABLED=true`
+- `EXTENDED_LIVE_ENABLED=true`
+- `EXTENDED_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_SIGNER_URL` points to the Extended Stark signer sidecar.
+- Signer `/health` reports `ok=true`, `verified_algorithm=true`,
+  `signing_enabled=true`, `supported_exchanges=["Extended"]`, and
+  `supported_actions=["sign_extended_order"]`.
+- Exact confirmation:
+  `I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
+- `open_only` additionally requires no current Extended position, visible
+  account balance, valid market min size/notional, and `open_orders_count=0`.
+- `close_only` requires a current Extended short and `open_orders_count=0`.
+
 ### Stark Signing Verification
 
 The signer algorithm is tested against the official `x10xchange/python_sdk`
@@ -719,8 +734,67 @@ No real API key or Stark key is used by this test.
    `close_only probe requires current Extended short position` blocker because
    there is no longer a short to close.
 
+### Signer Operations
+
+The Extended Stark signer is a separate sidecar from Rails and from the
+EIP-712 signer. The Stark private key must stay outside Rails and outside this
+repo.
+
+One-time host setup:
+
+```bash
+sudo install -d -m 700 -o root -g root /etc/delta-neutral/keys
+sudo install -m 600 -o root -g root /dev/null /etc/delta-neutral/keys/extended-stark.key
+sudoedit /etc/delta-neutral/keys/extended-stark.key
+sudo cp /opt/delta_neutral/docs/templates/delta-neutral-extended-signer.service /etc/systemd/system/delta-neutral-extended-signer.service
+sudo systemctl daemon-reload
+```
+
+The service template defaults to:
+
+- `EXTENDED_SIGNER_HOST=172.18.0.1`
+- `EXTENDED_SIGNER_PORT=8776`
+- `EXTENDED_STARK_PRIVATE_KEY_FILE=/etc/delta-neutral/keys/extended-stark.key`
+- `EXTENDED_SIGNER_ENABLED=false`
+- `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=false`
+
+Safe start after reviewing the key path and public key:
+
+```bash
+sudo systemctl start delta-neutral-extended-signer
+sudo systemctl status delta-neutral-extended-signer --no-pager
+curl -s http://172.18.0.1:8776/health
+```
+
+For live probes, `/health` must show `ok=true`, `verified_algorithm=true`,
+`signing_enabled=true`, `supported_exchanges=["Extended"]`, and
+`supported_actions=["sign_extended_order"]`. If it shows
+`signing_enabled=false`, Rails must block before signing or submit.
+
+Safe stop:
+
+```bash
+sudo systemctl stop delta-neutral-extended-signer
+curl -s http://172.18.0.1:8776/health
+```
+
+After stop, Rails Extended live preflight should show the signer as unreachable
+or unhealthy. Existing Ethereal/Nado behavior is independent.
+
 ### Rollback
 
-Unset Extended env vars or select another hedge venue. `HedgeSyncJob` still
-skips Extended auto-rebalance, and the lifecycle task does not mutate hedge
-state.
+Rollback is readback-first and avoids any automatic retry:
+
+1. Stop the Extended signer:
+   `sudo systemctl stop delta-neutral-extended-signer`
+2. Ensure `EXTENDED_LIVE_ENABLED=false` and
+   `EXTENDED_AUTO_REBALANCE_ENABLED=false` outside the repo.
+3. Select Ethereal or Nado in the dashboard; do not switch the production hedge
+   venue automatically.
+4. If a probe left an Extended short open, use only the gated `close_only`
+   lifecycle after a dry-run confirms the current short and `open_orders_count=0`.
+5. Confirm final flat state with:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=close_only`
+
+`HedgeSyncJob` still skips Extended auto-rebalance, and the lifecycle task does
+not mutate hedge target state.

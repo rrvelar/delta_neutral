@@ -267,35 +267,23 @@ class ExtendedMainnetLifecycleCheck
   def sanitize_signer_health(payload)
     return nil unless payload
 
-    payload.to_h.except(:api_key, :private_key, :signature, "api_key", "private_key", "signature")
+    sanitize_sensitive(payload)
   end
 
   def sanitize_signer_response(payload)
     return nil unless payload
 
-    sanitized = payload.to_h.deep_dup
-    if sanitized.dig(:settlement, :signature)
-      sanitized[:settlement][:signature] = "<redacted>"
-    elsif sanitized.dig("settlement", "signature")
-      sanitized["settlement"]["signature"] = "<redacted>"
-    end
-    sanitized.except(:private_key, "private_key")
+    sanitize_sensitive(payload)
   end
 
   def sanitize_submit_payload(payload)
     return nil unless payload
 
-    sanitized = payload.to_h.deep_dup
-    if sanitized.dig("settlement", "signature")
-      sanitized["settlement"]["signature"] = "<redacted>"
-    elsif sanitized.dig(:settlement, :signature)
-      sanitized[:settlement][:signature] = "<redacted>"
-    end
-    sanitized
+    sanitize_sensitive(payload)
   end
 
   def sanitize_submit_response(payload)
-    payload
+    sanitize_sensitive(payload)
   end
 
   def signed_submit_payload(unsigned_order, signer_response)
@@ -399,5 +387,22 @@ class ExtendedMainnetLifecycleCheck
     signer_health_ok?(health) &&
       Array.wrap(health[:supported_exchanges]).include?("Extended") &&
       Array.wrap(health[:supported_actions]).include?("sign_extended_order")
+  end
+
+  def sanitize_sensitive(value)
+    case value
+    when Hash
+      value.to_h.each_with_object({}) do |(key, nested), sanitized|
+        sanitized[key] = sensitive_key?(key) ? "<redacted>" : sanitize_sensitive(nested)
+      end
+    when Array
+      value.map { |nested| sanitize_sensitive(nested) }
+    else
+      value
+    end
+  end
+
+  def sensitive_key?(key)
+    key.to_s.match?(/api[_-]?key|private|authorization|cookie|signature/i)
   end
 end

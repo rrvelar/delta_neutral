@@ -337,6 +337,39 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
   end
 
+  test "live receipts redact signatures api keys auth headers and private keys" do
+    api_client = live_api_client(
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+      submit_response: {
+        "status" => "OK",
+        "data" => {
+          "id" => "abc123",
+          "signature" => "0xechoed-signature",
+          "apiKey" => "echoed-api-key",
+          "authorization" => "Bearer secret",
+          "cookie" => "session=secret",
+          "privateKey" => "0xprivate"
+        }
+      }
+    )
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true)).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_no_match(/0xechoed-signature|echoed-api-key|Bearer secret|session=secret|0xprivate|0xsignature/i, result.receipt.to_json)
+    assert_equal "<redacted>", result.receipt.dig(:submit_response, "data", "signature")
+    assert_equal "<redacted>", result.receipt.dig(:submit_response, "data", "apiKey")
+    assert_equal "<redacted>", result.receipt.dig(:submit_response, "data", "authorization")
+    assert_equal "<redacted>", result.receipt.dig(:submit_response, "data", "cookie")
+    assert_equal "<redacted>", result.receipt.dig(:submit_response, "data", "privateKey")
+  end
+
   test "live rebalance delta decrease submits one reduce only buy and requires target readback" do
     api_client = live_api_client(
       before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.25", value: "530", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
@@ -525,14 +558,15 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     end.new
   end
 
-  def live_api_client(before_positions: [], after_positions: [], open_orders: [])
+  def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil)
     Class.new do
       attr_reader :submit_calls, :submitted_payload
 
-      define_method(:initialize) do |before_rows, after_rows, orders|
+      define_method(:initialize) do |before_rows, after_rows, orders, response|
         @before_rows = before_rows
         @after_rows = after_rows
         @orders = orders
+        @submit_response = response
         @submit_calls = 0
       end
 
@@ -564,9 +598,9 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       def submit_order(payload)
         @submit_calls += 1
         @submitted_payload = payload
-        { "status" => "OK", "data" => { "id" => "abc123" } }
+        @submit_response || { "status" => "OK", "data" => { "id" => "abc123" } }
       end
-    end.new(before_positions, after_positions, open_orders)
+    end.new(before_positions, after_positions, open_orders, submit_response)
   end
 
   def live_env

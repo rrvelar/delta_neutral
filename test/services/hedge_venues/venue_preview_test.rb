@@ -38,7 +38,9 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
       assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
       assert_not_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
-      assert_includes state.fetch(:warnings), "Extended manual mainnet lifecycle is available only through explicit live gates."
+      assert_includes state.fetch(:warnings), "Manual live supported; auto disabled."
+      assert_includes state.fetch(:warnings), "Signer must be running; key stored outside Rails."
+      assert_includes state.fetch(:warnings), "Use close_only after probe."
       assert_nil venue.read_position(symbol: "ETH")
     end
 

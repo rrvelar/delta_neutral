@@ -6,6 +6,8 @@
 <% selected_adapter = @selected_hedge_venue_adapter || (aerodrome ? HedgeVenues.build(selected_venue) : nil) %>
 <% selected_venue_name = selected_adapter&.venue_name || HedgeVenues.label(selected_venue) %>
 <% venue_dashboard = @selected_hedge_venue_dashboard || {} %>
+<% selected_account_state = venue_dashboard[:account_state] || {} %>
+<% selected_read_only_diagnostics = selected_account_state[:read_only_diagnostics] || {} %>
 <% dashboard_status = production_dashboard.presence || {} %>
 <% target_eth_short = dashboard_status[:target_hedge_eth] || venue_dashboard[:target_hedge_eth] %>
 <% current_short_eth = dashboard_status[:current_short_eth] || venue_dashboard[:current_short_eth] %>
@@ -189,6 +191,10 @@ end %>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Estimated leverage</span><span class="text-white"><%= effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Next action</span><span class="<%= rebalance_needed ? 'text-yellow-200' : 'text-green-300' %>"><%= rebalance_needed ? next_action.to_s.humanize : "within tolerance / no-op" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white"><%= current_venue_position.present? ? "available" : "unavailable" %></span></div>
+            <% if selected_venue == "extended" %>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Extended position</span><span class="text-white"><%= selected_read_only_diagnostics[:current_position_status] || (current_venue_position.present? ? "position_present" : "no_position") %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Open orders</span><span class="text-white"><%= selected_account_state[:open_orders_count] || selected_read_only_diagnostics[:open_orders_count] || "Unavailable" %></span></div>
+            <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3">
@@ -200,7 +206,10 @@ end %>
             <p class="mt-4 rounded-lg border border-indigo-900 bg-indigo-950/30 p-3 text-xs text-indigo-100">Ethereal uses cross margin only. Effective leverage is estimated from position notional / account collateral.</p>
           <% end %>
           <% if selected_venue == "extended" %>
-            <p class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3 text-xs text-yellow-100">Extended mainnet order submit is implemented behind explicit live gates. Dry-runs do not sign or submit orders.</p>
+            <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3 text-xs text-yellow-100">
+              <p>Manual live supported; auto disabled. Signer must be running; key stored outside Rails. Use close_only after probe.</p>
+              <p class="mt-2 text-yellow-200">Extended mainnet order submit is implemented behind explicit live gates. Dry-runs do not sign or submit orders.</p>
+            </div>
           <% end %>
         </div>
 
