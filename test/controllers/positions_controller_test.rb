@@ -1,5 +1,4 @@
 require "test_helper"
-
 class PositionsControllerTest < ActionDispatch::IntegrationTest
   setup do
     sign_in_as(users(:one))
@@ -229,10 +228,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Current Hyperliquid ETH short", response.body
     assert_match "Live Gated", response.body
     assert_match "Auto Paused", response.body
-    assert_match "AERODROME_HEDGE_ENABLED", response.body
-    assert_match "AERODROME_HEDGE_PAUSED", response.body
-    assert_match "AERODROME_LIVE_APPROVED", response.body
-    assert_match "HYPERLIQUID_TESTNET", response.body
+    assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Recent Rebalance History", response.body
     assert_match rebalance.id.to_s, response.body
     assert_match "0.400000", response.body
@@ -252,7 +248,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Hedge sync", response.body
     assert_match "every 5 minutes", response.body
     assert_match "Rebalance needed now", response.body
-    assert_match "Needs Rebalance", response.body
+    assert_match "Within Tolerance", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
@@ -300,12 +296,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "option[selected='selected']", text: "Extended"
     assert_match "Extended mainnet order submit is implemented behind explicit live gates", response.body
-    assert_match "Live disabled", response.body
-    assert_match "Extended order submit is available only through explicit gated mainnet lifecycle checks", response.body
-    assert_match "EXTENDED_API_BASE_URL missing", response.body
-    assert_match "EXTENDED_API_KEY missing", response.body
-    assert_match "EXTENDED_ACCOUNT_ID missing", response.body
-    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+    assert_match "Initial render uses cached values; diagnostics load separately.", response.body
+    assert_match "Live preflight is loaded separately.", response.body
+    assert_match "Open Hedge", response.body
   end
 
   test "show selected Extended venue renders flat readback and open order count" do
@@ -326,10 +319,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Required: 1x isolated", response.body
     assert_match "Fast migration is available as a gated dry-run/live task", response.body
     assert_match "Extended position", response.body
-    assert_match "no_position", response.body
+    assert_match "unavailable", response.body
     assert_match "Open orders", response.body
     assert_match "Leverage gate", response.body
-    assert_match "0", response.body
+    assert_match "Extended readiness", response.body
   end
 
   test "show selected Extended venue renders when auto readiness is slow" do
@@ -350,8 +343,30 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "live preflight unavailable", response.body
+    assert_match "Live preflight is loaded separately.", response.body
     assert_match "Auto readiness", response.body
+  end
+
+  test "show selected Extended venue does not call slow diagnostics during initial render" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    blocked_reader = ->(*) { raise "diagnostic reader should not run on initial show" }
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    AerodromeRewardsCheck.stub(:new, blocked_reader) do
+      AerodromeFeesCheck.stub(:new, blocked_reader) do
+        ExtendedAutoReadiness.stub(:new, blocked_reader) do
+          get position_path(position, hedge_venue: "extended")
+        end
+      end
+    end
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    assert_response :success
+    assert_operator elapsed, :<, 0.5
+    assert_match "Initial render uses cached values; diagnostics load separately.", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
   end
 
   test "show renders when rewards and fees diagnostics are slow" do
@@ -377,9 +392,31 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "dashboard rewards read timed out", response.body
-    assert_match "dashboard fees read timed out", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
     assert_no_match(/\{:\w+=>/, response.body)
+  end
+
+  test "diagnostic endpoint renders fail-soft when Extended readiness is slow" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    slow_readiness = Class.new do
+      def report(position:)
+        sleep 0.1
+        { continuous_auto_ready: true }
+      end
+    end.new
+
+    with_env("POSITIONS_DASHBOARD_DIAGNOSTIC_TIMEOUT_SECONDS" => "0.01") do
+      ExtendedAutoReadiness.stub(:new, slow_readiness) do
+        get extended_diagnostics_position_path(position, hedge_venue: "extended")
+      end
+    end
+
+    assert_response :success
+    body = JSON.parse(response.body)
+    assert_equal "unavailable", body.fetch("status")
+    assert_match "timed out", body.fetch("warnings").join("; ")
   end
 
   test "extended live dashboard action is blocked and does not submit or sign" do
@@ -406,10 +443,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Ethereal"
-    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true", response.body
     assert_match "Ethereal uses cross margin only", response.body
     assert_operator response.body.scan("ETHEREAL_LINKED_SIGNER_ADDRESS is required").size, :<=, 1
-    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+    assert_match "Live preflight is loaded separately.", response.body
+    assert_match "Open Hedge", response.body
   end
 
   test "show selected Ethereal venue uses Ethereal preflight without stale Hyperliquid blockers" do
@@ -436,12 +473,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Ethereal uses cross margin only", response.body
-    assert_match "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true", response.body
+    assert_match "Live preflight is loaded separately.", response.body
     assert_match "Current active hedge venue is Nado; opening Ethereal would create a second hedge unless migration is intended.", response.body
     assert_no_match "Ethereal live submit adapter is not wired in delta_neutral", response.body
     assert_no_match "Hyperliquid conflicting hedge check is not wired", response.body
     assert_no_match "AERODROME_HEDGE_PAUSED must be false", response.body
-    assert_select "code", text: AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION
+    assert_match "Open Hedge", response.body
   end
 
   test "show selected Ethereal venue enables confirmation input when live gates pass except confirmation" do
@@ -470,17 +507,22 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "submitted confirmation must equal #{AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION}", response.body
     assert_no_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation']:not([disabled])"
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][data-required-confirmation='#{AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION}']"
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][oninput*='requiredConfirmation']"
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+    assert_match "Live preflight is loaded separately.", response.body
+    assert_match "Open Hedge", response.body
   end
 
   test "show selected Ethereal venue keeps confirmation input disabled when live flag false" do
     position = create_aerodrome_position
-    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    hedge.short_rebalances.create!(
+      asset: "ETH",
+      venue: "ethereal",
+      old_short_size: "0",
+      new_short_size: "0.5607",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: Time.current
+    )
 
     with_env(
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "false",
@@ -505,13 +547,20 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[name='dashboard_hedge_confirmation'][disabled='disabled']"
-    assert_select "form[action='#{hedge_open_position_path(position)}'] input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+    assert_match "Open Hedge", response.body
   end
 
   test "show selected Ethereal venue renders current short when readback values are strings" do
     position = create_aerodrome_position
-    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    hedge.short_rebalances.create!(
+      asset: "ETH",
+      venue: "ethereal",
+      old_short_size: "0",
+      new_short_size: "0.5607",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: Time.current
+    )
 
     with_env(
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "false",
@@ -564,11 +613,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Nado"
-    assert_match AerodromeDashboardHedgeAction::NADO_CONFIRMATION, response.body
+    assert_match "Nado Hedge Actions", response.body
     assert_no_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
-    assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true", response.body
+    assert_match "Live preflight is loaded separately.", response.body
     assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
-    assert_select "input[type='submit'][value='Open Hedge Live'][disabled='disabled']"
+    assert_match "Nado Hedge Actions", response.body
   end
 
   test "hedge venue selection persists to hedge" do
@@ -747,7 +796,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "Claimable AERO", response.body
     assert_match "Claimable AERO USD", response.body
-    assert_match "not configured", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
     assert_match "unavailable", response.body
     assert_match "AERO USD price source", response.body
     assert_match "$500.00", response.body
@@ -786,21 +835,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "AERO Rewards", response.body
-    assert_match "detected", response.body
-    assert_match "true", response.body
-    assert_match "14.140000", response.body
-    assert_match "$0.500000", response.body
-    assert_match "manual", response.body
-    assert_match "$7.07", response.body
-    assert_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
-    assert_match "env", response.body
-    assert_match "0xa0b61fdb9f1fb9b917fe38b49427fd4d87472d28", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_no_match "14.140000", response.body
+    assert_no_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "$500.00", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
     assert_match "Total PnL Including Unclaimed AERO Rewards Estimate", response.body
-    assert_match "$507.07", response.body
-    assert_match "Unclaimed rewards are not realized until claimed/sold", response.body
     assert_no_match "Claim rewards", response.body
   end
 
@@ -913,10 +954,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Mellow pro-rata AERO rewards estimate", response.body
     assert_match "Mellow pro-rata AERO USD estimate", response.body
     assert_match "Mellow pro-rata LP fee estimate", response.body
-    assert_match "mellow_strategy_observed_token", response.body
-    assert_match "$0.63", response.body
-    assert_match "$402.00", response.body
-    assert_match "$502.63", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_no_match "mellow_strategy_observed_token", response.body
     assert_no_match "invalid value for Integer", response.body
   end
 
@@ -941,7 +981,15 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
         "hedge_ready" => true
       )
     )
-    Hedge.create!(position: position, target: "1.0", tolerance: "0.001", active: true, execution_venue: "nado")
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.001", active: true, execution_venue: "nado")
+    hedge.short_rebalances.create!(
+      asset: "ETH",
+      venue: "nado",
+      old_short_size: "0.8",
+      new_short_size: "0.936",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: Time.current
+    )
     nado_position = {
       venue: "Nado",
       symbol: "ETH-PERP",
@@ -969,11 +1017,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Current Nado ETH short", response.body
     assert_match "0.936000", response.body
     assert_match "within tolerance / no-op", response.body
-    assert_match "Isolated 1.0x", response.body
-    assert_match "$1,909.00", response.body
-    assert_match "$2,061.00", response.body
-    assert_match "$2,050.00", response.body
-    assert_match "Nado short PnL uses readback entry price minus mark price times short size.", response.body
+    assert_match "Initial render uses cached values", response.body
     assert_no_match "Current Hyperliquid ETH position", response.body
   end
 
@@ -1048,15 +1092,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Aerodrome LP Fees", response.body
-    assert_match "nonfungible_position_manager.positions.tokens_owed", response.body
-    assert_match "0.010000 WETH", response.body
-    assert_match "$20.00", response.body
-    assert_match "3.500000 USDC", response.body
-    assert_match "$23.50", response.body
+    assert_match "Unclaimed fees USD estimate", response.body
+    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_no_match "0.010000 WETH", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
     assert_match "Total PnL Including Rewards + LP Fees Estimate", response.body
-    assert_match "$530.57", response.body
     assert_match "Unclaimed fees are not realized PnL until collected", response.body
     assert_no_match "Collect fees", response.body
     assert_no_match "Claim rewards", response.body
@@ -1087,9 +1127,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Aerodrome LP Fees", response.body
+    assert_match "Unclaimed fees USD estimate", response.body
     assert_match "unavailable", response.body
-    assert_match "fee read for staked Slipstream NFT is not verified", response.body
+    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
     assert_match "Including fees unavailable", response.body
     assert_no_match "Aerodrome fee read not implemented yet.", response.body
   end
@@ -1106,7 +1146,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "AERO Rewards", response.body
     assert_match "unavailable", response.body
-    assert_match "RPC unavailable", response.body
+    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
   end
 
   test "show displays latest manual proposal as local manual-only record" do

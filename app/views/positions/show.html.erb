@@ -134,7 +134,15 @@ end %>
     <section>
       <div class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>
-        <span class="text-xs text-gray-500">Source of truth: <%= selected_venue_name %> readback + <%= @position.mellow_autopilot? ? "Mellow pro-rata accounting" : "Slipstream NFT accounting" %></span>
+        <div class="flex flex-wrap items-center justify-end gap-2 text-xs">
+          <span class="text-gray-500">Initial render uses cached values; diagnostics load separately.</span>
+          <%= link_to "Production diagnostics", production_diagnostics_position_path(@position, hedge_venue: selected_venue), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
+          <%= link_to "Hedge accounting", hedge_accounting_diagnostics_position_path(@position, hedge_venue: selected_venue), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
+          <%= link_to "Rewards / fees", rewards_fees_diagnostics_position_path(@position), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
+          <% if selected_venue == "extended" %>
+            <%= link_to "Extended readiness", extended_diagnostics_position_path(@position, hedge_venue: selected_venue), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
+          <% end %>
+        </div>
       </div>
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <% [
