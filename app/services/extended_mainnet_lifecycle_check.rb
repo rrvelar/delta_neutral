@@ -1,7 +1,7 @@
 class ExtendedMainnetLifecycleCheck
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS".freeze
-  MODES = %w[open_only delta_round_trip close_reopen].freeze
+  MODES = %w[open_only close_only delta_round_trip close_reopen].freeze
 
   def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
@@ -32,7 +32,7 @@ class ExtendedMainnetLifecycleCheck
       )
     end
 
-    blockers.concat(live_blockers(confirmation: confirmation, orders: orders))
+    blockers.concat(live_blockers(mode: mode, confirmation: confirmation, orders: orders, current_position: current_position))
     if blockers.any?
       return result(
         status: "blocked_before_submit",
@@ -61,7 +61,7 @@ class ExtendedMainnetLifecycleCheck
       )
     end
 
-    signed_result = sign_and_submit_open_only(orders.first, current_position: current_position)
+    signed_result = sign_and_submit(order_preview: orders.first, mode: mode)
     final_status = signed_result.fetch(:final_status)
     result(
       status: final_status,
@@ -82,6 +82,8 @@ class ExtendedMainnetLifecycleCheck
     case mode
     when "open_only"
       [ @venue.open_short_preview(symbol: "ETH", size_eth: size_eth, max_slippage: max_slippage) ]
+    when "close_only"
+      [ @venue.close_preview(symbol: "ETH", size_eth: short_size(current_position)) ]
     when "delta_round_trip"
       [
         @venue.rebalance_preview(symbol: "ETH", delta_eth: -size_eth, max_slippage: max_slippage),
@@ -100,23 +102,26 @@ class ExtendedMainnetLifecycleCheck
   def structural_blockers(mode:, orders:, dry_run:, signer_health:)
     blockers = []
     blockers << "mode must be one of #{MODES.join(', ')}" unless mode.in?(MODES)
-    blockers << "Extended live submit currently supports open_only probe only" if !dry_run && mode != "open_only"
+    blockers << "Extended live submit currently supports open_only and close_only probes only" if !dry_run && !mode.in?(%w[open_only close_only])
     blockers.concat(dry_run ? @venue.blockers : @venue.live_readiness_blockers)
     blockers.concat(orders.flat_map { |order| order.fetch(:blockers, []) }) if dry_run
     blockers.concat(orders.flat_map { |order| @venue.live_order_blockers(preview: order) }) unless dry_run
+    blockers.concat(mode_position_blockers(mode: mode, current_position: @venue.read_position(symbol: "ETH")))
     blockers.concat(dry_run_signer_blockers(signer_health)) if dry_run
     blockers.uniq
   end
 
-  def live_blockers(confirmation:, orders:)
+  def live_blockers(mode:, confirmation:, orders:, current_position:)
     blockers = []
     blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" unless bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
     blockers << "EXTENDED_LIVE_ENABLED must be true" unless bool_env("EXTENDED_LIVE_ENABLED")
     blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false for manual Extended mainnet probe" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers << "EXTENDED_SIGNER_URL is required" if @env["EXTENDED_SIGNER_URL"].blank?
-    blockers << "open_only live probe requires no current Extended position" if @venue.read_position(symbol: "ETH")
-    blockers << "open_only live probe requires open_orders_count=0" unless @venue.account_state[:open_orders_count].to_i.zero?
+    blockers.concat(mode_position_blockers(mode: mode, current_position: current_position))
+    blockers << "#{mode} live probe requires open_orders_count=0" unless @venue.account_state[:open_orders_count].to_i.zero?
+    return blockers unless mode == "open_only"
+
     account_value = BigDecimal(@venue.account_state.dig(:read_only_diagnostics, :account_value_usd).to_s)
     notional = BigDecimal(orders.first&.dig(:payload, :estimated_notional_usd).to_s)
     blockers << "Extended account value unavailable or insufficient for probe notional" unless account_value.positive? && account_value >= notional
@@ -149,7 +154,18 @@ class ExtendedMainnetLifecycleCheck
     blockers
   end
 
-  def sign_and_submit_open_only(order_preview, current_position:)
+  def mode_position_blockers(mode:, current_position:)
+    case mode
+    when "open_only"
+      current_position ? [ "open_only live probe requires no current Extended position" ] : []
+    when "close_only"
+      short_size(current_position).positive? ? [] : [ "close_only probe requires current Extended short position" ]
+    else
+      []
+    end
+  end
+
+  def sign_and_submit(order_preview:, mode:)
     unsigned_order = @venue.extended_live_order(preview: order_preview, now: @now.call)
     signer_response = @signer_client.sign_order(unsigned_order)
     unless signer_response[:status] == "signed"
@@ -168,7 +184,7 @@ class ExtendedMainnetLifecycleCheck
 
     submit_payload = signed_submit_payload(unsigned_order, signer_response)
     submit_response = @venue.submit_order(submit_payload)
-    readback_attempts = poll_open_readback(expected_size: BigDecimal(unsigned_order.fetch("qty").to_s))
+    readback_attempts = mode == "close_only" ? poll_flat_readback : poll_open_readback(expected_size: BigDecimal(unsigned_order.fetch("qty").to_s))
     confirmed = readback_attempts.any? { |attempt| attempt[:confirmed] }
     {
       final_status: confirmed ? "success" : "submitted_but_readback_pending",
@@ -208,7 +224,7 @@ class ExtendedMainnetLifecycleCheck
       submitted: execution ? execution[:submitted] : false,
       final_status: status,
       blockers: blockers.uniq,
-      warnings: [ "Extended mainnet path is manual-only and fail-closed until Stark signing is verified." ]
+      warnings: [ "Extended mainnet path is manual-only and controlled by explicit live gates." ]
     }
     Result.new(status, blockers.uniq, receipt[:warnings], receipt)
   end
@@ -296,6 +312,22 @@ class ExtendedMainnetLifecycleCheck
         short_size: size.to_s("F"),
         side: position&.fetch(:side, nil),
         confirmed: position&.fetch(:side, nil) == "short" && (size - expected_size).abs <= BigDecimal("0.001")
+      }
+    rescue ArgumentError
+      { attempt: index + 1, confirmed: false }
+    end
+  end
+
+  def poll_flat_readback
+    3.times.map do |index|
+      @sleeper.call(1) if index.positive?
+      position = @venue.read_position(symbol: "ETH")
+      size = short_size(position)
+      {
+        attempt: index + 1,
+        short_size: size.to_s("F"),
+        side: position&.fetch(:side, nil),
+        confirmed: position.nil? || size <= BigDecimal("0.001")
       }
     rescue ArgumentError
       { attempt: index + 1, confirmed: false }

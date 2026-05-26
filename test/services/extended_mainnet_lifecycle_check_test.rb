@@ -175,6 +175,64 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal false, result.receipt.fetch(:submitted)
   end
 
+  test "close only dry run builds full size buy reduce only order for current short" do
+    result = build_service(
+      api_client: live_api_client(before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", status: "OPEN" } ])
+    ).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.005",
+      confirmation: nil,
+      dry_run: true
+    )
+
+    summary = result.receipt.fetch(:order_payload_summaries).first
+    assert_equal "dry_run", result.status
+    assert_equal "close_short", summary.fetch(:action)
+    assert_equal "buy", summary.fetch(:side)
+    assert_equal "BUY", summary.fetch(:extended_side)
+    assert_equal true, summary.fetch(:reduce_only)
+    assert_equal "0.01", summary.fetch(:rounded_size_eth)
+    assert_equal "2141.2", summary.fetch(:crossing_price)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:submitted)
+  end
+
+  test "close only blocks when no current Extended short exists" do
+    result = build_service(api_client: live_api_client).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.01",
+      confirmation: nil,
+      dry_run: true
+    )
+
+    assert_equal "dry_run", result.status
+    assert_includes result.blockers, "close_only probe requires current Extended short position"
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
+  test "live close only refuses without probe gates and confirmation" do
+    signer = CountingSigner.new(ok: true)
+    api_client = live_api_client(before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", status: "OPEN" } ])
+    result = build_service(api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.01",
+      confirmation: "wrong",
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "EXTENDED_MAINNET_PROBE_ENABLED must be true"
+    assert_includes result.blockers, "EXTENDED_LIVE_ENABLED must be true"
+    assert_includes result.blockers, "submitted confirmation must equal #{ExtendedMainnetLifecycleCheck::CONFIRMATION}"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
   test "dry run records unreachable signer health as blocker" do
     signer = Struct.new(:health, keyword_init: true).new(
       health: {
@@ -237,6 +295,54 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       position: fake_position,
       mode: "open_only",
       size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
+  end
+
+  test "live close only submits one reduce only buy and requires flat readback" do
+    api_client = live_api_client(
+      before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", status: "OPEN" } ],
+      after_positions: []
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.005",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal "BUY", api_client.submitted_payload.fetch("side")
+    assert_equal true, api_client.submitted_payload.fetch("reduceOnly")
+    assert_equal "0.01", api_client.submitted_payload.fetch("qty")
+    assert_equal "2141.2", api_client.submitted_payload.fetch("price")
+    assert_equal true, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
+    assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
+  end
+
+  test "live close only accepted without flat readback is pending" do
+    api_client = live_api_client(
+      before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", status: "OPEN" } ],
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", status: "OPEN" } ]
+    )
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true), sleeper: ->(_) { }).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.005",
       confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
       dry_run: false
     )
