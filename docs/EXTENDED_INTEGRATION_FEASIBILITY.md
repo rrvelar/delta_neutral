@@ -921,6 +921,58 @@ Ethereal reduce-only leg (`BUY`, `reduceOnly=true`) only after Extended readback
 confirms. If either readback is not confirmed, the task stops and requires
 manual review. It never retries or duplicates orders.
 
+### Fast Full Ethereal to Extended Migration
+
+The fast migration path moves the whole planned short exposure in one
+readback-gated operation. It is still manual-only and does not switch
+`hedge.execution_venue`; finalization remains a separate command.
+
+Before a live full migration:
+
+1. Disable Ethereal auto-rebalance outside the repo:
+   `AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED=false`.
+2. Keep Extended continuous auto disabled:
+   `EXTENDED_AUTO_REBALANCE_ENABLED=false`.
+3. Confirm Nado is flat.
+4. Confirm Extended leverage is 1x and isolated-equivalent is confirmed.
+5. Confirm Extended signer health reports `ok=true`,
+   `verified_algorithm=true`, `signing_enabled=true`, and supports
+   `sign_extended_order`.
+
+Dry-run the full migration:
+
+```bash
+bin/rails extended:migration_full dry_run=true position_id=3
+```
+
+Live full migration requires:
+
+```bash
+EXTENDED_MIGRATION_FULL_ENABLED=true \
+EXTENDED_LIVE_ENABLED=true \
+AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED=false \
+AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED=true \
+bin/rails extended:migration_full dry_run=false position_id=3 confirmation=I_UNDERSTAND_THIS_FULLY_MIGRATES_HEDGE_FROM_ETHEREAL_TO_EXTENDED
+```
+
+Default sequence is `extended_first`:
+
+1. Submit Extended `SELL`, `reduceOnly=false` for the additional size needed
+   to bring Extended to the current target short.
+2. Confirm Extended readback near the target.
+3. Submit Ethereal `BUY`, `reduceOnly=true` for the full current Ethereal
+   short.
+4. Confirm Ethereal flat.
+5. Read both venues and verify combined hedge remains near target.
+
+The Extended-first sequence intentionally bounds risk toward temporary
+overhedge rather than temporary underhedge. If Extended confirms but Ethereal
+does not confirm, the receipt is marked
+`partial_migration_manual_action_required` and no retry is attempted. If
+Extended does not confirm, the Ethereal leg is not submitted. Receipts are
+written to `storage/extended_migration_checks/YYYYMMDD.jsonl` with signatures,
+API keys, auth headers, cookies, private keys, and secret env values redacted.
+
 After all exposure has moved and readback shows Extended near target, Ethereal
 flat, Nado flat, and no Extended open orders, dry-run finalization:
 

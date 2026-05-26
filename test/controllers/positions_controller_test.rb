@@ -324,6 +324,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Signer must be running; key stored outside Rails", response.body
     assert_match "Use close_only after probe", response.body
     assert_match "Required: 1x isolated", response.body
+    assert_match "Fast migration is available as a gated dry-run/live task", response.body
     assert_match "Extended position", response.body
     assert_match "no_position", response.body
     assert_match "Open orders", response.body

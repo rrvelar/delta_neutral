@@ -129,6 +129,28 @@ namespace :extended do
     abort("Extended migration step did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 
+  desc "Fast full Ethereal to Extended migration; dry-run by default"
+  task migration_full: :environment do
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    position = extended_probe_position
+    result = ExtendedMigrationFull.new(env: extended_probe_env).run(
+      position: position,
+      dry_run: dry_run,
+      sequence: ENV["sequence"] || ENV["SEQUENCE"] || "extended_first",
+      confirmation: ENV["confirmation"] || ENV["CONFIRMATION"],
+      max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01"
+    )
+
+    receipt_path = Rails.root.join("storage", "extended_migration_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    FileUtils.mkdir_p(receipt_path.dirname)
+    File.open(receipt_path, "a") { |file| file.puts(JSON.generate(result.receipt.merge(receipt_path: receipt_path.to_s))) }
+
+    puts JSON.pretty_generate(result.receipt)
+    puts "Receipt appended to #{receipt_path}"
+    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "blocked_before_submit", "blocked_or_extended_not_confirmed", "partial_migration_manual_action_required", "combined_outside_tolerance_manual_action_required" ]
+    abort("Extended full migration did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
+  end
+
   desc "Finalize Ethereal to Extended migration after readback confirms final state; dry-run by default"
   task migration_finalize: :environment do
     dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))

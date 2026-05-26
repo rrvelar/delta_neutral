@@ -212,7 +212,8 @@ class PositionsController < ApplicationController
       open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
       live_preflight: target ? selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) : nil,
-      action_live_preflights: selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position)
+      action_live_preflights: selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position),
+      migration_full_readiness: @selected_hedge_venue == "extended" ? extended_migration_full_readiness(target: target, extended_short: current_short) : nil
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
@@ -234,10 +235,11 @@ class PositionsController < ApplicationController
 
   def selected_venue_short_size(position)
     return BigDecimal("0") unless position
+    return BigDecimal(position[:short_size].to_s) if position[:short_size].present?
 
     size = BigDecimal(position.fetch(:size).to_s)
     size.negative? ? size.abs : BigDecimal("0")
-  rescue ArgumentError
+  rescue ArgumentError, KeyError
     BigDecimal("0")
   end
 
@@ -322,6 +324,26 @@ class PositionsController < ApplicationController
     else
       BigDecimal("0")
     end
+  end
+
+  def extended_migration_full_readiness(target:, extended_short:)
+    ethereal_position = EtherealHedgeExecutionService.new.read_position
+    ethereal_short = selected_venue_short_size(ethereal_position)
+    {
+      ethereal_short_eth: ethereal_short.to_s("F"),
+      extended_short_eth: extended_short.to_s("F"),
+      target_short_eth: target&.to_s("F"),
+      expected_extended_short_after: target&.to_s("F"),
+      expected_ethereal_short_after: "0",
+      expected_combined_short_after: target&.to_s("F"),
+      sequence: "extended_first",
+      warning: "Extended-first temporarily overhedges until Ethereal close confirms."
+    }
+  rescue => e
+    {
+      status: "unavailable",
+      warning: "Fast migration readiness unavailable: #{e.class}: #{e.message}"
+    }
   end
 
   def aerodrome_rewards_report
