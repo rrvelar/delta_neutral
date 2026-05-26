@@ -2,6 +2,7 @@ class AerodromeDashboardHedgeAction
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_HYPERLIQUID_ORDERS"
   NADO_CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS"
   ETHEREAL_CONFIRMATION = EtherealHedgeExecutionService::CONFIRMATION
+  EXTENDED_CONFIRMATION = ExtendedMainnetLifecycleCheck::CONFIRMATION
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
@@ -84,6 +85,8 @@ class AerodromeDashboardHedgeAction
         run_nado_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
       elsif @venue_key == "ethereal"
         run_ethereal_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
+      elsif @venue_key == "extended"
+        run_extended_action(target: target, current_short: current_short, drift: drift, before_position: before_position)
       elsif @action == "close"
         run_emergency_close
       else
@@ -212,7 +215,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def execution_gate_blockers
-    return [] if @venue_key.in?(%w[nado ethereal])
+    return [] if @venue_key.in?(%w[nado ethereal extended])
 
     self.class.execution_gate_blockers(
       action: @action,
@@ -289,12 +292,26 @@ class AerodromeDashboardHedgeAction
     result.receipt
   end
 
+  def run_extended_action(target:, current_short:, drift:, before_position:)
+    size = preflight_target_size(target: target, drift: drift, current_short: current_short)
+    result = if @action == "close"
+      extended_service.close_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "open"
+      extended_service.open_short(position: @position, size_eth: size, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    elsif @action == "rebalance"
+      extended_service.rebalance_short(position: @position, delta_eth: drift, current_position: before_position, confirmation: @confirmation, max_slippage: max_slippage)
+    else
+      ExtendedHedgeExecutionService::Result.new("blocked_before_submit", [ "unsupported Extended action" ], [], {})
+    end
+    result.receipt
+  end
+
   def execution_status(execution_result)
     return "submitted" unless execution_result.is_a?(Hash)
     return "submitted" unless execution_result.key?(:final_status)
 
     case execution_result[:final_status].to_s
-    when "submitted_and_confirmed", "submitted_but_readback_pending", "submitted_but_not_confirmed"
+    when "submitted_and_confirmed", "submitted_but_readback_pending", "submitted_but_not_confirmed", "success"
       "submitted"
     when "blocked_before_submit"
       "blocked"

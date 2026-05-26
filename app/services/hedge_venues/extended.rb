@@ -22,23 +22,23 @@ module HedgeVenues
     end
 
     def mode
-      "read_only_scaffold"
+      live_enabled? ? "live_gated" : "manual_live_gated"
     end
 
     def live_supported?
-      false
+      true
     end
 
     def live_enabled?
-      false
+      live_flag_enabled?
     end
 
     def live_flag_enabled?
-      false
+      bool_env("EXTENDED_LIVE_ENABLED") == true
     end
 
     def live_confirmation_phrase
-      nil
+      ExtendedMainnetLifecycleCheck::CONFIRMATION
     end
 
     def read_position(symbol:)
@@ -110,8 +110,8 @@ module HedgeVenues
         venue: venue_name,
         mode: mode,
         status: account_state_status(account_info: account_info, balance: balance, market: market),
-        live_supported: false,
-        live_enabled: false,
+        live_supported: live_supported?,
+        live_enabled: live_enabled?,
         market_symbol: market_symbol,
         margin_mode: current_position&.fetch(:margin_mode, nil) || "unverified",
         current_short_eth: current_position&.fetch(:short_size, nil),
@@ -125,6 +125,7 @@ module HedgeVenues
         ),
         market_metadata_available: market_metadata_available?,
         market_metadata: market_metadata_diagnostics(raw_market: market),
+        fee_rates: fee_rate_diagnostics,
         open_orders_count: open_orders_count,
         blockers: blockers,
         warnings: warnings
@@ -245,8 +246,8 @@ module HedgeVenues
 
     def warnings
       [
-        "Extended read-only scaffold.",
-        "Live disabled.",
+        "Extended manual mainnet lifecycle is available only through explicit live gates.",
+        live_enabled? ? "Extended live gate is enabled; dashboard actions still require exact confirmation." : "Live disabled.",
         "Extended order submit is available only through explicit gated mainnet lifecycle checks.",
         "Extended requires a separate Stark signer sidecar before any Phase 3+ live test."
       ]
@@ -682,6 +683,13 @@ module HedgeVenues
 
     def taker_fee_rate
       decimal_or_nil(env["EXTENDED_TAKER_FEE_RATE"]) || fee_rate_from_api || BigDecimal("0.0005")
+    end
+
+    def fee_rate_diagnostics
+      {
+        taker_fee_rate: taker_fee_rate&.to_s("F"),
+        source: decimal_or_nil(env["EXTENDED_TAKER_FEE_RATE"]) ? "env" : (fee_rate_from_api ? "extended_api" : "default")
+      }
     end
 
     def fee_rate_from_api

@@ -91,6 +91,7 @@ class PositionsController < ApplicationController
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @selected_hedge_venue_dashboard = selected_hedge_venue_dashboard
+      @hedge_venue_accounting = hedge_venue_accounting
       @latest_aerodrome_weth_rebalance = @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first
       @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
@@ -215,6 +216,20 @@ class PositionsController < ApplicationController
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
+  end
+
+  def hedge_venue_accounting
+    return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
+
+    current_position = @selected_hedge_venue_dashboard&.dig(:current_venue_position)
+    account_state = @selected_hedge_venue_dashboard&.dig(:account_state)
+    HedgeVenueAccounting.new(
+      position: @position,
+      venue_key: @selected_hedge_venue,
+      adapter: @selected_hedge_venue_adapter,
+      current_position: current_position,
+      account_state: account_state
+    ).report
   end
 
   def selected_venue_short_size(position)

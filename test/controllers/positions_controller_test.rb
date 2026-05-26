@@ -289,7 +289,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended", response.body
   end
 
-  test "show selected Extended venue renders fail closed read only scaffold" do
+  test "show selected Extended venue renders gated manual venue state" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
 
@@ -299,7 +299,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Extended"
-    assert_match "Extended read-only scaffold", response.body
+    assert_match "Extended mainnet order submit is implemented behind explicit live gates", response.body
     assert_match "Live disabled", response.body
     assert_match "Extended order submit is available only through explicit gated mainnet lifecycle checks", response.body
     assert_match "EXTENDED_API_BASE_URL missing", response.body

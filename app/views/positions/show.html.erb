@@ -46,6 +46,8 @@ end %>
 <% selected_action_blockers = (active_preflight[:blockers] || []).uniq %>
 <% selected_action_warnings = (active_preflight[:warnings] || []).uniq %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
+<% hedge_accounting = @hedge_venue_accounting || {} %>
+<% accounting_components = hedge_accounting[:components] || {} %>
 <% rewards_report = @aerodrome_rewards_report || {} %>
 <% fees_report = @aerodrome_fees_report || {} %>
 <% reward_value_state = rewards_report[:value_state].presence || (rewards_report[:claimable_aero_usd].present? ? (rewards_report[:claimable_aero_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
@@ -56,13 +58,17 @@ end %>
 <% latest_snap = @pnl_snapshots.first %>
 <% pool_unrealized = position_valuation.pool_delta_usd %>
 <% pnl_execution_venue = HedgeVenues.normalize(dashboard_status[:execution_venue] || @position.hedge&.execution_venue) %>
-<% venue_hedge_unrealized_raw = dashboard_status[:venue_hedge_unrealized_pnl_usd].presence %>
-<% hedge_unrealized = pnl_execution_venue.in?(%w[nado ethereal]) ? (venue_hedge_unrealized_raw ? BigDecimal(venue_hedge_unrealized_raw.to_s) : nil) : (latest_snap&.hedge_unrealized || 0).to_d %>
+<% venue_hedge_unrealized_raw = accounting_components.dig(:unrealized_pnl_usd, :value).presence || dashboard_status[:venue_hedge_unrealized_pnl_usd].presence %>
+<% hedge_unrealized = pnl_execution_venue.in?(%w[nado ethereal extended]) ? (venue_hedge_unrealized_raw ? BigDecimal(venue_hedge_unrealized_raw.to_s) : nil) : (latest_snap&.hedge_unrealized || 0).to_d %>
 <% hedge_unrealized_available = !hedge_unrealized.nil? %>
-<% hedge_realized = (latest_snap&.hedge_realized || 0).to_d %>
+<% hedge_realized = if accounting_components.dig(:realized_pnl_usd, :value).present?
+  BigDecimal(accounting_components.dig(:realized_pnl_usd, :value).to_s)
+else
+  (latest_snap&.hedge_realized || 0).to_d
+end %>
 <% total_unrealized = if pool_unrealized && hedge_unrealized_available
   pool_unrealized + hedge_unrealized
-elsif pool_unrealized && !pnl_execution_venue.in?(%w[nado ethereal])
+elsif pool_unrealized && !pnl_execution_venue.in?(%w[nado ethereal extended])
   pool_unrealized
 elsif hedge_unrealized_available
   hedge_unrealized
@@ -135,6 +141,7 @@ end %>
           [ "Target hedge ETH", format_venue_eth_amount(target_eth_short), "Target short" ],
           [ current_short_label, format_venue_eth_amount(current_short_eth), "Exchange readback" ],
           [ "Drift", format_venue_eth_amount(drift_eth), drift_usd.present? ? format_venue_usd_amount(drift_usd) : "USD unavailable" ],
+          [ "Net hedge PnL", format_venue_usd_amount(hedge_accounting[:net_venue_pnl_usd]), "Realized + unrealized + funding - fees - borrow" ],
           [ "Tolerance state", tolerance_label, "Tolerance #{format_venue_eth_amount(tolerance_eth)}" ],
           [ "Margin mode", margin_mode.present? ? (margin_mode.to_s == "isolated" ? "Isolated 1.0x" : margin_mode.to_s.humanize) : "Unavailable", selected_venue == "ethereal" ? "Ethereal cross only" : "Venue readback" ],
           [ "Effective leverage", effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable", current_notional.present? ? "Notional #{format_venue_usd_amount(current_notional)}" : "Notional unavailable" ],
@@ -243,7 +250,7 @@ end %>
               when :rebalance then next_action.in?([ "increase short", "reduce short", "rebalance" ])
               when :close then BigDecimal(current_short_eth.to_s).positive? rescue false
               end %>
-              <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : (selected_venue == "ethereal" ? AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION : (key == :close ? AerodromeLiveEmergencyClose::CONFIRMATION : AerodromeDashboardHedgeAction::CONFIRMATION)) %>
+              <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : (selected_venue == "ethereal" ? AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION : (selected_venue == "extended" ? AerodromeDashboardHedgeAction::EXTENDED_CONFIRMATION : (key == :close ? AerodromeLiveEmergencyClose::CONFIRMATION : AerodromeDashboardHedgeAction::CONFIRMATION))) %>
               <% confirmation_enabled = action_needed && selected_adapter&.live_enabled? && action_blockers.blank? %>
               <% submit_id = "dashboard-hedge-live-submit-#{key}" %>
               <div class="rounded-xl border <%= action_needed ? 'border-indigo-800 bg-indigo-950/20' : 'border-gray-800 bg-gray-950/40 opacity-80' %> p-4">
@@ -379,6 +386,43 @@ end %>
       <% end %>
     </section>
 
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Hedge PnL & Costs</p>
+          <h2 class="mt-1 text-lg font-semibold text-white"><%= selected_venue_name %> venue accounting</h2>
+        </div>
+        <p class="text-sm text-gray-400">Missing venue components are shown as unavailable, not as zero.</p>
+      </div>
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <% [
+          [ "Unrealized hedge PnL", accounting_components.dig(:unrealized_pnl_usd, :value), accounting_components.dig(:unrealized_pnl_usd, :state), accounting_components.dig(:unrealized_pnl_usd, :source) ],
+          [ "Realized hedge PnL", accounting_components.dig(:realized_pnl_usd, :value), accounting_components.dig(:realized_pnl_usd, :state), accounting_components.dig(:realized_pnl_usd, :source) ],
+          [ "Trading fees", accounting_components.dig(:trading_fees_usd, :value), accounting_components.dig(:trading_fees_usd, :state), accounting_components.dig(:trading_fees_usd, :source) ],
+          [ "Funding", accounting_components.dig(:funding_pnl_usd, :value), accounting_components.dig(:funding_pnl_usd, :state), accounting_components.dig(:funding_pnl_usd, :source) ],
+          [ "Borrow / interest", accounting_components.dig(:borrow_interest_usd, :value), accounting_components.dig(:borrow_interest_usd, :state), accounting_components.dig(:borrow_interest_usd, :source) ],
+          [ "Net hedge PnL", hedge_accounting[:net_venue_pnl_usd], hedge_accounting[:net_venue_pnl_usd].present? ? "available" : "unavailable", "realized + unrealized + funding - fees - borrow + rebates" ]
+        ].each do |label, value, state, source| %>
+          <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+            <p class="text-xs text-gray-500"><%= label %></p>
+            <p class="mt-2 text-lg font-semibold <%= value.present? && BigDecimal(value.to_s) < 0 ? 'text-red-300' : 'text-white' rescue 'text-white' %>"><%= value.present? ? format_venue_usd_amount(value) : "Unavailable" %></p>
+            <p class="mt-1 break-words text-xs text-gray-500"><%= state.presence || "unavailable" %> · <%= source.presence || "venue does not expose this component" %></p>
+          </div>
+        <% end %>
+      </div>
+      <% fee_rates = hedge_accounting[:fee_rates] || {} %>
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Fee tier / rate</p>
+          <p class="mt-2 text-sm text-white"><%= fee_rates.present? ? fee_rates.map { |key, value| "#{key.to_s.humanize}: #{value}" }.join(" · ") : "Unavailable" %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 md:col-span-2">
+          <p class="text-xs text-gray-500">Unavailable components</p>
+          <p class="mt-2 break-words text-sm text-white"><%= (hedge_accounting[:unavailable_components] || []).map { |key| key.to_s.humanize }.presence&.join(", ") || "None" %></p>
+        </div>
+      </div>
+    </section>
+
     <section class="grid grid-cols-1 gap-4 xl:grid-cols-3">
       <div class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 xl:col-span-2">
         <p class="text-xs uppercase tracking-wide text-gray-500">PnL & Rewards</p>
@@ -408,7 +452,7 @@ end %>
                 <p class="mt-1 break-words text-xs text-gray-500"><%= total_pnl_with_rewards_and_fees ? "Pool + hedge + reward and LP fee estimates." : "Rewards or LP fee estimate unavailable; combined total not shown. Including fees unavailable." %></p>
               </div>
             </div>
-            <% if pnl_execution_venue.in?(%w[nado ethereal]) %>
+            <% if pnl_execution_venue.in?(%w[nado ethereal extended]) %>
               <p class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400">
                 <% if hedge_unrealized_available %>
                   <%= HedgeVenues.label(pnl_execution_venue) %> short PnL uses readback entry price minus mark price times short size.

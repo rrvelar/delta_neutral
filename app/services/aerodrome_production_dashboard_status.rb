@@ -197,8 +197,8 @@ class AerodromeProductionDashboardStatus
   end
 
   def venue_hedge_unrealized_pnl(position)
-    return nil unless execution_venue.in?(%w[nado ethereal]) && position&.dig(:side) == "short"
-    return decimal_hash_value(position, :unrealized_pnl_usd) if execution_venue == "ethereal" && position[:unrealized_pnl_usd].present?
+    return nil unless execution_venue.in?(%w[nado ethereal extended]) && position&.dig(:side) == "short"
+    return decimal_hash_value(position, :unrealized_pnl_usd) if execution_venue.in?(%w[ethereal extended]) && position[:unrealized_pnl_usd].present?
 
     entry_price = decimal_hash_value(position, :entry_price)
     mark_price = decimal_hash_value(position, :mark_price)
@@ -209,11 +209,11 @@ class AerodromeProductionDashboardStatus
   end
 
   def venue_hedge_pnl_message(position)
-    return nil unless execution_venue.in?(%w[nado ethereal])
+    return nil unless execution_venue.in?(%w[nado ethereal extended])
 
     venue = HedgeVenues.label(execution_venue)
     return "#{venue} hedge PnL unavailable: no ETH-PERP position readback." unless position
-    return nil if execution_venue == "ethereal" && position[:unrealized_pnl_usd].present?
+    return nil if execution_venue.in?(%w[ethereal extended]) && position[:unrealized_pnl_usd].present?
     return "#{venue} hedge PnL unavailable: readback missing entry price." if position[:entry_price].blank?
     return "#{venue} hedge PnL unavailable: readback missing mark price." if position[:mark_price].blank?
 

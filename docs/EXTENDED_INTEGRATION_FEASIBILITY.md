@@ -2,10 +2,11 @@
 
 Date checked: 2026-05-25
 
-This document is a research and design artifact only. It does not approve live
-Extended trading, does not add credentials, does not add signing, and does not
+This document is a research, implementation, and operations artifact. It does
+not add credentials, does not approve Extended auto-rebalance, and does not
 change the current production hedge venue. Current production remains Ethereal;
-Nado is flat and disabled.
+Nado is flat and disabled. Extended manual mainnet probes are available only
+behind explicit live gates and signer health checks.
 
 ## Sources Checked
 
@@ -32,15 +33,16 @@ Nado is flat and disabled.
 
 ## Feasibility Verdict
 
-Extended is feasible as a future delta_neutral hedge venue, but it should not be
-implemented as a direct live Ruby venue first. The safest path is:
+Extended is feasible as a future delta_neutral hedge venue, but it should stay
+manual-only until more of the lifecycle is proven. The implemented path is:
 
 1. Documentation-only.
 2. Read-only Ruby adapter.
 3. Dry-run order planning and payload summaries.
-4. Testnet-only proof using a separate Stark signer/SDK sidecar.
-5. Mainnet live only after testnet proves open, increase, decrease, close, and
-   delayed reconciliation.
+4. Separate Stark signer sidecar with SDK-parity hashing/signing.
+5. Controlled mainnet probes behind explicit gates.
+6. Auto-rebalance only after open, close, delta increase/decrease, delayed
+   reconciliation, and operational rollback are proven.
 
 The main integration risks are key handling, Stark order signing, async order
 confirmation, leverage/margin semantics, and the need to reconcile REST
@@ -426,9 +428,9 @@ fail-closed and cannot trade:
 
 1. Open `/positions/:id?hedge_venue=extended`.
 2. Confirm the selected venue panel says:
-   - `Extended read-only scaffold`
+   - `Extended mainnet order submit is implemented behind explicit live gates`
    - `Live disabled`
-   - `Submit/cancel endpoint integration not implemented`
+   - `Dry-runs do not sign or submit orders`
 3. Confirm live buttons are disabled and preflight blockers include missing
    Extended config when no Extended env is present.
 4. Run `bin/rails ethereal:hedge_payload_check` to verify the existing Ethereal
@@ -464,8 +466,10 @@ keys in Rails.
 
 ## Phase 2 Dry-Run Order Intent Scaffold
 
-Phase 2 adds Extended order intent previews only. It still cannot sign, submit,
-cancel, or auto-rebalance Extended orders.
+Phase 2 originally added Extended order intent previews only. The current
+implementation has since added controlled manual `open_only`/`close_only`
+mainnet probes; this section documents the dry-run intent shape that is still
+used before any live probe. It still cannot auto-rebalance Extended orders.
 
 The scaffold now builds normalized intent summaries for operator review:
 
@@ -511,21 +515,22 @@ the same blocker before any signer or submit path can run. The lifecycle task
 defaults `size_eth` to `0.01`; operators must pass `size_eth` at or above the
 discovered `min_size` and should not rely on implicit rounding up.
 
-### What still blocks live
+### What still blocks automatic production use
 
 - `Extended live disabled.`
-- `Extended submit endpoint integration not implemented.`
 - `Extended auto-rebalance disabled.`
 - Missing API/account/vault/client/Stark public key config.
 - Missing market metadata.
-- No Stark signer sidecar.
-- No order submit/cancel implementation.
-- No WebSocket/account confirmation loop.
+- Missing or unhealthy Stark signer sidecar.
+- `signing_enabled=false`.
+- Open orders present.
+- Missing exact operator confirmation for manual live probes.
+- No WebSocket/account stream confirmation loop.
 
-The payload includes `future_submit_endpoint: "POST /user/order"` only as a
-documentation hint. `submit_endpoint` remains `nil`, `order_submission` is
-`false`, `stark_signature_created` is `false`, and live service receipts keep
-`orders_submitted: 0` and `signatures_created: 0`.
+The payload includes `submit_endpoint: "POST /user/order"` because manual submit
+is implemented for gated lifecycle probes. Dry-run still keeps
+`order_submission: false`, `orders_placed: 0`, `signatures_created: 0`, and
+`submitted: false`.
 
 ## Minimal Mainnet Foundation
 
@@ -557,16 +562,22 @@ signing algorithm is verified against the official SDK.
   `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true`; the systemd template keeps
   it false.
 - `bin/rails extended:mainnet_lifecycle_check` builds manual mainnet lifecycle
-  dry-run receipts for `open_only`, `delta_round_trip`, and `close_reopen`.
+  dry-run receipts for `open_only`, `close_only`, `delta_round_trip`, and
+  `close_reopen`.
+- Gated live `open_only` and `close_only` probes are implemented. Both require
+  readback confirmation before reporting success.
+- Receipts are appended to
+  `storage/extended_mainnet_live_checks/YYYYMMDD.jsonl` and redact Stark
+  signatures/API secrets.
 
 ### Still Blocked
 
 - No Extended auto-rebalance.
-- No submit/cancel endpoint calls.
 - No Rails-side Stark signature creation.
 - No Stark private key in Rails.
-- No live order can pass because the implementation keeps
-  `Extended submit endpoint integration not implemented.` as a hard blocker.
+- No live order can run without the explicit probe gates, exact confirmation,
+  healthy signer, and clean read-only account state.
+- No close/reopen or delta round-trip live submit is enabled yet.
 
 ### Required Mainnet Read-Only Env
 
@@ -587,12 +598,14 @@ real values:
 
 ### Required Live Probe Env
 
-These still do not bypass the current signer-algorithm blocker:
+These are required for the controlled manual mainnet probes:
 
 - `EXTENDED_MAINNET_PROBE_ENABLED=true`
 - `EXTENDED_LIVE_ENABLED=true`
 - `EXTENDED_SIGNER_URL=http://172.18.0.1:8776`
-- `EXTENDED_PROBE_MAX_SIZE_ETH=0.005`
+- `EXTENDED_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_PROBE_MAX_SIZE_ETH=0.01` or another explicit cap at or above the
+  discovered Extended minimum order size.
 - exact confirmation:
   `I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
 
@@ -615,9 +628,37 @@ The sidecar `/health` reports `ok`, `signer_id`, `supported_exchanges`,
 - `fast-stark-crypto` is installed
 - `EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true`
 
-Rails live probes still remain blocked by their own gates and by the explicit
-`Extended submit endpoint integration not implemented.` blocker until a
-separate task wires submit/readback after operator review.
+Rails live probes remain blocked by their own gates unless the signer reports
+`ok=true`, `verified_algorithm=true`, `signing_enabled=true`,
+`supported_exchanges=["Extended"]`, and
+`supported_actions=["sign_extended_order"]`.
+
+### Mainnet Lifecycle Proof
+
+Manual Extended mainnet lifecycle probes have been proven with the current
+implementation:
+
+| Probe | Size | Side | reduceOnly | Result |
+| --- | ---: | --- | --- | --- |
+| `open_only` | `0.01 ETH` | `SELL` | `false` | Submitted, filled, and confirmed by Extended readback as a short |
+| `close_only` | full current short, `0.01 ETH` | `BUY` | `true` | Submitted, filled, and confirmed by Extended readback as flat |
+
+Final state after the proof:
+
+- Extended readback is flat/no position.
+- Ethereal production hedge remained open and unchanged.
+- Nado remained flat.
+- Extended auto-rebalance remains disabled.
+- Receipts are in `storage/extended_mainnet_live_checks/YYYYMMDD.jsonl`.
+
+Success criteria used by the lifecycle task:
+
+- REST submit acceptance alone is not success.
+- `open_only` success requires later readback showing the expected short size.
+- `close_only` success requires later readback showing no position or
+  `short_size <= 0.001`.
+- If submit is accepted but readback does not confirm, status remains
+  `submitted_but_readback_pending`.
 
 ### Stark Signing Verification
 
@@ -662,7 +703,21 @@ No real API key or Stark key is used by this test.
 4. Run:
    `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=open_only`
 5. Confirm receipts show `orders_placed: 0` and `signatures_created: 0`.
-6. Do not enable live probe until signer algorithm parity is implemented.
+6. Confirm signer health before any live probe:
+   `curl -s http://172.18.0.1:8776/health`
+7. Dry-run open:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=open_only size_eth=0.01`
+8. Live open, only for a controlled probe:
+   `EXTENDED_MAINNET_PROBE_ENABLED=true EXTENDED_LIVE_ENABLED=true EXTENDED_AUTO_REBALANCE_ENABLED=false bin/rails extended:mainnet_lifecycle_check dry_run=false mode=open_only size_eth=0.01 confirmation=I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
+9. Dry-run close:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=close_only`
+10. Live close, only to flatten the controlled probe:
+   `EXTENDED_MAINNET_PROBE_ENABLED=true EXTENDED_LIVE_ENABLED=true EXTENDED_AUTO_REBALANCE_ENABLED=false bin/rails extended:mainnet_lifecycle_check dry_run=false mode=close_only confirmation=I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
+11. Final flat readback:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=close_only`
+   should show `current_position_status: no_position` and a
+   `close_only probe requires current Extended short position` blocker because
+   there is no longer a short to close.
 
 ### Rollback
 

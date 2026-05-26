@@ -7,7 +7,7 @@ module HedgeVenues
       assert_instance_of HedgeVenues::Hyperliquid, HedgeVenues.build(nil)
     end
 
-    test "extended venue is read only scaffold and disabled by default" do
+    test "extended venue is manual live capable and disabled by default" do
       venue = HedgeVenues::Extended.new(env: {})
       preview = venue.open_short_preview(symbol: "ETH", size_eth: BigDecimal("0.1234"), max_slippage: "0.01")
       state = venue.account_state
@@ -15,8 +15,8 @@ module HedgeVenues
       assert_equal "extended", HedgeVenues.normalize("extended")
       assert_equal "Extended", HedgeVenues.label("extended")
       assert_equal "Extended", preview.fetch(:venue)
-      assert_equal "read_only_scaffold", preview.fetch(:mode)
-      assert_equal false, preview.fetch(:live_supported)
+      assert_equal "manual_live_gated", preview.fetch(:mode)
+      assert_equal true, preview.fetch(:live_supported)
       assert_equal false, preview.fetch(:live_enabled)
       assert_equal false, preview.fetch(:submit_enabled)
       assert_equal false, preview.fetch(:order_submission)
@@ -38,7 +38,7 @@ module HedgeVenues
       assert_includes state.fetch(:blockers), "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata"
       assert_includes state.fetch(:blockers), "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata"
       assert_not_includes state.fetch(:blockers), "Extended submit endpoint integration not implemented."
-      assert_includes state.fetch(:warnings), "Extended read-only scaffold."
+      assert_includes state.fetch(:warnings), "Extended manual mainnet lifecycle is available only through explicit live gates."
       assert_nil venue.read_position(symbol: "ETH")
     end
 

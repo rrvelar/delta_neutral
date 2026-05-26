@@ -190,7 +190,7 @@ class AerodromeAutoRebalanceStatus
   end
 
   def extended_status_blockers(blockers, rebalance_needed:)
-    blockers << "Extended auto-rebalance is not implemented." if rebalance_needed
+    blockers << "rebalance needed but EXTENDED_AUTO_REBALANCE_ENABLED is intentionally not supported yet" if rebalance_needed
     blockers
   end
 
@@ -202,7 +202,7 @@ class AerodromeAutoRebalanceStatus
     if execution_venue == "ethereal" && !bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
       return "Manual Ethereal hedge actions are available when live gates pass; automatic Ethereal rebalance is disabled."
     end
-    return "Extended is read-only scaffold only; automatic Extended rebalance is disabled." if execution_venue == "extended"
+    return "Manual Extended hedge actions are available through gated lifecycle checks; automatic Extended rebalance is disabled." if execution_venue == "extended"
     return "Current hedge is within tolerance; no automatic rebalance is needed." unless rebalance_needed
 
     nil

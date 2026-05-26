@@ -1,4 +1,28 @@
 namespace :extended do
+  desc "Read-only reconciliation for pending Extended ShortRebalance records"
+  task reconcile_pending_rebalances: :environment do
+    scope = ShortRebalance.where(venue: "extended", status: ShortRebalance::STATUS_PENDING)
+    scope = scope.where(hedge_id: ENV["HEDGE_ID"]) if ENV["HEDGE_ID"].present?
+    reconciler = ExtendedPendingRebalanceReconciler.new
+    results = scope.order(:rebalanced_at, :id).map do |rebalance|
+      reconciled = reconciler.reconcile(rebalance)
+      {
+        id: rebalance.id,
+        hedge_id: rebalance.hedge_id,
+        status: rebalance.reload.status,
+        reconciled: reconciled.present? && rebalance.status == ShortRebalance::STATUS_SUCCESS
+      }
+    end
+
+    puts JSON.pretty_generate(
+      venue: "extended",
+      checked: results.size,
+      results: results,
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+  end
+
   desc "Controlled Extended mainnet lifecycle check; dry-run by default and live remains fail-closed"
   task mainnet_lifecycle_check: :environment do
     mode = (ENV["mode"] || ENV["MODE"] || "open_only").to_s.downcase

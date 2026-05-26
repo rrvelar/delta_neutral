@@ -57,7 +57,8 @@ class HedgeSyncJob < ApplicationJob
         end
 
         if hedge.extended_execution?
-          Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — Extended is read-only scaffold; live and auto rebalance are not implemented")
+          ExtendedPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
+          Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — Extended auto-rebalance is disabled; manual dashboard lifecycle remains gated")
           next
         end
 

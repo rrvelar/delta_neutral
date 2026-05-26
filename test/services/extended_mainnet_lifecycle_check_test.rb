@@ -330,7 +330,61 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal "0.01", api_client.submitted_payload.fetch("qty")
     assert_equal "2141.2", api_client.submitted_payload.fetch("price")
     assert_equal true, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
+    assert_equal "success", result.receipt.fetch(:final_status)
+    assert_equal BigDecimal("0"), BigDecimal(result.receipt.fetch(:readback_attempts).last.fetch(:short_size))
+    assert_equal "<redacted>", result.receipt.dig(:signer_response, "settlement", "signature")
+    assert_equal "<redacted>", result.receipt.dig(:submit_payload, "settlement", "signature")
     assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
+  end
+
+  test "live rebalance delta decrease submits one reduce only buy and requires target readback" do
+    api_client = live_api_client(
+      before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.25", value: "530", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.24", value: "508.8", openPrice: "2120", markPrice: "2120", status: "OPEN" } ]
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "rebalance_delta",
+      size_eth: "0.01",
+      delta_eth: "-0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
+    assert_equal "BUY", api_client.submitted_payload.fetch("side")
+    assert_equal true, api_client.submitted_payload.fetch("reduceOnly")
+    assert_equal "0.01", api_client.submitted_payload.fetch("qty")
+    assert_equal true, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
+  end
+
+  test "live rebalance delta increase submits one sell and requires target readback" do
+    api_client = live_api_client(
+      before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.25", value: "530", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.26", value: "551.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ]
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "rebalance_delta",
+      size_eth: "0.01",
+      delta_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
+    assert_equal "SELL", api_client.submitted_payload.fetch("side")
+    assert_equal false, api_client.submitted_payload.fetch("reduceOnly")
+    assert_equal "0.01", api_client.submitted_payload.fetch("qty")
+    assert_equal true, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
   end
 
   test "live close only accepted without flat readback is pending" do

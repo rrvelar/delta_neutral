@@ -1,7 +1,7 @@
 class ExtendedMainnetLifecycleCheck
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS".freeze
-  MODES = %w[open_only close_only delta_round_trip close_reopen].freeze
+  MODES = %w[open_only rebalance_delta close_only delta_round_trip close_reopen].freeze
 
   def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
@@ -11,11 +11,12 @@ class ExtendedMainnetLifecycleCheck
     @sleeper = sleeper
   end
 
-  def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01")
+  def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil)
     mode = mode.to_s
-    size = capped_size(size_eth)
+    requested_size = mode == "rebalance_delta" && delta_eth.present? ? BigDecimal(delta_eth.to_s).abs : BigDecimal(size_eth.to_s)
+    size = capped_size(requested_size)
     current_position = @venue.read_position(symbol: "ETH")
-    orders = build_orders(position: position, mode: mode, size_eth: size, current_position: current_position, max_slippage: max_slippage)
+    orders = build_orders(position: position, mode: mode, size_eth: size, current_position: current_position, max_slippage: max_slippage, delta_eth: delta_eth)
     dry_run_signer_health = signer_health_for_diagnostics if dry_run
     blockers = structural_blockers(mode: mode, orders: orders, dry_run: dry_run, signer_health: dry_run_signer_health)
 
@@ -78,10 +79,13 @@ class ExtendedMainnetLifecycleCheck
 
   private
 
-  def build_orders(position:, mode:, size_eth:, current_position:, max_slippage:)
+  def build_orders(position:, mode:, size_eth:, current_position:, max_slippage:, delta_eth: nil)
     case mode
     when "open_only"
       [ @venue.open_short_preview(symbol: "ETH", size_eth: size_eth, max_slippage: max_slippage) ]
+    when "rebalance_delta"
+      signed_delta = BigDecimal(delta_eth.presence || size_eth.to_s)
+      [ @venue.rebalance_preview(symbol: "ETH", delta_eth: signed_delta, max_slippage: max_slippage) ]
     when "close_only"
       [ @venue.close_preview(symbol: "ETH", size_eth: short_size(current_position)) ]
     when "delta_round_trip"
@@ -102,7 +106,7 @@ class ExtendedMainnetLifecycleCheck
   def structural_blockers(mode:, orders:, dry_run:, signer_health:)
     blockers = []
     blockers << "mode must be one of #{MODES.join(', ')}" unless mode.in?(MODES)
-    blockers << "Extended live submit currently supports open_only and close_only probes only" if !dry_run && !mode.in?(%w[open_only close_only])
+    blockers << "Extended live submit currently supports open_only, rebalance_delta, and close_only probes only" if !dry_run && !mode.in?(%w[open_only rebalance_delta close_only])
     blockers.concat(dry_run ? @venue.blockers : @venue.live_readiness_blockers)
     blockers.concat(orders.flat_map { |order| order.fetch(:blockers, []) }) if dry_run
     blockers.concat(orders.flat_map { |order| @venue.live_order_blockers(preview: order) }) unless dry_run
@@ -120,7 +124,7 @@ class ExtendedMainnetLifecycleCheck
     blockers << "EXTENDED_SIGNER_URL is required" if @env["EXTENDED_SIGNER_URL"].blank?
     blockers.concat(mode_position_blockers(mode: mode, current_position: current_position))
     blockers << "#{mode} live probe requires open_orders_count=0" unless @venue.account_state[:open_orders_count].to_i.zero?
-    return blockers unless mode == "open_only"
+    return blockers unless mode == "open_only" || rebalance_increase?(orders.first)
 
     account_value = BigDecimal(@venue.account_state.dig(:read_only_diagnostics, :account_value_usd).to_s)
     notional = BigDecimal(orders.first&.dig(:payload, :estimated_notional_usd).to_s)
@@ -160,6 +164,8 @@ class ExtendedMainnetLifecycleCheck
       current_position ? [ "open_only live probe requires no current Extended position" ] : []
     when "close_only"
       short_size(current_position).positive? ? [] : [ "close_only probe requires current Extended short position" ]
+    when "rebalance_delta"
+      short_size(current_position).positive? ? [] : [ "rebalance_delta probe requires current Extended short position" ]
     else
       []
     end
@@ -183,8 +189,9 @@ class ExtendedMainnetLifecycleCheck
     end
 
     submit_payload = signed_submit_payload(unsigned_order, signer_response)
+    expected_short = expected_short_after(order_preview: order_preview, current_position: @venue.read_position(symbol: "ETH"))
     submit_response = @venue.submit_order(submit_payload)
-    readback_attempts = mode == "close_only" ? poll_flat_readback : poll_open_readback(expected_size: BigDecimal(unsigned_order.fetch("qty").to_s))
+    readback_attempts = mode == "close_only" ? poll_flat_readback : poll_short_readback(expected_size: expected_short)
     confirmed = readback_attempts.any? { |attempt| attempt[:confirmed] }
     {
       final_status: confirmed ? "success" : "submitted_but_readback_pending",
@@ -302,7 +309,7 @@ class ExtendedMainnetLifecycleCheck
     )
   end
 
-  def poll_open_readback(expected_size:)
+  def poll_short_readback(expected_size:)
     3.times.map do |index|
       @sleeper.call(1) if index.positive?
       position = @venue.read_position(symbol: "ETH")
@@ -316,6 +323,23 @@ class ExtendedMainnetLifecycleCheck
     rescue ArgumentError
       { attempt: index + 1, confirmed: false }
     end
+  end
+
+  def expected_short_after(order_preview:, current_position:)
+    payload = order_preview.fetch(:payload)
+    qty = BigDecimal(payload.fetch(:rounded_size_eth).to_s)
+    current = short_size(current_position)
+
+    if payload.fetch(:extended_side).to_s == "BUY" && payload.fetch(:reduce_only)
+      [ current - qty, BigDecimal("0") ].max
+    else
+      current + qty
+    end
+  end
+
+  def rebalance_increase?(order)
+    payload = order&.fetch(:payload, {})
+    payload[:action].to_s == "increase_short" || (payload[:extended_side].to_s == "SELL" && payload[:reduce_only] == false)
   end
 
   def poll_flat_readback
