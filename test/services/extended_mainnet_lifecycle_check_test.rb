@@ -123,26 +123,28 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
   end
 
   test "dry run builds lifecycle payloads and submits nothing" do
-    result = build_service.run(
+    result = build_service(api_client: live_api_client).run(
       position: fake_position,
       mode: "delta_round_trip",
-      size_eth: "0.005",
+      size_eth: "0.01",
       confirmation: nil,
       dry_run: true
     )
 
     summaries = result.receipt.fetch(:order_payload_summaries)
     assert_equal "dry_run", result.status
-    assert_equal [ "buy", "sell" ], summaries.map { |summary| summary.fetch(:side) }
-    assert_equal [ true, false ], summaries.map { |summary| summary.fetch(:reduce_only) }
+    assert_equal [ "open", "decrease", "increase", "close" ], summaries.map { |summary| summary.fetch(:probe_leg) }
+    assert_equal [ "sell", "buy", "sell", "buy" ], summaries.map { |summary| summary.fetch(:side) }
+    assert_equal [ false, true, false, true ], summaries.map { |summary| summary.fetch(:reduce_only) }
+    assert_equal [ "0.02", "0.01", "0.01", "0.02" ], summaries.map { |summary| summary.fetch(:rounded_size_eth) }
     assert_equal "ETH-USD", result.receipt.dig(:market_metadata, :requested_market_symbol)
     assert_equal "env", result.receipt.dig(:market_metadata, :size_increment_source)
     assert_equal "env", result.receipt.dig(:market_metadata, :price_increment_source)
     assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :account_read_attempted)
     assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :positions_read_attempted)
     assert_equal true, result.receipt.dig(:read_only_account_diagnostics, :open_orders_read_attempted)
-    assert_equal "5000.0", result.receipt.dig(:read_only_account_diagnostics, :account_value_usd)
-    assert_equal "position_present", result.receipt.dig(:read_only_account_diagnostics, :current_position_status)
+    assert_equal "1999.79", result.receipt.dig(:read_only_account_diagnostics, :account_value_usd)
+    assert_equal "no_position", result.receipt.dig(:read_only_account_diagnostics, :current_position_status)
     assert_equal 0, result.receipt.fetch(:orders_placed)
     assert_equal 0, result.receipt.fetch(:signatures_created)
     assert_equal false, result.receipt.fetch(:submitted)
@@ -440,6 +442,59 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal false, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }
   end
 
+  test "live delta round trip opens reduces increases and closes with readback confirmation per leg" do
+    api_client = sequence_api_client(
+      states: [
+        [],
+        [ { market: "ETH-USD", side: "SHORT", size: "0.02", value: "42.4", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+        [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+        [ { market: "ETH-USD", side: "SHORT", size: "0.02", value: "42.4", openPrice: "2120", markPrice: "2120", status: "OPEN" } ],
+        []
+      ]
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "delta_round_trip",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal 4, signer.sign_calls
+    assert_equal 4, api_client.submit_calls
+    assert_equal 4, result.receipt.fetch(:orders_placed)
+    assert_equal 4, result.receipt.fetch(:signatures_created)
+    assert_equal [ "SELL", "BUY", "SELL", "BUY" ], api_client.submitted_payloads.map { |payload| payload.fetch("side") }
+    assert_equal [ false, true, false, true ], api_client.submitted_payloads.map { |payload| payload.fetch("reduceOnly") }
+    assert_equal [ "0.02", "0.01", "0.01", "0.02" ], api_client.submitted_payloads.map { |payload| payload.fetch("qty") }
+    assert_equal [ "open", "decrease", "increase", "close" ], result.receipt.fetch(:leg_summaries).map { |leg| leg.fetch(:leg) }
+    assert_equal true, result.receipt.fetch(:readback_attempts).all? { |attempt| attempt.fetch(:confirmed) }
+    assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
+  end
+
+  test "live delta round trip stops immediately when a leg readback fails" do
+    api_client = sequence_api_client(states: [ [], [] ])
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer, sleeper: ->(_) { }).run(
+      position: fake_position,
+      mode: "delta_round_trip",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal [ "open" ], result.receipt.fetch(:leg_summaries).map { |leg| leg.fetch(:leg) }
+  end
+
   test "live open blocks when current position exists" do
     api_client = live_api_client(before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01" } ])
     result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true)).run(
@@ -601,6 +656,51 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         @submit_response || { "status" => "OK", "data" => { "id" => "abc123" } }
       end
     end.new(before_positions, after_positions, open_orders, submit_response)
+  end
+
+  def sequence_api_client(states:, open_orders: [], submit_response: nil)
+    Class.new do
+      attr_reader :submit_calls, :submitted_payloads
+
+      define_method(:initialize) do |position_states, orders, response|
+        @position_states = position_states
+        @orders = orders
+        @submit_response = response
+        @submit_calls = 0
+        @submitted_payloads = []
+      end
+
+      def positions(market:)
+        @position_states.fetch([ @submit_calls, @position_states.size - 1 ].min)
+      end
+
+      def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
+      def account_info = { "status" => "ACTIVE", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
+      def open_orders(market:) = @orders
+      def fees(market:) = { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
+
+      def market(market:)
+        {
+          data: {
+            name: market,
+            tradingConfig: { minOrderSize: "0.01", minOrderSizeChange: "0.001", minPriceChange: "0.1" },
+            marketStats: { markPrice: "2120" },
+            l2Config: {
+              collateralId: "0x31857064564ed0ff978e687456963cba09c2c6985d8f9300a1de4962fafa054",
+              syntheticId: "0x4554482d3800000000000000000000",
+              collateralResolution: 1000000,
+              syntheticResolution: 1000000
+            }
+          }
+        }
+      end
+
+      def submit_order(payload)
+        @submit_calls += 1
+        @submitted_payloads << payload
+        @submit_response || { "status" => "OK", "data" => { "id" => "abc#{@submit_calls}" } }
+      end
+    end.new(states, open_orders, submit_response)
   end
 
   def live_env

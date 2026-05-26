@@ -643,6 +643,23 @@ implementation:
 | `open_only` | `0.01 ETH` | `SELL` | `false` | Submitted, filled, and confirmed by Extended readback as a short |
 | `close_only` | full current short, `0.01 ETH` | `BUY` | `true` | Submitted, filled, and confirmed by Extended readback as flat |
 
+`delta_round_trip` is implemented but not yet production-proven live. It is the
+next controlled proof path and must be run only after a dry-run review:
+
+1. Start flat with `open_orders_count=0`.
+2. Open `0.02 ETH` short with `SELL reduceOnly=false`.
+3. Confirm readback short is approximately `0.02 ETH`.
+4. Decrease `0.01 ETH` with `BUY reduceOnly=true`.
+5. Confirm readback short is approximately `0.01 ETH`.
+6. Increase `0.01 ETH` with `SELL reduceOnly=false`.
+7. Confirm readback short is approximately `0.02 ETH`.
+8. Close full `0.02 ETH` short with `BUY reduceOnly=true`.
+9. Confirm readback is flat/no position.
+
+Every leg requires signer health, creates at most one signature and one submit,
+requires readback confirmation before the next leg, and stops immediately if a
+leg is not confirmed. It never retries or duplicates orders automatically.
+
 Final state after the proof:
 
 - Extended readback is flat/no position.
@@ -674,6 +691,8 @@ Exact live gates used for the successful probes:
 - `open_only` additionally requires no current Extended position, visible
   account balance, valid market min size/notional, and `open_orders_count=0`.
 - `close_only` requires a current Extended short and `open_orders_count=0`.
+- `delta_round_trip` requires a flat starting state, visible account balance,
+  valid market min size/notional, and `open_orders_count=0` before each leg.
 
 ### Stark Signing Verification
 
@@ -728,7 +747,14 @@ No real API key or Stark key is used by this test.
    `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=close_only`
 10. Live close, only to flatten the controlled probe:
    `EXTENDED_MAINNET_PROBE_ENABLED=true EXTENDED_LIVE_ENABLED=true EXTENDED_AUTO_REBALANCE_ENABLED=false bin/rails extended:mainnet_lifecycle_check dry_run=false mode=close_only confirmation=I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
-11. Final flat readback:
+11. Dry-run delta round-trip:
+   `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=delta_round_trip size_eth=0.01`
+   This should show four planned legs: open `0.02`, decrease `0.01`,
+   increase `0.01`, close `0.02`, with `orders_placed: 0` and
+   `signatures_created: 0`.
+12. Live delta round-trip, only for a controlled proof after dry-run review:
+   `EXTENDED_MAINNET_PROBE_ENABLED=true EXTENDED_LIVE_ENABLED=true EXTENDED_AUTO_REBALANCE_ENABLED=false bin/rails extended:mainnet_lifecycle_check dry_run=false mode=delta_round_trip size_eth=0.01 confirmation=I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS`
+13. Final flat readback:
    `bin/rails extended:mainnet_lifecycle_check dry_run=true mode=close_only`
    should show `current_position_status: no_position` and a
    `close_only probe requires current Extended short position` blocker because

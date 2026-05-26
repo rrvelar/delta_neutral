@@ -62,7 +62,7 @@ class ExtendedMainnetLifecycleCheck
       )
     end
 
-    signed_result = sign_and_submit(order_preview: orders.first, mode: mode)
+    signed_result = mode == "delta_round_trip" ? sign_and_submit_sequence(orders: orders) : sign_and_submit(order_preview: orders.first, mode: mode)
     final_status = signed_result.fetch(:final_status)
     result(
       status: final_status,
@@ -89,9 +89,12 @@ class ExtendedMainnetLifecycleCheck
     when "close_only"
       [ @venue.close_preview(symbol: "ETH", size_eth: short_size(current_position)) ]
     when "delta_round_trip"
+      open_size = size_eth * 2
       [
-        @venue.rebalance_preview(symbol: "ETH", delta_eth: -size_eth, max_slippage: max_slippage),
-        @venue.rebalance_preview(symbol: "ETH", delta_eth: size_eth, max_slippage: max_slippage)
+        with_probe_leg(@venue.open_short_preview(symbol: "ETH", size_eth: open_size, max_slippage: max_slippage), "open"),
+        with_probe_leg(@venue.rebalance_preview(symbol: "ETH", delta_eth: -size_eth, max_slippage: max_slippage), "decrease"),
+        with_probe_leg(@venue.rebalance_preview(symbol: "ETH", delta_eth: size_eth, max_slippage: max_slippage), "increase"),
+        with_probe_leg(@venue.close_preview(symbol: "ETH", size_eth: open_size), "close")
       ]
     when "close_reopen"
       [
@@ -103,10 +106,14 @@ class ExtendedMainnetLifecycleCheck
     end
   end
 
+  def with_probe_leg(order, leg)
+    order.merge(probe_leg: leg, payload: order.fetch(:payload).merge(probe_leg: leg))
+  end
+
   def structural_blockers(mode:, orders:, dry_run:, signer_health:)
     blockers = []
     blockers << "mode must be one of #{MODES.join(', ')}" unless mode.in?(MODES)
-    blockers << "Extended live submit currently supports open_only, rebalance_delta, and close_only probes only" if !dry_run && !mode.in?(%w[open_only rebalance_delta close_only])
+    blockers << "Extended live submit currently supports open_only, rebalance_delta, delta_round_trip, and close_only probes only" if !dry_run && !mode.in?(%w[open_only rebalance_delta delta_round_trip close_only])
     blockers.concat(dry_run ? @venue.blockers : @venue.live_readiness_blockers)
     blockers.concat(orders.flat_map { |order| order.fetch(:blockers, []) }) if dry_run
     blockers.concat(orders.flat_map { |order| @venue.live_order_blockers(preview: order) }) unless dry_run
@@ -166,9 +173,51 @@ class ExtendedMainnetLifecycleCheck
       short_size(current_position).positive? ? [] : [ "close_only probe requires current Extended short position" ]
     when "rebalance_delta"
       short_size(current_position).positive? ? [] : [ "rebalance_delta probe requires current Extended short position" ]
+    when "delta_round_trip"
+      short_size(current_position).zero? ? [] : [ "delta_round_trip probe requires Extended to be flat before opening the probe short" ]
     else
       []
     end
+  end
+
+  def sign_and_submit_sequence(orders:)
+    legs = []
+
+    orders.each do |order_preview|
+      open_orders_count = @venue.account_state[:open_orders_count].to_i
+      if open_orders_count.nonzero?
+        legs << {
+          leg: order_preview[:probe_leg],
+          final_status: "blocked_before_submit",
+          blockers: [ "delta_round_trip leg #{order_preview[:probe_leg]} requires open_orders_count=0" ],
+          orders_placed: 0,
+          signatures_created: 0,
+          submitted: false
+        }
+        break
+      end
+
+      leg_mode = order_preview[:probe_leg] == "close" ? "close_only" : "rebalance_delta"
+      leg_result = sign_and_submit(order_preview: order_preview, mode: leg_mode).merge(leg: order_preview[:probe_leg])
+      legs << leg_result
+      break unless leg_result[:final_status] == "success"
+    end
+
+    sequence_status = legs.size == orders.size && legs.all? { |leg| leg[:final_status] == "success" } ? "success" : legs.last&.fetch(:final_status, "blocked_before_submit")
+    {
+      final_status: sequence_status,
+      legs: legs,
+      unsigned_order: legs.last&.fetch(:unsigned_order, nil),
+      signer_response: legs.last&.fetch(:signer_response, nil),
+      submit_payload: legs.last&.fetch(:submit_payload, nil),
+      submit_response: legs.last&.fetch(:submit_response, nil),
+      exchange_order_id: legs.last&.fetch(:exchange_order_id, nil),
+      readback_attempts: legs.flat_map { |leg| Array(leg[:readback_attempts]).map { |attempt| attempt.merge(leg: leg[:leg]) } },
+      orders_placed: legs.sum { |leg| leg[:orders_placed].to_i },
+      signatures_created: legs.sum { |leg| leg[:signatures_created].to_i },
+      submitted: legs.any? { |leg| leg[:submitted] },
+      blockers: legs.flat_map { |leg| Array(leg[:blockers]) }.uniq
+    }
   end
 
   def sign_and_submit(order_preview:, mode:)
@@ -225,15 +274,33 @@ class ExtendedMainnetLifecycleCheck
       submit_payload: execution && execution[:submit_payload],
       submit_response: execution && execution[:submit_response],
       exchange_order_id: execution && execution[:exchange_order_id],
+      leg_summaries: execution && execution[:legs]&.map { |leg| leg_summary(leg) },
       readback_attempts: execution ? execution[:readback_attempts] : [],
       orders_placed: execution ? execution[:orders_placed] : 0,
       signatures_created: execution ? execution[:signatures_created] : 0,
       submitted: execution ? execution[:submitted] : false,
       final_status: status,
-      blockers: blockers.uniq,
+      blockers: (blockers + Array(execution && execution[:blockers])).uniq,
       warnings: [ "Extended mainnet path is manual-only and controlled by explicit live gates." ]
     }
-    Result.new(status, blockers.uniq, receipt[:warnings], receipt)
+    Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def leg_summary(leg)
+    {
+      leg: leg[:leg],
+      final_status: leg[:final_status],
+      exchange_order_id: leg[:exchange_order_id],
+      orders_placed: leg[:orders_placed],
+      signatures_created: leg[:signatures_created],
+      submitted: leg[:submitted],
+      unsigned_order: sanitize_submit_payload(leg[:unsigned_order]),
+      signer_response: leg[:signer_response],
+      submit_payload: leg[:submit_payload],
+      submit_response: leg[:submit_response],
+      readback_attempts: leg[:readback_attempts],
+      blockers: leg[:blockers]
+    }.compact
   end
 
   def capped_size(size_eth)
