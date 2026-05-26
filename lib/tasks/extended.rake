@@ -82,13 +82,19 @@ namespace :extended do
   task auto_rebalance_once: :environment do
     dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
     confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
+    mode = ENV["mode"] || ENV["MODE"]
+    probe = ActiveModel::Type::Boolean.new.cast(ENV["probe"] || ENV["PROBE"])
+    max_size_eth = ENV["max_size_eth"] || ENV["MAX_SIZE_ETH"] || ENV["size_eth"] || ENV["SIZE_ETH"]
     position = extended_probe_position
     env = extended_probe_env
     result = ExtendedAutoRebalanceOnce.new(env: env).run(
       position: position,
       confirmation: confirmation,
       dry_run: dry_run,
-      max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01"
+      max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01",
+      mode: mode,
+      probe: probe,
+      max_size_eth: max_size_eth
     )
 
     receipt_path = Rails.root.join("storage", "extended_auto_rebalance_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")

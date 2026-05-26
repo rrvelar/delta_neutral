@@ -138,6 +138,67 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 0, client.submit_calls
   end
 
+  test "flat Extended with large target blocks full one-shot above cap before signing" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [])
+
+    result = build_service(env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH"), api_client: client, signer_client: signer).run(
+      position: fake_position(target: "2.4"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_equal "0.6", result.receipt.fetch(:target_short_eth)
+    assert_equal "0.6", result.receipt.fetch(:requested_order_size_eth)
+    assert_equal "0.02", result.receipt.fetch(:cap_eth)
+    assert_equal true, result.receipt.fetch(:cap_exceeded)
+    assert_equal false, result.receipt.fetch(:partial_probe)
+    assert_includes result.blockers, "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "probe mode caps a large one-shot order and marks partial probe" do
+    result = build_service(env: extended_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH"), api_client: api_client(before_positions: [])).run(
+      position: fake_position(target: "2.4"),
+      dry_run: true,
+      mode: "probe_rebalance",
+      max_size_eth: "0.01"
+    )
+
+    order = result.receipt.fetch(:intended_order)
+    assert_equal "dry_run", result.status
+    assert_equal "0.6", result.receipt.fetch(:raw_delta_eth)
+    assert_equal "0.6", result.receipt.fetch(:requested_order_size_eth)
+    assert_equal "0.01", result.receipt.fetch(:capped_order_size_eth)
+    assert_equal "0.01", order.fetch(:rounded_size_eth)
+    assert_equal true, result.receipt.fetch(:cap_exceeded)
+    assert_equal true, result.receipt.fetch(:partial_probe)
+    assert_equal false, result.receipt.fetch(:submitted)
+  end
+
+  test "full migration requires migration gate and selected Extended venue" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [], after_positions: [ extended_short("0.6") ])
+
+    result = build_service(
+      env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH").merge("EXTENDED_MIGRATION_REBALANCE_ENABLED" => "true"),
+      api_client: client,
+      signer_client: signer
+    ).run(
+      position: fake_position(target: "2.4"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, result.receipt.fetch(:migration_mode)
+    assert_equal "0.6", client.submitted_payload.fetch("qty")
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, client.submit_calls
+  end
+
   test "live one-shot blocks when Nado still has a short" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.20") ])
@@ -368,7 +429,8 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
       "EXTENDED_REQUIRED_MARGIN_MODE" => "isolated",
       "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true",
       "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid",
-      "EXTENDED_STARK_PUBLIC_KEY" => "0x1234...abcd"
+      "EXTENDED_STARK_PUBLIC_KEY" => "0x1234...abcd",
+      "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.1"
     ).except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT")
   end
 

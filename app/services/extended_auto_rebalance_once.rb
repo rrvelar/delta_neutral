@@ -11,11 +11,17 @@ class ExtendedAutoRebalanceOnce
     @sleeper = sleeper
   end
 
-  def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true)
+  def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil)
     current_position = @venue.read_position(symbol: "ETH")
     account_state = @venue.account_state
     signer_health = signer_health_for_diagnostics
-    plan = build_plan(position: position, current_position: current_position, max_slippage: max_slippage)
+    plan = build_plan(
+      position: position,
+      current_position: current_position,
+      max_slippage: max_slippage,
+      probe_mode: probe_mode?(mode: mode, probe: probe),
+      max_size_eth: max_size_eth
+    )
     conflict_state = conflict_state_for(position: position, dry_run: dry_run)
     blockers = readiness_blockers(
       position: position,
@@ -42,11 +48,11 @@ class ExtendedAutoRebalanceOnce
       )
     end
 
-    lifecycle = ExtendedMainnetLifecycleCheck.new(env: lifecycle_env, venue: @venue, signer_client: @signer_client, sleeper: @sleeper).run(
+    lifecycle = ExtendedMainnetLifecycleCheck.new(env: lifecycle_env(plan), venue: @venue, signer_client: @signer_client, sleeper: @sleeper).run(
       position: position,
-      mode: "rebalance_delta",
+      mode: lifecycle_mode_for(plan),
       size_eth: plan.fetch(:order_size_eth),
-      delta_eth: plan.fetch(:delta_eth),
+      delta_eth: lifecycle_mode_for(plan) == "rebalance_delta" ? plan.fetch(:delta_eth) : nil,
       confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
       dry_run: false,
       max_slippage: max_slippage
@@ -67,23 +73,34 @@ class ExtendedAutoRebalanceOnce
 
   private
 
-  def build_plan(position:, current_position:, max_slippage:)
+  def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:)
     valuation = PositionValuation.current(position)
     target = valuation.weth_exposure && position.hedge ? valuation.weth_exposure * position.hedge.target : nil
     current_short = short_size(current_position)
     tolerance = target && position.hedge ? target * position.hedge.tolerance : nil
     delta = target ? target - current_short : nil
     action = intended_action(delta: delta, tolerance: tolerance)
-    preview = preview_for(action: action, delta: delta, current_short: current_short, max_slippage: max_slippage)
+    cap = one_shot_cap(max_size_eth)
+    requested_order_size = order_size_decimal(action: action, delta: delta)
+    cap_exceeded = requested_order_size && requested_order_size > cap
+    capped_delta = probe_mode && cap_exceeded ? capped_delta(delta: delta, cap: cap) : delta
+    preview = preview_for(action: action, delta: capped_delta, current_short: current_short, max_slippage: max_slippage)
 
     {
       target_short_eth: decimal_string(target),
       current_short_eth: current_short.to_s("F"),
       current_side: current_position&.fetch(:side, nil),
-      delta_eth: decimal_string(delta),
+      raw_delta_eth: decimal_string(delta),
+      delta_eth: decimal_string(capped_delta),
       tolerance_eth: decimal_string(tolerance),
       intended_action: action,
-      order_size_eth: order_size_for(action: action, delta: delta),
+      requested_order_size_eth: decimal_string(requested_order_size),
+      capped_order_size_eth: order_size_for(action: action, delta: capped_delta),
+      order_size_eth: order_size_for(action: action, delta: capped_delta),
+      cap_eth: cap.to_s("F"),
+      cap_exceeded: cap_exceeded == true,
+      partial_probe: probe_mode && cap_exceeded == true,
+      migration_mode: migration_mode?,
       intended_order: preview&.fetch(:payload, nil),
       order_validation_blockers: Array(preview&.dig(:payload, :validation_blockers)),
       preview_blockers: preview&.fetch(:blockers, []) || []
@@ -106,6 +123,8 @@ class ExtendedAutoRebalanceOnce
     blockers << "Extended market metadata unavailable" unless account_state[:market_metadata_available]
     blockers << "Extended one-shot requires open_orders_count=0" unless account_state[:open_orders_count].to_i.zero?
     blockers << "Current Extended position is long; manual action required" if plan[:current_side].to_s == "long"
+    blockers << "Extended one-shot order size #{plan[:requested_order_size_eth]} exceeds EXTENDED_ONE_SHOT_MAX_SIZE_ETH #{plan[:cap_eth]}; use probe mode or explicit migration gate" if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
+    blockers << "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration" if plan[:cap_exceeded] && !plan[:partial_probe] && !migration_mode?
     blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && position.hedge&.execution_venue != "extended"
     blockers << "Current Nado position must be flat before Extended live rebalance" if conflict_state[:nado_short_eth].to_d.positive?
     blockers.concat(signer_health_blockers(signer_health)) unless dry_run
@@ -122,9 +141,17 @@ class ExtendedAutoRebalanceOnce
       timestamp: @now.call.utc.iso8601,
       target_short_eth: plan[:target_short_eth],
       current_short_eth: plan[:current_short_eth],
+      raw_delta_eth: plan[:raw_delta_eth],
       delta_eth: plan[:delta_eth],
       tolerance_eth: plan[:tolerance_eth],
       intended_action: plan[:intended_action],
+      requested_order_size_eth: plan[:requested_order_size_eth],
+      capped_order_size_eth: plan[:capped_order_size_eth],
+      cap_eth: plan[:cap_eth],
+      cap_exceeded: plan[:cap_exceeded],
+      partial_probe: plan[:partial_probe],
+      migration_mode: plan[:migration_mode],
+      selected_hedge_venue: position.hedge&.execution_venue,
       intended_order: plan[:intended_order],
       readiness_gates: {
         live_enabled: bool_env("EXTENDED_LIVE_ENABLED"),
@@ -150,7 +177,7 @@ class ExtendedAutoRebalanceOnce
       signatures_created: execution ? execution[:signatures_created] : 0,
       submitted: execution ? execution[:submitted] : false,
       blockers: blockers.uniq,
-      warnings: [ "Extended one-shot auto is manual-only; continuous auto remains separately gated." ]
+      warnings: warnings_for(plan)
     }.compact
     Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
   end
@@ -179,6 +206,39 @@ class ExtendedAutoRebalanceOnce
     return nil if action == "no_op" || delta.nil?
 
     delta.abs.to_s("F")
+  end
+
+  def order_size_decimal(action:, delta:)
+    return nil if action == "no_op" || delta.nil?
+
+    delta.abs
+  end
+
+  def capped_delta(delta:, cap:)
+    return delta unless delta
+
+    delta.negative? ? -cap : cap
+  end
+
+  def one_shot_cap(max_size_eth)
+    BigDecimal((max_size_eth.presence || @env["EXTENDED_ONE_SHOT_MAX_SIZE_ETH"].presence || "0.02").to_s)
+  rescue ArgumentError
+    BigDecimal("0.02")
+  end
+
+  def probe_mode?(mode:, probe:)
+    ActiveModel::Type::Boolean.new.cast(probe) || mode.to_s == "probe_rebalance"
+  end
+
+  def migration_mode?
+    bool_env("EXTENDED_MIGRATION_REBALANCE_ENABLED")
+  end
+
+  def warnings_for(plan)
+    warnings = [ "Extended one-shot auto is manual-only; continuous auto remains separately gated." ]
+    warnings << "Extended probe mode capped the intended order to #{plan[:capped_order_size_eth]} ETH; this is a partial probe, not a full rebalance." if plan[:partial_probe]
+    warnings << "Extended full-target one-shot exceeds probe cap and requires explicit migration mode." if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
+    warnings
   end
 
   def short_size(position)
@@ -217,11 +277,20 @@ class ExtendedAutoRebalanceOnce
     blockers
   end
 
-  def lifecycle_env
+  def lifecycle_env(plan)
     @env.to_h.merge(
       "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
-      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false"
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "EXTENDED_PROBE_MAX_SIZE_ETH" => plan.fetch(:order_size_eth).to_s
     )
+  end
+
+  def lifecycle_mode_for(plan)
+    return "open_only" if plan[:intended_action] == "increase_short" && BigDecimal(plan[:current_short_eth].to_s).zero?
+
+    "rebalance_delta"
+  rescue ArgumentError
+    "rebalance_delta"
   end
 
   def decimal_string(value)
