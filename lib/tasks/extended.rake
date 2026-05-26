@@ -107,6 +107,15 @@ namespace :extended do
     abort("Extended one-shot auto rebalance did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 
+  desc "Read-only Extended continuous auto readiness check"
+  task auto_readiness: :environment do
+    position = extended_probe_position
+    result = ExtendedAutoReadiness.new(env: extended_probe_env).report(position: position)
+
+    puts JSON.pretty_generate(result)
+    abort("Extended continuous auto readiness blocked: #{result.fetch(:blockers).join('; ')}") unless result.fetch(:continuous_auto_ready)
+  end
+
   desc "Stepwise Ethereal to Extended migration; dry-run by default"
   task migration_step: :environment do
     dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))

@@ -213,7 +213,8 @@ class PositionsController < ApplicationController
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
       live_preflight: target ? selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) : nil,
       action_live_preflights: selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position),
-      migration_full_readiness: @selected_hedge_venue == "extended" ? extended_migration_full_readiness(target: target, extended_short: current_short) : nil
+      migration_full_readiness: @selected_hedge_venue == "extended" ? extended_migration_full_readiness(target: target, extended_short: current_short) : nil,
+      auto_readiness: @selected_hedge_venue == "extended" ? ExtendedAutoReadiness.new.report(position: @position) : nil
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }

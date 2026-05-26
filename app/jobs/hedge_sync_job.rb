@@ -315,8 +315,9 @@ class HedgeSyncJob < ApplicationJob
   end
 
   def sync_extended_aerodrome_hedge(hedge)
-    unless extended_auto_rebalance_enabled?
-      Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — EXTENDED_AUTO_REBALANCE_ENABLED must be true")
+    readiness = ExtendedAutoReadiness.new.report(position: hedge.position)
+    unless readiness.fetch(:continuous_auto_ready)
+      Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — #{readiness.fetch(:blockers).join('; ')}")
       return
     end
 

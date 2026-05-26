@@ -852,6 +852,36 @@ sudo systemctl status delta-neutral-extended-signer --no-pager
 curl -s http://172.18.0.1:8776/health
 ```
 
+For a permanent signer service, keep the private key in
+`/etc/delta-neutral/keys/extended-stark.key` with `root:root` ownership and
+`0600` permissions. Use a systemd drop-in or reviewed environment file outside
+the repo to opt in the signer:
+
+```bash
+sudo systemctl edit delta-neutral-extended-signer
+```
+
+Example non-secret drop-in values:
+
+```ini
+[Service]
+Environment=EXTENDED_SIGNER_ENABLED=true
+Environment=EXTENDED_SIGNER_ENABLE_VERIFIED_ALGORITHM=true
+Environment=EXTENDED_SIGNER_HOST=172.18.0.1
+Environment=EXTENDED_SIGNER_PORT=8776
+Environment=EXTENDED_STARK_PRIVATE_KEY_FILE=/etc/delta-neutral/keys/extended-stark.key
+Environment=EXTENDED_STARK_PUBLIC_KEY=0x...
+```
+
+Then reload and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable delta-neutral-extended-signer
+sudo systemctl restart delta-neutral-extended-signer
+curl -s http://172.18.0.1:8776/health
+```
+
 For live probes, `/health` must show `ok=true`, `verified_algorithm=true`,
 `signing_enabled=true`, `supported_exchanges=["Extended"]`, and
 `supported_actions=["sign_extended_order"]`. If it shows
@@ -990,3 +1020,40 @@ bin/rails extended:migration_finalize dry_run=false position_id=3 confirmation=I
 After finalization, choose which venue auto should run and enable only that
 venue's auto gate. Do not leave Ethereal auto enabled during migration, because
 it can fight the stepwise transfer by restoring Ethereal to the full target.
+
+### Extended Continuous Auto Readiness
+
+After full migration and `extended:migration_finalize`, continuous Extended auto
+is still disabled until the operator enables `EXTENDED_AUTO_REBALANCE_ENABLED`
+outside the repo. Use the read-only readiness task before changing that gate:
+
+```bash
+bin/rails extended:auto_readiness position_id=3
+```
+
+The readiness task never signs or submits. It reports:
+
+- `execution_venue`
+- Extended current short, target short, drift, and tolerance
+- Ethereal flat status
+- Nado flat status
+- Extended leverage/margin gate
+- signer health
+- `open_orders_count`
+- `EXTENDED_AUTO_REBALANCE_ENABLED`
+- `EXTENDED_LIVE_ENABLED`
+- `continuous_auto_ready`
+
+Continuous Extended auto is allowed only when all of these are true:
+
+- `hedge.execution_venue == "extended"`
+- Ethereal is flat
+- Nado is flat
+- `AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_AUTO_REBALANCE_ENABLED=true`
+- `EXTENDED_LIVE_ENABLED=true`
+- signer health is ok, verified, signing-enabled, and supports
+  `Extended/sign_extended_order`
+- Extended leverage/margin gate passes
+- account balance/collateral and market metadata are visible
+- `open_orders_count=0`

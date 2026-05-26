@@ -49,6 +49,7 @@ end %>
 <% selected_action_warnings = (active_preflight[:warnings] || []).uniq %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
+<% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
 <% hedge_accounting = @hedge_venue_accounting || {} %>
 <% accounting_components = hedge_accounting[:components] || {} %>
 <% rewards_report = @aerodrome_rewards_report || {} %>
@@ -200,6 +201,10 @@ end %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Current margin</span><span class="text-white"><%= selected_read_only_diagnostics[:current_margin_mode] || "Unavailable" %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">One-shot auto gate</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_ONE_SHOT_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Continuous auto</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_AUTO_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Auto readiness</span><span class="<%= extended_auto_readiness[:continuous_auto_ready] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:continuous_auto_ready] ? "ready" : "blocked" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Ethereal flat</span><span class="<%= extended_auto_readiness[:ethereal_flat] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:ethereal_flat].nil? ? "unknown" : extended_auto_readiness[:ethereal_flat] %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Nado flat</span><span class="<%= extended_auto_readiness[:nado_flat] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:nado_flat].nil? ? "unknown" : extended_auto_readiness[:nado_flat] %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Signer</span><span class="<%= extended_auto_readiness.dig(:signer_health, :ok) ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness.dig(:signer_health, :ok) ? "ok" : "blocked" %></span></div>
             <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>
@@ -226,6 +231,9 @@ end %>
                   <div><span class="text-yellow-300">Target</span><br><%= format_venue_eth_amount(migration_full_readiness[:target_short_eth]) %> ETH</div>
                   <div><span class="text-yellow-300">Expected final</span><br><%= format_venue_eth_amount(migration_full_readiness[:expected_extended_short_after]) %> ETH Extended / <%= format_venue_eth_amount(migration_full_readiness[:expected_ethereal_short_after]) %> ETH Ethereal</div>
                 </div>
+              <% end %>
+              <% if extended_auto_readiness[:blockers].present? %>
+                <p class="mt-3 break-words border-t border-yellow-900/60 pt-3 text-yellow-200">Continuous auto readiness blockers: <%= extended_auto_readiness[:blockers].uniq.join("; ") %></p>
               <% end %>
             </div>
           <% end %>

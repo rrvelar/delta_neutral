@@ -223,6 +223,53 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "extended hedge sync skips when readiness blocks continuous auto" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    readiness = Struct.new(:report_payload) do
+      def report(position:)
+        report_payload
+      end
+    end.new({ continuous_auto_ready: false, blockers: [ "Ethereal must be flat before Extended continuous auto" ] })
+
+    ExtendedAutoReadiness.stub(:new, readiness) do
+      ExtendedAutoRebalanceOnce.stub(:new, ->(*) { raise "ExtendedAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  end
+
+  test "extended hedge sync invokes Extended branch only when readiness passes" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    readiness = Struct.new(:report_payload) do
+      def report(position:)
+        report_payload
+      end
+    end.new({ continuous_auto_ready: true, blockers: [] })
+    calls = []
+    runner = Struct.new(:calls) do
+      def run(position:, dry_run:, one_shot:, max_slippage:)
+        calls << { position: position, dry_run: dry_run, one_shot: one_shot, max_slippage: max_slippage }
+        ExtendedAutoRebalanceOnce::Result.new("no_op", [], [], { final_status: "no_op", current_short_eth: "0", target_short_eth: "0", readback_attempts: [] })
+      end
+    end.new(calls)
+
+    ExtendedAutoReadiness.stub(:new, readiness) do
+      ExtendedAutoRebalanceOnce.stub(:new, runner) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal 1, calls.size
+    assert_equal false, calls.first.fetch(:dry_run)
+    assert_equal false, calls.first.fetch(:one_shot)
+  end
+
   test "nado hedge sync increases short from Mellow target and readback" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" })
