@@ -236,6 +236,90 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 0, client.submit_calls
   end
 
+  test "full one-shot with selected Ethereal venue remains blocked" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [])
+
+    result = build_service(env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH"), api_client: client, signer_client: signer).run(
+      position: fake_position(target: "2.4", execution_venue: "ethereal"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_equal true, result.receipt.fetch(:cap_exceeded)
+    assert_equal false, result.receipt.fetch(:partial_probe)
+    assert_includes result.blockers, "Position hedge execution_venue must be extended for Extended live rebalance"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "probe rebalance with selected Ethereal venue passes selected venue gate and submits one capped order" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [], after_positions: [ extended_short("0.01") ])
+    position = fake_position(target: "2.4", execution_venue: "ethereal")
+
+    result = build_service(env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH"), api_client: client, signer_client: signer).run(
+      position: position,
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION,
+      mode: "probe_rebalance",
+      max_size_eth: "0.01"
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_not_includes result.blockers, "Position hedge execution_venue must be extended for Extended live rebalance"
+    assert_equal "ethereal", position.hedge.execution_venue
+    assert_equal true, result.receipt.fetch(:probe_mode)
+    assert_equal true, result.receipt.fetch(:partial_probe)
+    assert_equal false, result.receipt.fetch(:migration_mode)
+    assert_equal "ethereal", result.receipt.fetch(:selected_hedge_venue)
+    assert_equal "0.01", result.receipt.fetch(:capped_order_size_eth)
+    assert_equal "0.01", result.receipt.fetch(:cap_eth)
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, client.submit_calls
+    assert_equal "0.01", client.submitted_payload.fetch("qty")
+  end
+
+  test "probe rebalance blocks without signer before submit" do
+    signer = CountingSigner.new(ok: false, verified_algorithm: true, signing_enabled: false)
+    client = api_client(before_positions: [])
+
+    result = build_service(env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH"), api_client: client, signer_client: signer).run(
+      position: fake_position(target: "2.4", execution_venue: "ethereal"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION,
+      mode: "probe_rebalance",
+      max_size_eth: "0.01"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended signer health must advertise Extended/sign_extended_order support"
+    assert_not_includes result.blockers, "Position hedge execution_venue must be extended for Extended live rebalance"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "probe rebalance blocks if target order is not partial" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(env: live_env, api_client: client, signer_client: signer).run(
+      position: fake_position(tolerance: "0.001", execution_venue: "ethereal"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION,
+      mode: "probe_rebalance",
+      max_size_eth: "0.1"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_equal true, result.receipt.fetch(:probe_mode)
+    assert_equal false, result.receipt.fetch(:partial_probe)
+    assert_includes result.blockers, "Extended probe_rebalance must be a capped partial probe; full target orders require migration mode"
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
   test "live one-shot blocks when order size is below Extended min size" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.245") ])

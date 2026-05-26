@@ -98,6 +98,7 @@ class ExtendedAutoRebalanceOnce
       capped_order_size_eth: order_size_for(action: action, delta: capped_delta),
       order_size_eth: order_size_for(action: action, delta: capped_delta),
       cap_eth: cap.to_s("F"),
+      probe_mode: probe_mode,
       cap_exceeded: cap_exceeded == true,
       partial_probe: probe_mode && cap_exceeded == true,
       migration_mode: migration_mode?,
@@ -115,6 +116,7 @@ class ExtendedAutoRebalanceOnce
     if one_shot
       blockers << "EXTENDED_ONE_SHOT_REBALANCE_ENABLED must be true" unless dry_run || bool_env("EXTENDED_ONE_SHOT_REBALANCE_ENABLED")
       blockers << "submitted confirmation must equal #{CONFIRMATION}" unless dry_run || confirmation == CONFIRMATION
+      blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false for Extended probe_rebalance" if plan[:probe_mode] && bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
     else
       blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must be true" unless dry_run || bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
     end
@@ -125,7 +127,8 @@ class ExtendedAutoRebalanceOnce
     blockers << "Current Extended position is long; manual action required" if plan[:current_side].to_s == "long"
     blockers << "Extended one-shot order size #{plan[:requested_order_size_eth]} exceeds EXTENDED_ONE_SHOT_MAX_SIZE_ETH #{plan[:cap_eth]}; use probe mode or explicit migration gate" if plan[:cap_exceeded] && !plan[:partial_probe] && !plan[:migration_mode]
     blockers << "EXTENDED_MIGRATION_REBALANCE_ENABLED must be true for full-target Extended one-shot migration" if plan[:cap_exceeded] && !plan[:partial_probe] && !migration_mode?
-    blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && position.hedge&.execution_venue != "extended"
+    blockers << "Extended probe_rebalance must be a capped partial probe; full target orders require migration mode" if plan[:probe_mode] && !plan[:partial_probe] && plan[:intended_action] != "no_op"
+    blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && !plan[:partial_probe] && position.hedge&.execution_venue != "extended"
     blockers << "Current Nado position must be flat before Extended live rebalance" if conflict_state[:nado_short_eth].to_d.positive?
     blockers.concat(signer_health_blockers(signer_health)) unless dry_run
     blockers.uniq
@@ -148,6 +151,7 @@ class ExtendedAutoRebalanceOnce
       requested_order_size_eth: plan[:requested_order_size_eth],
       capped_order_size_eth: plan[:capped_order_size_eth],
       cap_eth: plan[:cap_eth],
+      probe_mode: plan[:probe_mode],
       cap_exceeded: plan[:cap_exceeded],
       partial_probe: plan[:partial_probe],
       migration_mode: plan[:migration_mode],
@@ -231,7 +235,7 @@ class ExtendedAutoRebalanceOnce
   end
 
   def migration_mode?
-    bool_env("EXTENDED_MIGRATION_REBALANCE_ENABLED")
+    bool_env("EXTENDED_MIGRATION_REBALANCE_ENABLED") == true
   end
 
   def warnings_for(plan)
