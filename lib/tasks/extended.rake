@@ -125,7 +125,7 @@ namespace :extended do
 
     puts JSON.pretty_generate(result.receipt)
     puts "Receipt appended to #{receipt_path}"
-    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "blocked_before_submit", "extended_leg_not_confirmed", "partial_migration_manual_action_required" ]
+    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "blocked_before_submit", "extended_leg_not_confirmed", "partial_migration_manual_action_required", "combined_outside_tolerance_manual_action_required" ]
     abort("Extended migration step did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 

@@ -25,9 +25,34 @@ class ExtendedMigrationStepTest < ActiveSupport::TestCase
     assert_equal false, result.receipt.fetch(:planned_extended_leg).fetch(:reduce_only)
     assert_equal "buy", result.receipt.fetch(:planned_ethereal_leg).fetch(:side)
     assert_equal true, result.receipt.fetch(:planned_ethereal_leg).fetch(:reduce_only)
+    assert_equal "0.24", result.receipt.fetch(:ethereal_short_expected_after)
+    assert_equal "0.01", result.receipt.fetch(:extended_short_expected_after)
+    assert_equal "0.25", result.receipt.fetch(:combined_short_expected_after)
     assert_equal 0, result.receipt.fetch(:orders_placed)
     assert_equal 0, result.receipt.fetch(:signatures_created)
     assert_equal false, result.receipt.fetch(:submitted)
+  end
+
+  test "live blocks when Ethereal auto is enabled" do
+    signer = FakeSigner.new
+    result = build_service(env: live_env.merge("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "true"), signer: signer).run(
+      position: fake_position,
+      dry_run: false,
+      confirmation: ExtendedMigrationStep::CONFIRMATION
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Disable Ethereal auto-rebalance before stepwise migration; otherwise Ethereal may fight the migration."
+    assert_equal true, result.receipt.fetch(:ethereal_auto_enabled)
+    assert_equal 0, signer.sign_calls
+  end
+
+  test "dry-run warns when Ethereal auto is enabled" do
+    result = build_service(env: live_env.merge("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "true")).run(position: fake_position, dry_run: true)
+
+    assert_equal "dry_run", result.status
+    assert_equal true, result.receipt.fetch(:ethereal_auto_enabled)
+    assert_includes result.receipt.fetch(:warnings), "Disable Ethereal auto-rebalance before live migration; otherwise Ethereal may fight the migration."
   end
 
   test "live blocks without migration gate" do
@@ -136,6 +161,28 @@ class ExtendedMigrationStepTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
     assert_equal "0.01", result.receipt.fetch(:extended_short_after)
     assert_equal "0.24", result.receipt.fetch(:ethereal_short_after)
+    assert_equal "0.24", result.receipt.fetch(:ethereal_short_actual_after)
+    assert_equal "0.01", result.receipt.fetch(:extended_short_actual_after)
+    assert_equal "0.25", result.receipt.fetch(:combined_short_actual_after)
+    assert_equal "0.0", result.receipt.fetch(:combined_delta_after)
+  end
+
+  test "combined outside tolerance after both legs requires manual status" do
+    signer = FakeSigner.new
+    extended = FakeExtendedVenue.new(short: "0", applied_extra: "0.05")
+    ethereal = FakeEtherealService.new(short: "0.25")
+
+    result = build_service(env: live_env, extended_venue: extended, ethereal_service: ethereal, signer: signer).run(
+      position: fake_position,
+      dry_run: false,
+      confirmation: ExtendedMigrationStep::CONFIRMATION
+    )
+
+    assert_equal "combined_outside_tolerance_manual_action_required", result.status
+    assert_equal BigDecimal("0.30"), BigDecimal(result.receipt.fetch(:combined_short_actual_after))
+    assert_includes result.receipt.fetch(:warnings), "Combined Ethereal + Extended short is outside hedge tolerance after migration step; manual review required."
+    assert_equal 1, extended.submit_calls
+    assert_equal 1, ethereal.submit_calls
   end
 
   test "Ethereal failure after Extended success requires manual action and no retry" do
@@ -233,9 +280,10 @@ class ExtendedMigrationStepTest < ActiveSupport::TestCase
   class FakeExtendedVenue
     attr_reader :submit_calls
 
-    def initialize(short:, margin_blockers: [])
+    def initialize(short:, margin_blockers: [], applied_extra: "0")
       @short = BigDecimal(short.to_s)
       @margin_blockers = margin_blockers
+      @applied_extra = BigDecimal(applied_extra.to_s)
       @submit_calls = 0
     end
 
@@ -267,7 +315,7 @@ class ExtendedMigrationStepTest < ActiveSupport::TestCase
 
     def apply_extended_step(size)
       @submit_calls += 1
-      @short += BigDecimal(size.to_s)
+      @short += BigDecimal(size.to_s) + @applied_extra
     end
 
     private

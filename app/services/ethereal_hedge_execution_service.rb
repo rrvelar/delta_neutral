@@ -262,6 +262,7 @@ class EtherealHedgeExecutionService
         margin_mode: "cross",
         account_value_usd: decimal_string(account_value),
         estimated_effective_leverage: decimal_string(effective),
+        expected_after_short_eth: decimal_string(expected_short_after(action: action, size_eth: signed_size, current_position: current_position)),
         client_order_id: client_order_id,
         onchain_id: ethereal_onchain_id
       },
@@ -591,7 +592,7 @@ class EtherealHedgeExecutionService
       submitted_order_summary: sanitized_order_summary(order),
       submit_response_classification: submit_response,
       exchange_order_id: submit_response&.dig(:exchange_order_id),
-      expected_short_eth: decimal_string(expected_short_after(action: action, size_eth: order.dig(:summary, :rounded_size_eth) || 0, current_position: pre_position)),
+      expected_short_eth: order.dig(:summary, :expected_after_short_eth) || decimal_string(expected_short_after(action: action, size_eth: order.dig(:summary, :rounded_size_eth) || 0, current_position: pre_position)),
       readback_poll_attempts: readback_poll&.fetch(:attempts, []),
       post_submit_readback: serialize_position(post_position),
       final_status: status,

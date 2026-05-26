@@ -33,8 +33,8 @@ class ExtendedMigrationStep
       current_position: ethereal_position_after_extended,
       max_slippage: max_slippage
     )
-    final_status = ethereal_result.status == "submitted_and_confirmed" ? "success" : "partial_migration_manual_action_required"
     final_state = read_state(position)
+    final_status = final_status_for(ethereal_result: ethereal_result, final_state: final_state)
     result(
       status: final_status,
       position: position,
@@ -92,6 +92,7 @@ class ExtendedMigrationStep
     blockers << "EXTENDED_MIGRATION_STEP_ENABLED must be true" unless dry_run || bool_env("EXTENDED_MIGRATION_STEP_ENABLED")
     blockers << "EXTENDED_LIVE_ENABLED must be true" unless bool_env("EXTENDED_LIVE_ENABLED")
     blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false during migration_step" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+    blockers << "Disable Ethereal auto-rebalance before stepwise migration; otherwise Ethereal may fight the migration." if !dry_run && ethereal_auto_enabled?
     blockers << "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true" unless bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless dry_run || confirmation == CONFIRMATION
     blockers << "current Extended position is long; manual action required" if state.dig(:extended_position, :side).to_s == "long"
@@ -146,12 +147,20 @@ class ExtendedMigrationStep
       migration_sequence: plan[:migration_sequence],
       planned_extended_leg: summarize_extended_leg(plan[:planned_extended_leg]),
       planned_ethereal_leg: summarize_ethereal_leg(plan[:planned_ethereal_leg]),
+      ethereal_auto_enabled: ethereal_auto_enabled?,
+      ethereal_short_expected_after: decimal_string(plan[:expected_ethereal_short_after]),
+      extended_short_expected_after: decimal_string(plan[:expected_extended_short_after]),
+      combined_short_expected_after: decimal_string(plan[:expected_combined_short_after]),
       signer_health: sanitize_sensitive(state[:signer_health]),
       extended_execution: sanitize_sensitive(extended_execution),
       ethereal_execution: sanitize_sensitive(ethereal_execution),
       ethereal_short_after: decimal_string(final_state[:ethereal_short]),
       extended_short_after: decimal_string(final_state[:extended_short]),
-      combined_short_after: decimal_string(final_state[:ethereal_short] + final_state[:extended_short]),
+      combined_short_after: decimal_string(final_combined_short(final_state)),
+      ethereal_short_actual_after: decimal_string(final_state[:ethereal_short]),
+      extended_short_actual_after: decimal_string(final_state[:extended_short]),
+      combined_short_actual_after: decimal_string(final_combined_short(final_state)),
+      combined_delta_after: decimal_string(combined_delta_after(final_state)),
       final_status: status,
       orders_placed: orders_placed(extended_execution, ethereal_execution),
       signatures_created: signatures_created(extended_execution),
@@ -227,8 +236,31 @@ class ExtendedMigrationStep
 
   def warnings_for(status)
     warnings = [ "Migration is stepwise. Production venue is not switched until finalize succeeds." ]
+    warnings << "Disable Ethereal auto-rebalance before live migration; otherwise Ethereal may fight the migration." if ethereal_auto_enabled?
     warnings << "Extended leg confirmed but Ethereal leg did not; total hedge may be temporarily over target by the step size." if status == "partial_migration_manual_action_required"
+    warnings << "Combined Ethereal + Extended short is outside hedge tolerance after migration step; manual review required." if status == "combined_outside_tolerance_manual_action_required"
     warnings
+  end
+
+  def final_status_for(ethereal_result:, final_state:)
+    return "partial_migration_manual_action_required" unless ethereal_result.status == "submitted_and_confirmed"
+    return "combined_outside_tolerance_manual_action_required" unless combined_matches_target?(final_state[:target_short], final_combined_short(final_state), final_state[:tolerance])
+
+    "success"
+  end
+
+  def final_combined_short(final_state)
+    final_state[:ethereal_short] + final_state[:extended_short]
+  end
+
+  def combined_delta_after(final_state)
+    return unless final_state[:target_short]
+
+    final_combined_short(final_state) - final_state[:target_short]
+  end
+
+  def ethereal_auto_enabled?
+    bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
   end
 
   def decimal_string(value)

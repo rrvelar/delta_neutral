@@ -884,3 +884,57 @@ Rollback is readback-first and avoids any automatic retry:
 
 `HedgeSyncJob` still skips Extended auto-rebalance, and the lifecycle task does
 not mutate hedge target state.
+
+### Stepwise Ethereal to Extended Migration
+
+The migration flow is intentionally stepwise and readback-gated. It does not
+switch `hedge.execution_venue`; finalization is a separate task after readback
+shows Ethereal flat and Extended near target.
+
+Before any live migration step:
+
+1. Disable Ethereal auto-rebalance outside the repo:
+   `AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED=false`.
+2. Keep Extended continuous auto disabled:
+   `EXTENDED_AUTO_REBALANCE_ENABLED=false`.
+3. Confirm Nado is flat.
+4. Confirm Extended leverage/margin gate passes at 1x isolated-equivalent.
+5. Confirm the Extended signer is running and healthy.
+
+Dry-run one migration step:
+
+```bash
+bin/rails extended:migration_step dry_run=true position_id=3 step_size_eth=0.01
+```
+
+Live migration step requires:
+
+```bash
+EXTENDED_MIGRATION_STEP_ENABLED=true \
+EXTENDED_LIVE_ENABLED=true \
+AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED=true \
+bin/rails extended:migration_step dry_run=false position_id=3 step_size_eth=0.01 confirmation=I_UNDERSTAND_THIS_MIGRATES_HEDGE_FROM_ETHEREAL_TO_EXTENDED
+```
+
+The step submits Extended first (`SELL`, `reduceOnly=false`) and submits the
+Ethereal reduce-only leg (`BUY`, `reduceOnly=true`) only after Extended readback
+confirms. If either readback is not confirmed, the task stops and requires
+manual review. It never retries or duplicates orders.
+
+After all exposure has moved and readback shows Extended near target, Ethereal
+flat, Nado flat, and no Extended open orders, dry-run finalization:
+
+```bash
+bin/rails extended:migration_finalize dry_run=true position_id=3
+```
+
+Live finalization requires:
+
+```bash
+EXTENDED_MIGRATION_FINALIZE_ENABLED=true \
+bin/rails extended:migration_finalize dry_run=false position_id=3 confirmation=I_UNDERSTAND_THIS_SWITCHES_PRODUCTION_HEDGE_TO_EXTENDED
+```
+
+After finalization, choose which venue auto should run and enable only that
+venue's auto gate. Do not leave Ethereal auto enabled during migration, because
+it can fight the stepwise transfer by restoring Ethereal to the full target.

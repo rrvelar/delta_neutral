@@ -44,8 +44,33 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal "buy", order.dig(:summary, :side)
     assert_equal true, order.dig(:summary, :reduce_only)
     assert_equal "0.05", order.dig(:summary, :rounded_size_eth)
+    assert_equal "0.45", order.dig(:summary, :expected_after_short_eth)
     assert_equal true, order.dig(:submit_payload, :data, :reduceOnly)
     assert_equal 0, order.dig(:submit_payload, :data, :side)
+  end
+
+  test "rebalance decrease receipt expected short subtracts reduce-only size" do
+    reads = [ ethereal_short("0.5"), ethereal_short("0.45") ]
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:live_enabled?) { true }
+    venue.define_singleton_method(:read_position) { |symbol:| reads.shift }
+    service = build_service(
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, _payload) { { status: "SUBMITTED", id: "eth-1" } }
+    )
+
+    result = service.rebalance_short(
+      position: fake_position,
+      delta_eth: "-0.05",
+      current_position: ethereal_short("0.5"),
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "0.45", result.receipt.fetch(:expected_short_eth)
+    assert_equal "0.45", result.receipt.dig(:post_submit_readback, :short_size)
   end
 
   test "live mode blocks without Ethereal venue and confirmation" do
