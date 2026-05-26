@@ -58,7 +58,7 @@ class HedgeSyncJob < ApplicationJob
 
         if hedge.extended_execution?
           ExtendedPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
-          Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — Extended auto-rebalance is disabled; manual dashboard lifecycle remains gated")
+          sync_extended_aerodrome_hedge(hedge)
           next
         end
 
@@ -309,6 +309,38 @@ class HedgeSyncJob < ApplicationJob
       message: ethereal_rebalance_message(result),
       order_side: result.receipt.dig(:submitted_order_summary, :side),
       reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
+      exchange_order_id: result.receipt[:exchange_order_id],
+      receipt_path: receipt_path
+    )
+  end
+
+  def sync_extended_aerodrome_hedge(hedge)
+    unless extended_auto_rebalance_enabled?
+      Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — EXTENDED_AUTO_REBALANCE_ENABLED must be true")
+      return
+    end
+
+    result = ExtendedAutoRebalanceOnce.new.run(position: hedge.position, dry_run: false, one_shot: false, max_slippage: nado_max_slippage)
+    return if result.status == "no_op"
+
+    receipt_path = write_extended_receipt(result.receipt)
+    status = if result.status == "success"
+      ShortRebalance::STATUS_SUCCESS
+    elsif result.status.to_s.start_with?("submitted_but")
+      ShortRebalance::STATUS_PENDING
+    else
+      ShortRebalance::STATUS_FAILED
+    end
+    old_short = BigDecimal(result.receipt.fetch(:current_short_eth, "0").to_s)
+    new_short = extended_receipt_confirmed_short(result.receipt) || decimal_or_fallback(result.receipt[:target_short_eth], old_short)
+    record_extended_rebalance(
+      hedge,
+      old_short: old_short,
+      new_short: new_short,
+      status: status,
+      message: extended_rebalance_message(result),
+      order_side: result.receipt.dig(:intended_order, :side),
+      reduce_only: result.receipt.dig(:intended_order, :reduce_only),
       exchange_order_id: result.receipt[:exchange_order_id],
       receipt_path: receipt_path
     )
@@ -616,6 +648,10 @@ class HedgeSyncJob < ApplicationJob
     ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", "false"))
   end
 
+  def extended_auto_rebalance_enabled?
+    ActiveModel::Type::Boolean.new.cast(ENV.fetch("EXTENDED_AUTO_REBALANCE_ENABLED", "false"))
+  end
+
   def nado_max_slippage
     ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")
   end
@@ -704,6 +740,23 @@ class HedgeSyncJob < ApplicationJob
     )
   end
 
+  def record_extended_rebalance(hedge, old_short:, new_short:, status:, message: nil, order_side: nil, reduce_only: nil, exchange_order_id: nil, receipt_path: nil)
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: old_short,
+      new_short_size: new_short,
+      realized_pnl: BigDecimal("0"),
+      status: status,
+      message: message,
+      rebalanced_at: Time.current,
+      venue: "extended",
+      order_side: order_side,
+      reduce_only: reduce_only,
+      exchange_order_id: exchange_order_id,
+      receipt_path: receipt_path
+    )
+  end
+
   def nado_rebalance_message(result)
     result.blockers.presence&.join("; ") ||
       result.receipt[:final_message].presence ||
@@ -716,6 +769,27 @@ class HedgeSyncJob < ApplicationJob
       result.receipt[:final_message].presence ||
       result.receipt.dig(:submit_response_classification, :message).presence ||
       result.receipt[:final_status]
+  end
+
+  def extended_rebalance_message(result)
+    result.blockers.presence&.join("; ") || result.receipt[:final_status]
+  end
+
+  def extended_receipt_confirmed_short(receipt)
+    attempt = Array(receipt[:readback_attempts]).reverse.find { |row| row[:confirmed] || row["confirmed"] }
+    return unless attempt
+
+    BigDecimal((attempt[:short_size] || attempt["short_size"]).to_s)
+  rescue ArgumentError
+    nil
+  end
+
+  def decimal_or_fallback(value, fallback)
+    return fallback if value.blank?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError
+    fallback
   end
 
   def nado_receipt_order_side(receipt)
@@ -743,6 +817,15 @@ class HedgeSyncJob < ApplicationJob
     FileUtils.mkdir_p(dir)
     path = dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
     event = receipt.merge(event: "ethereal_auto_rebalance", timestamp: Time.current.iso8601, receipt_path: path.to_s)
+    File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
+    path.to_s
+  end
+
+  def write_extended_receipt(receipt)
+    dir = Rails.root.join("storage", "extended_auto_rebalance_checks")
+    FileUtils.mkdir_p(dir)
+    path = dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    event = receipt.merge(event: "extended_auto_rebalance", timestamp: Time.current.iso8601, receipt_path: path.to_s)
     File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
     path.to_s
   end

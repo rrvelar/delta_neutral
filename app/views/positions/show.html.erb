@@ -197,6 +197,8 @@ end %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Leverage gate</span><span class="text-white"><%= selected_read_only_diagnostics[:margin_gate_status] || selected_account_state.dig(:margin_gate, :status) || "unknown" %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Current leverage</span><span class="text-white"><%= selected_read_only_diagnostics[:current_leverage] || "Unavailable" %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Current margin</span><span class="text-white"><%= selected_read_only_diagnostics[:current_margin_mode] || "Unavailable" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">One-shot auto gate</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_ONE_SHOT_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Continuous auto</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_AUTO_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
             <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>
@@ -211,6 +213,7 @@ end %>
           <% if selected_venue == "extended" %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3 text-xs text-yellow-100">
               <p>Manual live supported; auto disabled. Signer must be running; key stored outside Rails. Use close_only after probe.</p>
+              <p class="mt-2 text-yellow-100">Extended manual live proven. Auto requires explicit gate.</p>
               <p class="mt-2 text-yellow-100">Required: 1x isolated.</p>
               <p class="mt-2 text-yellow-200">Extended mainnet order submit is implemented behind explicit live gates. Dry-runs do not sign or submit orders.</p>
             </div>

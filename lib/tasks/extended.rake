@@ -78,6 +78,29 @@ namespace :extended do
     abort("Extended set leverage check did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 
+  desc "Controlled one-shot Extended auto rebalance; dry-run by default"
+  task auto_rebalance_once: :environment do
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
+    position = extended_probe_position
+    env = extended_probe_env
+    result = ExtendedAutoRebalanceOnce.new(env: env).run(
+      position: position,
+      confirmation: confirmation,
+      dry_run: dry_run,
+      max_slippage: ENV["max_slippage"] || ENV["MAX_SLIPPAGE"] || "0.01"
+    )
+
+    receipt_path = Rails.root.join("storage", "extended_auto_rebalance_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    FileUtils.mkdir_p(receipt_path.dirname)
+    File.open(receipt_path, "a") { |file| file.puts(JSON.generate(result.receipt.merge(receipt_path: receipt_path.to_s))) }
+
+    puts JSON.pretty_generate(result.receipt)
+    puts "Receipt appended to #{receipt_path}"
+    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "no_op", "submitted_but_readback_pending", "blocked_before_submit" ]
+    abort("Extended one-shot auto rebalance did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
+  end
+
   def extended_probe_position
     return extended_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_EXTENDED_READBACK"])
 
@@ -105,12 +128,22 @@ namespace :extended do
   end
 
   def extended_mock_position
-    hedge = Struct.new(:id, :target, keyword_init: true).new(id: ENV["HEDGE_ID"] || 3, target: BigDecimal("1.0"))
+    hedge = Struct.new(:id, :target, :tolerance, :execution_venue, keyword_init: true).new(
+      id: ENV["HEDGE_ID"] || 3,
+      target: BigDecimal("1.0"),
+      tolerance: BigDecimal("0.03"),
+      execution_venue: "extended"
+    )
     Struct.new(:id, :hedge, :asset0_price_usd, keyword_init: true) do
       def active? = true
       def mellow_autopilot? = true
       def hedge_ready? = true
+      def position_source = Position::SOURCE_MELLOW_AUTOPILOT
+      def mellow_metadata_hash = { "hedge_ready" => true, "last_probe_confidence" => "high" }
+      def mellow_current_value_usd = BigDecimal("1290")
+      def entry_value_usd = BigDecimal("1290")
       def mellow_weth_exposure = BigDecimal("0.5")
+      def mellow_usdc_exposure = BigDecimal("240")
     end.new(id: ENV["position_id"] || ENV["POSITION_ID"] || 3, hedge: hedge, asset0_price_usd: BigDecimal("2100"))
   end
 end
