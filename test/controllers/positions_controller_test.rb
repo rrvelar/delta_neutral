@@ -248,7 +248,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Hedge sync", response.body
     assert_match "every 5 minutes", response.body
     assert_match "Rebalance needed now", response.body
-    assert_match "Within Tolerance", response.body
+    assert_match "In tolerance", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
@@ -323,6 +323,50 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Open orders", response.body
     assert_match "Leverage gate", response.body
     assert_match "Extended readiness", response.body
+  end
+
+  test "show extended production venue uses cached ShortRebalance data" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0.7", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 2.minutes.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "ethereal", old_short_size: "1.25", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "nado", old_short_size: "0.1", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Production venue", response.body
+    assert_match "Extended", response.body
+    assert_match "Current Extended ETH short", response.body
+    assert_match "1.250000", response.body
+    assert_match "stale as of", response.body
+    assert_match "Migration complete: production venue Extended.", response.body
+  end
+
+  test "show does not report in tolerance when selected current short is unknown" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Unknown / diagnostics unavailable", response.body
+    assert_no_match "In tolerance", response.body
+  end
+
+  test "show separates old failed rows from latest selected venue successes" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0", new_short_size: "0.5", status: ShortRebalance::STATUS_FAILED, message: "old failure", rebalanced_at: 2.hours.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0.5", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, message: "latest success", rebalanced_at: 1.minute.ago)
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "latest success", response.body
+    assert_match "Failed / needs attention", response.body
+    assert_match "old failure", response.body
+    assert_operator response.body.index("latest success"), :<, response.body.index("old failure")
   end
 
   test "show selected Extended venue renders when auto readiness is slow" do
