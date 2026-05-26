@@ -149,6 +149,62 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/api-secret|authorization|cookie/i, result.receipt.to_json)
   end
 
+  test "dry run includes verified signer health and reports signing disabled without algorithm blocker" do
+    signer = CountingSigner.new(ok: false, verified_algorithm: true, signing_enabled: false)
+    result = build_service(
+      env: extended_env.merge("EXTENDED_SIGNER_URL" => "http://extended-signer.invalid"),
+      signer_client: signer
+    ).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: nil,
+      dry_run: true
+    )
+
+    payload = result.receipt.fetch(:order_payload_summaries).first
+    assert_equal "dry_run", result.status
+    assert_equal true, result.receipt.dig(:signer_health, "verified_algorithm")
+    assert_equal false, result.receipt.dig(:signer_health, "signing_enabled")
+    assert_not_includes result.blockers, "Extended Stark signer verified_algorithm=false"
+    assert_includes result.blockers, "Extended Stark signer signing_enabled=false"
+    assert_equal "dry_run_no_signature", payload.dig(:signer_request, :status)
+    assert_equal "dry_run_no_signature", result.receipt.dig(:signer_request, :status)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:submitted)
+  end
+
+  test "dry run records unreachable signer health as blocker" do
+    signer = Struct.new(:health, keyword_init: true).new(
+      health: {
+        ok: false,
+        reason: "Errno::ECONNREFUSED: Connection refused",
+        verified_algorithm: false,
+        signing_enabled: false,
+        supported_exchanges: [],
+        supported_actions: []
+      }.with_indifferent_access
+    )
+    result = build_service(
+      env: extended_env.merge("EXTENDED_SIGNER_URL" => "http://extended-signer.invalid"),
+      signer_client: signer
+    ).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: nil,
+      dry_run: true
+    )
+
+    assert_equal "dry_run", result.status
+    assert_equal "Errno::ECONNREFUSED: Connection refused", result.receipt.dig(:signer_health, "reason")
+    assert_includes result.blockers, "Extended signer unhealthy: Errno::ECONNREFUSED: Connection refused"
+    assert_includes result.blockers, "Extended Stark signer verified_algorithm=false"
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   test "live open submits exactly one order and requires readback confirmation" do
     api_client = live_api_client(after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ])
     signer = CountingSigner.new(ok: true)

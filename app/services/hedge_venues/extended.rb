@@ -355,19 +355,19 @@ module HedgeVenues
         nonce: "required_later",
         max_slippage: max_slippage&.to_s,
         margin_mode: "unverified",
-        submit_endpoint: nil,
-        future_submit_endpoint: "POST /user/order",
+        submit_endpoint: "POST /user/order",
         signer_request: {
           schema: "extended_stark_order_sign_request",
-          status: "blocked_hash_algorithm_not_verified",
+          status: "dry_run_no_signature",
           signer_boundary: "external_extended_stark_signer",
           private_key_in_rails: false
         },
         order_submission: false,
-        signature_required: false,
+        signature_required: true,
         stark_signature_created: false,
-        signing_implemented: false,
-        submit_implemented: false,
+        signing_implemented: true,
+        submit_implemented: true,
+        live_submit_blocked: true,
         cancel_implemented: false
       }
     end

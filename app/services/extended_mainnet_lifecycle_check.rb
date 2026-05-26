@@ -16,7 +16,8 @@ class ExtendedMainnetLifecycleCheck
     size = capped_size(size_eth)
     current_position = @venue.read_position(symbol: "ETH")
     orders = build_orders(position: position, mode: mode, size_eth: size, current_position: current_position, max_slippage: max_slippage)
-    blockers = structural_blockers(mode: mode, orders: orders, dry_run: dry_run)
+    dry_run_signer_health = signer_health_for_diagnostics if dry_run
+    blockers = structural_blockers(mode: mode, orders: orders, dry_run: dry_run, signer_health: dry_run_signer_health)
 
     if dry_run
       return result(
@@ -26,7 +27,8 @@ class ExtendedMainnetLifecycleCheck
         mode: mode,
         dry_run: true,
         current_position: current_position,
-        orders: orders
+        orders: orders,
+        signer_health: dry_run_signer_health
       )
     end
 
@@ -95,14 +97,14 @@ class ExtendedMainnetLifecycleCheck
     end
   end
 
-  def structural_blockers(mode:, orders:, dry_run:)
+  def structural_blockers(mode:, orders:, dry_run:, signer_health:)
     blockers = []
     blockers << "mode must be one of #{MODES.join(', ')}" unless mode.in?(MODES)
     blockers << "Extended live submit currently supports open_only probe only" if !dry_run && mode != "open_only"
     blockers.concat(dry_run ? @venue.blockers : @venue.live_readiness_blockers)
     blockers.concat(orders.flat_map { |order| order.fetch(:blockers, []) }) if dry_run
     blockers.concat(orders.flat_map { |order| @venue.live_order_blockers(preview: order) }) unless dry_run
-    blockers << "Extended Stark signer verified_algorithm=false" if dry_run && !signer_verified_algorithm?
+    blockers.concat(dry_run_signer_blockers(signer_health)) if dry_run
     blockers.uniq
   end
 
@@ -126,12 +128,24 @@ class ExtendedMainnetLifecycleCheck
 
   def signer_health_blockers(health)
     blockers = []
-    blockers << "Extended signer health must advertise Extended/sign_extended_order support" unless @signer_client.supports_extended_order_signing?
-    blockers << "Extended Stark signer verified_algorithm=false" unless ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
-    blockers << "Extended Stark signer signing_enabled=false" unless ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
+    blockers << "Extended signer health must advertise Extended/sign_extended_order support" unless signer_health_supports_extended_order?(health)
+    blockers << "Extended Stark signer verified_algorithm=false" unless signer_health_verified_algorithm?(health)
+    blockers << "Extended Stark signer signing_enabled=false" unless signer_health_signing_enabled?(health)
     if health[:stark_public_key].present? && expected_redacted_stark_public_key.present? && health[:stark_public_key] != expected_redacted_stark_public_key
       blockers << "Extended signer Stark public key does not match EXTENDED_STARK_PUBLIC_KEY"
     end
+    blockers
+  end
+
+  def dry_run_signer_blockers(health)
+    return [ "EXTENDED_SIGNER_URL is required for Extended live submit" ] if @env["EXTENDED_SIGNER_URL"].blank?
+    return [ "Extended signer health unavailable" ] unless health
+
+    blockers = []
+    blockers << "Extended signer unhealthy: #{health[:reason]}" if health[:reason].present? && !signer_health_ok?(health)
+    blockers << "Extended signer health must advertise Extended/sign_extended_order support" unless signer_health_supports_extended_order?(health)
+    blockers << "Extended Stark signer verified_algorithm=false" unless signer_health_verified_algorithm?(health)
+    blockers << "Extended Stark signer signing_enabled=false" unless signer_health_signing_enabled?(health)
     blockers
   end
 
@@ -183,7 +197,7 @@ class ExtendedMainnetLifecycleCheck
       market_metadata: @venue.market_metadata_diagnostics,
       order_payload_summaries: orders.map { |order| order[:payload] },
       signer_health: sanitize_signer_health(signer_health),
-      signer_request: execution && sanitize_submit_payload(execution[:unsigned_order]),
+      signer_request: execution ? sanitize_submit_payload(execution[:unsigned_order]) : orders.first&.dig(:payload, :signer_request),
       signer_response: execution && execution[:signer_response],
       submit_payload: execution && execution[:submit_payload],
       submit_response: execution && execution[:submit_response],
@@ -307,11 +321,27 @@ class ExtendedMainnetLifecycleCheck
     ActiveModel::Type::Boolean.new.cast(@env[key])
   end
 
-  def signer_verified_algorithm?
-    return @signer_client.verified_algorithm? if @signer_client.respond_to?(:verified_algorithm?)
+  def signer_health_for_diagnostics
+    return nil if @env["EXTENDED_SIGNER_URL"].blank?
 
-    ActiveModel::Type::Boolean.new.cast(@signer_client.health[:verified_algorithm])
-  rescue
-    false
+    @signer_client.health.with_indifferent_access
+  end
+
+  def signer_health_ok?(health)
+    ActiveModel::Type::Boolean.new.cast(health[:ok])
+  end
+
+  def signer_health_verified_algorithm?(health)
+    ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
+  end
+
+  def signer_health_signing_enabled?(health)
+    ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
+  end
+
+  def signer_health_supports_extended_order?(health)
+    signer_health_ok?(health) &&
+      Array.wrap(health[:supported_exchanges]).include?("Extended") &&
+      Array.wrap(health[:supported_actions]).include?("sign_extended_order")
   end
 end
