@@ -180,9 +180,11 @@ Normalized `HedgeVenues::Extended#read_position("ETH")` should return:
 }
 ```
 
-If Extended exposes true isolated/cross modes in current docs, that must be
-verified before labeling it. The known SDK surfaces per-market leverage; it does
-not prove the same margin model as Nado isolated or Ethereal cross.
+Extended docs expose current leverage with `GET /user/leverage` and leverage
+updates with `PATCH /user/leverage`. The docs reviewed do not expose a
+separate per-position isolated/cross margin-mode field equivalent to Nado
+isolated margin. Until isolated or isolated-equivalent account semantics are
+operator-verified, Extended live submit is blocked.
 
 ## Trading Semantics for Future Work
 
@@ -318,6 +320,9 @@ Proposed env names, not added to real env in this task:
 - `EXTENDED_READ_ONLY_ENABLED=false`
 - `EXTENDED_LIVE_ENABLED=false`
 - `EXTENDED_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_REQUIRED_LEVERAGE=1`
+- `EXTENDED_REQUIRED_MARGIN_MODE=isolated`
+- `EXTENDED_ISOLATED_ACCOUNT_CONFIRMED=false`
 - `EXTENDED_TESTNET_LIVE_ENABLED=false`
 - `EXTENDED_LIVE_CONFIRMATION`
 
@@ -604,6 +609,11 @@ These are required for the controlled manual mainnet probes:
 - `EXTENDED_LIVE_ENABLED=true`
 - `EXTENDED_SIGNER_URL=http://172.18.0.1:8776`
 - `EXTENDED_AUTO_REBALANCE_ENABLED=false`
+- `EXTENDED_REQUIRED_LEVERAGE=1`
+- `EXTENDED_REQUIRED_MARGIN_MODE=isolated`
+- `EXTENDED_ISOLATED_ACCOUNT_CONFIRMED=true` only after the operator has
+  verified the account/subaccount is dedicated and isolated-equivalent for this
+  hedge.
 - `EXTENDED_PROBE_MAX_SIZE_ETH=0.01` or another explicit cap at or above the
   discovered Extended minimum order size.
 - exact confirmation:
@@ -632,6 +642,17 @@ Rails live probes remain blocked by their own gates unless the signer reports
 `ok=true`, `verified_algorithm=true`, `signing_enabled=true`,
 `supported_exchanges=["Extended"]`, and
 `supported_actions=["sign_extended_order"]`.
+
+Rails also blocks before signer/sign/submit unless the margin gate passes:
+
+- `GET /user/leverage?market=ETH-USD` returns `leverage=1`.
+- Required margin mode is `isolated`.
+- Because the current Extended API/docs do not expose a Nado-style isolated
+  position mode, `EXTENDED_ISOLATED_ACCOUNT_CONFIRMED=true` is required as an
+  operator assertion that the configured Extended account is
+  isolated-equivalent/dedicated for this hedge.
+- If a current position exists and effective leverage is materially above 1x,
+  Rails blocks even when the operator flag is set.
 
 ### Mainnet Lifecycle Proof
 
@@ -683,6 +704,10 @@ Exact live gates used for the successful probes:
 - `EXTENDED_LIVE_ENABLED=true`
 - `EXTENDED_AUTO_REBALANCE_ENABLED=false`
 - `EXTENDED_SIGNER_URL` points to the Extended Stark signer sidecar.
+- `GET /user/leverage?market=ETH-USD` reports `1`.
+- `EXTENDED_REQUIRED_LEVERAGE=1`.
+- `EXTENDED_REQUIRED_MARGIN_MODE=isolated`.
+- `EXTENDED_ISOLATED_ACCOUNT_CONFIRMED=true` after operator verification.
 - Signer `/health` reports `ok=true`, `verified_algorithm=true`,
   `signing_enabled=true`, `supported_exchanges=["Extended"]`, and
   `supported_actions=["sign_extended_order"]`.

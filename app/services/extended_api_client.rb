@@ -33,6 +33,10 @@ class ExtendedApiClient
     get("/user/orders", market: market)
   end
 
+  def leverage(market:)
+    get("/user/leverage", market: market)
+  end
+
   def fees(market:)
     get("/user/fees", "market[]" => market)
   end

@@ -323,9 +323,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Manual live supported; auto disabled", response.body
     assert_match "Signer must be running; key stored outside Rails", response.body
     assert_match "Use close_only after probe", response.body
+    assert_match "Required: 1x isolated", response.body
     assert_match "Extended position", response.body
     assert_match "no_position", response.body
     assert_match "Open orders", response.body
+    assert_match "Leverage gate", response.body
     assert_match "0", response.body
   end
 
@@ -1624,6 +1626,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       .to_return(status: 200, body: { data: { equity: "1999.79", balance: "1999.79" } }.to_json)
     stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/orders\?market=ETH-USD\z})
       .to_return(status: 200, body: [].to_json)
+    stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/leverage\?market=ETH-USD\z})
+      .to_return(status: 200, body: { data: [ { market: "ETH-USD", leverage: "1" } ] }.to_json)
     stub_request(:get, %r{\Ahttps://extended\.example/api/v1/user/fees\?market%5B%5D=ETH-USD\z})
       .to_return(status: 200, body: { data: [ { market: "ETH-USD", takerFeeRate: "0.0005" } ] }.to_json)
     stub_request(:get, %r{\Ahttps://extended\.example/api/v1/info/markets\?market=ETH-USD\z})

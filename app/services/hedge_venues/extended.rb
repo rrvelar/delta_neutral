@@ -93,6 +93,7 @@ module HedgeVenues
         account_value_usd: decimal_string_or_value(account_value),
         collateral_usd: decimal_string_or_value(decimal_or_nil(source[:collateral_usd] || source[:balance])),
         effective_leverage: effective&.to_s("F"),
+        leverage: decimal_string_or_value(decimal_or_nil(source[:leverage])),
         margin_mode: source[:margin_mode] || "unverified",
         status: source[:status],
         raw: source[:raw]
@@ -123,6 +124,7 @@ module HedgeVenues
           balance: balance,
           current_position: current_position
         ),
+        margin_gate: margin_gate_diagnostics(current_position: current_position),
         market_metadata_available: market_metadata_available?,
         market_metadata: market_metadata_diagnostics(raw_market: market),
         fee_rates: fee_rate_diagnostics,
@@ -161,6 +163,8 @@ module HedgeVenues
       balance = read_only_call(:balance) if balance.nil? && configured?
       current_position = read_position(symbol: "ETH") if current_position.nil? && configured?
       open_orders = read_only_call(:open_orders, market: market_symbol) if open_orders.nil? && configured?
+      leverage = read_only_call(:leverage, market: market_symbol) if configured?
+      margin_gate = margin_gate_diagnostics(current_position: current_position, leverage_payload: leverage, account_info: account_info, balance: balance)
       account_values = account_value_fields_from(balance: balance, account_info: account_info)
 
       {
@@ -181,7 +185,17 @@ module HedgeVenues
         current_position_status: current_position ? "position_present" : "no_position",
         current_position_side: current_position&.fetch(:side, nil),
         current_short_eth: current_position&.fetch(:short_size, nil),
-        open_orders_count: open_orders.nil? ? nil : array_payload(open_orders).size
+        open_orders_count: open_orders.nil? ? nil : array_payload(open_orders).size,
+        leverage_read_attempted: configured?,
+        current_leverage: margin_gate[:current_leverage],
+        margin_mode_read_attempted: configured?,
+        current_margin_mode: margin_gate[:current_margin_mode],
+        isolated_account_detected: margin_gate[:isolated_account_detected],
+        effective_leverage: margin_gate[:effective_leverage],
+        required_leverage: margin_gate[:required_leverage],
+        required_margin_mode: margin_gate[:required_margin_mode],
+        margin_gate_status: margin_gate[:status],
+        margin_gate_blockers: margin_gate[:blockers]
       }.compact
     end
 
@@ -226,6 +240,7 @@ module HedgeVenues
       blockers << "Extended l2Config.collateralId missing from market metadata." if metadata[:collateral_asset_id].blank?
       blockers << "Extended l2Config.syntheticResolution missing from market metadata." if metadata[:synthetic_resolution].blank?
       blockers << "Extended l2Config.collateralResolution missing from market metadata." if metadata[:collateral_resolution].blank?
+      blockers.concat(margin_gate_diagnostics[:blockers])
       blockers
     end
 
@@ -241,7 +256,7 @@ module HedgeVenues
       (config_blockers + market_metadata_blockers + [
         "Extended live disabled.",
         "Extended auto-rebalance disabled."
-      ]).uniq
+      ] + margin_gate_diagnostics[:blockers]).uniq
     end
 
     def warnings
@@ -306,6 +321,51 @@ module HedgeVenues
       market_metadata_blockers.empty?
     end
 
+    def margin_gate_diagnostics(current_position: nil, leverage_payload: nil, account_info: nil, balance: nil)
+      leverage_payload = read_only_call(:leverage, market: market_symbol) if leverage_payload.nil? && configured?
+      current_position = read_position(symbol: "ETH") if current_position.nil? && configured?
+      balance = read_only_call(:balance) if balance.nil? && configured?
+      account_values = account_value_fields_from(balance: balance, account_info: account_info)
+      required_leverage = decimal_or_nil(env["EXTENDED_REQUIRED_LEVERAGE"].presence || "1")
+      required_margin_mode = env["EXTENDED_REQUIRED_MARGIN_MODE"].presence || "isolated"
+      current_leverage = leverage_from_payload(leverage_payload) || decimal_or_nil(current_position&.fetch(:leverage, nil))
+      current_margin_mode = current_position&.fetch(:margin_mode, nil).presence || margin_mode_from_payload(leverage_payload) || "unknown"
+      isolated_confirmed = bool_env("EXTENDED_ISOLATED_ACCOUNT_CONFIRMED")
+      notional = decimal_or_nil(current_position&.fetch(:notional_usd, nil))
+      account_value = decimal_or_nil(account_values[:account_value_usd] || account_values[:collateral_usd])
+      effective = if notional && account_value&.positive?
+        notional.abs / account_value
+      else
+        decimal_or_nil(current_position&.fetch(:effective_leverage, nil))
+      end
+
+      blockers = []
+      blockers << "EXTENDED_REQUIRED_LEVERAGE must be configured" unless required_leverage
+      blockers << "Extended current leverage is unknown; refusing live submit." unless current_leverage
+      blockers << "Extended current leverage #{current_leverage.to_s('F')} does not match required #{required_leverage.to_s('F')}x." if current_leverage && required_leverage && (current_leverage - required_leverage).abs > BigDecimal("0.000001")
+
+      if required_margin_mode.to_s == "isolated"
+        isolated_mode = current_margin_mode.to_s.in?(%w[isolated isolated_equivalent])
+        blockers << "Extended current margin mode is #{current_margin_mode}; required isolated or isolated-equivalent." unless isolated_mode || isolated_confirmed
+        blockers << "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED must be true for isolated-equivalent Extended live submit." unless isolated_confirmed
+        blockers << "Extended effective leverage #{effective.to_s('F')} appears materially above 1x." if effective && effective > BigDecimal("1.05")
+      end
+
+      {
+        status: blockers.empty? ? "pass" : "blocked",
+        blockers: blockers,
+        leverage_read_attempted: configured?,
+        current_leverage: current_leverage&.to_s("F"),
+        margin_mode_read_attempted: configured?,
+        current_margin_mode: current_margin_mode,
+        isolated_account_detected: isolated_confirmed ? true : (current_margin_mode.to_s.in?(%w[isolated isolated_equivalent]) ? "unknown" : false),
+        effective_leverage: effective&.to_s("F"),
+        required_leverage: required_leverage&.to_s("F"),
+        required_margin_mode: required_margin_mode,
+        isolated_account_confirmed: isolated_confirmed
+      }
+    end
+
     def market_metadata_blockers
       blockers = REQUIRED_MARKET_METADATA.filter_map do |key, message|
         message if env[key].blank?
@@ -313,6 +373,24 @@ module HedgeVenues
       blockers << "EXTENDED_SIZE_INCREMENT missing and not discovered from Extended market metadata" unless size_increment
       blockers << "EXTENDED_PRICE_INCREMENT missing and not discovered from Extended market metadata" unless price_increment
       blockers
+    end
+
+    def leverage_from_payload(payload)
+      rows = array_payload(payload)
+      row = rows.find { |item| value_from(item.to_h.with_indifferent_access, :market).to_s.casecmp?(market_symbol) } || rows.first
+      return decimal_or_nil(value_from(row.to_h.with_indifferent_access, :leverage)) if row
+
+      data = data_payload(payload)
+      decimal_or_nil(value_from(data, :leverage)) if data.is_a?(Hash)
+    end
+
+    def margin_mode_from_payload(payload)
+      rows = array_payload(payload)
+      row = rows.find { |item| value_from(item.to_h.with_indifferent_access, :market).to_s.casecmp?(market_symbol) } || rows.first
+      return value_from(row.to_h.with_indifferent_access, :marginMode, :margin_mode) if row
+
+      data = data_payload(payload)
+      value_from(data, :marginMode, :margin_mode) if data.is_a?(Hash)
     end
 
     def market_symbol
@@ -489,7 +567,8 @@ module HedgeVenues
         entry_price: value_from(source, :entry_price, :openPrice, :averageOpenPrice),
         mark_price: value_from(source, :mark_price, :markPrice),
         unrealized_pnl_usd: value_from(source, :unrealized_pnl_usd, :unrealisedPnl, :unrealizedPnl),
-        margin_mode: value_from(source, :margin_mode, :marginMode) || "unverified",
+        leverage: value_from(source, :leverage),
+        margin_mode: value_from(source, :margin_mode, :marginMode) || "unknown",
         status: value_from(source, :status),
         raw: safe_raw_position(source)
       )

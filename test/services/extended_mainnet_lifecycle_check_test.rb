@@ -59,7 +59,10 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       env: extended_env.merge(
         "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
         "EXTENDED_LIVE_ENABLED" => "true",
-        "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid"
+        "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid",
+        "EXTENDED_REQUIRED_LEVERAGE" => "1",
+        "EXTENDED_REQUIRED_MARGIN_MODE" => "isolated",
+        "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true"
       ),
       signer_client: signer,
       api_client: live_api_client
@@ -120,6 +123,82 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal "0.01", summary.fetch(:min_size)
     assert_equal 0, result.receipt.fetch(:orders_placed)
     assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
+  test "live open blocks when Extended leverage is unknown before signer or submit" do
+    api_client = live_api_client(leverage_payload: { "error" => "unsupported" })
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended current leverage is unknown; refusing live submit."
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
+  test "live open blocks when Extended leverage is 10x before signer or submit" do
+    api_client = live_api_client(leverage_payload: { "data" => [ { "market" => "ETH-USD", "leverage" => "10" } ] })
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended current leverage 10.0 does not match required 1.0x."
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
+  test "live close blocks when Extended margin mode is cross before signer or submit" do
+    api_client = live_api_client(
+      before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "20.85", openPrice: "2085", markPrice: "2085", leverage: "1", marginMode: "cross", status: "OPEN" } ],
+      leverage_payload: { "data" => [ { "market" => "ETH-USD", "leverage" => "1", "marginMode" => "cross" } ] }
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env.merge("EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "false"), api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "close_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended current margin mode is cross; required isolated or isolated-equivalent."
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
+  test "live open passes margin gate when leverage is 1 and isolated account is confirmed" do
+    api_client = live_api_client(after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ])
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_not_includes result.blockers, "Extended current leverage is unknown; refusing live submit."
+    assert_equal "pass", result.receipt.dig(:read_only_account_diagnostics, :margin_gate_status)
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, api_client.submit_calls
   end
 
   test "dry run builds lifecycle payloads and submits nothing" do
@@ -613,15 +692,16 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     end.new
   end
 
-  def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil)
+  def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil, leverage_payload: nil)
     Class.new do
       attr_reader :submit_calls, :submitted_payload
 
-      define_method(:initialize) do |before_rows, after_rows, orders, response|
+      define_method(:initialize) do |before_rows, after_rows, orders, response, leverage_response|
         @before_rows = before_rows
         @after_rows = after_rows
         @orders = orders
         @submit_response = response
+        @leverage_payload = leverage_response
         @submit_calls = 0
       end
 
@@ -632,6 +712,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
       def account_info = { "status" => "ACTIVE", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
       def open_orders(market:) = @orders
+      def leverage(market:) = @leverage_payload || { "data" => [ { "market" => market, "leverage" => "1" } ] }
       def fees(market:) = { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
 
       def market(market:)
@@ -655,17 +736,18 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         @submitted_payload = payload
         @submit_response || { "status" => "OK", "data" => { "id" => "abc123" } }
       end
-    end.new(before_positions, after_positions, open_orders, submit_response)
+    end.new(before_positions, after_positions, open_orders, submit_response, leverage_payload)
   end
 
-  def sequence_api_client(states:, open_orders: [], submit_response: nil)
+  def sequence_api_client(states:, open_orders: [], submit_response: nil, leverage_payload: nil)
     Class.new do
       attr_reader :submit_calls, :submitted_payloads
 
-      define_method(:initialize) do |position_states, orders, response|
+      define_method(:initialize) do |position_states, orders, response, leverage_response|
         @position_states = position_states
         @orders = orders
         @submit_response = response
+        @leverage_payload = leverage_response
         @submit_calls = 0
         @submitted_payloads = []
       end
@@ -677,6 +759,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
       def account_info = { "status" => "ACTIVE", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
       def open_orders(market:) = @orders
+      def leverage(market:) = @leverage_payload || { "data" => [ { "market" => market, "leverage" => "1" } ] }
       def fees(market:) = { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
 
       def market(market:)
@@ -700,7 +783,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         @submitted_payloads << payload
         @submit_response || { "status" => "OK", "data" => { "id" => "abc#{@submit_calls}" } }
       end
-    end.new(states, open_orders, submit_response)
+    end.new(states, open_orders, submit_response, leverage_payload)
   end
 
   def live_env
@@ -708,6 +791,9 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
       "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
       "EXTENDED_LIVE_ENABLED" => "true",
       "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "EXTENDED_REQUIRED_LEVERAGE" => "1",
+      "EXTENDED_REQUIRED_MARGIN_MODE" => "isolated",
+      "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true",
       "EXTENDED_SIGNER_URL" => "http://extended-signer.invalid",
       "EXTENDED_STARK_PUBLIC_KEY" => "0x1234...abcd"
     ).except("EXTENDED_SIZE_INCREMENT", "EXTENDED_PRICE_INCREMENT")
