@@ -53,6 +53,31 @@ namespace :extended do
     abort("Extended mainnet lifecycle check did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
   end
 
+  desc "Controlled Extended leverage update; dry-run by default"
+  task set_leverage: :environment do
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    market = ENV["market"] || ENV["MARKET"] || ENV["EXTENDED_MARKET_SYMBOL"] || "ETH-USD"
+    leverage = ENV["leverage"] || ENV["LEVERAGE"] || ENV["EXTENDED_REQUIRED_LEVERAGE"] || "1"
+    confirmation = ENV["confirmation"] || ENV["CONFIRMATION"]
+    env = extended_probe_env
+    venue = HedgeVenues::Extended.new(env: env)
+    result = ExtendedSetLeverageCheck.new(env: env, venue: venue).run(
+      market: market,
+      leverage: leverage,
+      confirmation: confirmation,
+      dry_run: dry_run
+    )
+
+    receipt_path = Rails.root.join("storage", "extended_leverage_checks", "#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    FileUtils.mkdir_p(receipt_path.dirname)
+    File.open(receipt_path, "a") { |file| file.puts(JSON.generate(result.receipt)) }
+
+    puts JSON.pretty_generate(result.receipt)
+    puts "Receipt appended to #{receipt_path}"
+    allowed_statuses = dry_run ? [ "dry_run" ] : [ "success", "patch_submitted_but_readback_unconfirmed", "blocked_before_patch" ]
+    abort("Extended set leverage check did not pass: #{result.status}") unless result.status.in?(allowed_statuses)
+  end
+
   def extended_probe_position
     return extended_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_EXTENDED_READBACK"])
 

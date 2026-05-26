@@ -252,6 +252,20 @@ module HedgeVenues
       api_client.submit_order(payload)
     end
 
+    def update_leverage(market:, leverage:)
+      api_client.update_leverage(market: market, leverage: leverage)
+    end
+
+    def leverage_diagnostics(market: market_symbol)
+      payload = read_only_call(:leverage, market: market)
+      {
+        leverage_read_attempted: configured?,
+        current_leverage: leverage_from_payload(payload)&.to_s("F"),
+        raw_status: read_status(payload),
+        response_keys: safe_keys(payload)
+      }.compact
+    end
+
     def blockers
       (config_blockers + market_metadata_blockers + [
         "Extended live disabled.",
@@ -342,7 +356,9 @@ module HedgeVenues
       blockers = []
       blockers << "EXTENDED_REQUIRED_LEVERAGE must be configured" unless required_leverage
       blockers << "Extended current leverage is unknown; refusing live submit." unless current_leverage
-      blockers << "Extended current leverage #{current_leverage.to_s('F')} does not match required #{required_leverage.to_s('F')}x." if current_leverage && required_leverage && (current_leverage - required_leverage).abs > BigDecimal("0.000001")
+      if current_leverage && required_leverage && (current_leverage - required_leverage).abs > BigDecimal("0.000001")
+        blockers << "Extended current leverage #{current_leverage.to_s('F')} does not match required #{required_leverage.to_s('F')}x. Run extended:set_leverage dry_run=true."
+      end
 
       if required_margin_mode.to_s == "isolated"
         isolated_mode = current_margin_mode.to_s.in?(%w[isolated isolated_equivalent])

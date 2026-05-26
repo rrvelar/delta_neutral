@@ -607,6 +607,8 @@ These are required for the controlled manual mainnet probes:
 
 - `EXTENDED_MAINNET_PROBE_ENABLED=true`
 - `EXTENDED_LIVE_ENABLED=true`
+- `EXTENDED_SET_LEVERAGE_ENABLED=false` by default. Set true only for the
+  manual `extended:set_leverage` workflow.
 - `EXTENDED_SIGNER_URL=http://172.18.0.1:8776`
 - `EXTENDED_AUTO_REBALANCE_ENABLED=false`
 - `EXTENDED_REQUIRED_LEVERAGE=1`
@@ -653,6 +655,10 @@ Rails also blocks before signer/sign/submit unless the margin gate passes:
   isolated-equivalent/dedicated for this hedge.
 - If a current position exists and effective leverage is materially above 1x,
   Rails blocks even when the operator flag is set.
+- If current leverage is not 1, run
+  `bin/rails extended:set_leverage dry_run=true` first and review the intended
+  `PATCH /user/leverage` payload. Do not rely on order submit to auto-change
+  leverage.
 
 ### Mainnet Lifecycle Proof
 
@@ -784,6 +790,35 @@ No real API key or Stark key is used by this test.
    should show `current_position_status: no_position` and a
    `close_only probe requires current Extended short position` blocker because
    there is no longer a short to close.
+
+### Controlled Leverage Update
+
+Use this only while Extended is flat and has no open orders. It never signs and
+never places orders.
+
+Dry-run:
+
+```bash
+bin/rails extended:set_leverage dry_run=true market=ETH-USD leverage=1
+```
+
+Live, only after reviewing the dry-run payload:
+
+```bash
+EXTENDED_SET_LEVERAGE_ENABLED=true bin/rails extended:set_leverage dry_run=false market=ETH-USD leverage=1 confirmation=I_UNDERSTAND_THIS_UPDATES_EXTENDED_LEVERAGE
+```
+
+The task:
+
+- reads current leverage with `GET /user/leverage?market=...`;
+- builds the intended `PATCH /user/leverage` payload;
+- refuses live mode unless `EXTENDED_SET_LEVERAGE_ENABLED=true` and the exact
+  confirmation is provided;
+- refuses live mode if an Extended position exists;
+- refuses live mode if `open_orders_count` is not zero;
+- reads leverage again after PATCH;
+- reports success only when readback equals the target leverage;
+- writes redacted JSONL receipts under `storage/extended_leverage_checks/`.
 
 ### Signer Operations
 

@@ -156,7 +156,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     )
 
     assert_equal "blocked_before_submit", result.status
-    assert_includes result.blockers, "Extended current leverage 10.0 does not match required 1.0x."
+    assert_includes result.blockers, "Extended current leverage 10.0 does not match required 1.0x. Run extended:set_leverage dry_run=true."
     assert_equal 0, signer.sign_calls
     assert_equal 0, api_client.submit_calls
   end
