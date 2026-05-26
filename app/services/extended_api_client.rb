@@ -88,7 +88,7 @@ class ExtendedApiClient
   def http_get(uri, headers)
     request = Net::HTTP::Get.new(uri)
     headers.each { |key, value| request[key] = value }
-    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", open_timeout: http_timeout_seconds, read_timeout: http_timeout_seconds) do |http|
       http.request(request)
     end
   end
@@ -133,7 +133,7 @@ class ExtendedApiClient
     request = Net::HTTP::Post.new(uri)
     headers.each { |key, value| request[key] = value }
     request.body = JSON.generate(payload)
-    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", open_timeout: http_timeout_seconds, read_timeout: http_timeout_seconds) do |http|
       http.request(request)
     end
   end
@@ -142,7 +142,7 @@ class ExtendedApiClient
     request = Net::HTTP::Patch.new(uri)
     headers.each { |key, value| request[key] = value }
     request.body = JSON.generate(payload)
-    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") do |http|
+    Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", open_timeout: http_timeout_seconds, read_timeout: http_timeout_seconds) do |http|
       http.request(request)
     end
   end
@@ -153,6 +153,12 @@ class ExtendedApiClient
       "Content-Type" => "application/json",
       "X-Api-Key" => @env.fetch("EXTENDED_API_KEY", "")
     }
+  end
+
+  def http_timeout_seconds
+    Float(@env.fetch("EXTENDED_API_TIMEOUT_SECONDS", "2"))
+  rescue ArgumentError
+    2.0
   end
 
   def api_base_url

@@ -332,6 +332,56 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0", response.body
   end
 
+  test "show selected Extended venue renders when auto readiness is slow" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    stub_extended_read_only_flat
+    slow_readiness = Class.new do
+      def report(position:)
+        sleep 0.1
+        { continuous_auto_ready: true }
+      end
+    end.new
+
+    with_env(extended_dashboard_env.merge("POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01")) do
+      ExtendedAutoReadiness.stub(:new, slow_readiness) do
+        get position_path(position, hedge_venue: "extended")
+      end
+    end
+
+    assert_response :success
+    assert_match "live preflight unavailable", response.body
+    assert_match "Auto readiness", response.body
+  end
+
+  test "show renders when rewards and fees diagnostics are slow" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
+    slow_report = Class.new do
+      def report
+        sleep 0.1
+        { status: "PASS" }
+      end
+    end.new
+
+    with_env(
+      "AERODROME_REWARDS_ENABLED" => "true",
+      "AERODROME_FEES_ENABLED" => "true",
+      "POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01"
+    ) do
+      AerodromeRewardsCheck.stub(:new, ->(**) { slow_report }) do
+        AerodromeFeesCheck.stub(:new, ->(**) { slow_report }) do
+          get position_path(position)
+        end
+      end
+    end
+
+    assert_response :success
+    assert_match "dashboard rewards read timed out", response.body
+    assert_match "dashboard fees read timed out", response.body
+    assert_no_match(/\{:\w+=>/, response.body)
+  end
+
   test "extended live dashboard action is blocked and does not submit or sign" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

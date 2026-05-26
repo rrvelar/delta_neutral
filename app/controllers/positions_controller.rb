@@ -1,3 +1,5 @@
+require "timeout"
+
 # Manages the current user's DeFi positions.
 #
 # All queries are scoped to {Current.user} to prevent cross-user data access.
@@ -90,29 +92,35 @@ class PositionsController < ApplicationController
       @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue].presence || @position.hedge&.execution_venue)
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
-      @selected_hedge_venue_dashboard = selected_hedge_venue_dashboard
-      @hedge_venue_accounting = hedge_venue_accounting
-      @latest_aerodrome_weth_rebalance = @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first
-      @aerodrome_hedge_proposals = @position.aerodrome_hedge_proposals.latest_first.limit(10)
+      @selected_hedge_venue_dashboard = safe_dashboard_section("selected_hedge_venue_dashboard", fallback: unavailable_venue_dashboard) { selected_hedge_venue_dashboard }
+      @hedge_venue_accounting = safe_dashboard_section("hedge_venue_accounting", fallback: unavailable_hedge_accounting) { hedge_venue_accounting }
+      @latest_aerodrome_weth_rebalance = safe_dashboard_section("latest_rebalance", fallback: nil) { @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first }
+      @aerodrome_hedge_proposals = safe_dashboard_section("hedge_proposals", fallback: []) { @position.aerodrome_hedge_proposals.latest_first.limit(10) }
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
-      safety = AerodromeHedgeProposalSafety.new
-      @aerodrome_proposal_safety_results = @aerodrome_hedge_proposals.to_h do |proposal|
-        [ proposal.id, safety.evaluate(proposal, current_position: @position) ]
+      @aerodrome_proposal_safety_results = safe_dashboard_section("proposal_safety", fallback: {}) do
+        safety = AerodromeHedgeProposalSafety.new
+        @aerodrome_hedge_proposals.to_h { |proposal| [ proposal.id, safety.evaluate(proposal, current_position: @position) ] }
       end
-      @aerodrome_rewards_report = aerodrome_rewards_report
-      @aerodrome_fees_report = aerodrome_fees_report
-      @aerodrome_production_dashboard_status = AerodromeProductionDashboardStatus.new(
+      @aerodrome_rewards_report = safe_dashboard_section("aerodrome_rewards_report", fallback: unavailable_rewards_report("dashboard rewards read timed out")) { aerodrome_rewards_report }
+      @aerodrome_fees_report = safe_dashboard_section("aerodrome_fees_report", fallback: unavailable_fees_report("dashboard fees read timed out")) { aerodrome_fees_report }
+      @aerodrome_production_dashboard_status = safe_dashboard_section("production_dashboard_status", fallback: unavailable_production_dashboard_status) do
+        AerodromeProductionDashboardStatus.new(
         position: @position,
         hedge_venue_adapter: @selected_hedge_venue_adapter
-      ).report
-      @aerodrome_rebalance_history_status = AerodromeRebalanceHistoryStatus.new(
+        ).report
+      end
+      @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
+        AerodromeRebalanceHistoryStatus.new(
         position: @position,
         dashboard_status: @aerodrome_production_dashboard_status
-      ).report
-      @aerodrome_auto_rebalance_status = AerodromeAutoRebalanceStatus.new(
+        ).report
+      end
+      @aerodrome_auto_rebalance_status = safe_dashboard_section("auto_rebalance_status", fallback: unavailable_auto_rebalance_status) do
+        AerodromeAutoRebalanceStatus.new(
         position: @position,
         dashboard_status: @aerodrome_production_dashboard_status
-      ).report
+        ).report
+      end
     end
   end
 
@@ -208,13 +216,13 @@ class PositionsController < ApplicationController
       drift_eth: drift&.to_s("F"),
       tolerance_eth: tolerance&.to_s("F"),
       next_action: selected_venue_next_action(target: target, current_short: current_short, drift: drift, tolerance: tolerance),
-      account_state: @selected_hedge_venue_adapter.account_state,
+      account_state: safe_dashboard_section("selected_venue_account_state", fallback: unavailable_account_state) { @selected_hedge_venue_adapter.account_state },
       open_preview: target ? @selected_hedge_venue_adapter.open_short_preview(symbol: "ETH", size_eth: target, max_slippage: ENV.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01")) : nil,
       close_preview: current_short.positive? ? @selected_hedge_venue_adapter.close_preview(symbol: "ETH", size_eth: current_short) : nil,
-      live_preflight: target ? selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) : nil,
-      action_live_preflights: selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position),
-      migration_full_readiness: @selected_hedge_venue == "extended" ? extended_migration_full_readiness(target: target, extended_short: current_short) : nil,
-      auto_readiness: @selected_hedge_venue == "extended" ? ExtendedAutoReadiness.new.report(position: @position) : nil
+      live_preflight: target ? safe_dashboard_section("selected_venue_live_preflight", fallback: unavailable_preflight) { selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) } : nil,
+      action_live_preflights: safe_dashboard_section("selected_venue_action_preflights", fallback: unavailable_action_preflights) { selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position) },
+      migration_full_readiness: @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_migration_full_readiness", fallback: unavailable_migration_full_readiness) { extended_migration_full_readiness(target: target, extended_short: current_short) } : nil,
+      auto_readiness: @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_auto_readiness", fallback: unavailable_extended_auto_readiness) { ExtendedAutoReadiness.new.report(position: @position) } : nil
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
@@ -427,6 +435,161 @@ class PositionsController < ApplicationController
       value_state: "unavailable",
       stop_reason: e.message,
       warnings: [ e.message ]
+    }
+  end
+
+  def safe_dashboard_section(name, timeout_seconds: dashboard_section_timeout_seconds, fallback:)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Timeout.timeout(timeout_seconds) { yield }.tap do
+      log_dashboard_section_duration(name, started)
+    end
+  rescue Timeout::Error
+    log_dashboard_section_duration(name, started, timed_out: true)
+    fallback_with_warning(fallback, "#{name} timed out after #{timeout_seconds}s")
+  rescue => e
+    log_dashboard_section_duration(name, started, error: e)
+    fallback_with_warning(fallback, "#{name} unavailable: #{e.class}: #{e.message}")
+  end
+
+  def dashboard_section_timeout_seconds
+    BigDecimal(ENV.fetch("POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS", "1.5")).to_f
+  rescue ArgumentError
+    1.5
+  end
+
+  def log_dashboard_section_duration(name, started, timed_out: false, error: nil)
+    elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
+    suffix = if timed_out
+      " timed_out=true"
+    elsif error
+      " error=#{error.class}"
+    else
+      ""
+    end
+    Rails.logger.info("[PositionsController#show] section=#{name} duration_ms=#{elapsed_ms}#{suffix}")
+  end
+
+  def fallback_with_warning(fallback, warning)
+    case fallback
+    when Hash
+      fallback.deep_dup.tap do |copy|
+        copy[:status] ||= "unavailable"
+        copy[:warnings] = Array(copy[:warnings]) + [ warning ]
+        copy[:blockers] = Array(copy[:blockers]) + [ warning ] if copy.key?(:blockers)
+      end
+    else
+      fallback
+    end
+  end
+
+  def unavailable_venue_dashboard
+    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
+    {
+      target_hedge_eth: target&.to_s("F"),
+      current_short_eth: nil,
+      drift_eth: nil,
+      tolerance_eth: target && @position.hedge ? (target * @position.hedge.tolerance).to_s("F") : nil,
+      next_action: "unavailable",
+      current_venue_position: nil,
+      account_state: unavailable_account_state,
+      live_preflight: unavailable_preflight,
+      action_live_preflights: unavailable_action_preflights,
+      warnings: [ "Venue dashboard diagnostics unavailable; refresh diagnostics." ]
+    }
+  end
+
+  def unavailable_account_state
+    {
+      status: "unavailable",
+      read_only_diagnostics: { current_position_status: "unavailable" },
+      open_orders_count: nil,
+      margin_gate: { status: "unavailable", blockers: [ "venue diagnostics unavailable" ] },
+      blockers: [ "venue diagnostics unavailable" ],
+      warnings: [ "venue diagnostics unavailable" ]
+    }
+  end
+
+  def unavailable_preflight
+    { blockers: [ "live preflight unavailable; refresh diagnostics" ], warnings: [ "live preflight unavailable" ] }
+  end
+
+  def unavailable_action_preflights
+    { open: unavailable_preflight, rebalance: unavailable_preflight, close: unavailable_preflight }
+  end
+
+  def unavailable_migration_full_readiness
+    { status: "unavailable", warning: "Fast migration readiness unavailable; refresh diagnostics." }
+  end
+
+  def unavailable_extended_auto_readiness
+    {
+      status: "unavailable",
+      continuous_auto_ready: false,
+      planned_auto_action: "unavailable",
+      planned_auto_order_size_eth: nil,
+      auto_max_rebalance_size_eth: nil,
+      partial_auto_rebalance: false,
+      auto_can_act: false,
+      ethereal_flat: nil,
+      nado_flat: nil,
+      signer_health: { ok: false, reason: "unavailable" },
+      blockers: [ "Extended auto readiness unavailable; refresh diagnostics" ],
+      warnings: [ "Extended auto readiness unavailable; refresh diagnostics" ]
+    }
+  end
+
+  def unavailable_hedge_accounting
+    {
+      status: "unavailable",
+      components: {},
+      net_venue_pnl_usd: nil,
+      warnings: [ "Hedge accounting unavailable; refresh diagnostics." ]
+    }
+  end
+
+  def unavailable_production_dashboard_status
+    {
+      status: "unavailable",
+      execution_venue: @selected_hedge_venue,
+      target_hedge_eth: @position_valuation.weth_exposure && @position.hedge ? (@position_valuation.weth_exposure * @position.hedge.target).to_s("F") : nil,
+      current_short_eth: nil,
+      drift_eth: nil,
+      warnings: [ "Production dashboard diagnostics unavailable; refresh diagnostics." ]
+    }
+  end
+
+  def unavailable_auto_rebalance_status
+    { status: "unavailable", blockers: [ "auto-rebalance diagnostics unavailable" ], warnings: [ "auto-rebalance diagnostics unavailable" ] }
+  end
+
+  def unavailable_rewards_report(reason)
+    {
+      status: "unavailable",
+      gauge_status: "unavailable",
+      claimable_aero: nil,
+      claimable_aero_usd: nil,
+      token_id: @position.external_id,
+      strategy_level_estimate: @position.mellow_autopilot?,
+      reward_label: @position.mellow_autopilot? ? "Mellow pro-rata AERO rewards estimate" : "Claimable AERO",
+      claimable_by_app: false,
+      value_state: "unavailable",
+      stop_reason: reason,
+      warnings: [ reason ]
+    }
+  end
+
+  def unavailable_fees_report(reason)
+    {
+      status: "unavailable",
+      fee_source: "unavailable",
+      total_fees_usd: nil,
+      token_id: @position.external_id,
+      strategy_level_estimate: @position.mellow_autopilot?,
+      fee_label: @position.mellow_autopilot? ? "Mellow pro-rata LP fee estimate" : "Unclaimed fees USD estimate",
+      collect_enabled_by_app: false,
+      value_state: "unavailable",
+      stop_reason: reason,
+      warnings: [ reason ]
     }
   end
 
