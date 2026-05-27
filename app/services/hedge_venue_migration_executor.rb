@@ -1,14 +1,14 @@
 class HedgeVenueMigrationExecutor
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_MIGRATES_HEDGE_BETWEEN_VENUES".freeze
-  RECEIPT_DIR = Rails.root.join("storage/hedge_migration_checks")
 
-  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil)
+  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil, receipt_writer: nil)
     @env = env
     @planner = planner
     @leg_runner = leg_runner || DefaultLegRunner.new(env: env)
     @now = now
     @snapshot_refresher = snapshot_refresher || method(:refresh_dashboard_snapshot)
+    @receipt_writer = receipt_writer || HedgeVenueMigrationReceiptWriter.new(now: now)
   end
 
   def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false)
@@ -347,23 +347,27 @@ class HedgeVenueMigrationExecutor
   end
 
   def write_receipt(receipt)
-    FileUtils.mkdir_p(RECEIPT_DIR)
-    path = RECEIPT_DIR.join("#{@now.call.utc.strftime('%Y%m%d')}.jsonl")
-    File.open(path, "a") { |file| file.puts(JSON.generate(sanitize_sensitive(receipt))) }
-  rescue SystemCallError => e
-    Rails.logger.warn("Hedge migration receipt write failed: #{e.class}: #{e.message}")
+    @receipt_writer.write(sanitize_sensitive(receipt))
   end
 
   def sanitize_sensitive(value)
     case value
     when Hash
       value.to_h.each_with_object({}) do |(key, nested), sanitized|
-        sanitized[key] = key.to_s.match?(/api[_-]?key|private|authorization|cookie|signature|secret/i) ? "<redacted>" : sanitize_sensitive(nested)
+        sanitized[key] = sensitive_key?(key) ? "<redacted>" : sanitize_sensitive(nested)
       end
     when Array
       value.map { |nested| sanitize_sensitive(nested) }
     else
       value
     end
+  end
+
+  def sensitive_key?(key)
+    text = key.to_s
+    return false if text == "confirmation_type"
+    return false if text == "signatures_created"
+
+    text.match?(/api[_-]?key|private|authorization|cookie|signature|secret/i)
   end
 end

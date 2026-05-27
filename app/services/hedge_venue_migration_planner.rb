@@ -54,8 +54,12 @@ class HedgeVenueMigrationPlanner
 
     receipt.merge!(
       current_production_venue: position.hedge&.execution_venue,
+      production_venue: position.hedge&.execution_venue,
       source_snapshot_id: snapshot.id,
       source_snapshot_refreshed_at: snapshot.refreshed_at&.utc&.iso8601,
+      extended_short_before: decimal_string(venue_short(snapshot, "extended")),
+      ethereal_short_before: decimal_string(venue_short(snapshot, "ethereal")),
+      nado_short_before: decimal_string(venue_short(snapshot, "nado")),
       from_short_before: decimal_string(from_short),
       to_short_before: decimal_string(to_short),
       target_short: decimal_string(target),
@@ -82,6 +86,7 @@ class HedgeVenueMigrationPlanner
       full_migration_allowed: full_migration_allowed,
       finalize_available: full && expected_from.zero? && snapshot.tolerance_abs_eth.present? && expected_drift.abs <= snapshot.tolerance_abs_eth,
       required_gates: required_gates(from: from, to: to, mode: mode),
+      live_gates: required_gates(from: from, to: to, mode: mode),
       blockers: blockers.uniq,
       warnings: warnings.uniq
     )

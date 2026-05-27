@@ -515,6 +515,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Migration Control Center", response.body
     assert_match "Migration complete: production venue Extended.", response.body
     assert_match "Extended → Ethereal", response.body
+    assert_match "Production venue", response.body
+    assert_match "Preview from", response.body
+    assert_match "Preview to", response.body
+    assert_match "Preview does not switch the production hedge venue", response.body
     assert_match "Preview migration", response.body
     assert_match "Run manual migration", response.body
     assert_match "Finalize migration", response.body
@@ -554,6 +558,54 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "pending 0", response.body
   end
 
+  test "migration preview action writes dry run receipt and keeps production venue selected" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    receipt_path = Rails.root.join("storage/hedge_migration_checks/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    before_lines = File.exist?(receipt_path) ? File.readlines(receipt_path).size : 0
+
+    post migration_preview_position_path(position), params: {
+      from_venue: "extended",
+      to_venue: "ethereal",
+      migration_mode: "preview",
+      max_step_size_eth: "0.01"
+    }
+
+    assert_response :redirect
+    assert_includes response.location, position_path(position)
+    assert_includes response.location, "hedge_venue=extended"
+    assert_includes response.location, "preview_to_venue=ethereal"
+    assert_no_changes -> { hedge.reload.execution_venue } do
+      get position_path(position, hedge_venue: "extended", preview_from_venue: "extended", preview_to_venue: "ethereal")
+    end
+
+    lines = File.readlines(receipt_path)
+    assert_operator lines.size, :>, before_lines
+    receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |item| item["position_id"] == position.id && item["action"] == "migration_preview" }
+    assert receipt, "expected migration_preview receipt for position #{position.id}"
+    assert_equal "preview_ready", receipt.fetch("final_status")
+    assert_equal true, receipt.fetch("dry_run")
+    assert_equal 0, receipt.fetch("orders_submitted")
+    assert_equal 0, receipt.fetch("orders_placed")
+    assert_equal 0, receipt.fetch("signatures_created")
+    assert_equal "extended", receipt.fetch("production_venue")
+    assert_equal "extended", receipt.fetch("from_venue")
+    assert_equal "ethereal", receipt.fetch("to_venue")
+    assert receipt.fetch("planned_target_leg").fetch("size_eth")
+    assert receipt.fetch("planned_source_leg").fetch("size_eth")
+    assert receipt.fetch("expected_final_combined")
+    assert_equal receipt_path.to_s, receipt.fetch("receipt_path")
+    assert_no_match HedgeVenueMigrationExecutor::CONFIRMATION, receipt.to_json
+  end
+
   test "migration preview action is read only and blocks stale snapshot" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -569,7 +621,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :redirect
     assert_includes response.location, position_path(position)
-    assert_includes response.location, "hedge_venue=ethereal"
+    assert_includes response.location, "hedge_venue=extended"
+    assert_includes response.location, "preview_to_venue=ethereal"
     assert_match "snapshot is stale", flash[:alert]
   end
 
@@ -594,7 +647,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :redirect
     assert_includes response.location, position_path(position)
-    assert_includes response.location, "hedge_venue=ethereal"
+    assert_includes response.location, "hedge_venue=extended"
+    assert_includes response.location, "preview_to_venue=ethereal"
     assert_match "MIGRATION_LIVE_ENABLED must be true", flash[:alert]
   end
 
