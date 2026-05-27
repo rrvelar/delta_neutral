@@ -11,17 +11,18 @@ class HedgeVenueMigrationPlanner
     @now = now
   end
 
-  def plan(position:, from_venue:, to_venue:, mode: "preview", step_size_eth: nil, full_migration_allowed: false)
+  def plan(position:, from_venue:, to_venue:, mode: "preview", step_size_eth: nil, full_migration_allowed: false, migration_sequence: DEFAULT_SEQUENCE)
     from = HedgeVenues.normalize(from_venue)
     to = HedgeVenues.normalize(to_venue)
     mode = normalized_mode(mode)
+    sequence = normalized_sequence(migration_sequence)
     snapshot = position.position_dashboard_snapshot
     blockers = snapshot_blockers(snapshot)
     blockers << "from_venue and to_venue must differ" if from == to
     blockers << "Nado migration readiness is not implemented." if [ from, to ].include?("nado")
     blockers << "Migration direction #{from} -> #{to} is not supported yet." unless SUPPORTED_DIRECTIONS.include?([ from, to ])
 
-    receipt = base_receipt(position: position, snapshot: snapshot, from_venue: from, to_venue: to, mode: mode)
+    receipt = base_receipt(position: position, snapshot: snapshot, from_venue: from, to_venue: to, mode: mode, sequence: sequence)
     if blockers.any?
       receipt[:blockers] = blockers.uniq
       return Result.new("blocked", receipt[:blockers], receipt[:warnings], receipt)
@@ -40,14 +41,25 @@ class HedgeVenueMigrationPlanner
 
     to_leg = build_to_leg(to, target_short: target, current_short: to_short, size: migration_size, full: full)
     from_leg = build_from_leg(from, current_short: from_short, size: full ? from_short : [ migration_size, from_short ].min, full: full)
+    first_leg = sequence == "source_first" ? from_leg : to_leg
+    second_leg = sequence == "source_first" ? to_leg : from_leg
     expected_to = to_short + BigDecimal(to_leg.fetch(:size_eth).to_s)
     expected_from = [ from_short - BigDecimal(from_leg.fetch(:size_eth).to_s), BigDecimal("0") ].max
-    temporary_combined = snapshot.combined_short_eth.to_d + BigDecimal(to_leg.fetch(:size_eth).to_s)
+    temporary_combined = if sequence == "source_first"
+      snapshot.combined_short_eth.to_d - BigDecimal(from_leg.fetch(:size_eth).to_s)
+    else
+      snapshot.combined_short_eth.to_d + BigDecimal(to_leg.fetch(:size_eth).to_s)
+    end
+    temporary_drift = target - temporary_combined
     expected_combined = expected_from + expected_to + other_venue_short(snapshot, from, to)
     expected_drift = target - expected_combined
 
     warnings = receipt[:warnings]
-    warnings << "Target-venue-first sequence temporarily overhedges until source venue reduction confirms."
+    warnings << if sequence == "source_first"
+      "Source-venue-first sequence temporarily underhedges or leaves the hedge unhedged until target venue open confirms."
+    else
+      "Target-venue-first sequence temporarily overhedges until source venue reduction confirms."
+    end
     warnings << "Stepwise migration transfers only the step size and may leave the combined hedge unchanged unless a separate correction is planned." if mode == "stepwise"
     warnings << "Full migration plans final combined short at target_short_eth instead of preserving current combined exposure." if full
     warnings << "Live migration requires explicit migration gate, exact confirmation, venue live gates, zero open orders, and leg readback confirmation."
@@ -73,10 +85,16 @@ class HedgeVenueMigrationPlanner
       planned_to_leg: to_leg,
       planned_source_leg: from_leg,
       planned_target_leg: to_leg,
-      migration_sequence: DEFAULT_SEQUENCE,
+      planned_first_leg: first_leg,
+      planned_second_leg: second_leg,
+      migration_sequence: sequence,
       max_step_size_eth: decimal_string(step_size),
       temporary_combined_short_eth: decimal_string(temporary_combined),
       temporary_exposure: decimal_string(temporary_combined),
+      temporary_combined_after_first_leg: decimal_string(temporary_combined),
+      temporary_drift_after_first_leg: decimal_string(temporary_drift),
+      temporary_risk_type: sequence == "source_first" ? "underhedge/unhedged" : "overhedge",
+      source_first_unhedged_warning: sequence == "source_first",
       expected_from_short_after: decimal_string(expected_from),
       expected_to_short_after: decimal_string(expected_to),
       expected_combined_short_after: decimal_string(expected_combined),
@@ -104,7 +122,15 @@ class HedgeVenueMigrationPlanner
     "preview"
   end
 
-  def base_receipt(position:, snapshot:, from_venue:, to_venue:, mode:)
+  def normalized_sequence(value)
+    text = value.to_s
+    return DEFAULT_SEQUENCE if text.blank?
+    return text if text.in?(%w[target_first source_first])
+
+    DEFAULT_SEQUENCE
+  end
+
+  def base_receipt(position:, snapshot:, from_venue:, to_venue:, mode:, sequence:)
     {
       action: "hedge_venue_migration_preview",
       position_id: position.id,
@@ -112,6 +138,7 @@ class HedgeVenueMigrationPlanner
       from_venue: from_venue,
       to_venue: to_venue,
       mode: mode,
+      migration_sequence: sequence,
       dry_run: true,
       timestamp: @now.call.utc.iso8601,
       snapshot_id: snapshot&.id,

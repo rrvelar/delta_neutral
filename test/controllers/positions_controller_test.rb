@@ -518,6 +518,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Production venue", response.body
     assert_match "Preview from", response.body
     assert_match "Preview to", response.body
+    assert_match "Sequence", response.body
+    assert_match "Target-first", response.body
+    assert_match "Source-first", response.body
     assert_match "Preview does not switch the production hedge venue", response.body
     assert_match "Preview migration", response.body
     assert_match "Run manual migration", response.body
@@ -576,6 +579,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       from_venue: "extended",
       to_venue: "ethereal",
       migration_mode: "preview",
+      migration_sequence: "source_first",
       max_step_size_eth: "0.01"
     }
 
@@ -583,6 +587,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.location, position_path(position)
     assert_includes response.location, "hedge_venue=extended"
     assert_includes response.location, "preview_to_venue=ethereal"
+    assert_includes response.location, "preview_migration_sequence=source_first"
     assert_no_changes -> { hedge.reload.execution_venue } do
       get position_path(position, hedge_venue: "extended", preview_from_venue: "extended", preview_to_venue: "ethereal")
     end
@@ -599,6 +604,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "extended", receipt.fetch("production_venue")
     assert_equal "extended", receipt.fetch("from_venue")
     assert_equal "ethereal", receipt.fetch("to_venue")
+    assert_equal "source_first", receipt.fetch("migration_sequence")
+    assert_equal "underhedge/unhedged", receipt.fetch("temporary_risk_type")
+    assert receipt.key?("temporary_combined_after_first_leg")
     assert receipt.fetch("planned_target_leg").fetch("size_eth")
     assert receipt.fetch("planned_source_leg").fetch("size_eth")
     assert receipt.fetch("expected_final_combined")

@@ -62,7 +62,62 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal "sell", result.receipt.fetch(:planned_to_leg).fetch(:side)
     assert_equal "extended", result.receipt.fetch(:planned_from_leg).fetch(:venue)
     assert_equal "buy", result.receipt.fetch(:planned_from_leg).fetch(:side)
+    assert_equal "target_first", result.receipt.fetch(:migration_sequence)
+    assert_equal "ethereal", result.receipt.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "extended", result.receipt.fetch(:planned_second_leg).fetch(:venue)
+    assert_equal "overhedge", result.receipt.fetch(:temporary_risk_type)
     assert_includes result.warnings, "Target-venue-first sequence temporarily overhedges until source venue reduction confirms."
+  end
+
+  test "Extended to Ethereal full source first plans source close then target open" do
+    position = migration_position(execution_venue: "extended")
+    snapshot_for(position, extended_short: "0.824", ethereal_short: "0", nado_short: "0", target: "0.8086")
+
+    result = HedgeVenueMigrationPlanner.new.plan(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      mode: "full",
+      full_migration_allowed: true,
+      migration_sequence: "source_first"
+    )
+
+    assert_equal "source_first", result.receipt.fetch(:migration_sequence)
+    assert_equal "extended", result.receipt.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "buy", result.receipt.fetch(:planned_first_leg).fetch(:side)
+    assert_equal true, result.receipt.fetch(:planned_first_leg).fetch(:reduce_only)
+    assert_equal "0.824", result.receipt.fetch(:planned_first_leg).fetch(:size_eth)
+    assert_equal "ethereal", result.receipt.fetch(:planned_second_leg).fetch(:venue)
+    assert_equal "sell", result.receipt.fetch(:planned_second_leg).fetch(:side)
+    assert_equal false, result.receipt.fetch(:planned_second_leg).fetch(:reduce_only)
+    assert_equal "0.8086", result.receipt.fetch(:planned_second_leg).fetch(:size_eth)
+    assert_equal "0.8086", result.receipt.fetch(:expected_final_combined)
+    assert_equal "0.0", result.receipt.fetch(:expected_final_drift)
+    assert_equal "0.0", result.receipt.fetch(:temporary_combined_after_first_leg)
+    assert_equal "0.8086", result.receipt.fetch(:temporary_drift_after_first_leg)
+    assert_equal "underhedge/unhedged", result.receipt.fetch(:temporary_risk_type)
+    assert_equal true, result.receipt.fetch(:source_first_unhedged_warning)
+  end
+
+  test "Ethereal to Extended full source first works symmetrically" do
+    position = migration_position(execution_venue: "ethereal")
+    snapshot_for(position, extended_short: "0", ethereal_short: "0.824", nado_short: "0", target: "0.8086")
+
+    result = HedgeVenueMigrationPlanner.new.plan(
+      position: position,
+      from_venue: "ethereal",
+      to_venue: "extended",
+      mode: "full",
+      full_migration_allowed: true,
+      migration_sequence: "source_first"
+    )
+
+    assert_equal "ethereal", result.receipt.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "buy", result.receipt.fetch(:planned_first_leg).fetch(:side)
+    assert_equal "extended", result.receipt.fetch(:planned_second_leg).fetch(:venue)
+    assert_equal "sell", result.receipt.fetch(:planned_second_leg).fetch(:side)
+    assert_equal "0.8086", result.receipt.fetch(:expected_final_combined)
+    assert_equal "underhedge/unhedged", result.receipt.fetch(:temporary_risk_type)
   end
 
   test "Extended to Ethereal full preview lands final combined at target when current combined is outside tolerance" do
@@ -88,6 +143,27 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal "0.05", result.receipt.fetch(:planned_source_leg).fetch(:size_eth)
     assert_equal "0.8", result.receipt.fetch(:expected_final_combined)
     assert result.warnings.any? { |warning| warning.include?("Stepwise migration transfers only the step size") }
+  end
+
+  test "stepwise source first plans source reduce then target increase" do
+    position = migration_position(execution_venue: "extended")
+    snapshot_for(position, extended_short: "0.8", ethereal_short: "0", nado_short: "0", target: "0.8")
+
+    result = HedgeVenueMigrationPlanner.new.plan(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      mode: "stepwise",
+      step_size_eth: "0.05",
+      migration_sequence: "source_first"
+    )
+
+    assert_equal "extended", result.receipt.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "0.05", result.receipt.fetch(:planned_first_leg).fetch(:size_eth)
+    assert_equal "ethereal", result.receipt.fetch(:planned_second_leg).fetch(:venue)
+    assert_equal "0.05", result.receipt.fetch(:planned_second_leg).fetch(:size_eth)
+    assert_equal "0.75", result.receipt.fetch(:temporary_combined_after_first_leg)
+    assert_equal "underhedge/unhedged", result.receipt.fetch(:temporary_risk_type)
   end
 
   test "Nado migration is unavailable" do

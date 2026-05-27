@@ -11,7 +11,7 @@ class HedgeVenueMigrationExecutor
     @receipt_writer = receipt_writer || HedgeVenueMigrationReceiptWriter.new(now: now)
   end
 
-  def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false)
+  def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false, migration_sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE)
     refreshed_snapshot = nil
     if !dry_run && live_preflight_gate_open?(confirmation)
       refreshed_snapshot = @snapshot_refresher.call(position)
@@ -24,7 +24,8 @@ class HedgeVenueMigrationExecutor
       to_venue: to_venue,
       mode: mode,
       step_size_eth: step_size_eth,
-      full_migration_allowed: full_migration_allowed
+      full_migration_allowed: full_migration_allowed,
+      migration_sequence: migration_sequence
     )
     receipt = plan.receipt.merge(
       action: "hedge_venue_migration",
@@ -49,19 +50,25 @@ class HedgeVenueMigrationExecutor
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
-    first_leg = @leg_runner.call(receipt.fetch(:planned_target_leg), context: leg_context(position, confirmation, receipt))
-    receipt[:to_leg_execution] = sanitize_sensitive(first_leg)
+    first_planned_leg = receipt.fetch(:planned_first_leg)
+    second_planned_leg = receipt.fetch(:planned_second_leg)
+    first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
+    receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
+    receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     unless leg_confirmed?(first_leg)
       receipt[:final_status] = "first_leg_not_confirmed"
-      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "Target venue leg was not confirmed; source leg was not submitted." ]
+      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
-    second_leg = @leg_runner.call(receipt.fetch(:planned_source_leg), context: leg_context(position, confirmation, receipt))
-    receipt[:from_leg_execution] = sanitize_sensitive(second_leg)
+    second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
+    receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
+    receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << second_leg[:readback] if second_leg[:readback]
     receipt[:orders_placed] = leg_order_count(first_leg) + leg_order_count(second_leg)
     receipt[:signatures_created] = leg_signature_count(first_leg) + leg_signature_count(second_leg)
@@ -74,7 +81,10 @@ class HedgeVenueMigrationExecutor
     else
       receipt[:final_status] = "partial_migration_manual_action_required"
       receipt[:manual_action_required] = true
-      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Source venue leg was not confirmed after target leg succeeded." ]
+      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
+      if receipt[:migration_sequence] == "source_first"
+        receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
+      end
     end
     write_receipt(receipt)
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
@@ -289,8 +299,14 @@ class HedgeVenueMigrationExecutor
   end
 
   def final_readback_status(receipt:, first_leg:, second_leg:)
-    from_after = decimal(second_leg[:after_short_eth] || receipt.dig(:planned_source_leg, :expected_after_short_eth))
-    to_after = decimal(first_leg[:after_short_eth] || receipt.dig(:planned_target_leg, :expected_after_short_eth))
+    legs = [
+      [ receipt.fetch(:planned_first_leg), first_leg ],
+      [ receipt.fetch(:planned_second_leg), second_leg ]
+    ]
+    from_result = legs.find { |planned, _actual| planned.fetch(:venue) == receipt[:from_venue] }
+    to_result = legs.find { |planned, _actual| planned.fetch(:venue) == receipt[:to_venue] }
+    from_after = decimal(from_result&.last&.fetch(:after_short_eth, nil) || receipt.dig(:planned_source_leg, :expected_after_short_eth))
+    to_after = decimal(to_result&.last&.fetch(:after_short_eth, nil) || receipt.dig(:planned_target_leg, :expected_after_short_eth))
     target = decimal(receipt[:target_short])
     tolerance = decimal(receipt[:tolerance_abs_eth])
     tolerance = decimal(receipt[:target_short]) * BigDecimal("0.03") unless tolerance.positive?

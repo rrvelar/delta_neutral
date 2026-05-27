@@ -220,7 +220,8 @@ class PositionsController < ApplicationController
       to_venue: params[:to_venue],
       mode: params[:migration_mode].presence || "preview",
       step_size_eth: params[:max_step_size_eth],
-      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed]),
+      migration_sequence: params[:migration_sequence]
     )
     write_migration_preview_receipt(result, position)
     level = result.blockers.present? ? :alert : :notice
@@ -238,7 +239,8 @@ class PositionsController < ApplicationController
       dry_run: false,
       confirmation: params[:migration_confirmation],
       step_size_eth: params[:max_step_size_eth],
-      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed]),
+      migration_sequence: params[:migration_sequence]
     )
     level = result.status == "success" ? :notice : :alert
     redirect_to position_path(position, migration_preview_query_params(position)),
@@ -596,7 +598,8 @@ class PositionsController < ApplicationController
       to_venue: params[:preview_to_venue].presence || params[:to_venue].presence || selected_migration_to_venue,
       mode: params[:preview_migration_mode].presence || params[:migration_mode].presence || "preview",
       step_size_eth: params[:max_step_size_eth].presence || default_migration_step_size_eth,
-      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:preview_full_migration_allowed].presence || params[:full_migration_allowed])
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:preview_full_migration_allowed].presence || params[:full_migration_allowed]),
+      migration_sequence: params[:preview_migration_sequence].presence || params[:migration_sequence]
     ).receipt
   rescue => e
     {
@@ -624,6 +627,7 @@ class PositionsController < ApplicationController
       preview_from_venue: params[:from_venue],
       preview_to_venue: params[:to_venue],
       preview_migration_mode: params[:migration_mode],
+      preview_migration_sequence: params[:migration_sequence],
       max_step_size_eth: params[:max_step_size_eth],
       preview_full_migration_allowed: params[:full_migration_allowed]
     }.compact

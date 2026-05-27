@@ -324,7 +324,7 @@ end %>
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
           <h2 class="mt-1 text-lg font-semibold text-white">Manual hedge venue migration</h2>
-          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration is target-first, manually gated, and readback-confirmed leg by leg.</p>
+          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration is manually gated and readback-confirmed leg by leg.</p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-sm">
           <p class="text-gray-500">Active migration status</p>
@@ -347,7 +347,7 @@ end %>
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p class="text-xs uppercase tracking-wide text-gray-500">Current plan</p>
-              <p class="mt-1 text-sm text-gray-300"><%= HedgeVenues.label(migration_plan[:from_venue]) %> → <%= HedgeVenues.label(migration_plan[:to_venue]) %> · <%= migration_plan[:mode].presence || "preview" %></p>
+              <p class="mt-1 text-sm text-gray-300"><%= HedgeVenues.label(migration_plan[:from_venue]) %> → <%= HedgeVenues.label(migration_plan[:to_venue]) %> · <%= migration_plan[:mode].presence || "preview" %> · <%= migration_plan[:migration_sequence].to_s.tr("_", "-") %></p>
             </div>
             <span class="rounded-full border <%= migration_plan[:blockers].present? ? 'border-yellow-800 bg-yellow-950/50 text-yellow-200' : 'border-green-800 bg-green-950/60 text-green-300' %> px-3 py-1 text-xs"><%= migration_plan[:blockers].present? ? "Blocked preview" : "Preview ready" %></span>
           </div>
@@ -355,10 +355,12 @@ end %>
             <div><p class="text-xs text-gray-500">Production venue</p><p class="text-white"><%= HedgeVenues.label(migration_plan[:production_venue] || @position.hedge&.execution_venue) %></p></div>
             <div><p class="text-xs text-gray-500">Preview from</p><p class="text-white"><%= HedgeVenues.label(migration_plan[:from_venue]) %></p></div>
             <div><p class="text-xs text-gray-500">Preview to</p><p class="text-white"><%= HedgeVenues.label(migration_plan[:to_venue]) %></p></div>
+            <div><p class="text-xs text-gray-500">Sequence</p><p class="text-white"><%= migration_plan[:migration_sequence].to_s.tr("_", " ") %></p></div>
             <div><p class="text-xs text-gray-500">From short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:from_short_before]) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">To short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:to_short_before]) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">Current drift</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:drift_before] || drift_eth) %> ETH</p></div>
-            <div><p class="text-xs text-gray-500">Temporary combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:temporary_exposure] || migration_plan[:temporary_combined_short_eth]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Temporary combined after first leg</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:temporary_combined_after_first_leg] || migration_plan[:temporary_exposure]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Temporary risk</p><p class="text-white"><%= migration_plan[:temporary_risk_type].presence || "—" %></p></div>
             <div><p class="text-xs text-gray-500">Target venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_to_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_to_leg, :size_eth)) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">Source venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_from_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_from_leg, :size_eth)) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">Projected final combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:expected_final_combined] || migration_plan[:expected_combined_short_after]) %> ETH</p></div>
@@ -367,7 +369,7 @@ end %>
           </div>
           <% if migration_plan[:mode].to_s == "full" && inside_tolerance == false %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3 text-xs text-yellow-100">
-              Full migration correction: this plan targets <%= format_venue_eth_amount(migration_plan[:target_short]) %> ETH final combined exposure instead of preserving the current combined short. Temporary target-first exposure may reach <%= format_venue_eth_amount(migration_plan[:temporary_exposure]) %> ETH before the source reduction confirms.
+              Full migration correction: this plan targets <%= format_venue_eth_amount(migration_plan[:target_short]) %> ETH final combined exposure instead of preserving the current combined short. Temporary <%= migration_plan[:migration_sequence].to_s.tr("_", "-") %> exposure may reach <%= format_venue_eth_amount(migration_plan[:temporary_combined_after_first_leg] || migration_plan[:temporary_exposure]) %> ETH before the second leg confirms.
             </div>
           <% elsif migration_plan[:mode].to_s == "stepwise" %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3 text-xs text-yellow-100">
@@ -408,7 +410,7 @@ end %>
 
       <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-4">
         <%= form_with url: migration_preview_position_path(@position), method: :post, class: "rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-3" do |form| %>
-          <div class="grid grid-cols-1 gap-3 md:grid-cols-5">
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-6">
             <div>
               <%= form.label :from_venue, "From", class: "block text-xs uppercase tracking-wide text-gray-500" %>
               <%= form.select :from_venue, options_for_select([ [ "Extended", "extended" ], [ "Ethereal", "ethereal" ], [ "Nado", "nado" ] ], migration_from_default), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
@@ -420,6 +422,10 @@ end %>
             <div>
               <%= form.label :migration_mode, "Mode", class: "block text-xs uppercase tracking-wide text-gray-500" %>
               <%= form.select :migration_mode, options_for_select([ [ "Preview", "preview" ], [ "Stepwise", "stepwise" ], [ "Full", "full" ] ], migration_plan[:mode] || "preview"), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+            </div>
+            <div>
+              <%= form.label :migration_sequence, "Sequence", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+              <%= form.select :migration_sequence, options_for_select([ [ "Target-first", "target_first" ], [ "Source-first", "source_first" ] ], migration_plan[:migration_sequence] || "target_first"), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
             </div>
             <div>
               <%= form.label :max_step_size_eth, "Max step ETH", class: "block text-xs uppercase tracking-wide text-gray-500" %>
@@ -435,6 +441,10 @@ end %>
           <div class="mt-3 flex flex-wrap gap-2">
             <%= form.submit "Preview migration", class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
           </div>
+          <div class="mt-3 grid grid-cols-1 gap-2 text-xs text-yellow-100 md:grid-cols-2">
+            <p class="rounded-lg border border-yellow-900 bg-yellow-950/20 p-3">Target-first opens the target venue first, then closes the source. It avoids an unhedged window, but creates temporary overhedge.</p>
+            <p class="rounded-lg border border-yellow-900 bg-yellow-950/20 p-3">Source-first closes the source venue first, then opens the target. It avoids temporary overhedge, but creates a temporary underhedged or unhedged window.</p>
+          </div>
         <% end %>
 
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
@@ -444,6 +454,7 @@ end %>
             <%= form.hidden_field :from_venue, value: migration_from_default %>
             <%= form.hidden_field :to_venue, value: migration_to_default %>
             <%= form.hidden_field :migration_mode, value: migration_plan[:mode].presence || "preview" %>
+            <%= form.hidden_field :migration_sequence, value: migration_plan[:migration_sequence].presence || "target_first" %>
             <%= form.hidden_field :max_step_size_eth, value: params[:max_step_size_eth].presence || migration_plan[:max_step_size_eth].presence || "0.01" %>
             <%= form.hidden_field :full_migration_allowed, value: ActiveModel::Type::Boolean.new.cast(migration_plan[:full_migration_allowed]) ? "1" : "0" %>
             <code class="block break-all rounded border border-gray-800 bg-gray-950 p-2 text-[11px] text-gray-300"><%= HedgeVenueMigrationExecutor::CONFIRMATION %></code>

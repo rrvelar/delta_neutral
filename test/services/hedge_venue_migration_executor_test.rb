@@ -19,6 +19,25 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "source first live execution blocks without env gate and confirmation" do
+    position = migration_position
+    result = HedgeVenueMigrationExecutor.new(env: {}).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: "wrong",
+      full_migration_allowed: true,
+      mode: "full",
+      migration_sequence: "source_first"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "MIGRATION_LIVE_ENABLED must be true"
+    assert_includes result.blockers, "submitted confirmation must equal #{HedgeVenueMigrationExecutor::CONFIRMATION}"
+    assert_equal "source_first", result.receipt.fetch(:migration_sequence)
+  end
+
   test "live execution blocks without confirmation" do
     position = migration_position
     result = HedgeVenueMigrationExecutor.new(env: live_env, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
@@ -101,6 +120,37 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal 2, calls.size
     assert_equal 2, result.receipt.fetch(:orders_placed)
     assert_equal 1, result.receipt.fetch(:signatures_created)
+  end
+
+  test "source first target leg failure after source close requires manual action" do
+    position = migration_position
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      assert context.fetch(:position)
+      if calls.size == 1
+        { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, after_short_eth: leg.fetch(:expected_after_short_eth) }
+      else
+        { status: "submitted_but_readback_pending", confirmed: false, orders_placed: 1, signatures_created: 1, blockers: [ "target open not confirmed" ] }
+      end
+    end
+
+    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full",
+      migration_sequence: "source_first"
+    )
+
+    assert_equal "partial_migration_manual_action_required", result.status
+    assert_equal true, result.receipt.fetch(:manual_action_required)
+    assert_equal "extended", calls.first.fetch(:venue)
+    assert_equal "ethereal", calls.second.fetch(:venue)
+    assert result.receipt.fetch(:warnings).any? { |warning| warning.include?("temporarily unhedged") }
   end
 
   test "live execution blocks when source auto is enabled" do
