@@ -84,7 +84,7 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def show
-    @position = Current.user.positions.includes(:dex, :hedge, wallet: :network).find(params[:id])
+    @position = Current.user.positions.includes(:dex, :hedge, :position_dashboard_snapshot, wallet: :network).find(params[:id])
     @position_valuation = PositionValuation.current(@position)
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
@@ -155,9 +155,10 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def sync_now
-    @position = Current.user.positions.find(params[:id])
+    @position = Current.user.positions.includes(:dex).find(params[:id])
     PositionSyncJob.perform_later(@position.id)
-    redirect_to position_path(@position), notice: "Position sync queued."
+    DashboardSnapshotJob.perform_later(@position.id) if @position.dex.name == "aerodrome_slipstream"
+    redirect_to position_path(@position), notice: @position.dex.name == "aerodrome_slipstream" ? "Position sync and dashboard snapshot refresh queued." : "Position sync queued."
   end
 
   def hedge_open_preview
@@ -262,10 +263,10 @@ class PositionsController < ApplicationController
   def lightweight_selected_hedge_venue_dashboard
     return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
 
-    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
-    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size) || cached_selected_venue_short_size
+    target = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:target_short_eth))
+    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size)
     drift = target && current_short ? target - current_short : nil
-    tolerance = target && @position.hedge ? target * @position.hedge.tolerance : nil
+    tolerance = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:tolerance_eth))
 
     {
       target_hedge_eth: target&.to_s("F"),
@@ -285,22 +286,6 @@ class PositionsController < ApplicationController
     }
   end
 
-  def cached_selected_venue_short_size
-    rebalance = latest_successful_selected_venue_rebalance
-    return BigDecimal(rebalance.new_short_size.to_s) if rebalance&.new_short_size
-
-    nil
-  rescue ArgumentError
-    nil
-  end
-
-  def latest_successful_selected_venue_rebalance
-    @latest_successful_selected_venue_rebalance ||= @position.hedge&.short_rebalances&.
-      where(venue: @selected_hedge_venue, asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.
-      order(rebalanced_at: :desc)&.
-      first
-  end
-
   def cached_selected_venue_position(current_short, venue_key = @selected_hedge_venue)
     return nil unless current_short
 
@@ -310,54 +295,88 @@ class PositionsController < ApplicationController
       side: current_short.positive? ? "short" : nil,
       short_size: current_short.to_s("F"),
       size: current_short.positive? ? "-#{current_short.to_s('F')}" : "0",
-      status: "cached_from_rebalance_history",
+      status: "snapshot",
       stale: true
     }
   end
 
   def cached_hedge_dashboard_snapshot
-    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
-    tolerance = target && @position.hedge ? target * @position.hedge.tolerance : nil
-    venue_states = %w[extended ethereal nado].to_h { |venue| [ venue.to_sym, cached_venue_state(venue) ] }
-    selected = venue_states[@selected_hedge_venue&.to_sym] || cached_venue_state(@selected_hedge_venue)
-    selected_short = selected[:short_size]
-    drift = target && selected_short ? target - selected_short : nil
-    inside_tolerance = drift && tolerance ? drift.abs <= tolerance : nil
+    snapshot = @position.position_dashboard_snapshot
+    return missing_dashboard_snapshot if snapshot.nil?
+
+    venue_states = %w[extended ethereal nado].to_h { |venue| [ venue.to_sym, snapshot_venue_state(snapshot, venue) ] }
+    selected = venue_states[@selected_hedge_venue&.to_sym] || unknown_venue_state(@selected_hedge_venue)
+    inside_tolerance = snapshot.inside_tolerance
     {
-      production_venue: @position.hedge&.execution_venue,
-      production_venue_name: HedgeVenues.label(@position.hedge&.execution_venue),
+      id: snapshot.id,
+      refreshed_at: snapshot.refreshed_at,
+      stale: snapshot.stale_now?,
+      refresh_status: snapshot.refresh_status,
+      error_summary: snapshot.error_summary,
+      production_venue: snapshot.production_venue,
+      production_venue_name: HedgeVenues.label(snapshot.production_venue),
       selected_venue: selected,
       venue_states: venue_states,
-      target_short_eth: target&.to_s("F"),
-      tolerance_eth: tolerance&.to_s("F"),
-      drift_eth: drift&.to_s("F"),
+      target_short_eth: snapshot.decimal_string(snapshot.target_short_eth),
+      tolerance_eth: snapshot.decimal_string(snapshot.tolerance_abs_eth),
+      drift_eth: snapshot.decimal_string(snapshot.drift_eth),
       inside_tolerance: inside_tolerance,
       hedge_status: hedge_status_label(inside_tolerance),
-      combined_short_eth: combined_short(venue_states)&.to_s("F"),
-      auto_status: cached_auto_status,
-      signer_status: cached_signer_status,
+      combined_short_eth: snapshot.decimal_string(snapshot.combined_short_eth),
+      auto_status: snapshot_auto_status(snapshot),
+      signer_status: snapshot_signer_status(snapshot),
       latest_rebalance: latest_venue_rebalance(@selected_hedge_venue),
-      migration_status: cached_migration_status(venue_states)
+      migration_status: cached_migration_status(venue_states),
+      message: snapshot.stale_now? ? "Dashboard snapshot is stale." : "Dashboard snapshot refreshed."
     }
   end
 
-  def cached_venue_state(venue)
+  def missing_dashboard_snapshot
+    venue_states = %w[extended ethereal nado].to_h { |venue| [ venue.to_sym, unknown_venue_state(venue) ] }
+    {
+      stale: true,
+      refresh_status: "missing",
+      production_venue: @position.hedge&.execution_venue,
+      production_venue_name: HedgeVenues.label(@position.hedge&.execution_venue),
+      selected_venue: venue_states[@selected_hedge_venue&.to_sym] || unknown_venue_state(@selected_hedge_venue),
+      venue_states: venue_states,
+      target_short_eth: nil,
+      tolerance_eth: nil,
+      drift_eth: nil,
+      inside_tolerance: nil,
+      hedge_status: "Unknown / snapshot not refreshed",
+      combined_short_eth: nil,
+      auto_status: { enabled: nil, label: "Auto Unknown", source: "snapshot missing" },
+      signer_status: { label: "Unknown", ok: nil, source: "snapshot missing" },
+      latest_rebalance: latest_venue_rebalance(@selected_hedge_venue),
+      migration_status: { label: "Snapshot not refreshed.", complete: false },
+      message: "Snapshot not refreshed yet. Click Refresh Read-only Data."
+    }
+  end
+
+  def snapshot_venue_state(snapshot, venue)
     latest = latest_venue_rebalance(venue)
-    success = latest_successful_venue_rebalance(venue)
-    short = parse_decimal(success&.new_short_size)
+    state = snapshot.venue_state(venue)
+    state.merge(
+      latest_status: latest&.status,
+      latest_message: latest&.message,
+      latest_rebalance_at: latest&.rebalanced_at || latest&.updated_at
+    )
+  end
+
+  def unknown_venue_state(venue)
     {
       venue: venue,
       venue_name: HedgeVenues.label(venue),
-      short_size: short,
-      short_size_eth: short&.to_s("F"),
-      status: cached_venue_position_status(short, success),
+      short_size: nil,
+      short_size_eth: nil,
+      status: "unknown",
       notional_usd: nil,
       leverage: nil,
-      latest_status: latest&.status,
-      latest_message: latest&.message,
-      stale_as_of: success&.rebalanced_at || success&.updated_at,
-      latest_rebalance_at: latest&.rebalanced_at || latest&.updated_at,
-      source: success ? "ShortRebalance ##{success.id}" : "unavailable"
+      latest_status: latest_venue_rebalance(venue)&.status,
+      latest_message: latest_venue_rebalance(venue)&.message,
+      stale_as_of: nil,
+      source: "PositionDashboardSnapshot missing"
     }
   end
 
@@ -371,57 +390,30 @@ class PositionsController < ApplicationController
       .first
   end
 
-  def latest_successful_venue_rebalance(venue)
-    return nil unless @position.hedge && venue.present?
-
-    @latest_successful_venue_rebalances ||= {}
-    @latest_successful_venue_rebalances[venue] ||= @position.hedge.short_rebalances
-      .where(venue: venue, asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)
-      .order(rebalanced_at: :desc, id: :desc)
-      .first
-  end
-
-  def cached_venue_position_status(short, success)
-    return "unknown" unless success
-    return "flat" if short.nil? || short.zero?
-
-    "short"
-  end
-
-  def combined_short(venue_states)
-    shorts = venue_states.values.filter_map { |state| state[:short_size] }
-    return nil if shorts.empty?
-
-    shorts.sum(BigDecimal("0"))
-  end
-
   def hedge_status_label(inside_tolerance)
     return "Unknown / diagnostics unavailable" if inside_tolerance.nil?
 
     inside_tolerance ? "In tolerance" : "Out of tolerance"
   end
 
-  def cached_auto_status
-    enabled = case @position.hedge&.execution_venue
-    when "extended" then ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_AUTO_REBALANCE_ENABLED"])
-    when "ethereal" then ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"])
-    when "nado" then ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_NADO_AUTO_REBALANCE_ENABLED"])
-    else ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_HEDGE_ENABLED"]) && !ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_HEDGE_PAUSED"])
+  def snapshot_auto_status(snapshot)
+    enabled = case snapshot.production_venue
+    when "extended" then snapshot.extended_auto_enabled
+    when "ethereal" then snapshot.ethereal_auto_enabled
+    when "nado" then snapshot.nado_auto_enabled
     end
-    { enabled: enabled, label: enabled ? "Auto Active" : "Auto Off" }
+    return { enabled: nil, label: "Auto Unknown", source: "snapshot" } if enabled.nil?
+
+    { enabled: enabled, label: enabled ? "Auto Active" : "Auto Off", source: "PositionDashboardSnapshot ##{snapshot.id}" }
   end
 
-  def cached_signer_status
-    return { label: "Unknown", ok: nil, source: "not cached" } unless @position.hedge&.extended_execution?
-
-    receipt = latest_jsonl_receipt("storage/extended_auto_rebalance_checks/*.jsonl", "storage/extended_mainnet_live_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
-    health = receipt&.dig("signer_health") || receipt&.dig("readiness_gates", "signer_health")
-    ok = health&.fetch("ok", nil)
+  def snapshot_signer_status(snapshot)
+    status = snapshot.signer_status.presence || "unknown"
     {
-      label: ok.nil? ? "Unknown" : (ok ? "OK" : "Down"),
-      ok: ok,
-      source: receipt ? "latest Extended receipt" : "not cached",
-      stale_as_of: receipt&.dig("created_at") || receipt&.dig("timestamp")
+      label: status == "ok" ? "OK" : status.humanize,
+      ok: status == "ok",
+      source: "PositionDashboardSnapshot ##{snapshot.id}",
+      stale_as_of: snapshot.signer_checked_at
     }
   end
 
@@ -454,6 +446,10 @@ class PositionsController < ApplicationController
     BigDecimal(value.to_s)
   rescue ArgumentError
     nil
+  end
+
+  def decimal_or_nil(value)
+    parse_decimal(value)
   end
 
   def hedge_venue_accounting
@@ -782,10 +778,10 @@ class PositionsController < ApplicationController
   end
 
   def unavailable_production_dashboard_status
-    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
-    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size) || cached_selected_venue_short_size
+    target = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:target_short_eth))
+    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size)
     drift = target && current_short ? target - current_short : nil
-    tolerance = target && @position.hedge ? target * @position.hedge.tolerance : nil
+    tolerance = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:tolerance_eth))
     {
       status: "unavailable",
       execution_venue: @selected_hedge_venue,
@@ -802,10 +798,10 @@ class PositionsController < ApplicationController
   end
 
   def lightweight_auto_rebalance_status
-    target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
-    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size) || cached_selected_venue_short_size
+    target = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:target_short_eth))
+    current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size)
     drift = target && current_short ? target - current_short : nil
-    tolerance = target && @position.hedge ? target * @position.hedge.tolerance : nil
+    tolerance = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:tolerance_eth))
     {
       status: "cached",
       target_short_eth: target&.to_s("F"),

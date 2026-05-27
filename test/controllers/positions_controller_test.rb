@@ -171,7 +171,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Portfolio Snapshot", response.body
     assert_match "Selected Venue: Hyperliquid", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Off", response.body
+    assert_match "Auto Unknown", response.body
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID", response.body
     assert_match "315985", response.body
@@ -227,7 +227,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0.625000", response.body
     assert_match "Current Hyperliquid ETH short", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Off", response.body
+    assert_match "Auto Unknown", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Recent Rebalance History", response.body
     assert_match rebalance.id.to_s, response.body
@@ -248,7 +248,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Hedge sync", response.body
     assert_match "every 5 minutes", response.body
     assert_match "Rebalance needed now", response.body
-    assert_match "In tolerance", response.body
+    assert_match "Unknown / snapshot not refreshed", response.body
     assert_no_match "Hedge: None", response.body
     assert_no_match "Execute", response.body
     assert_no_match "Trade", response.body
@@ -314,7 +314,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Extended manual live supported", response.body
-    assert_match "Continuous auto: Auto Off", response.body
+    assert_match "Continuous auto: Auto Unknown", response.body
     assert_match "Signer must be running; key stored outside Rails", response.body
     assert_match "Required: 1x isolated", response.body
     assert_match "Migration tools", response.body
@@ -325,12 +325,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended readiness", response.body
   end
 
-  test "show extended production venue uses cached ShortRebalance data" do
+  test "show extended production venue uses dashboard snapshot for current exposure" do
     position = create_aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
     hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0.7", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 2.minutes.ago)
-    hedge.short_rebalances.create!(asset: "ETH", venue: "ethereal", old_short_size: "1.25", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
-    hedge.short_rebalances.create!(asset: "ETH", venue: "nado", old_short_size: "0.1", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "ethereal", old_short_size: "1.25", new_short_size: "9.9", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "nado", old_short_size: "0.1", new_short_size: "4.2", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    create_dashboard_snapshot(position, extended_short_eth: "1.25", ethereal_short_eth: "0", nado_short_eth: "0")
 
     get position_path(position)
 
@@ -339,7 +340,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended", response.body
     assert_match "Current Extended ETH short", response.body
     assert_match "1.250000", response.body
-    assert_match "stale as of", response.body
+    assert_match "snapshot as of", response.body
+    assert_match "Ethereal", response.body
+    assert_match(/Ethereal<\/p>\s*<p[^>]*>0\.000000 ETH/, response.body)
+    assert_match(/Nado<\/p>\s*<p[^>]*>0\.000000 ETH/, response.body)
+    assert_match(/Combined short<\/p><p class="text-white">1\.250000 ETH/, response.body)
+    assert_match "flat", response.body
     assert_match "Migration complete: production venue Extended.", response.body
   end
 
@@ -349,6 +355,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0.8", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 2.minutes.ago)
     hedge.short_rebalances.create!(asset: "ETH", venue: "ethereal", old_short_size: "1.25", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
     hedge.short_rebalances.create!(asset: "ETH", venue: "nado", old_short_size: "0.1", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    create_dashboard_snapshot(position, extended_short_eth: "1.25", ethereal_short_eth: "0", nado_short_eth: "0", extended_auto_enabled: true)
 
     with_env("EXTENDED_AUTO_REBALANCE_ENABLED" => "true") do
       get position_path(position)
@@ -372,7 +379,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     get position_path(position)
 
     assert_response :success
-    assert_match "Unknown / diagnostics unavailable", response.body
+    assert_match "Unknown / snapshot not refreshed", response.body
     assert_no_match "In tolerance", response.body
   end
 
@@ -1655,6 +1662,40 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       hedge_tolerance: "0.03",
       deactivate_existing_aerodrome_positions: deactivate_existing
     }
+  end
+
+  def create_dashboard_snapshot(position, extended_short_eth:, ethereal_short_eth:, nado_short_eth:, extended_auto_enabled: false, refreshed_at: 2.minutes.ago)
+    target = BigDecimal(position.asset0_amount.to_s) * position.hedge.target
+    combined = BigDecimal(extended_short_eth.to_s) + BigDecimal(ethereal_short_eth.to_s) + BigDecimal(nado_short_eth.to_s)
+    tolerance = target * position.hedge.tolerance
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: refreshed_at,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: position.hedge.execution_venue,
+      selected_venue: position.hedge.execution_venue,
+      target_short_eth: target,
+      tolerance_ratio: position.hedge.tolerance,
+      tolerance_abs_eth: tolerance,
+      combined_short_eth: combined,
+      drift_eth: target - combined,
+      inside_tolerance: (target - combined).abs <= tolerance,
+      extended_short_eth: extended_short_eth,
+      ethereal_short_eth: ethereal_short_eth,
+      nado_short_eth: nado_short_eth,
+      extended_status: BigDecimal(extended_short_eth.to_s).positive? ? "active" : "flat",
+      ethereal_status: BigDecimal(ethereal_short_eth.to_s).positive? ? "active" : "flat",
+      nado_status: BigDecimal(nado_short_eth.to_s).positive? ? "active" : "flat",
+      extended_auto_enabled: extended_auto_enabled,
+      ethereal_auto_enabled: false,
+      nado_auto_enabled: false,
+      signer_status: "ok",
+      signer_checked_at: refreshed_at,
+      extended_source_status: "ok",
+      ethereal_source_status: "ok",
+      nado_source_status: "ok",
+      source_errors: "{}"
+    )
   end
 
   def hyperliquid_write_guard
