@@ -11,11 +11,12 @@
 <% selected_account_state = venue_dashboard[:account_state] || {} %>
 <% selected_read_only_diagnostics = selected_account_state[:read_only_diagnostics] || {} %>
 <% dashboard_status = production_dashboard.presence || {} %>
-<% target_eth_short = dashboard_status[:target_hedge_eth] || venue_dashboard[:target_hedge_eth] %>
-<% current_short_eth = dashboard_status[:current_short_eth] || venue_dashboard[:current_short_eth] %>
-<% drift_eth = dashboard_status[:drift_eth] || venue_dashboard[:drift_eth] %>
-<% tolerance_eth = venue_dashboard[:tolerance_eth] || auto_status[:tolerance_eth] %>
-<% current_venue_position = dashboard_status[:current_venue_position] || venue_dashboard[:current_venue_position] || {} %>
+<% selected_snapshot = cached_snapshot[:selected_venue] || {} %>
+<% target_eth_short = cached_snapshot[:target_short_eth] || venue_dashboard[:target_hedge_eth] || dashboard_status[:target_hedge_eth] %>
+<% current_short_eth = selected_snapshot[:short_size_eth] || venue_dashboard[:current_short_eth] || dashboard_status[:current_short_eth] %>
+<% drift_eth = cached_snapshot[:drift_eth] || venue_dashboard[:drift_eth] || dashboard_status[:drift_eth] %>
+<% tolerance_eth = cached_snapshot[:tolerance_eth] || venue_dashboard[:tolerance_eth] || auto_status[:tolerance_eth] %>
+<% current_venue_position = venue_dashboard[:current_venue_position] || dashboard_status[:current_venue_position] || {} %>
 <% margin_mode = dashboard_status[:margin_mode] || current_venue_position[:margin_mode] %>
 <% effective_leverage = current_venue_position[:effective_leverage] || dashboard_status[:effective_leverage] %>
 <% mark_price = dashboard_status[:mark_price] || current_venue_position[:mark_price] %>
@@ -38,7 +39,7 @@ elsif selected_venue == "extended"
 else
   ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false")) && !ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
 end %>
-<% auto_status_label = auto_gate_enabled ? "Auto Enabled" : "Auto Paused" %>
+<% auto_status_label = auto_gate_enabled ? "Auto Active" : "Auto Off" %>
 <% auto_operational_label = cached_snapshot.dig(:auto_status, :label).presence || auto_status_label %>
 <% signer_label = cached_snapshot.dig(:signer_status, :label).presence || "Unknown" %>
 <% next_action = venue_dashboard[:next_action] || (rebalance_needed ? "rebalance" : "no-op") %>
@@ -51,7 +52,7 @@ else :open
 end %>
 <% active_preflight = action_preflights[recommended_action_key] || venue_dashboard[:live_preflight] || {} %>
 <% selected_action_blockers = (active_preflight[:blockers] || []).uniq %>
-<% selected_action_warnings = (active_preflight[:warnings] || []).uniq %>
+<% selected_action_warnings = (active_preflight[:warnings] || []).uniq.reject { |warning| selected_action_blockers.include?(warning) } %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
 <% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
@@ -93,6 +94,8 @@ end %>
 <% mellow_asset1_value = @position.mellow_autopilot? ? position_valuation.usdc_exposure : nil %>
 <% current_short_label = "Current #{selected_venue_name} ETH short" %>
 <% current_position_label = "Current #{selected_venue_name} ETH-PERP position" %>
+<% selected_auto_readiness_loaded = extended_auto_readiness[:status] != "unavailable" %>
+<% selected_auto_ready = selected_auto_readiness_loaded ? extended_auto_readiness[:continuous_auto_ready] : nil %>
 <% drift_negative = begin
   drift_eth.present? && BigDecimal(drift_eth.to_s).negative?
 rescue ArgumentError
@@ -114,7 +117,7 @@ end %>
             <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-200"><%= margin_mode.to_s == "isolated" ? "Isolated 1.0x" : "#{margin_mode.to_s.humanize} Margin" %></span>
           <% end %>
           <span class="rounded-full border <%= selected_live_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-yellow-800 bg-yellow-950/60 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= live_status_label %></span>
-          <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_status_label %></span>
+          <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_operational_label %></span>
           <span class="rounded-full border <%= rebalance_needed.nil? ? 'border-gray-700 bg-gray-950 text-gray-300' : (rebalance_needed ? 'border-red-800 bg-red-950/60 text-red-200' : 'border-green-800 bg-green-950/60 text-green-300') %> px-3 py-1 text-xs font-semibold"><%= tolerance_label %></span>
           <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold">Auto: <%= auto_operational_label %></span>
           <span class="rounded-full border <%= signer_label == 'OK' ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold">Signer: <%= signer_label %></span>
@@ -254,29 +257,14 @@ end %>
             <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_short_label %></span><span class="truncate text-white" title="<%= current_short_eth %>"><%= format_venue_eth_amount(current_short_eth) %> ETH</span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Target short</span><span class="truncate text-white" title="<%= target_eth_short %>"><%= format_venue_eth_amount(target_eth_short) %> ETH</span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Delta</span><span class="<%= drift_negative ? 'text-red-300' : 'text-green-300' %>" title="<%= drift_eth %>"><%= format_venue_eth_amount(drift_eth) %> ETH</span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Notional impact</span><span class="text-white"><%= format_venue_usd_amount(drift_usd) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Mark price</span><span class="text-white"><%= format_venue_usd_amount(mark_price) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Entry price</span><span class="text-white"><%= format_venue_usd_amount(entry_price) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Isolated margin</span><span class="text-white"><%= format_venue_usd_amount(isolated_margin) %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Margin mode</span><span class="text-white"><%= margin_mode.present? ? margin_mode.to_s.humanize : "Unavailable" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500">Estimated leverage</span><span class="text-white"><%= effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable" %></span></div>
             <div class="flex justify-between gap-4"><span class="text-gray-500">Next action</span><span class="<%= rebalance_needed ? 'text-yellow-200' : 'text-green-300' %>"><%= rebalance_needed ? next_action.to_s.humanize : "within tolerance / no-op" %></span></div>
-            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white"><%= current_venue_position.present? ? "available" : "unavailable" %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Live gate</span><span class="text-white"><%= live_status_label %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500">Auto</span><span class="text-white"><%= auto_operational_label %></span></div>
+            <div class="flex justify-between gap-4"><span class="text-gray-500"><%= current_position_label %></span><span class="text-white"><%= current_short_eth.present? ? "cached" : "not loaded" %></span></div>
             <% if selected_venue == "extended" %>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Extended position</span><span class="text-white"><%= selected_read_only_diagnostics[:current_position_status] || (current_venue_position.present? ? "position_present" : "no_position") %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Open orders</span><span class="text-white"><%= selected_account_state[:open_orders_count] || selected_read_only_diagnostics[:open_orders_count] || "Unavailable" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Leverage gate</span><span class="text-white"><%= selected_read_only_diagnostics[:margin_gate_status] || selected_account_state.dig(:margin_gate, :status) || "unknown" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Current leverage</span><span class="text-white"><%= selected_read_only_diagnostics[:current_leverage] || "Unavailable" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Current margin</span><span class="text-white"><%= selected_read_only_diagnostics[:current_margin_mode] || "Unavailable" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">One-shot auto gate</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_ONE_SHOT_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Continuous auto</span><span class="text-white"><%= ActiveModel::Type::Boolean.new.cast(ENV["EXTENDED_AUTO_REBALANCE_ENABLED"]) ? "enabled" : "disabled" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Auto readiness</span><span class="<%= extended_auto_readiness[:continuous_auto_ready] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:continuous_auto_ready] ? "ready" : "blocked" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Planned auto</span><span class="text-white"><%= extended_auto_readiness[:planned_auto_action] || "unknown" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Auto order size</span><span class="text-white"><%= format_venue_eth_amount(extended_auto_readiness[:planned_auto_order_size_eth]) %> ETH</span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Auto cap</span><span class="text-white"><%= format_venue_eth_amount(extended_auto_readiness[:auto_max_rebalance_size_eth]) %> ETH</span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Ethereal flat</span><span class="<%= extended_auto_readiness[:ethereal_flat] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:ethereal_flat].nil? ? "unknown" : extended_auto_readiness[:ethereal_flat] %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Nado flat</span><span class="<%= extended_auto_readiness[:nado_flat] ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness[:nado_flat].nil? ? "unknown" : extended_auto_readiness[:nado_flat] %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Signer</span><span class="<%= extended_auto_readiness.dig(:signer_health, :ok) ? 'text-green-300' : 'text-yellow-200' %>"><%= extended_auto_readiness.dig(:signer_health, :ok) ? "ok" : "blocked" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Open orders</span><span class="text-white"><%= selected_account_state[:open_orders_count] || selected_read_only_diagnostics[:open_orders_count] || "not loaded" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Auto readiness</span><span class="<%= selected_auto_ready ? 'text-green-300' : 'text-gray-300' %>"><%= selected_auto_readiness_loaded ? (selected_auto_ready ? "ready" : "blocked") : "not loaded" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Planned auto</span><span class="text-white"><%= selected_auto_readiness_loaded ? (extended_auto_readiness[:planned_auto_action] || "no-op") : "diagnostics separate" %></span></div>
             <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>
@@ -290,11 +278,17 @@ end %>
           <% end %>
           <% if selected_venue == "extended" %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3 text-xs text-yellow-100">
-              <p>Manual live supported; auto disabled. Signer must be running; key stored outside Rails. Use close_only after probe.</p>
-              <p class="mt-2 text-yellow-100">Extended manual live proven. Auto requires explicit gate.</p>
-              <p class="mt-2 text-yellow-100">Migration is stepwise. Production venue is not switched until finalize succeeds.</p>
-              <p class="mt-2 text-yellow-100">Fast migration is available as a gated dry-run/live task. Extended-first temporarily overhedges until Ethereal close confirms.</p>
+              <p>Extended manual live supported. Continuous auto: <%= auto_operational_label %>. Signer must be running; key stored outside Rails.</p>
               <p class="mt-2 text-yellow-100">Required: 1x isolated.</p>
+              <% if cached_snapshot.dig(:migration_status, :complete) %>
+                <p class="mt-2 text-green-200"><%= cached_snapshot.dig(:migration_status, :label) %></p>
+              <% else %>
+                <details class="mt-2">
+                  <summary class="cursor-pointer text-yellow-100">Migration tools</summary>
+                  <p class="mt-2 text-yellow-100">Migration is stepwise. Production venue is not switched until finalize succeeds.</p>
+                  <p class="mt-2 text-yellow-100">Fast migration is available as a gated dry-run/live task. Extended-first temporarily overhedges until Ethereal close confirms.</p>
+                </details>
+              <% end %>
               <p class="mt-2 text-yellow-200">Extended mainnet order submit is implemented behind explicit live gates. Dry-runs do not sign or submit orders.</p>
               <% if migration_full_readiness.present? %>
                 <div class="mt-3 grid grid-cols-2 gap-2 border-t border-yellow-900/60 pt-3">
@@ -304,7 +298,7 @@ end %>
                   <div><span class="text-yellow-300">Expected final</span><br><%= format_venue_eth_amount(migration_full_readiness[:expected_extended_short_after]) %> ETH Extended / <%= format_venue_eth_amount(migration_full_readiness[:expected_ethereal_short_after]) %> ETH Ethereal</div>
                 </div>
               <% end %>
-              <% if extended_auto_readiness[:blockers].present? %>
+              <% if selected_auto_readiness_loaded && extended_auto_readiness[:blockers].present? %>
                 <p class="mt-3 break-words border-t border-yellow-900/60 pt-3 text-yellow-200">Continuous auto readiness blockers: <%= extended_auto_readiness[:blockers].uniq.join("; ") %></p>
               <% end %>
             </div>
@@ -344,11 +338,10 @@ end %>
             <% end %>
           </div>
 
-          <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <% [
               [ :open, hedge_open_preview_position_path(@position), hedge_open_position_path(@position), "Open Hedge" ],
-              [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge" ],
-              [ :close, hedge_close_preview_position_path(@position), hedge_close_position_path(@position), "Close Hedge" ]
+              [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge" ]
             ].each do |key, preview_path, live_path, label| %>
               <% action_preflight = action_preflights[key] || {} %>
               <% action_blockers = (action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
@@ -395,6 +388,37 @@ end %>
               </div>
             <% end %>
           </div>
+
+          <details class="rounded-xl border border-red-950/70 bg-red-950/10 p-4">
+            <summary class="cursor-pointer text-sm font-semibold text-red-100">Emergency / manual close tools</summary>
+            <% key = :close %>
+            <% action_preflight = action_preflights[key] || {} %>
+            <% action_blockers = (action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
+            <% close_needed = BigDecimal(current_short_eth.to_s).positive? rescue false %>
+            <% required_phrase = selected_venue == "nado" ? AerodromeDashboardHedgeAction::NADO_CONFIRMATION : (selected_venue == "ethereal" ? AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION : (selected_venue == "extended" ? AerodromeDashboardHedgeAction::EXTENDED_CONFIRMATION : AerodromeLiveEmergencyClose::CONFIRMATION)) %>
+            <% confirmation_enabled = close_needed && selected_adapter&.live_enabled? && action_blockers.blank? %>
+            <% submit_id = "dashboard-hedge-live-submit-close" %>
+            <p class="mt-3 text-sm text-red-100">Close is a dangerous manual action for the production hedge. Use it only for explicit operator intervention.</p>
+            <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <%= button_to "Close Hedge Preview", hedge_close_preview_position_path(@position), method: :post, params: { hedge_venue: selected_venue }, disabled: !close_needed, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 transition hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600" %>
+              <% if close_needed %>
+                <%= form_with url: hedge_close_position_path(@position), method: :post, class: "space-y-2" do |form| %>
+                  <%= form.hidden_field :hedge_venue, value: selected_venue %>
+                  <code id="dashboard-hedge-phrase-close" class="block break-all rounded-lg border border-gray-800 bg-gray-950 p-2 text-[11px] text-gray-200"><%= required_phrase %></code>
+                  <%= form.text_field :dashboard_hedge_confirmation,
+                    id: "dashboard-hedge-confirmation-close",
+                    placeholder: required_phrase,
+                    value: "",
+                    autocomplete: "off",
+                    disabled: !confirmation_enabled,
+                    data: { required_confirmation: required_phrase, live_submit_id: submit_id },
+                    oninput: "document.getElementById(this.dataset.liveSubmitId).disabled = this.value !== this.dataset.requiredConfirmation",
+                    class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600 disabled:border-gray-800 disabled:text-gray-600" %>
+                  <%= form.submit "Close Hedge Live", id: submit_id, disabled: true, class: "w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-900 disabled:border-gray-800 disabled:bg-gray-900 disabled:text-gray-600" %>
+                <% end %>
+              <% end %>
+            </div>
+          </details>
         </div>
       </div>
     </section>
@@ -403,7 +427,7 @@ end %>
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Auto-Rebalance Status</p>
-          <h2 class="mt-1 text-lg font-semibold text-white"><%= auto_status[:auto_rebalance_status].to_s.humanize.presence || "Unavailable" %></h2>
+          <h2 class="mt-1 text-lg font-semibold text-white"><%= auto_operational_label %></h2>
           <% if auto_status[:auto_rebalance_message].present? %>
             <p class="mt-1 text-sm text-gray-400"><%= auto_status[:auto_rebalance_message] %></p>
           <% end %>
@@ -418,7 +442,7 @@ end %>
       <div class="mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
         <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Current drift</p><p class="mt-1 text-white"><%= format_venue_eth_amount(auto_status[:current_drift_eth] || drift_eth) %></p></div>
         <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Tolerance</p><p class="mt-1 text-white"><%= format_venue_eth_amount(auto_status[:tolerance_eth] || tolerance_eth) %></p></div>
-        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Rebalance needed now</p><p class="<%= auto_status[:rebalance_needed] ? 'text-red-300' : 'text-green-300' %> mt-1"><%= auto_status[:rebalance_needed] ? "yes" : "no" %></p></div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Rebalance needed now</p><p class="<%= rebalance_needed.nil? ? 'text-gray-300' : (rebalance_needed ? 'text-red-300' : 'text-green-300') %> mt-1"><%= rebalance_needed.nil? ? "unknown" : (rebalance_needed ? "yes" : "no") %></p></div>
         <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Manage</p><%= link_to "Settings", edit_settings_path, class: "mt-1 inline-block text-indigo-300 hover:text-indigo-200" %></div>
       </div>
       <% auto_messages = ((auto_status[:blockers] || []) + (auto_status[:warnings] || [])).uniq %>
@@ -432,6 +456,8 @@ end %>
     <% history_report = @aerodrome_rebalance_history_status || {} %>
     <% history_records = history_report[:records] || [] %>
     <% selected_history = history_records.select { |record| HedgeVenues.normalize(record.venue) == selected_venue } %>
+    <% selected_success_history = selected_history.select { |record| record.status == ShortRebalance::STATUS_SUCCESS } %>
+    <% primary_selected_history = selected_success_history.presence || selected_history %>
     <% previous_history = history_records.reject { |record| HedgeVenues.normalize(record.venue) == selected_venue } %>
     <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
       <div class="flex items-center justify-between gap-3">
@@ -448,7 +474,7 @@ end %>
               <tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Time</th><th class="px-3 py-2">Venue</th><th class="px-3 py-2">Side</th><th class="px-3 py-2">Old</th><th class="px-3 py-2">New</th><th class="px-3 py-2">Delta</th><th class="px-3 py-2">Realized</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Message</th><th class="px-3 py-2">Order</th></tr>
             </thead>
             <tbody class="divide-y divide-gray-800">
-              <% selected_history.first(12).each do |rebalance| %>
+              <% primary_selected_history.first(12).each do |rebalance| %>
                 <tr>
                   <% rebalance_delta = if rebalance.old_short_size && rebalance.new_short_size
                     BigDecimal(rebalance.new_short_size.to_s) - BigDecimal(rebalance.old_short_size.to_s)
@@ -560,6 +586,13 @@ end %>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Excluding Rewards / Fees</p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total unrealized</p><p class="mt-2 text-xl font-semibold <%= (total_unrealized || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_unrealized ? format_usd(total_unrealized) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Pool <%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %> / Hedge <%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Realized</p><p class="mt-2 text-xl font-semibold <%= hedge_realized >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= format_usd(hedge_realized) %></p></div>
+              <% if !rewards_usable && !fees_usable && reward_value_state != "verified_zero" && fee_value_state != "verified_zero" %>
+                <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4 md:col-span-3">
+                  <p class="text-xs text-gray-500">Rewards / fees diagnostics</p>
+                  <p class="mt-2 text-lg font-semibold text-white">Not loaded during initial render</p>
+                  <p class="mt-1 break-words text-xs text-gray-500">AERO rewards, LP fee estimates, and totals including estimates load from the Rewards / fees diagnostics link. Unavailable values are not treated as zero.</p>
+                </div>
+              <% else %>
               <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
                 <p class="text-xs text-gray-500"><%= rewards_report[:reward_source] == "mellow_ui_parity_eth_call" ? "Mellow UI-parity AERO rewards estimate" : (rewards_report[:strategy_level_estimate] ? "Mellow pro-rata AERO rewards estimate" : "AERO rewards estimate") %></p>
                 <p class="mt-2 text-xl font-semibold text-white"><%= rewards_pnl ? format_usd(rewards_pnl) : "Unavailable" %></p>
@@ -580,6 +613,7 @@ end %>
                 <p class="mt-2 text-xl font-semibold <%= (total_pnl_with_rewards_and_fees || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl_with_rewards_and_fees ? format_usd(total_pnl_with_rewards_and_fees) : "Unavailable" %></p>
                 <p class="mt-1 break-words text-xs text-gray-500"><%= total_pnl_with_rewards_and_fees ? "Pool + hedge + reward and LP fee estimates." : "Rewards or LP fee estimate unavailable; combined total not shown. Including fees unavailable." %></p>
               </div>
+              <% end %>
             </div>
             <% if pnl_execution_venue.in?(%w[nado ethereal extended]) %>
               <p class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-400">

@@ -408,7 +408,7 @@ class PositionsController < ApplicationController
     when "nado" then ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_NADO_AUTO_REBALANCE_ENABLED"])
     else ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_HEDGE_ENABLED"]) && !ActiveModel::Type::Boolean.new.cast(ENV["AERODROME_HEDGE_PAUSED"])
     end
-    { enabled: enabled, label: enabled ? "Active" : "Off" }
+    { enabled: enabled, label: enabled ? "Auto Active" : "Auto Off" }
   end
 
   def cached_signer_status

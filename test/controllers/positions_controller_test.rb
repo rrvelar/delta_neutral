@@ -171,7 +171,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Portfolio Snapshot", response.body
     assert_match "Selected Venue: Hyperliquid", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Paused", response.body
+    assert_match "Auto Off", response.body
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID", response.body
     assert_match "315985", response.body
@@ -227,7 +227,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0.625000", response.body
     assert_match "Current Hyperliquid ETH short", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Paused", response.body
+    assert_match "Auto Off", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Recent Rebalance History", response.body
     assert_match rebalance.id.to_s, response.body
@@ -313,15 +313,15 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Manual live supported; auto disabled", response.body
+    assert_match "Extended manual live supported", response.body
+    assert_match "Continuous auto: Auto Off", response.body
     assert_match "Signer must be running; key stored outside Rails", response.body
-    assert_match "Use close_only after probe", response.body
     assert_match "Required: 1x isolated", response.body
-    assert_match "Fast migration is available as a gated dry-run/live task", response.body
-    assert_match "Extended position", response.body
-    assert_match "unavailable", response.body
+    assert_match "Migration tools", response.body
+    assert_match "Current Extended ETH-PERP position", response.body
+    assert_match "not loaded", response.body
     assert_match "Open orders", response.body
-    assert_match "Leverage gate", response.body
+    assert_match "Auto readiness", response.body
     assert_match "Extended readiness", response.body
   end
 
@@ -341,6 +341,28 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "1.250000", response.body
     assert_match "stale as of", response.body
     assert_match "Migration complete: production venue Extended.", response.body
+  end
+
+  test "show extended production venue keeps cached snapshot values consistent" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "0.8", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 2.minutes.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "ethereal", old_short_size: "1.25", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+    hedge.short_rebalances.create!(asset: "ETH", venue: "nado", old_short_size: "0.1", new_short_size: "0", status: ShortRebalance::STATUS_SUCCESS, rebalanced_at: 1.minute.ago)
+
+    with_env("EXTENDED_AUTO_REBALANCE_ENABLED" => "true") do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Current Extended ETH short", response.body
+    assert_operator response.body.scan("1.250000").size, :>=, 2
+    assert_match "Auto Active", response.body
+    assert_no_match "Auto Paused", response.body
+    assert_operator response.body.scan("Live preflight is loaded separately.").size, :<=, 1
+    assert_match "Emergency / manual close tools", response.body
+    assert_no_match "Close Hedge</p>\n                    <p class=\"mt-1 text-xs text-gray-500\">Relevant now", response.body
+    assert_no_match "Production venue is not switched until finalize succeeds", response.body
   end
 
   test "show does not report in tolerance when selected current short is unknown" do
@@ -885,7 +907,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "$500.00", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
-    assert_match "Total PnL Including Unclaimed AERO Rewards Estimate", response.body
+    assert_match "Rewards / fees diagnostics", response.body
+    assert_match "Not loaded during initial render", response.body
     assert_no_match "Claim rewards", response.body
   end
 
@@ -1140,7 +1163,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
     assert_no_match "0.010000 WETH", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
-    assert_match "Total PnL Including Rewards + LP Fees Estimate", response.body
+    assert_match "Rewards / fees diagnostics", response.body
     assert_match "Unclaimed fees are not realized PnL until collected", response.body
     assert_no_match "Collect fees", response.body
     assert_no_match "Claim rewards", response.body
@@ -1174,7 +1197,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Unclaimed fees USD estimate", response.body
     assert_match "unavailable", response.body
     assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
-    assert_match "Including fees unavailable", response.body
+    assert_match "Unavailable values are not treated as zero", response.body
     assert_no_match "Aerodrome fee read not implemented yet.", response.body
   end
 
