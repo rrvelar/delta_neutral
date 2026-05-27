@@ -9,7 +9,7 @@ class DashboardController < ApplicationController
   #
   # @return [void]
   def index
-    @positions = DashboardVisiblePositions.new(user: Current.user).relation
+    @positions = DashboardVisiblePositions.new(user: Current.user).call
     @total_value = @positions.sum { |position| PositionValuation.current(position).current_value_usd || 0 }
     @active_hedges = @positions.count { |p| p.hedge&.active? }
   end

@@ -4,7 +4,7 @@ class DashboardVisiblePositionsTest < ActiveSupport::TestCase
   test "includes active position owned through current user's wallet even if direct user differs" do
     position = create_wallet_owned_position(user: users(:two), wallet_user: users(:one))
 
-    visible_ids = DashboardVisiblePositions.new(user: users(:one)).relation.pluck(:id)
+    visible_ids = DashboardVisiblePositions.new(user: users(:one)).call.pluck(:id)
 
     assert_includes visible_ids, position.id
   end
@@ -12,7 +12,7 @@ class DashboardVisiblePositionsTest < ActiveSupport::TestCase
   test "does not include inactive wallet-owned positions" do
     position = create_wallet_owned_position(user: users(:two), wallet_user: users(:one), active: false)
 
-    visible_ids = DashboardVisiblePositions.new(user: users(:one)).relation.pluck(:id)
+    visible_ids = DashboardVisiblePositions.new(user: users(:one)).call.pluck(:id)
 
     assert_not_includes visible_ids, position.id
   end
@@ -20,9 +20,25 @@ class DashboardVisiblePositionsTest < ActiveSupport::TestCase
   test "does not include another user's position when neither direct user nor wallet match" do
     position = create_wallet_owned_position(user: users(:two), wallet_user: users(:two))
 
-    visible_ids = DashboardVisiblePositions.new(user: users(:one)).relation.pluck(:id)
+    visible_ids = DashboardVisiblePositions.new(user: users(:one)).call.pluck(:id)
 
     assert_not_includes visible_ids, position.id
+  end
+
+  test "class convenience call includes wallet-owned Mellow position" do
+    position = create_wallet_owned_position(user: users(:two), wallet_user: users(:one))
+
+    visible_ids = DashboardVisiblePositions.call(user: users(:one)).pluck(:id)
+
+    assert_includes visible_ids, position.id
+  end
+
+  test "positional initializer remains compatible with console checks" do
+    position = create_wallet_owned_position(user: users(:two), wallet_user: users(:one))
+
+    visible_ids = DashboardVisiblePositions.new(users(:one)).call.pluck(:id)
+
+    assert_includes visible_ids, position.id
   end
 
   private

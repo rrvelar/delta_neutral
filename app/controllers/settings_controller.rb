@@ -3,7 +3,7 @@ class SettingsController < ApplicationController
   # GET /settings/edit
   def edit
     @setting = Current.user.setting || Current.user.build_setting
-    @production_position = DashboardVisiblePositions.new(user: Current.user).relation.find { |position| position.hedge&.active? }
+    @production_position = DashboardVisiblePositions.new(user: Current.user).call.find { |position| position.hedge&.active? }
     @production_snapshot = @production_position&.position_dashboard_snapshot
     @venue_runtime_summary = {
       production_venue: @production_position&.hedge ? HedgeVenues.label(@production_position.hedge.execution_venue) : "Unknown",

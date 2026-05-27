@@ -35,6 +35,7 @@ Rails.application.routes.draw do
     post :reject, on: :member
   end
 
+  get "settings", to: "settings#edit"
   resource :settings, only: [ :edit, :update ]
   get "mellow_autopilot_probe", to: "mellow_autopilot_probes#index"
   post "mellow_autopilot_probe/create_position", to: "mellow_autopilot_probes#create_position", as: :create_mellow_autopilot_position

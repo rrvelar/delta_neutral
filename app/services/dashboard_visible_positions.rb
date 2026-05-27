@@ -1,14 +1,33 @@
 class DashboardVisiblePositions
-  def initialize(user:)
-    @user = user
+  def self.call(user:)
+    new(user: user).call
+  end
+
+  def initialize(positional_user = nil, user: nil)
+    @user = user || positional_user
+  end
+
+  def call
+    relation
   end
 
   def relation
+    raise ArgumentError, "user is required" unless user
+
+    visible_relation
+  end
+
+  private
+
+  attr_reader :user
+
+  def visible_relation
     Position
       .active
       .left_outer_joins(:wallet)
       .where("positions.user_id = :user_id OR wallets.user_id = :user_id", user_id: user.id)
       .includes(
+        :wallet,
         :dex,
         :hedge,
         :position_dashboard_snapshot,
@@ -20,8 +39,4 @@ class DashboardVisiblePositions
       .distinct
       .order(updated_at: :desc)
   end
-
-  private
-
-  attr_reader :user
 end

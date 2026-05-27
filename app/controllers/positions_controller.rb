@@ -11,7 +11,7 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def index
-    @positions = DashboardVisiblePositions.new(user: Current.user).relation
+    @positions = DashboardVisiblePositions.new(user: Current.user).call
   end
 
   def new

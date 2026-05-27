@@ -10,6 +10,12 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
+  test "settings compatibility path renders edit page" do
+    get "/settings"
+    assert_response :success
+    assert_match "Settings", response.body
+  end
+
   test "edit shows current production venue summary without making Hyperliquid look current" do
     create_extended_position
 
@@ -21,6 +27,15 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Signer", response.body
     assert_match "Hyperliquid Legacy Settings", response.body
     assert_match "These settings do not indicate the current production venue.", response.body
+  end
+
+  test "navbar settings link points to valid settings route" do
+    get root_path
+
+    assert_response :success
+    assert_select "a[href='#{edit_settings_path}']", text: "Settings"
+    get edit_settings_path
+    assert_response :success
   end
 
   test "should get edit without existing setting" do
