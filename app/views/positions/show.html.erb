@@ -507,7 +507,12 @@ end %>
                   <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_sequences]&.include?("target_first") ? "yes" : "no" %></td>
                   <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_sequences]&.include?("source_first") ? "yes" : "no" %></td>
                   <td class="<%= ready ? 'text-green-300' : 'text-yellow-200' %> whitespace-nowrap px-3 py-2"><%= route[:route_status] %></td>
-                  <td class="max-w-md px-3 py-2 text-gray-400"><%= Array(route[:blockers]).first(2).join("; ").presence || "none" %></td>
+                  <td class="max-w-md px-3 py-2 text-gray-400">
+                    <% if route[:nado_readiness].present? %>
+                      <span class="block text-gray-300">Nado: <%= route.dig(:nado_readiness, :nado_flat).nil? ? "unknown" : (route.dig(:nado_readiness, :nado_flat) ? "flat" : "#{format_venue_eth_amount(route.dig(:nado_readiness, :nado_current_short_eth))} ETH short") %>; open orders <%= route.dig(:nado_readiness, :nado_open_orders_count).nil? ? "unknown" : route.dig(:nado_readiness, :nado_open_orders_count) %>.</span>
+                    <% end %>
+                    <%= Array(route[:blockers]).first(2).join("; ").presence || "none" %>
+                  </td>
                   <td class="whitespace-nowrap px-3 py-2 text-gray-400"><%= route[:last_proof_time].presence || "not recorded" %></td>
                 </tr>
               <% end %>

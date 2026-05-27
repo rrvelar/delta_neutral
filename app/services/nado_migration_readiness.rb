@@ -1,38 +1,283 @@
 class NadoMigrationReadiness
-  def initialize(snapshot: nil, env: ENV)
-    @snapshot = snapshot
+  DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
+  LIVE_BLOCKER = "Nado live migration path not implemented.".freeze
+
+  def initialize(position: nil, position_id: nil, snapshot: nil, intended_role: "either", mode: "full", sequence: "target_first", env: ENV, nado_service: nil)
+    @position = position || Position.find_by(id: position_id)
+    @snapshot = snapshot || @position&.position_dashboard_snapshot
+    @intended_role = intended_role.to_s
+    @mode = mode.to_s
+    @sequence = sequence.to_s
     @env = env
+    @nado_service = nado_service
   end
 
   def report
-    blockers = [
-      "Nado migration readiness is not proven.",
-      "Nado live migration path not implemented.",
-      "Nado close/open readback proof required."
-    ]
-    current_short = decimal_string(snapshot&.nado_short_eth)
+    blockers = []
+    warnings = [ "Nado live migration remains disabled; this readiness check is dry-run proof only." ]
+    blockers << "Nado migration readiness is not proven." unless nado_position_read_available? && nado_open_orders_read_available? && nado_market_read_available?
+    blockers << "Position dashboard snapshot is missing; Nado migration proof requires snapshot exposure." unless snapshot
+    blockers << LIVE_BLOCKER
+    blockers << "Nado close/open readback proof required." unless nado_position_read_available?
+    blockers << "Nado open orders readback is unavailable." unless nado_open_orders_read_available?
+    blockers << "Nado open orders must be zero for migration proof." if nado_open_orders_count.to_i.positive?
+    blockers << "Nado market metadata is unavailable." unless nado_market_read_available?
+    blockers.concat(account_blockers)
+
+    target_preview = target_leg_preview
+    source_preview = source_leg_preview
+    blockers << "Nado open/increase short payload preview unavailable." if target_role? && !target_preview_available?(target_preview)
+    blockers << "Nado reduce-only close/reduce payload preview unavailable." if source_role? && !source_preview_available?(source_preview)
+
+    missing = missing_capabilities(
+      target_preview: target_preview,
+      source_preview: source_preview
+    )
 
     {
-      status: "not_implemented",
-      nado_position_read_available: false,
-      nado_open_orders_read_available: false,
-      nado_current_short_eth: current_short,
-      nado_flat: nado_short&.zero?,
+      status: readiness_status(blockers: blockers, target_preview: target_preview, source_preview: source_preview),
+      intended_role: intended_role,
+      mode: mode,
+      sequence: sequence,
+      nado_position_read_available: nado_position_read_available?,
+      nado_open_orders_read_available: nado_open_orders_read_available?,
+      nado_current_short_eth: decimal_string(nado_current_short),
+      nado_flat: nado_current_short&.zero?,
+      nado_open_orders_count: nado_open_orders_count,
+      nado_market_read_available: nado_market_read_available?,
+      nado_open_short_preview_available: target_preview_available?(target_preview),
+      nado_reduce_only_close_preview_available: source_preview_available?(source_preview),
+      nado_open_short_supported: target_preview_available?(target_preview),
+      nado_reduce_only_close_supported: source_preview_available?(source_preview),
+      nado_leverage_margin_known: nado_market_read_available?,
       nado_live_enabled: bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED"),
       nado_auto_enabled: bool_env("AERODROME_NADO_AUTO_ENABLED"),
-      nado_reduce_only_close_supported: false,
-      nado_open_short_supported: false,
-      nado_leverage_margin_known: false,
-      blockers: blockers,
-      warnings: [ "Nado routes are displayed for proof planning, but remain fail-closed." ],
+      nado_live_migration_supported: false,
+      target_leg_preview: target_preview,
+      source_leg_preview: source_preview,
+      blockers: blockers.uniq,
+      warnings: warnings.uniq,
+      missing_capabilities: missing.uniq,
       orders_submitted: 0,
+      orders_placed: 0,
       signatures_created: 0
     }
   end
 
   private
 
-  attr_reader :snapshot, :env
+  attr_reader :position, :snapshot, :intended_role, :mode, :sequence, :env
+
+  def nado_service
+    @nado_service ||= NadoHedgeExecutionService.new(env: env)
+  end
+
+  def nado_position
+    @nado_position = nado_service.read_position if !defined?(@nado_position)
+    @nado_position
+  rescue => e
+    @nado_position_error = "#{e.class}: #{e.message}"
+    :unavailable
+  end
+
+  def account_state
+    return @account_state if defined?(@account_state)
+
+    if nado_service.respond_to?(:account_state)
+      return @account_state = nado_service.account_state
+    end
+
+    venue = nado_service.instance_variable_get(:@venue) if nado_service.respond_to?(:instance_variable_get)
+    @account_state = venue&.account_state || {}
+  rescue => e
+    @account_state_error = "#{e.class}: #{e.message}"
+    @account_state = {}
+  end
+
+  def nado_position_read_available?
+    return false if account_blockers.any? { |blocker| blocker.to_s.include?("position readback") || blocker.to_s.include?("read-only checks") }
+
+    nado_position != :unavailable
+  end
+
+  def nado_open_orders_read_available?
+    !nado_open_orders_count.nil?
+  end
+
+  def nado_open_orders_count
+    raw = account_state[:open_orders_count] || account_state["open_orders_count"]
+    return nil if raw.nil?
+
+    raw.to_i
+  end
+
+  def account_blockers
+    Array(account_state[:blockers] || account_state["blockers"])
+  end
+
+  def nado_market_read_available?
+    [ target_leg_preview, source_leg_preview ].compact.any? { |preview| preview.dig(:payload_summary, :product_id).present? || preview.dig(:payload_summary, :rounded_price).present? }
+  end
+
+  def nado_current_short
+    short_from_position(nado_position)
+  end
+
+  def target_leg_preview
+    return @target_leg_preview if defined?(@target_leg_preview)
+    return @target_leg_preview = nil unless target_role? && snapshot && position
+
+    size = target_leg_size
+    return @target_leg_preview = nil unless size&.positive?
+
+    action = nado_current_short&.positive? ? "rebalance" : "open"
+    order = nado_service.build_order_preview(
+      position: position,
+      action: action,
+      size_eth: size,
+      max_slippage: DEFAULT_MAX_SLIPPAGE,
+      current_position: nado_position == :unavailable ? nil : nado_position
+    )
+    @target_leg_preview = leg_preview(order: order, action: action, size: size, expected_after: nado_current_short.to_d + size)
+  rescue => e
+    @target_leg_preview = unavailable_preview("Nado target leg preview unavailable: #{e.class}: #{e.message}")
+  end
+
+  def source_leg_preview
+    return @source_leg_preview if defined?(@source_leg_preview)
+    return @source_leg_preview = nil unless source_role? && snapshot && position
+    return @source_leg_preview = nil unless nado_current_short&.positive?
+
+    size = source_leg_size
+    return @source_leg_preview = nil unless size&.positive?
+
+    order = nado_service.build_order_preview(
+      position: position,
+      action: "close",
+      size_eth: size,
+      max_slippage: DEFAULT_MAX_SLIPPAGE,
+      current_position: nado_position == :unavailable ? nil : nado_position
+    )
+    @source_leg_preview = leg_preview(order: order, action: "close", size: size, expected_after: BigDecimal("0"))
+  rescue => e
+    @source_leg_preview = unavailable_preview("Nado source leg preview unavailable: #{e.class}: #{e.message}")
+  end
+
+  def leg_preview(order:, action:, size:, expected_after:)
+    summary = order.fetch(:summary, {}).to_h.symbolize_keys
+    {
+      venue: "nado",
+      action: action,
+      side: summary[:side],
+      reduce_only: summary[:reduce_only],
+      size_eth: decimal_string(size),
+      expected_after_short_eth: decimal_string(expected_after),
+      payload_summary: summary.slice(
+        :venue,
+        :symbol,
+        :action,
+        :side,
+        :reduce_only,
+        :full_close,
+        :close_strategy,
+        :rounded_size_eth,
+        :rounded_price,
+        :estimated_notional_usd,
+        :product_id,
+        :order_type,
+        :margin_mode,
+        :requested_leverage,
+        :appendix,
+        :appendix_decoded,
+        :isolated,
+        :order_sender_kind
+      ),
+      blockers: order.fetch(:blockers, []),
+      warnings: order.fetch(:warnings, []),
+      ok: order.fetch(:ok, false),
+      submitted: false,
+      signatures_created: 0,
+      orders_submitted: 0
+    }
+  end
+
+  def unavailable_preview(message)
+    {
+      venue: "nado",
+      ok: false,
+      blockers: [ message ],
+      warnings: [],
+      submitted: false,
+      signatures_created: 0,
+      orders_submitted: 0
+    }
+  end
+
+  def target_role?
+    intended_role.in?(%w[target either matrix])
+  end
+
+  def source_role?
+    intended_role.in?(%w[source either matrix])
+  end
+
+  def target_leg_size
+    target = BigDecimal(snapshot.target_short_eth.to_s)
+    [ target - nado_current_short.to_d, BigDecimal("0") ].max
+  rescue ArgumentError
+    nil
+  end
+
+  def source_leg_size
+    return nado_current_short if mode == "full"
+
+    [ nado_current_short, BigDecimal(ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")) ].min
+  rescue ArgumentError
+    nado_current_short
+  end
+
+  def target_preview_available?(preview)
+    preview.present? && preview.fetch(:ok, false) && preview.fetch(:blockers, []).empty?
+  end
+
+  def source_preview_available?(preview)
+    preview.present? && preview.fetch(:ok, false) && preview.fetch(:blockers, []).empty?
+  end
+
+  def missing_capabilities(target_preview:, source_preview:)
+    missing = []
+    missing << "Nado current position readback" unless nado_position_read_available?
+    missing << "Nado open orders readback" unless nado_open_orders_read_available?
+    missing << "Nado market metadata" unless nado_market_read_available?
+    missing << "Nado open/increase short payload preview" if target_role? && !target_preview_available?(target_preview)
+    missing << "Nado reduce-only close/reduce payload preview" if source_role? && !source_preview_available?(source_preview)
+    missing << LIVE_BLOCKER
+    missing
+  end
+
+  def readiness_status(blockers:, target_preview:, source_preview:)
+    return "not_implemented" unless nado_position_read_available? || nado_market_read_available?
+
+    preview_ok = (!target_role? || target_preview_available?(target_preview)) &&
+      (!source_role? || source_preview_available?(source_preview))
+    operational_blockers = blockers - [ LIVE_BLOCKER ]
+    return "partial" if preview_ok && operational_blockers.empty?
+    return "partial" if [ target_preview, source_preview ].compact.any? { |preview| preview.fetch(:ok, false) }
+
+    "blocked"
+  end
+
+  def short_from_position(position)
+    return BigDecimal("0") if position.nil?
+    return nil if position == :unavailable
+    return BigDecimal(position[:short_size].to_s) if position[:short_size].present?
+    return BigDecimal(position["short_size"].to_s) if position["short_size"].present?
+
+    size = BigDecimal((position[:size] || position["size"]).to_s)
+    size.negative? ? size.abs : BigDecimal("0")
+  rescue ArgumentError, NoMethodError
+    BigDecimal(snapshot&.nado_short_eth.to_s)
+  end
 
   def bool_env(key)
     ActiveModel::Type::Boolean.new.cast(env[key])
@@ -40,13 +285,5 @@ class NadoMigrationReadiness
 
   def decimal_string(value)
     value&.to_s("F")
-  end
-
-  def nado_short
-    return nil unless snapshot
-
-    BigDecimal(snapshot.nado_short_eth.to_s)
-  rescue ArgumentError
-    nil
   end
 end

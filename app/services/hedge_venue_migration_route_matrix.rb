@@ -16,7 +16,7 @@ class HedgeVenueMigrationRouteMatrix
   ].freeze
   PROOF_RECEIPT_DIR = Rails.root.join("storage/hedge_migration_route_proofs")
 
-  def initialize(position:, snapshot: nil, modes: MODES, sequences: SEQUENCES, venues: VENUES, now: -> { Time.current }, receipt_dir: PROOF_RECEIPT_DIR)
+  def initialize(position:, snapshot: nil, modes: MODES, sequences: SEQUENCES, venues: VENUES, now: -> { Time.current }, receipt_dir: PROOF_RECEIPT_DIR, nado_service: nil)
     @position = position
     @snapshot = snapshot || position&.position_dashboard_snapshot
     @modes = modes
@@ -24,6 +24,7 @@ class HedgeVenueMigrationRouteMatrix
     @venues = venues
     @now = now
     @receipt_dir = Pathname(receipt_dir)
+    @nado_service = nado_service
   end
 
   def report
@@ -64,7 +65,7 @@ class HedgeVenueMigrationRouteMatrix
 
   private
 
-  attr_reader :position, :snapshot, :modes, :sequences, :venues, :now, :receipt_dir
+  attr_reader :position, :snapshot, :modes, :sequences, :venues, :now, :receipt_dir, :nado_service
 
   def route_pairs
     ROUTE_ORDER.select { |from, to| venues.include?(from) && venues.include?(to) }
@@ -89,6 +90,7 @@ class HedgeVenueMigrationRouteMatrix
       supported_sequences: proof.fetch(:supported_sequences),
       last_preview_receipt_path: last_proof&.fetch("receipt_path", nil),
       last_proof_time: last_proof&.fetch("timestamp", nil),
+      nado_readiness: proof.dig(:planned_fields, :nado_readiness),
       orders_submitted: 0,
       signatures_created: 0
     }
@@ -126,7 +128,7 @@ class HedgeVenueMigrationRouteMatrix
   end
 
   def preview_proof(from:, to:, mode:, sequence:)
-    return nado_proof(from, to) if [ from, to ].include?("nado")
+    return nado_proof(from, to, mode: mode, sequence: sequence) if [ from, to ].include?("nado")
     return unsupported_proof(from, to) unless SUPPORTED_PREVIEW_ROUTES.include?([ from, to ])
 
     result = HedgeVenueMigrationPlanner.new(now: now).plan(
@@ -154,25 +156,21 @@ class HedgeVenueMigrationRouteMatrix
     }
   end
 
-  def nado_proof(from, to)
-    readiness = NadoMigrationReadiness.new(snapshot: snapshot).report
-    missing = [
-      "Nado migration readiness service must prove readback/open-orders support.",
-      "Nado live migration executor must prove target/source leg sequencing.",
-      "Nado close/open readback proof must be recorded before live migration."
-    ]
+  def nado_proof(from, to, mode: "full", sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE)
+    readiness = nado_readiness(from: from, to: to, mode: mode, sequence: sequence)
+    dry_run_capable = nado_dry_run_capable?(readiness, from: from, to: to)
     {
-      supported: false,
-      preview_available: false,
-      readiness_status: readiness.fetch(:status),
-      route_status: "NOT_IMPLEMENTED",
+      supported: dry_run_capable,
+      preview_available: dry_run_capable,
+      readiness_status: dry_run_capable ? "blocked_for_live" : readiness.fetch(:status),
+      route_status: dry_run_capable ? "READY_FOR_DRY_RUN" : nado_blocked_status(readiness),
       blockers: readiness.fetch(:blockers),
       warnings: readiness.fetch(:warnings),
-      missing_capabilities: missing,
+      missing_capabilities: readiness.fetch(:missing_capabilities),
       required_gates: required_gates(from, to),
-      supported_modes: [],
-      supported_sequences: [],
-      planned_fields: {}
+      supported_modes: dry_run_capable ? modes : [],
+      supported_sequences: dry_run_capable ? sequences : [],
+      planned_fields: nado_planned_fields(readiness, from: from, to: to)
     }
   end
 
@@ -206,6 +204,60 @@ class HedgeVenueMigrationRouteMatrix
       :temporary_drift_after_first_leg,
       :final_expected_inside_tolerance
     )
+  end
+
+  def nado_readiness(from:, to:, mode:, sequence:)
+    NadoMigrationReadiness.new(
+      position: position,
+      snapshot: snapshot,
+      intended_role: nado_role(from: from, to: to),
+      mode: mode,
+      sequence: sequence,
+      nado_service: nado_service
+    ).report
+  end
+
+  def nado_role(from:, to:)
+    return "source" if from == "nado"
+    return "target" if to == "nado"
+
+    "matrix"
+  end
+
+  def nado_dry_run_capable?(readiness, from:, to:)
+    return false unless readiness.fetch(:nado_position_read_available)
+    return false unless readiness.fetch(:nado_open_orders_read_available)
+    return false unless readiness.fetch(:nado_open_orders_count).to_i.zero?
+    return readiness.fetch(:nado_open_short_preview_available) if to == "nado"
+    return readiness.fetch(:nado_reduce_only_close_preview_available) if from == "nado"
+
+    false
+  end
+
+  def nado_blocked_status(readiness)
+    return "PREVIEW_BLOCKED" if readiness.fetch(:status).in?(%w[blocked partial])
+
+    "NOT_IMPLEMENTED"
+  end
+
+  def nado_planned_fields(readiness, from:, to:)
+    fields = {
+      nado_readiness: readiness.slice(
+        :status,
+        :nado_position_read_available,
+        :nado_open_orders_read_available,
+        :nado_current_short_eth,
+        :nado_flat,
+        :nado_open_orders_count,
+        :nado_market_read_available,
+        :nado_open_short_preview_available,
+        :nado_reduce_only_close_preview_available,
+        :nado_live_migration_supported
+      )
+    }
+    fields[:planned_target_leg] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?
+    fields[:planned_source_leg] = readiness[:source_leg_preview] if from == "nado" && readiness[:source_leg_preview].present?
+    fields
   end
 
   def required_gates(from, to)

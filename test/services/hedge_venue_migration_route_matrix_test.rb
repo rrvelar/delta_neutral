@@ -34,9 +34,32 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
       item = route(matrix, from, to)
       assert_equal false, item.fetch(:supported)
       assert_equal false, item.fetch(:preview_available)
-      assert_equal "NOT_IMPLEMENTED", item.fetch(:route_status)
+      assert_includes %w[NOT_IMPLEMENTED PREVIEW_BLOCKED], item.fetch(:route_status)
       assert_includes item.fetch(:blockers), "Nado migration readiness is not proven."
     end
+  end
+
+  test "Extended to Nado route uses readiness and can expose dry run target leg preview" do
+    service = FakeNadoService.new(current_position: nil)
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position, nado_service: service).report
+    item = route(matrix, "extended", "nado")
+
+    assert_equal true, item.fetch(:preview_available)
+    assert_equal false, item.fetch(:live_available)
+    assert_equal "READY_FOR_DRY_RUN", item.fetch(:route_status)
+    assert_equal "blocked_for_live", item.fetch(:readiness_status)
+    assert_equal "0.0", item.dig(:nado_readiness, :nado_current_short_eth)
+  end
+
+  test "Nado to Extended route uses readiness and can expose dry run source leg preview" do
+    service = FakeNadoService.new(current_position: { short_size: BigDecimal("0.4"), size: BigDecimal("-0.4") })
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position, nado_service: service).report
+    item = route(matrix, "nado", "extended")
+
+    assert_equal true, item.fetch(:preview_available)
+    assert_equal false, item.fetch(:live_available)
+    assert_equal "READY_FOR_DRY_RUN", item.fetch(:route_status)
+    assert_equal "0.4", item.dig(:nado_readiness, :nado_current_short_eth)
   end
 
   test "proof receipts are written with zero orders and signatures" do
@@ -47,6 +70,7 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
 
       assert_equal 24, summary.fetch(:receipts_written)
       assert rows.any? { |row| row["from_venue"] == "extended" && row["to_venue"] == "ethereal" && row["planned_first_leg"].present? }
+      assert rows.any? { |row| row["to_venue"] == "nado" && row["nado_readiness"].present? }
       rows.each do |row|
         assert_equal "migration_route_proof", row.fetch("action")
         assert_equal 0, row.fetch("orders_submitted")
@@ -107,5 +131,41 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
       open_orders_count_extended: 0,
       leverage_margin_gate_status: "pass"
     )
+  end
+
+  class FakeNadoService
+    def initialize(current_position:)
+      @current_position = current_position
+    end
+
+    def read_position
+      @current_position
+    end
+
+    def account_state
+      { open_orders_count: 0, blockers: [], warnings: [] }
+    end
+
+    def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position:)
+      reduce_only = action == "close" || BigDecimal(size_eth.to_s).negative?
+      {
+        ok: true,
+        summary: {
+          venue: "Nado",
+          symbol: "ETH-PERP",
+          action: action,
+          side: reduce_only ? "buy" : "sell",
+          reduce_only: reduce_only,
+          rounded_size_eth: BigDecimal(size_eth.to_s).abs.to_s("F"),
+          rounded_price: "2400",
+          estimated_notional_usd: "960",
+          product_id: 4,
+          order_type: "ioc",
+          margin_mode: "isolated"
+        },
+        blockers: [],
+        warnings: []
+      }
+    end
   end
 end
