@@ -295,7 +295,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "option[selected='selected']", text: "Extended"
-    assert_match "Extended mainnet order submit is implemented behind explicit live gates", response.body
+    assert_match "Extended production venue", response.body
+    assert_match "Detailed live preflight loads separately.", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Live preflight is loaded separately.", response.body
     assert_match "Open Hedge", response.body
@@ -313,10 +314,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Extended manual live supported", response.body
-    assert_match "Continuous auto: Auto Unknown", response.body
-    assert_match "Signer must be running; key stored outside Rails", response.body
-    assert_match "Required: 1x isolated", response.body
+    assert_match "Extended production venue", response.body
+    assert_match "Auto: Auto Unknown", response.body
+    assert_match "Signer: Unknown", response.body
+    assert_match "Required: 1x isolated-equivalent", response.body
     assert_match "Migration tools", response.body
     assert_match "Current Extended ETH-PERP position", response.body
     assert_match "not loaded", response.body
@@ -370,6 +371,46 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Emergency / manual close tools", response.body
     assert_no_match "Close Hedge</p>\n                    <p class=\"mt-1 text-xs text-gray-500\">Relevant now", response.body
     assert_no_match "Production venue is not switched until finalize succeeds", response.body
+  end
+
+  test "show maps Extended snapshot market and pnl fields into main dashboard" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    hedge.short_rebalances.create!(asset: "ETH", venue: "extended", old_short_size: "1.20", new_short_size: "1.25", status: ShortRebalance::STATUS_SUCCESS, message: "auto success", rebalanced_at: 1.minute.ago)
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_auto_enabled: true,
+      extended_attrs: {
+        notional_usd: "2625",
+        entry_price: "2000",
+        mark_price: "2100",
+        unrealized_pnl_usd: "-125",
+        leverage: "1",
+        effective_leverage: "1.0",
+        margin_mode: "isolated",
+        open_orders_count: 0
+      }
+    )
+
+    with_env("EXTENDED_AUTO_REBALANCE_ENABLED" => "true") do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "$2,625.00", response.body
+    assert_match "$2,000.00", response.body
+    assert_match "$2,100.00", response.body
+    assert_match "-$125.00", response.body
+    assert_match "Isolated 1.0x", response.body
+    assert_match "1.0x", response.body
+    assert_match "Open orders", response.body
+    assert_match ">0<", response.body
+    assert_match "Last selected-venue success", response.body
+    assert_match "auto success", response.body
+    assert_no_match "Expected final", response.body
   end
 
   test "show does not report in tolerance when selected current short is unknown" do
@@ -1664,7 +1705,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     }
   end
 
-  def create_dashboard_snapshot(position, extended_short_eth:, ethereal_short_eth:, nado_short_eth:, extended_auto_enabled: false, refreshed_at: 2.minutes.ago)
+  def create_dashboard_snapshot(position, extended_short_eth:, ethereal_short_eth:, nado_short_eth:, extended_auto_enabled: false, refreshed_at: 2.minutes.ago, extended_attrs: {})
     target = BigDecimal(position.asset0_amount.to_s) * position.hedge.target
     combined = BigDecimal(extended_short_eth.to_s) + BigDecimal(ethereal_short_eth.to_s) + BigDecimal(nado_short_eth.to_s)
     tolerance = target * position.hedge.tolerance
@@ -1686,6 +1727,16 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       extended_status: BigDecimal(extended_short_eth.to_s).positive? ? "active" : "flat",
       ethereal_status: BigDecimal(ethereal_short_eth.to_s).positive? ? "active" : "flat",
       nado_status: BigDecimal(nado_short_eth.to_s).positive? ? "active" : "flat",
+      extended_notional_usd: extended_attrs.fetch(:notional_usd, nil),
+      extended_entry_price: extended_attrs.fetch(:entry_price, nil),
+      extended_mark_price: extended_attrs.fetch(:mark_price, nil),
+      extended_unrealized_pnl_usd: extended_attrs.fetch(:unrealized_pnl_usd, nil),
+      extended_realized_pnl_usd: extended_attrs.fetch(:realized_pnl_usd, nil),
+      extended_leverage: extended_attrs.fetch(:leverage, nil),
+      extended_effective_leverage: extended_attrs.fetch(:effective_leverage, nil),
+      extended_margin_mode: extended_attrs.fetch(:margin_mode, nil),
+      open_orders_count_extended: extended_attrs.fetch(:open_orders_count, nil),
+      leverage_margin_gate_status: extended_attrs.fetch(:leverage_margin_gate_status, nil),
       extended_auto_enabled: extended_auto_enabled,
       ethereal_auto_enabled: false,
       nado_auto_enabled: false,

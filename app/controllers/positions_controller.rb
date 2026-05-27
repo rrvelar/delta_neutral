@@ -323,6 +323,10 @@ class PositionsController < ApplicationController
       inside_tolerance: inside_tolerance,
       hedge_status: hedge_status_label(inside_tolerance),
       combined_short_eth: snapshot.decimal_string(snapshot.combined_short_eth),
+      leverage_margin_gate_status: snapshot.leverage_margin_gate_status,
+      auto_readiness_status: snapshot.auto_readiness_status,
+      planned_auto_action: snapshot.planned_auto_action,
+      planned_auto_order_size_eth: snapshot.decimal_string(snapshot.planned_auto_order_size_eth),
       auto_status: snapshot_auto_status(snapshot),
       signer_status: snapshot_signer_status(snapshot),
       latest_rebalance: latest_venue_rebalance(@selected_hedge_venue),
@@ -802,6 +806,7 @@ class PositionsController < ApplicationController
     current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size)
     drift = target && current_short ? target - current_short : nil
     tolerance = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:tolerance_eth))
+    latest_success = latest_successful_venue_action(@selected_hedge_venue)
     {
       status: "cached",
       target_short_eth: target&.to_s("F"),
@@ -809,8 +814,23 @@ class PositionsController < ApplicationController
       drift_eth: drift&.to_s("F"),
       tolerance_eth: tolerance&.to_s("F"),
       rebalance_needed: drift && tolerance ? drift.abs > tolerance : false,
+      last_rebalance_id: latest_success&.id,
+      last_rebalance_time: latest_success&.rebalanced_at || latest_success&.updated_at,
+      last_rebalance_status: latest_success&.status,
+      last_rebalance_old_short_eth: latest_success&.old_short_size,
+      last_rebalance_new_short_eth: latest_success&.new_short_size,
       warnings: [ "Auto diagnostics are loaded separately." ]
     }
+  end
+
+  def latest_successful_venue_action(venue)
+    return nil unless @position.hedge && venue.present?
+
+    @latest_successful_venue_actions ||= {}
+    @latest_successful_venue_actions[venue] ||= @position.hedge.short_rebalances
+      .where(venue: venue, asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)
+      .order(rebalanced_at: :desc, id: :desc)
+      .first
   end
 
   def unavailable_rewards_report(reason)
