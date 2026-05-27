@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_27_000100) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_27_000300) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -94,6 +94,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_27_000100) do
     t.string "ethereal_source_status"
     t.string "ethereal_status"
     t.boolean "extended_auto_enabled"
+    t.integer "extended_critical_read_duration_ms"
+    t.string "extended_critical_read_status"
     t.decimal "extended_effective_leverage", precision: 20, scale: 10
     t.decimal "extended_entry_price", precision: 30, scale: 12
     t.decimal "extended_leverage", precision: 20, scale: 10
@@ -101,11 +103,14 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_27_000100) do
     t.string "extended_margin_mode"
     t.decimal "extended_mark_price", precision: 30, scale: 12
     t.decimal "extended_notional_usd", precision: 30, scale: 12
+    t.integer "extended_optional_read_duration_ms"
+    t.string "extended_optional_read_status"
     t.decimal "extended_realized_pnl_usd", precision: 30, scale: 12
     t.decimal "extended_short_eth", precision: 30, scale: 18
     t.string "extended_source_status"
     t.string "extended_status"
     t.decimal "extended_unrealized_pnl_usd", precision: 30, scale: 12
+    t.datetime "extended_value_stale_as_of"
     t.boolean "inside_tolerance"
     t.string "leverage_margin_gate_status"
     t.boolean "nado_auto_enabled"
@@ -126,6 +131,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_27_000100) do
     t.text "source_errors"
     t.boolean "stale", default: true, null: false
     t.decimal "target_short_eth", precision: 30, scale: 18
+    t.decimal "timeout_seconds_used", precision: 10, scale: 3
     t.decimal "tolerance_abs_eth", precision: 30, scale: 18
     t.decimal "tolerance_ratio", precision: 20, scale: 10
     t.datetime "updated_at", null: false

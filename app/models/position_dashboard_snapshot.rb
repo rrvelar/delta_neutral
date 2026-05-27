@@ -32,8 +32,10 @@ class PositionDashboardSnapshot < ApplicationRecord
       effective_leverage: key == "extended" ? extended_effective_leverage : ethereal_effective_leverage,
       margin_mode: key == "extended" ? extended_margin_mode : nil,
       source_status: public_send("#{key}_source_status").presence || "unknown",
-      stale_as_of: refreshed_at,
-      source: "PositionDashboardSnapshot ##{id}"
+      stale_as_of: key == "extended" && extended_source_status == "stale" ? extended_value_stale_as_of : refreshed_at,
+      source: "PositionDashboardSnapshot ##{id}",
+      critical_read_status: key == "extended" ? extended_critical_read_status : nil,
+      optional_read_status: key == "extended" ? extended_optional_read_status : nil
     }
   end
 

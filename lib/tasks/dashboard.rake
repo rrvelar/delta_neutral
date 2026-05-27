@@ -24,6 +24,12 @@ namespace :dashboard do
       ethereal_status: snapshot.ethereal_status,
       nado_status: snapshot.nado_status,
       signer_status: snapshot.signer_status,
+      timeout_seconds_used: snapshot.timeout_seconds_used&.to_s("F"),
+      extended_critical_read_duration_ms: snapshot.extended_critical_read_duration_ms,
+      extended_critical_read_status: snapshot.extended_critical_read_status,
+      extended_optional_read_duration_ms: snapshot.extended_optional_read_duration_ms,
+      extended_optional_read_status: snapshot.extended_optional_read_status,
+      extended_value_stale_as_of: snapshot.extended_value_stale_as_of&.iso8601,
       orders_submitted: 0,
       signatures_created: 0,
       source_errors: snapshot.source_errors_hash

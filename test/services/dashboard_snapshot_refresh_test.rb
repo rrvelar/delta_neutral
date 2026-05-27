@@ -92,6 +92,144 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_equal "not_configured", snapshot.extended_source_status
   end
 
+  test "uses dashboard snapshot timeout instead of page section timeout" do
+    position = create_position_with_hedge
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env.merge(
+        "POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01",
+        "DASHBOARD_SNAPSHOT_VENUE_TIMEOUT_SECONDS" => "8"
+      ),
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.831" }, read_delay: 0.05, account_state: {} },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal BigDecimal("0.831"), snapshot.extended_short_eth
+    assert_equal "active", snapshot.extended_status
+    assert_equal BigDecimal("8.0"), snapshot.timeout_seconds_used
+    assert_equal "ok", snapshot.extended_critical_read_status
+  end
+
+  test "extended read_position taking two seconds succeeds with default snapshot timeout" do
+    position = create_position_with_hedge
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.831" }, read_delay: 2.0, account_state: {} },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal BigDecimal("0.831"), snapshot.extended_short_eth
+    assert_equal "active", snapshot.extended_status
+    assert_equal "ok", snapshot.extended_critical_read_status
+    assert_operator snapshot.extended_critical_read_duration_ms, :>=, 1_900
+  end
+
+  test "optional extended diagnostics timeout does not clear critical exposure" do
+    position = create_position_with_hedge
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      timeout_seconds: 0.01,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.831" }, account_state: {}, account_delay: 0.05 },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal BigDecimal("0.831"), snapshot.extended_short_eth
+    assert_equal "active", snapshot.extended_status
+    assert_equal "ok", snapshot.extended_critical_read_status
+    assert_equal "error", snapshot.extended_optional_read_status
+    assert_equal BigDecimal("0.831"), snapshot.combined_short_eth
+    assert_includes snapshot.source_errors_hash.fetch("extended_optional"), "Timeout::Error"
+  end
+
+  test "critical extended timeout carries forward previous good snapshot" do
+    position = create_position_with_hedge
+    previous = position.create_position_dashboard_snapshot!(
+      refreshed_at: 5.minutes.ago,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "1.25",
+      tolerance_ratio: "0.05",
+      tolerance_abs_eth: "0.0625",
+      combined_short_eth: "0.7",
+      drift_eth: "0.55",
+      inside_tolerance: false,
+      extended_short_eth: "0.7",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat",
+      extended_source_status: "ok",
+      ethereal_source_status: "ok",
+      nado_source_status: "ok"
+    )
+    previous_refreshed_at = previous.refreshed_at
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      timeout_seconds: 0.01,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.9" }, read_delay: 0.05, account_state: {} },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal previous.id, snapshot.id
+    assert_equal BigDecimal("0.7"), snapshot.extended_short_eth
+    assert_equal "error", snapshot.extended_status
+    assert_equal "stale", snapshot.extended_source_status
+    assert_equal "error_carried_forward", snapshot.extended_critical_read_status
+    assert_equal previous_refreshed_at.to_i, snapshot.extended_value_stale_as_of.to_i
+    assert_equal BigDecimal("0.7"), snapshot.combined_short_eth
+    assert_equal BigDecimal("0.55"), snapshot.drift_eth
+    assert_equal false, snapshot.inside_tolerance
+  end
+
+  test "critical extended timeout without previous snapshot leaves extended error unknown" do
+    position = create_position_with_hedge
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      timeout_seconds: 0.01,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.9" }, read_delay: 0.05, account_state: {} },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_nil snapshot.extended_short_eth
+    assert_equal "error", snapshot.extended_status
+    assert_equal "error", snapshot.extended_source_status
+    assert_nil snapshot.combined_short_eth
+    assert_nil snapshot.drift_eth
+    assert_nil snapshot.inside_tolerance
+  end
+
   private
 
   def create_position_with_hedge
@@ -163,6 +301,7 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     end
 
     def read_position(symbol:)
+      sleep @result[:read_delay] if @result[:read_delay]
       value = @result.fetch(:position)
       raise value if value.is_a?(Exception)
 
@@ -170,6 +309,7 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     end
 
     def account_state
+      sleep @result[:account_delay] if @result[:account_delay]
       @result.fetch(:account_state, {})
     end
   end

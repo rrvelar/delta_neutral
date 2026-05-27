@@ -1,14 +1,14 @@
 require "timeout"
 
 class DashboardSnapshotRefresh
-  DEFAULT_TIMEOUT_SECONDS = 2
+  DEFAULT_TIMEOUT_SECONDS = 8.0
 
-  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: DEFAULT_TIMEOUT_SECONDS)
+  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: nil)
     @position = position
     @env = env
     @venue_builder = venue_builder
     @signer_client = signer_client || ExtendedStarkSignerClient.new(env: env)
-    @timeout_seconds = timeout_seconds
+    @timeout_seconds = timeout_seconds || configured_timeout_seconds
   end
 
   def refresh
@@ -19,7 +19,10 @@ class DashboardSnapshotRefresh
     venue_results = %w[extended ethereal nado].to_h { |venue| [ venue, read_venue(venue) ] }
     combined = combined_short(venue_results)
     drift = target && combined ? target - combined : nil
-    errors = venue_results.transform_values { |result| result[:error] }.compact
+    errors = venue_results.each_with_object({}) do |(venue, result), memo|
+      memo[venue] = result[:error] if result[:error].present?
+      memo["#{venue}_optional"] = result[:optional_error] if result[:optional_error].present?
+    end
     signer = read_signer_health
     errors[:signer] = signer[:error] if signer[:error].present?
     refresh_status = snapshot_status(venue_results, signer)
@@ -43,6 +46,7 @@ class DashboardSnapshotRefresh
       nado_auto_enabled: bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED"),
       signer_status: signer[:status],
       signer_checked_at: signer[:checked_at],
+      timeout_seconds_used: timeout_seconds,
       source_errors: JSON.generate(errors)
     }.merge(venue_attrs(venue_results))
 
@@ -58,18 +62,18 @@ class DashboardSnapshotRefresh
   def read_venue(venue)
     return not_configured_venue if venue_not_configured?(venue)
 
-    result = with_timeout("#{venue} readback") do
-      adapter = venue_builder.build(venue)
-      current_position = adapter.read_position(symbol: "ETH")
-      account_state = venue == "extended" ? safe_account_state(adapter) : {}
-      normalize_venue_result(venue, current_position, account_state)
+    adapter = venue_builder.build(venue)
+    result = if venue == "extended"
+      read_extended_venue(adapter)
+    else
+      read_standard_venue(venue, adapter)
     end
     result[:source_status] = "ok" if result[:source_status].blank?
     result
   rescue Timeout::Error => e
-    venue_error(e)
+    carry_forward_venue_error(venue, e)
   rescue => e
-    venue_error(e)
+    carry_forward_venue_error(venue, e)
   end
 
   def not_configured_venue
@@ -93,10 +97,36 @@ class DashboardSnapshotRefresh
     end
   end
 
-  def safe_account_state(adapter)
-    with_timeout("extended account state") { adapter.account_state || {} }
-  rescue
-    {}
+  def read_standard_venue(venue, adapter)
+    timed_read("#{venue} readback") do
+      current_position = adapter.read_position(symbol: "ETH")
+      normalize_venue_result(venue, current_position, {})
+    end.fetch(:result)
+  end
+
+  def read_extended_venue(adapter)
+    critical = timed_read("extended critical readback") { adapter.read_position(symbol: "ETH") }
+    current_position = critical.fetch(:result)
+    optional = timed_read("extended optional account state") { adapter.account_state || {} }
+    account_state = optional.fetch(:result)
+    normalize_venue_result("extended", current_position, account_state).merge(
+      critical_read_duration_ms: critical.fetch(:duration_ms),
+      critical_read_status: "ok",
+      optional_read_duration_ms: optional.fetch(:duration_ms),
+      optional_read_status: "ok"
+    )
+  rescue Timeout::Error, StandardError => e
+    if defined?(critical) && critical&.dig(:result)
+      normalize_venue_result("extended", critical.fetch(:result), {}).merge(
+        critical_read_duration_ms: critical.fetch(:duration_ms),
+        critical_read_status: "ok",
+        optional_read_duration_ms: duration_ms_from(defined?(optional_started) ? optional_started : nil),
+        optional_read_status: "error",
+        optional_error: sanitized_error(e)
+      )
+    else
+      raise
+    end
   end
 
   def normalize_venue_result(venue, current_position, account_state)
@@ -137,6 +167,32 @@ class DashboardSnapshotRefresh
     }
   end
 
+  def carry_forward_venue_error(venue, error)
+    previous = position.position_dashboard_snapshot
+    return venue_error(error) unless venue == "extended" && previous&.extended_short_eth
+
+    {
+      status: "error",
+      source_status: "stale",
+      short_eth: previous.extended_short_eth,
+      notional_usd: previous.extended_notional_usd,
+      entry_price: previous.extended_entry_price,
+      mark_price: previous.extended_mark_price,
+      unrealized_pnl_usd: previous.extended_unrealized_pnl_usd,
+      leverage: previous.extended_leverage,
+      effective_leverage: previous.extended_effective_leverage,
+      margin_mode: previous.extended_margin_mode,
+      open_orders_count: previous.open_orders_count_extended,
+      leverage_margin_gate_status: previous.leverage_margin_gate_status,
+      critical_read_duration_ms: nil,
+      critical_read_status: "error_carried_forward",
+      optional_read_duration_ms: nil,
+      optional_read_status: "not_attempted",
+      value_stale_as_of: previous.refreshed_at,
+      error: "#{sanitized_error(error)}; carried forward previous Extended snapshot ##{previous.id}"
+    }
+  end
+
   def read_signer_health
     return { status: "unknown", checked_at: nil } if env["EXTENDED_SIGNER_URL"].blank?
 
@@ -172,6 +228,11 @@ class DashboardSnapshotRefresh
       auto_readiness_status: results.dig("extended", :auto_readiness_status),
       planned_auto_action: results.dig("extended", :planned_auto_action),
       planned_auto_order_size_eth: results.dig("extended", :planned_auto_order_size_eth),
+      extended_value_stale_as_of: results.dig("extended", :value_stale_as_of),
+      extended_critical_read_duration_ms: results.dig("extended", :critical_read_duration_ms),
+      extended_critical_read_status: results.dig("extended", :critical_read_status),
+      extended_optional_read_duration_ms: results.dig("extended", :optional_read_duration_ms),
+      extended_optional_read_status: results.dig("extended", :optional_read_status),
       extended_source_status: results.dig("extended", :source_status),
       ethereal_source_status: results.dig("ethereal", :source_status),
       nado_source_status: results.dig("nado", :source_status)
@@ -224,6 +285,32 @@ class DashboardSnapshotRefresh
 
   def with_timeout(_name, &block)
     Timeout.timeout(timeout_seconds, &block)
+  end
+
+  def timed_read(name)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    result = with_timeout(name) { yield }
+    duration = duration_ms_from(started)
+    Rails.logger.info("[DashboardSnapshotRefresh] section=#{name} duration_ms=#{duration} timeout_seconds=#{timeout_seconds}")
+    { result: result, duration_ms: duration, status: "ok" }
+  rescue Timeout::Error => e
+    Rails.logger.warn("[DashboardSnapshotRefresh] section=#{name} timed_out=true timeout_seconds=#{timeout_seconds}")
+    raise e
+  rescue => e
+    Rails.logger.warn("[DashboardSnapshotRefresh] section=#{name} error=#{e.class} timeout_seconds=#{timeout_seconds}")
+    raise e
+  end
+
+  def duration_ms_from(started)
+    return nil unless started
+
+    ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
+  end
+
+  def configured_timeout_seconds
+    Float(env.fetch("DASHBOARD_SNAPSHOT_VENUE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS.to_s))
+  rescue ArgumentError
+    DEFAULT_TIMEOUT_SECONDS
   end
 
   def sanitized_error(error)
