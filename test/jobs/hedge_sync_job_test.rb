@@ -223,6 +223,18 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "extended hedge sync enqueues dashboard snapshot refresh after branch finishes" do
+    position = aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    enqueued = []
+
+    DashboardSnapshotJob.stub(:perform_later, ->(position_id) { enqueued << position_id }) do
+      HedgeSyncJob.perform_now(hedge.id)
+    end
+
+    assert_equal [ position.id ], enqueued
+  end
+
   test "extended hedge sync skips when readiness blocks continuous auto" do
     position = aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

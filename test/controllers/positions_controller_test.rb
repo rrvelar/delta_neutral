@@ -453,6 +453,26 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Timeout::Error", response.body
   end
 
+  test "show marks dashboard snapshot stale using configured threshold" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: 3.minutes.ago
+    )
+
+    with_env("POSITION_DASHBOARD_SNAPSHOT_STALE_AFTER_SECONDS" => "120") do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "Snapshot stale as of", response.body
+    assert_match "1.250000", response.body
+  end
+
   test "show renders rewards fees and accounting snapshots without live diagnostics" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

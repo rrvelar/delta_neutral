@@ -1,5 +1,5 @@
 class PositionDashboardSnapshot < ApplicationRecord
-  STALE_AFTER = 10.minutes
+  DEFAULT_STALE_AFTER_SECONDS = 120
   STATUSES = %w[ok partial error unknown].freeze
   VENUE_STATUSES = %w[active flat unknown error].freeze
 
@@ -8,7 +8,7 @@ class PositionDashboardSnapshot < ApplicationRecord
   validates :refresh_status, inclusion: { in: STATUSES }
 
   def stale_now?
-    stale? || refreshed_at.nil? || refreshed_at < STALE_AFTER.ago
+    stale? || refreshed_at.nil? || refreshed_at < stale_after_seconds.seconds.ago
   end
 
   def source_errors_hash
@@ -46,5 +46,11 @@ class PositionDashboardSnapshot < ApplicationRecord
 
   def decimal_string(value)
     value&.to_s("F")
+  end
+
+  def stale_after_seconds
+    ENV.fetch("POSITION_DASHBOARD_SNAPSHOT_STALE_AFTER_SECONDS", DEFAULT_STALE_AFTER_SECONDS).to_i
+  rescue ArgumentError
+    DEFAULT_STALE_AFTER_SECONDS
   end
 end

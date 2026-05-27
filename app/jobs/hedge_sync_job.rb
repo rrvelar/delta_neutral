@@ -39,65 +39,69 @@ class HedgeSyncJob < ApplicationJob
 
     hedges.includes(position: :dex).find_each do |hedge|
       if aerodrome_position?(hedge.position)
-        if Position.active_hedgeable.count > 1
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — #{Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE}")
-          next
-        end
+        begin
+          if Position.active_hedgeable.count > 1
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — #{Position::MULTIPLE_ACTIVE_HEDGEABLE_MESSAGE}")
+            next
+          end
 
-        if hedge.nado_execution?
-          NadoPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
-          sync_nado_aerodrome_hedge(hedge)
-          next
-        end
+          if hedge.nado_execution?
+            NadoPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
+            sync_nado_aerodrome_hedge(hedge)
+            next
+          end
 
-        if hedge.ethereal_execution?
-          EtherealPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
-          sync_ethereal_aerodrome_hedge(hedge)
-          next
-        end
+          if hedge.ethereal_execution?
+            EtherealPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
+            sync_ethereal_aerodrome_hedge(hedge)
+            next
+          end
 
-        if hedge.extended_execution?
-          ExtendedPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
-          sync_extended_aerodrome_hedge(hedge)
-          next
-        end
+          if hedge.extended_execution?
+            ExtendedPendingRebalanceReconciler.new.reconcile_for_hedge(hedge)
+            sync_extended_aerodrome_hedge(hedge)
+            next
+          end
 
-        unless aerodrome_hedge_enabled?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
-          next
-        end
+          unless aerodrome_hedge_enabled?
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge is disabled")
+            next
+          end
 
-        unless hyperliquid_testnet_enabled? || (hyperliquid_mainnet_enabled? && aerodrome_live_approved?)
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome live hedge requires AERODROME_LIVE_APPROVED=true")
-          next
-        end
+          unless hyperliquid_testnet_enabled? || (hyperliquid_mainnet_enabled? && aerodrome_live_approved?)
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome live hedge requires AERODROME_LIVE_APPROVED=true")
+            next
+          end
 
-        if aerodrome_hedge_paused?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge paused by kill switch")
-          next
-        end
+          if aerodrome_hedge_paused?
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge paused by kill switch")
+            next
+          end
 
-        readiness_errors = aerodrome_readiness_errors(hedge)
-        if readiness_errors.any?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
-          next
-        end
+          readiness_errors = aerodrome_readiness_errors(hedge)
+          if readiness_errors.any?
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
+            next
+          end
 
-        hedge_assets = aerodrome_hedge_assets(hedge)
-        if hedge_assets.empty?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — no supported Aerodrome ETH/WETH hedge asset")
-          next
-        end
+          hedge_assets = aerodrome_hedge_assets(hedge)
+          if hedge_assets.empty?
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — no supported Aerodrome ETH/WETH hedge asset")
+            next
+          end
 
-        safety_errors = aerodrome_safety_errors(hedge, hedge_assets)
-        if safety_errors.any?
-          Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge safety gate blocked: #{safety_errors.join(', ')}")
-          next
-        end
+          safety_errors = aerodrome_safety_errors(hedge, hedge_assets)
+          if safety_errors.any?
+            Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — Aerodrome hedge safety gate blocked: #{safety_errors.join(', ')}")
+            next
+          end
 
-        hyperliquid ||= HyperliquidService.new
-        sync_aerodrome_hedge(hedge, hedge_assets, hyperliquid)
-        next
+          hyperliquid ||= HyperliquidService.new
+          sync_aerodrome_hedge(hedge, hedge_assets, hyperliquid)
+          next
+        ensure
+          enqueue_dashboard_snapshot(hedge.position)
+        end
       end
 
       hyperliquid ||= HyperliquidService.new
@@ -110,6 +114,12 @@ class HedgeSyncJob < ApplicationJob
   end
 
   private
+
+  def enqueue_dashboard_snapshot(position)
+    DashboardSnapshotJob.perform_later(position.id)
+  rescue => e
+    Rails.logger.warn("HedgeSyncJob: failed to enqueue DashboardSnapshotJob for position #{position.id}: #{e.class}: #{e.message}")
+  end
 
   # Checks and rebalances both assets for a hedge, if the position is active.
   #

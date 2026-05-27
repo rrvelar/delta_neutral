@@ -231,6 +231,19 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "Aerodrome position sync enqueues dashboard snapshot refresh" do
+    position = aerodrome_position
+    enqueued = []
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "false") do
+      DashboardSnapshotJob.stub(:perform_later, ->(position_id) { enqueued << position_id }) do
+        PositionSyncJob.perform_now(position.id)
+      end
+    end
+
+    assert_equal [ position.id ], enqueued
+  end
+
   test "Aerodrome read-only position sync creates pnl snapshot without Hyperliquid" do
     position = aerodrome_position
     position.update!(entry_value_usd: nil)

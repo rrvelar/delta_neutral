@@ -27,6 +27,7 @@ class PositionSyncJob < ApplicationJob
     positions.includes(:dex, :hedge, wallet: :network).find_each do |position|
       if aerodrome_position?(position)
         position.mellow_autopilot? ? sync_mellow_autopilot_position(position) : sync_aerodrome_position(position)
+        enqueue_dashboard_snapshot(position)
         next
       end
 
@@ -43,6 +44,12 @@ class PositionSyncJob < ApplicationJob
   end
 
   private
+
+  def enqueue_dashboard_snapshot(position)
+    DashboardSnapshotJob.perform_later(position.id)
+  rescue => e
+    Rails.logger.warn("PositionSyncJob: failed to enqueue DashboardSnapshotJob for position #{position.id}: #{e.class}: #{e.message}")
+  end
 
   # Syncs prices and creates a {PnlSnapshot} for a single position.
   #

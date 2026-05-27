@@ -7,6 +7,10 @@ default: &default
     class: PositionSyncJob
     schedule: every minute
 
+  dashboard_snapshot_refresh:
+    class: DashboardSnapshotJob
+    schedule: every minute
+
   hedge_sync:
     class: HedgeSyncJob
     schedule: every 5 minutes
