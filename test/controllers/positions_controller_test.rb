@@ -453,6 +453,70 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Timeout::Error", response.body
   end
 
+  test "show renders rewards fees and accounting snapshots without live diagnostics" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_attrs: {
+        notional_usd: "2625",
+        entry_price: "2000",
+        mark_price: "2100",
+        unrealized_pnl_usd: "-125",
+        leverage: "1",
+        open_orders_count: 0
+      }
+    )
+    position.create_position_rewards_fees_snapshot!(
+      refreshed_at: 2.minutes.ago,
+      refresh_status: "ok",
+      aero_rewards_amount: "25.476",
+      aero_rewards_usd: "11.12",
+      aero_usd_price: "0.4365",
+      aero_price_source: "coingecko",
+      rewards_source: "mellow_ui_parity_eth_call",
+      rewards_value_state: "estimated",
+      lp_fee_weth_amount: "0.01",
+      lp_fee_weth_usd: "20.5",
+      lp_fee_usdc_amount: "3.25",
+      lp_fee_usdc_usd: "3.25",
+      lp_fee_total_usd: "23.75",
+      fee_source: "mellow_strategy",
+      fee_value_state: "estimated"
+    )
+    position.create_position_hedge_accounting_snapshot!(
+      refreshed_at: 2.minutes.ago,
+      refresh_status: "ok",
+      venue: "extended",
+      current_short_eth: "1.25",
+      entry_price: "2000",
+      mark_price: "2100",
+      notional_usd: "2625",
+      unrealized_pnl_usd: "-125",
+      realized_pnl_usd: "0",
+      net_hedge_pnl_usd: "-125",
+      unavailable_components: %w[trading_fees_usd funding_pnl_usd borrow_interest_usd].to_json
+    )
+
+    blocked_reader = ->(*) { raise "live diagnostics should not run on initial show" }
+    AerodromeRewardsCheck.stub(:new, blocked_reader) do
+      AerodromeFeesCheck.stub(:new, blocked_reader) do
+        get position_path(position)
+      end
+    end
+
+    assert_response :success
+    assert_match "25.476000", response.body
+    assert_match "$11.12", response.body
+    assert_match "$23.75", response.body
+    assert_match "-$125.00", response.body
+    assert_match "Fees / funding / borrow", response.body
+    assert_no_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
+  end
+
   test "show does not report in tolerance when selected current short is unknown" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

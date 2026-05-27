@@ -657,6 +657,17 @@ end %>
       <div class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 xl:col-span-2">
         <p class="text-xs uppercase tracking-wide text-gray-500">PnL & Rewards</p>
         <h2 class="mt-1 text-lg font-semibold text-white">PnL Summary</h2>
+        <% if rewards_report[:snapshot_refreshed_at].present? || fees_report[:snapshot_refreshed_at].present? || hedge_accounting[:snapshot_refreshed_at].present? %>
+          <p class="mt-2 text-xs text-gray-500">
+            Read-only snapshots:
+            <% if rewards_report[:snapshot_refreshed_at].present? %>
+              rewards/fees <%= rewards_report[:snapshot_stale] ? "stale" : "fresh" %> as of <%= l(rewards_report[:snapshot_refreshed_at], format: :short) %>
+            <% end %>
+            <% if hedge_accounting[:snapshot_refreshed_at].present? %>
+              <%= " · " if rewards_report[:snapshot_refreshed_at].present? %>hedge accounting <%= hedge_accounting[:snapshot_stale] ? "stale" : "fresh" %> as of <%= l(hedge_accounting[:snapshot_refreshed_at], format: :short) %>
+            <% end %>
+          </p>
+        <% end %>
         <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= hedge_realized_available ? "Total PnL Excluding Rewards / Fees" : "Partial PnL Excluding Rewards / Fees" %></p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= total_pnl_note %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total unrealized</p><p class="mt-2 text-xl font-semibold <%= (total_unrealized || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_unrealized ? format_usd(total_unrealized) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Pool <%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %> / Hedge <%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></p></div>

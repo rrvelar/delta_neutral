@@ -15,6 +15,8 @@ class Position < ApplicationRecord
 
   has_one :hedge, dependent: :destroy
   has_one :position_dashboard_snapshot, dependent: :destroy
+  has_one :position_rewards_fees_snapshot, dependent: :destroy
+  has_one :position_hedge_accounting_snapshot, dependent: :destroy
   has_many :pnl_snapshots, dependent: :destroy
   has_many :aerodrome_hedge_proposals, dependent: :destroy
 

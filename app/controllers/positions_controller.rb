@@ -84,7 +84,14 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def show
-    @position = Current.user.positions.includes(:dex, :hedge, :position_dashboard_snapshot, wallet: :network).find(params[:id])
+    @position = Current.user.positions.includes(
+      :dex,
+      :hedge,
+      :position_dashboard_snapshot,
+      :position_rewards_fees_snapshot,
+      :position_hedge_accounting_snapshot,
+      wallet: :network
+    ).find(params[:id])
     @position_valuation = PositionValuation.current(@position)
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
@@ -94,7 +101,7 @@ class PositionsController < ApplicationController
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard
-      @hedge_venue_accounting = unavailable_hedge_accounting("Hedge accounting diagnostics are loaded separately.")
+      @hedge_venue_accounting = cached_hedge_accounting_report || unavailable_hedge_accounting("Hedge accounting diagnostics are loaded separately.")
       @latest_aerodrome_weth_rebalance = safe_dashboard_section("latest_rebalance", fallback: nil) { @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first }
       @aerodrome_hedge_proposals = safe_dashboard_section("hedge_proposals", fallback: []) { @position.aerodrome_hedge_proposals.latest_first.limit(10) }
       @latest_aerodrome_hedge_proposal = @aerodrome_hedge_proposals.first
@@ -102,8 +109,8 @@ class PositionsController < ApplicationController
         safety = AerodromeHedgeProposalSafety.new
         @aerodrome_hedge_proposals.to_h { |proposal| [ proposal.id, safety.evaluate(proposal, current_position: @position) ] }
       end
-      @aerodrome_rewards_report = unavailable_rewards_report("Rewards diagnostics are not loaded during initial dashboard render.")
-      @aerodrome_fees_report = unavailable_fees_report("Fee diagnostics are not loaded during initial dashboard render.")
+      @aerodrome_rewards_report = cached_rewards_report || unavailable_rewards_report("Rewards/fees snapshot not refreshed yet.")
+      @aerodrome_fees_report = cached_fees_report || unavailable_fees_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
@@ -158,7 +165,7 @@ class PositionsController < ApplicationController
     @position = Current.user.positions.includes(:dex).find(params[:id])
     PositionSyncJob.perform_later(@position.id)
     DashboardSnapshotJob.perform_later(@position.id) if @position.dex.name == "aerodrome_slipstream"
-    redirect_to position_path(@position), notice: @position.dex.name == "aerodrome_slipstream" ? "Position sync and dashboard snapshot refresh queued." : "Position sync queued."
+    redirect_to position_path(@position), notice: @position.dex.name == "aerodrome_slipstream" ? "Position sync and read-only dashboard snapshot refresh queued." : "Position sync queued."
   end
 
   def hedge_open_preview
@@ -333,6 +340,87 @@ class PositionsController < ApplicationController
       migration_status: cached_migration_status(venue_states),
       message: snapshot.stale_now? ? "Dashboard snapshot is stale." : "Dashboard snapshot refreshed."
     }
+  end
+
+  def cached_rewards_report
+    snapshot = @position.position_rewards_fees_snapshot
+    return nil unless snapshot
+
+    {
+      status: snapshot.refresh_status,
+      value_state: snapshot.rewards_value_state,
+      claimable_aero: snapshot.aero_rewards_amount&.to_s("F"),
+      claimable_aero_usd: snapshot.aero_rewards_usd&.to_s("F"),
+      aero_usd_price: snapshot.aero_usd_price&.to_s("F"),
+      aero_usd_price_source: snapshot.aero_price_source,
+      reward_source: snapshot.rewards_source,
+      source_confidence: snapshot.rewards_confidence,
+      stop_reason: snapshot.rewards_stop_reason,
+      warnings: snapshot.warnings_list,
+      snapshot_refreshed_at: snapshot.refreshed_at,
+      snapshot_stale: snapshot.stale_now?,
+      orders_submitted: snapshot.orders_submitted,
+      signatures_created: snapshot.signatures_created
+    }
+  end
+
+  def cached_fees_report
+    snapshot = @position.position_rewards_fees_snapshot
+    return nil unless snapshot
+
+    {
+      status: snapshot.refresh_status,
+      value_state: snapshot.fee_value_state,
+      fee_source: snapshot.fee_source,
+      stop_reason: snapshot.fee_stop_reason,
+      fee0_symbol: "WETH",
+      fee0_amount: snapshot.lp_fee_weth_amount&.to_s("F"),
+      fee0_usd: snapshot.lp_fee_weth_usd&.to_s("F"),
+      fee1_symbol: "USDC",
+      fee1_amount: snapshot.lp_fee_usdc_amount&.to_s("F"),
+      fee1_usd: snapshot.lp_fee_usdc_usd&.to_s("F"),
+      total_fees_usd: snapshot.lp_fee_total_usd&.to_s("F"),
+      warnings: snapshot.warnings_list,
+      snapshot_refreshed_at: snapshot.refreshed_at,
+      snapshot_stale: snapshot.stale_now?,
+      orders_submitted: snapshot.orders_submitted,
+      signatures_created: snapshot.signatures_created
+    }
+  end
+
+  def cached_hedge_accounting_report
+    snapshot = @position.position_hedge_accounting_snapshot
+    return nil unless snapshot
+
+    components = {
+      realized_pnl_usd: accounting_component(snapshot.realized_pnl_usd, "PositionHedgeAccountingSnapshot"),
+      unrealized_pnl_usd: accounting_component(snapshot.unrealized_pnl_usd, "PositionHedgeAccountingSnapshot"),
+      funding_pnl_usd: accounting_component(snapshot.funding_usd, "PositionHedgeAccountingSnapshot"),
+      trading_fees_usd: accounting_component(snapshot.trading_fees_usd, "PositionHedgeAccountingSnapshot"),
+      borrow_interest_usd: accounting_component(snapshot.borrow_interest_usd, "PositionHedgeAccountingSnapshot"),
+      rebates_or_credits_usd: accounting_component(snapshot.rebates_credits_usd, "PositionHedgeAccountingSnapshot")
+    }
+    {
+      venue: snapshot.venue,
+      venue_name: HedgeVenues.label(snapshot.venue),
+      current_short_eth: snapshot.current_short_eth&.to_s("F"),
+      entry_price: snapshot.entry_price&.to_s("F"),
+      mark_price: snapshot.mark_price&.to_s("F"),
+      notional_usd: snapshot.notional_usd&.to_s("F"),
+      components: components,
+      net_venue_pnl_usd: snapshot.net_hedge_pnl_usd&.to_s("F"),
+      unavailable_components: snapshot.unavailable_components_list,
+      snapshot_refreshed_at: snapshot.refreshed_at,
+      snapshot_stale: snapshot.stale_now?,
+      orders_submitted: snapshot.orders_submitted,
+      signatures_created: snapshot.signatures_created
+    }
+  end
+
+  def accounting_component(value, source)
+    return { state: "unavailable", value: nil, source: source } if value.blank?
+
+    { state: "available", value: value.to_s("F"), source: source }
   end
 
   def missing_dashboard_snapshot
