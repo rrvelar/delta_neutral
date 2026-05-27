@@ -1,6 +1,10 @@
 require "test_helper"
 
 class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
+  setup do
+    DashboardSnapshotRefresh.extended_optional_attempts.clear
+  end
+
   test "refresh stores current venue readbacks without using rebalance history" do
     position = create_position_with_hedge
     position.hedge.short_rebalances.create!(
@@ -158,6 +162,54 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_includes snapshot.source_errors_hash.fetch("extended_optional"), "Timeout::Error"
   end
 
+  test "optional extended diagnostics are throttled while critical exposure still updates" do
+    position = create_position_with_hedge
+    previous = position.create_position_dashboard_snapshot!(
+      refreshed_at: 5.minutes.ago,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "1.25",
+      tolerance_ratio: "0.05",
+      tolerance_abs_eth: "0.0625",
+      combined_short_eth: "0.7",
+      drift_eth: "0.55",
+      inside_tolerance: false,
+      extended_short_eth: "0.7",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat",
+      extended_source_status: "ok",
+      ethereal_source_status: "ok",
+      nado_source_status: "ok",
+      open_orders_count_extended: 3,
+      leverage_margin_gate_status: "pass"
+    )
+    DashboardSnapshotRefresh.extended_optional_attempts["dashboard_snapshot:extended_optional_attempt:position:#{position.id}"] = Time.current.to_i
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "0.831" }, account_state: RuntimeError.new("optional should be skipped") },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal previous.id, snapshot.id
+    assert_equal BigDecimal("0.831"), snapshot.extended_short_eth
+    assert_equal 3, snapshot.open_orders_count_extended
+    assert_equal "skipped_throttled", snapshot.extended_optional_read_status
+  ensure
+    DashboardSnapshotRefresh.extended_optional_attempts.delete("dashboard_snapshot:extended_optional_attempt:position:#{position.id}") if defined?(position) && position
+    Rails.cache.delete("dashboard_snapshot:extended_optional_attempt:position:#{position.id}") if defined?(position) && position
+  end
+
   test "critical extended timeout carries forward previous good snapshot" do
     position = create_position_with_hedge
     previous = position.create_position_dashboard_snapshot!(
@@ -310,7 +362,10 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
 
     def account_state
       sleep @result[:account_delay] if @result[:account_delay]
-      @result.fetch(:account_state, {})
+      value = @result.fetch(:account_state, {})
+      raise value if value.is_a?(Exception)
+
+      value
     end
   end
 

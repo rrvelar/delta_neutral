@@ -15,7 +15,7 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     inactive = aerodrome_position(active: false)
     calls = []
 
-    DashboardSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, [ :position, position.id ], SnapshotResult.new("ok")) }) do
+    DashboardSnapshotRefresh.stub(:new, ->(position:, **) { refresher(calls, [ :position, position.id ], SnapshotResult.new("ok")) }) do
       RewardsFeesSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, [ :rewards, position.id ], SnapshotResult.new("ok")) }) do
         HedgeAccountingSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, [ :accounting, position.id ], SnapshotResult.new("ok")) }) do
           DashboardSnapshotJob.perform_now
@@ -33,10 +33,48 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     position = aerodrome_position(active: true)
     calls = []
 
-    DashboardSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, :position, SnapshotResult.new("ok")) }) do
+    DashboardSnapshotRefresh.stub(:new, ->(position:, **) { refresher(calls, :position, SnapshotResult.new("ok")) }) do
       RewardsFeesSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, :rewards, SnapshotResult.new("ok")) }) do
         HedgeAccountingSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, :accounting, SnapshotResult.new("ok")) }) do
           DashboardSnapshotJob.perform_now(position.id)
+        end
+      end
+    end
+
+    assert_equal %i[position rewards accounting], calls
+  end
+
+  test "skips refresh when per-position lock is already held" do
+    position = aerodrome_position(active: true)
+    calls = []
+
+    JobConcurrencyGuard.with_lock("dashboard_snapshot:position:#{position.id}") do
+      DashboardSnapshotRefresh.stub(:new, ->(position:, **) { refresher(calls, :position, SnapshotResult.new("ok")) }) do
+        DashboardSnapshotJob.perform_now(position.id, force: true)
+      end
+    end
+
+    assert_empty calls
+  end
+
+  test "skips recent snapshot unless forced" do
+    position = aerodrome_position(active: true)
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended"
+    )
+    calls = []
+
+    with_env("DASHBOARD_SNAPSHOT_MIN_REFRESH_INTERVAL_SECONDS" => "30") do
+      DashboardSnapshotRefresh.stub(:new, ->(position:, **) { refresher(calls, :position, SnapshotResult.new("ok")) }) do
+        RewardsFeesSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, :rewards, SnapshotResult.new("ok")) }) do
+          HedgeAccountingSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, :accounting, SnapshotResult.new("ok")) }) do
+            DashboardSnapshotJob.perform_now(position.id)
+            DashboardSnapshotJob.perform_now(position.id, force: true)
+          end
         end
       end
     end
@@ -75,5 +113,13 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     ).tap do |position|
       Hedge.create!(position: position, target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
     end
+  end
+
+  def with_env(values)
+    old = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each { |key, value| ENV[key] = value }
+    yield
+  ensure
+    old.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 end

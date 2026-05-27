@@ -167,7 +167,7 @@ class PositionsController < ApplicationController
   def sync_now
     @position = Current.user.positions.includes(:dex).find(params[:id])
     PositionSyncJob.perform_later(@position.id)
-    DashboardSnapshotJob.perform_later(@position.id) if @position.dex.name == "aerodrome_slipstream"
+    DashboardSnapshotJob.perform_later(@position.id, force: true) if @position.dex.name == "aerodrome_slipstream"
     redirect_to position_path(@position), notice: @position.dex.name == "aerodrome_slipstream" ? "Position sync and read-only dashboard snapshot refresh queued." : "Position sync queued."
   end
 

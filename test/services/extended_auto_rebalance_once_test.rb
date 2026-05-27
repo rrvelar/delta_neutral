@@ -449,6 +449,69 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 0, client.submit_calls
   end
 
+  test "continuous auto lock prevents concurrent submit" do
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.26") ])
+
+    JobConcurrencyGuard.with_lock("extended_auto:position:#{fake_position.id}") do
+      result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+        position: fake_position(target: "1.04"),
+        dry_run: false,
+        one_shot: false
+      )
+
+      assert_equal "blocked_before_submit", result.status
+      assert_includes result.blockers, "Extended auto rebalance already running for position 3"
+    end
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "continuous auto aborts when pre-submit readback changes" do
+    signer = CountingSigner.new
+    client = api_client(
+      before_positions: [ extended_short("0.20") ],
+      pre_submit_positions: [ extended_short("0.24") ],
+      after_positions: [ extended_short("0.30") ]
+    )
+
+    result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+      position: fake_position(target: "1.04"),
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert result.blockers.any? { |blocker| blocker.include?("pre-submit readback changed") }
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
+  test "continuous auto recent rebalance guard prevents duplicate submit" do
+    position = ar_extended_position
+    position.hedge.short_rebalances.create!(
+      venue: "extended",
+      asset: "WETH",
+      old_short_size: "0.20",
+      new_short_size: "0.26",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: Time.current
+    )
+    signer = CountingSigner.new
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(env: continuous_env, api_client: client, signer_client: signer).run(
+      position: position,
+      dry_run: false,
+      one_shot: false
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert result.blockers.any? { |blocker| blocker.include?("guard window") }
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, client.submit_calls
+  end
+
   test "mocked live one-shot remains pending when readback does not confirm and does not retry" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.20") ])
@@ -549,21 +612,27 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     { market: "ETH-USD", side: "SHORT", size: size, value: (BigDecimal(size) * BigDecimal("2120")).to_s("F"), openPrice: "2120", markPrice: "2120", status: "OPEN" }
   end
 
-  def api_client(before_positions:, after_positions: before_positions, open_orders: [], leverage_payload: nil, submit_response: nil)
+  def api_client(before_positions:, after_positions: before_positions, pre_submit_positions: nil, open_orders: [], leverage_payload: nil, submit_response: nil)
     Class.new do
       attr_reader :submit_calls, :submitted_payload
 
-      define_method(:initialize) do |before_rows, after_rows, orders, leverage_response, response|
+      define_method(:initialize) do |before_rows, after_rows, pre_submit_rows, orders, leverage_response, response|
         @before_rows = before_rows
         @after_rows = after_rows
+        @pre_submit_rows = pre_submit_rows
         @orders = orders
         @leverage_payload = leverage_response
         @submit_response = response
         @submit_calls = 0
+        @position_calls = 0
       end
 
       def positions(market:)
-        @submit_calls.positive? ? @after_rows : @before_rows
+        @position_calls += 1
+        return @after_rows if @submit_calls.positive?
+        return @pre_submit_rows if @pre_submit_rows && @position_calls > 1
+
+        @before_rows
       end
 
       def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
@@ -593,7 +662,26 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
         @submitted_payload = payload
         @submit_response || { "status" => "OK", "data" => { "id" => "abc123" } }
       end
-    end.new(before_positions, after_positions, open_orders, leverage_payload, submit_response)
+    end.new(before_positions, after_positions, pre_submit_positions, open_orders, leverage_payload, submit_response)
+  end
+
+  def ar_extended_position
+    position = Position.create!(
+      user: users(:one),
+      wallet: wallets(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      source: Position::SOURCE_AERODROME_DIRECT,
+      external_id: SecureRandom.hex(6),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "0.26",
+      asset1_amount: "500",
+      asset0_price_usd: "2120",
+      asset1_price_usd: "1",
+      active: true
+    )
+    position.create_hedge!(target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    position
   end
 
   def live_env

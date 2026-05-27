@@ -2,13 +2,20 @@ require "timeout"
 
 class DashboardSnapshotRefresh
   DEFAULT_TIMEOUT_SECONDS = 8.0
+  DEFAULT_EXTENDED_OPTIONAL_INTERVAL_SECONDS = 300
+  @extended_optional_attempts = {}
 
-  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: nil)
+  class << self
+    attr_reader :extended_optional_attempts
+  end
+
+  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: nil, force: false)
     @position = position
     @env = env
     @venue_builder = venue_builder
     @signer_client = signer_client || ExtendedStarkSignerClient.new(env: env)
     @timeout_seconds = timeout_seconds || configured_timeout_seconds
+    @force = force
   end
 
   def refresh
@@ -107,13 +114,13 @@ class DashboardSnapshotRefresh
   def read_extended_venue(adapter)
     critical = timed_read("extended critical readback") { adapter.read_position(symbol: "ETH") }
     current_position = critical.fetch(:result)
-    optional = timed_read("extended optional account state") { adapter.account_state || {} }
+    optional = read_extended_optional_account_state(adapter)
     account_state = optional.fetch(:result)
     normalize_venue_result("extended", current_position, account_state).merge(
       critical_read_duration_ms: critical.fetch(:duration_ms),
       critical_read_status: "ok",
       optional_read_duration_ms: optional.fetch(:duration_ms),
-      optional_read_status: "ok"
+      optional_read_status: optional.fetch(:status)
     )
   rescue Timeout::Error, StandardError => e
     if defined?(critical) && critical&.dig(:result)
@@ -127,6 +134,37 @@ class DashboardSnapshotRefresh
     else
       raise
     end
+  end
+
+  def read_extended_optional_account_state(adapter)
+    unless force_refresh? || extended_optional_due?
+      previous = position.position_dashboard_snapshot
+      Rails.logger.info("[DashboardSnapshotRefresh] section=extended optional account state skipped=true reason=throttled interval_seconds=#{extended_optional_interval_seconds}")
+      return {
+        result: previous_extended_optional_account_state(previous),
+        duration_ms: nil,
+        status: "skipped_throttled"
+      }
+    end
+
+    timed_read("extended optional account state") { adapter.account_state || {} }.tap do
+      write_extended_optional_attempt
+    end
+  rescue Timeout::Error, StandardError
+    write_extended_optional_attempt
+    raise
+  end
+
+  def previous_extended_optional_account_state(previous)
+    return {} unless previous
+
+    {
+      open_orders_count: previous.open_orders_count_extended,
+      margin_gate: { status: previous.leverage_margin_gate_status },
+      account_value_usd: nil,
+      collateral_usd: nil,
+      market_metadata_available: nil
+    }.compact
   end
 
   def normalize_venue_result(venue, current_position, account_state)
@@ -311,6 +349,33 @@ class DashboardSnapshotRefresh
     Float(env.fetch("DASHBOARD_SNAPSHOT_VENUE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS.to_s))
   rescue ArgumentError
     DEFAULT_TIMEOUT_SECONDS
+  end
+
+  def force_refresh?
+    ActiveModel::Type::Boolean.new.cast(@force)
+  end
+
+  def extended_optional_due?
+    last_attempt = Rails.cache.read(extended_optional_attempt_cache_key) || self.class.extended_optional_attempts[extended_optional_attempt_cache_key]
+    return true if last_attempt.blank?
+
+    Time.at(last_attempt.to_i) <= extended_optional_interval_seconds.seconds.ago
+  end
+
+  def extended_optional_attempt_cache_key
+    "dashboard_snapshot:extended_optional_attempt:position:#{position.id}"
+  end
+
+  def write_extended_optional_attempt
+    timestamp = Time.current.to_i
+    self.class.extended_optional_attempts[extended_optional_attempt_cache_key] = timestamp
+    Rails.cache.write(extended_optional_attempt_cache_key, timestamp, expires_in: extended_optional_interval_seconds.seconds)
+  end
+
+  def extended_optional_interval_seconds
+    Integer(env.fetch("DASHBOARD_SNAPSHOT_EXTENDED_OPTIONAL_INTERVAL_SECONDS", DEFAULT_EXTENDED_OPTIONAL_INTERVAL_SECONDS.to_s))
+  rescue ArgumentError
+    DEFAULT_EXTENDED_OPTIONAL_INTERVAL_SECONDS
   end
 
   def sanitized_error(error)

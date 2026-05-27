@@ -1,6 +1,8 @@
 class ExtendedAutoRebalanceOnce
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_REBALANCE_ORDERS".freeze
+  DEFAULT_RECENT_REBALANCE_GUARD_SECONDS = 60
+  PRE_SUBMIT_EPSILON_ETH = BigDecimal("0.00000001")
 
   def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), nado_venue: HedgeVenues::Nado.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
@@ -12,6 +14,37 @@ class ExtendedAutoRebalanceOnce
   end
 
   def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil)
+    return run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth) if dry_run || one_shot
+
+    result = nil
+    ran = JobConcurrencyGuard.with_lock("extended_auto:position:#{position.id}") do
+      result = run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth)
+    end
+    return result if ran
+
+    Result.new(
+      "blocked_before_submit",
+      [ "Extended auto rebalance already running for position #{position.id}" ],
+      [],
+      {
+        venue: "extended",
+        action: "auto_rebalance_once",
+        source: "continuous_auto",
+        dry_run: false,
+        position_id: position.id,
+        final_status: "blocked_before_submit",
+        orders_placed: 0,
+        signatures_created: 0,
+        submitted: false,
+        blockers: [ "Extended auto rebalance already running for position #{position.id}" ],
+        warnings: []
+      }
+    )
+  end
+
+  private
+
+  def run_unlocked(position:, dry_run:, confirmation:, max_slippage:, one_shot:, mode:, probe:, max_size_eth:)
     current_position = @venue.read_position(symbol: "ETH")
     account_state = @venue.account_state
     signer_health = signer_health_for_diagnostics
@@ -49,6 +82,21 @@ class ExtendedAutoRebalanceOnce
       )
     end
 
+    pre_submit_blockers = pre_submit_readback_blockers(plan)
+    if pre_submit_blockers.any?
+      return result(
+        status: "blocked_before_submit",
+        blockers: pre_submit_blockers,
+        position: position,
+        plan: plan,
+        current_position: current_position,
+        account_state: account_state,
+        signer_health: signer_health,
+        conflict_state: conflict_state,
+        dry_run: false
+      )
+    end
+
     lifecycle = ExtendedMainnetLifecycleCheck.new(env: lifecycle_env(plan), venue: @venue, signer_client: @signer_client, sleeper: @sleeper).run(
       position: position,
       mode: lifecycle_mode_for(plan),
@@ -71,8 +119,6 @@ class ExtendedAutoRebalanceOnce
       execution: lifecycle.receipt
     )
   end
-
-  private
 
   def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:, one_shot:)
     valuation = PositionValuation.current(position)
@@ -140,8 +186,20 @@ class ExtendedAutoRebalanceOnce
     end
     blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && !plan[:partial_probe] && position.hedge&.execution_venue != "extended"
     blockers << "Current Nado position must be flat before Extended live rebalance" if conflict_state[:nado_short_eth].to_d.positive?
+    blockers.concat(recent_rebalance_blockers(position: position, dry_run: dry_run, one_shot: one_shot))
     blockers.concat(signer_health_blockers(signer_health)) unless dry_run
     blockers.uniq
+  end
+
+  def pre_submit_readback_blockers(plan)
+    fresh_position = @venue.read_position(symbol: "ETH")
+    fresh_short = short_size(fresh_position)
+    planned_old_short = BigDecimal(plan.fetch(:current_short_eth).to_s)
+    return [] if (fresh_short - planned_old_short).abs <= PRE_SUBMIT_EPSILON_ETH
+
+    [ "Extended pre-submit readback changed from planned old_short_size #{planned_old_short.to_s('F')} to #{fresh_short.to_s('F')}; aborting before signing/submission." ]
+  rescue => e
+    [ "Extended pre-submit readback failed before signing/submission: #{e.class}: #{e.message}" ]
   end
 
   def result(status:, blockers:, position:, plan:, current_position:, account_state:, signer_health:, conflict_state:, dry_run:, execution: nil)
@@ -310,6 +368,26 @@ class ExtendedAutoRebalanceOnce
     blockers << "Extended Stark signer verified_algorithm=false" unless ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
     blockers << "Extended Stark signer signing_enabled=false" unless ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
     blockers
+  end
+
+  def recent_rebalance_blockers(position:, dry_run:, one_shot:)
+    return [] if dry_run || one_shot || !position.is_a?(Position) || position.hedge.nil?
+
+    recent = position.hedge.short_rebalances
+      .where(venue: "extended", asset: [ nil, "ETH", "WETH" ])
+      .where(status: [ ShortRebalance::STATUS_SUCCESS, ShortRebalance::STATUS_PENDING ])
+      .where("rebalanced_at >= ? OR created_at >= ?", recent_rebalance_guard_seconds.seconds.ago, recent_rebalance_guard_seconds.seconds.ago)
+      .order(rebalanced_at: :desc, created_at: :desc)
+      .first
+    return [] unless recent
+
+    [ "Recent Extended rebalance ##{recent.id} is within #{recent_rebalance_guard_seconds}s guard window; skipping duplicate auto submit." ]
+  end
+
+  def recent_rebalance_guard_seconds
+    Integer(@env.fetch("EXTENDED_AUTO_RECENT_REBALANCE_GUARD_SECONDS", DEFAULT_RECENT_REBALANCE_GUARD_SECONDS.to_s))
+  rescue ArgumentError
+    DEFAULT_RECENT_REBALANCE_GUARD_SECONDS
   end
 
   def lifecycle_env(plan)
