@@ -246,6 +246,130 @@ end %>
       </div>
     </section>
 
+    <% migration_plan = @migration_control_plan || {} %>
+    <% latest_migration_receipt = @latest_hedge_migration_receipt || {} %>
+    <% auto_migration_decision = @auto_migration_decision || {} %>
+    <% migration_from_default = migration_plan[:from_venue].presence || cached_snapshot[:production_venue].presence || selected_venue %>
+    <% migration_to_default = migration_plan[:to_venue].presence || (migration_from_default == "extended" ? "ethereal" : "extended") %>
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
+          <h2 class="mt-1 text-lg font-semibold text-white">Manual hedge venue migration</h2>
+          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration remains gated and fail-closed.</p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-sm">
+          <p class="text-gray-500">Active migration status</p>
+          <p class="mt-1 text-white"><%= cached_snapshot.dig(:migration_status, :label).presence || "Not active" %></p>
+        </div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Production venue</p><p class="mt-1 text-white"><%= cached_snapshot[:production_venue_name] || selected_venue_name %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Target / combined</p><p class="mt-1 text-white"><%= format_venue_eth_amount(target_eth_short) %> / <%= format_venue_eth_amount(cached_snapshot[:combined_short_eth]) %> ETH</p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Tolerance</p><p class="<%= inside_tolerance.nil? ? 'text-gray-300' : (inside_tolerance ? 'text-green-300' : 'text-red-300') %> mt-1"><%= inside_tolerance.nil? ? "Unknown" : (inside_tolerance ? "Inside tolerance" : "Outside tolerance") %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Last snapshot</p><p class="mt-1 text-white"><%= cached_snapshot[:refreshed_at].present? ? l(cached_snapshot[:refreshed_at], format: :short) : "Not refreshed" %></p></div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-2">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p class="text-xs uppercase tracking-wide text-gray-500">Current plan</p>
+              <p class="mt-1 text-sm text-gray-300"><%= HedgeVenues.label(migration_plan[:from_venue]) %> → <%= HedgeVenues.label(migration_plan[:to_venue]) %> · <%= migration_plan[:mode].presence || "preview" %></p>
+            </div>
+            <span class="rounded-full border <%= migration_plan[:blockers].present? ? 'border-yellow-800 bg-yellow-950/50 text-yellow-200' : 'border-green-800 bg-green-950/60 text-green-300' %> px-3 py-1 text-xs"><%= migration_plan[:blockers].present? ? "Blocked preview" : "Preview ready" %></span>
+          </div>
+          <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div><p class="text-xs text-gray-500">From short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:from_short_before]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">To short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:to_short_before]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Temporary combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:temporary_combined_short_eth]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Target venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_to_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_to_leg, :size_eth)) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Source venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_from_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_from_leg, :size_eth)) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Projected final combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:expected_combined_short_after]) %> ETH</p></div>
+          </div>
+          <% if migration_plan[:warnings].present? %>
+            <ul class="mt-4 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+              <% migration_plan[:warnings].first(3).each do |warning| %><li><%= warning %></li><% end %>
+            </ul>
+          <% end %>
+          <% if migration_plan[:blockers].present? %>
+            <ul class="mt-4 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+              <% migration_plan[:blockers].first(4).each do |blocker| %><li><%= blocker %></li><% end %>
+            </ul>
+          <% end %>
+        </div>
+
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs uppercase tracking-wide text-gray-500">Last migration receipt</p>
+          <% if latest_migration_receipt.present? %>
+            <p class="mt-2 text-sm text-white"><%= latest_migration_receipt["final_status"] || latest_migration_receipt["status"] || "recorded" %></p>
+            <p class="mt-1 text-xs text-gray-500"><%= latest_migration_receipt["from_venue"] || latest_migration_receipt["venue"] %> → <%= latest_migration_receipt["to_venue"] || "extended" %></p>
+            <p class="mt-1 text-xs text-gray-500"><%= latest_migration_receipt["timestamp"] || latest_migration_receipt["created_at"] || "time unavailable" %></p>
+          <% else %>
+            <p class="mt-2 text-sm text-gray-300">No generic migration receipt yet.</p>
+          <% end %>
+          <div class="mt-4 border-t border-gray-800 pt-3">
+            <p class="text-xs uppercase tracking-wide text-gray-500">Auto migration</p>
+            <p class="mt-1 text-sm text-gray-300">Decision-only. <%= auto_migration_decision[:would_migrate] ? "Would migrate if enabled." : "Disabled / blocked." %></p>
+            <% if auto_migration_decision[:blockers].present? %>
+              <p class="mt-1 break-words text-xs text-gray-500"><%= auto_migration_decision[:blockers].first %></p>
+            <% end %>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-4">
+        <%= form_with url: migration_preview_position_path(@position), method: :post, class: "rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-3" do |form| %>
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-5">
+            <div>
+              <%= form.label :from_venue, "From", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+              <%= form.select :from_venue, options_for_select([ [ "Extended", "extended" ], [ "Ethereal", "ethereal" ], [ "Nado", "nado" ] ], migration_from_default), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+            </div>
+            <div>
+              <%= form.label :to_venue, "To", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+              <%= form.select :to_venue, options_for_select([ [ "Extended", "extended" ], [ "Ethereal", "ethereal" ], [ "Nado", "nado" ] ], migration_to_default), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+            </div>
+            <div>
+              <%= form.label :migration_mode, "Mode", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+              <%= form.select :migration_mode, options_for_select([ [ "Preview", "preview" ], [ "Stepwise", "stepwise" ], [ "Full", "full" ] ], migration_plan[:mode] || "preview"), {}, class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+            </div>
+            <div>
+              <%= form.label :max_step_size_eth, "Max step ETH", class: "block text-xs uppercase tracking-wide text-gray-500" %>
+              <%= form.text_field :max_step_size_eth, value: migration_plan.dig(:planned_to_leg, :size_eth).presence || "0.01", class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+            </div>
+            <div class="flex items-end">
+              <label class="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-sm text-gray-300">
+                <%= form.check_box :full_migration_allowed, checked: false, class: "rounded border-gray-700 bg-gray-950" %>
+                Full allowed
+              </label>
+            </div>
+          </div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <%= form.submit "Preview migration", class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+          </div>
+        <% end %>
+
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs uppercase tracking-wide text-gray-500">Manual live controls</p>
+          <p class="mt-1 text-xs text-gray-400">Live is blocked unless the migration env gate and exact phrase are present.</p>
+          <%= form_with url: migration_run_position_path(@position), method: :post, class: "mt-3 space-y-2" do |form| %>
+            <%= form.hidden_field :from_venue, value: migration_from_default %>
+            <%= form.hidden_field :to_venue, value: migration_to_default %>
+            <%= form.hidden_field :migration_mode, value: "preview" %>
+            <%= form.hidden_field :max_step_size_eth, value: "0.01" %>
+            <code class="block break-all rounded border border-gray-800 bg-gray-950 p-2 text-[11px] text-gray-300"><%= HedgeVenueMigrationExecutor::CONFIRMATION %></code>
+            <%= form.text_field :migration_confirmation, autocomplete: "off", placeholder: HedgeVenueMigrationExecutor::CONFIRMATION, class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
+            <%= form.submit "Run manual migration", class: "w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900" %>
+          <% end %>
+          <div class="mt-3 grid grid-cols-1 gap-2">
+            <%= button_to "Finalize migration", migration_finalize_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            <%= button_to "Cancel / clear migration state", migration_cancel_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section>
       <div class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>

@@ -16,6 +16,10 @@ Rails.application.routes.draw do
     post :hedge_rebalance, on: :member
     post :hedge_close_preview, on: :member
     post :hedge_close, on: :member
+    post :migration_preview, on: :member
+    post :migration_run, on: :member
+    post :migration_finalize, on: :member
+    post :migration_cancel, on: :member
     patch :hedge_venue, on: :member
     get :extended_diagnostics, on: :member
     get :hedge_accounting_diagnostics, on: :member

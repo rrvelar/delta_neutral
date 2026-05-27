@@ -473,6 +473,78 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "1.250000", response.body
   end
 
+  test "show renders migration control center from dashboard snapshot" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_auto_enabled: true,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    hedge.short_rebalances.create!(
+      venue: "ethereal",
+      asset: "WETH",
+      old_short_size: "1.0",
+      new_short_size: "1.1",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: 1.minute.ago
+    )
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "Migration Control Center", response.body
+    assert_match "Migration complete: production venue Extended.", response.body
+    assert_match "Extended → Ethereal", response.body
+    assert_match "Preview migration", response.body
+    assert_match "Run manual migration", response.body
+    assert_match "Finalize migration", response.body
+    assert_match "Cancel / clear migration state", response.body
+  end
+
+  test "migration preview action is read only and blocks stale snapshot" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: 10.minutes.ago
+    )
+
+    post migration_preview_position_path(position), params: { from_venue: "extended", to_venue: "ethereal", migration_mode: "full" }
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_match "snapshot is stale", flash[:alert]
+  end
+
+  test "migration run is fail closed without env gate" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    post migration_run_position_path(position), params: {
+      from_venue: "extended",
+      to_venue: "ethereal",
+      migration_mode: "full",
+      migration_confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: "1"
+    }
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_match "MIGRATION_LIVE_ENABLED must be true", flash[:alert]
+  end
+
   test "show renders rewards fees and accounting snapshots without live diagnostics" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

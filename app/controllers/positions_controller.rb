@@ -112,6 +112,9 @@ class PositionsController < ApplicationController
       @aerodrome_rewards_report = cached_rewards_report || unavailable_rewards_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_fees_report = cached_fees_report || unavailable_fees_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
+      @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
+      @migration_control_plan = cached_migration_control_plan
+      @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new.plan(position: @position, recommended_venue: selected_migration_to_venue, reason: nil).receipt
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
           position: @position,
@@ -202,7 +205,64 @@ class PositionsController < ApplicationController
     redirect_to position_path(position, hedge_venue: venue), notice: "Hedge venue set to #{HedgeVenues.label(venue)}."
   end
 
+  def migration_preview
+    position = load_position_for_migration
+    result = HedgeVenueMigrationPlanner.new.plan(
+      position: position,
+      from_venue: params[:from_venue],
+      to_venue: params[:to_venue],
+      mode: params[:migration_mode].presence || "preview",
+      step_size_eth: params[:max_step_size_eth],
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
+    )
+    level = result.blockers.present? ? :alert : :notice
+    redirect_to position_path(position, hedge_venue: params[:to_venue].presence || position.hedge&.execution_venue),
+      flash: { level => migration_result_message("Migration preview", result) }
+  end
+
+  def migration_run
+    position = load_position_for_migration
+    result = HedgeVenueMigrationExecutor.new.run(
+      position: position,
+      from_venue: params[:from_venue],
+      to_venue: params[:to_venue],
+      mode: params[:migration_mode].presence || "preview",
+      dry_run: false,
+      confirmation: params[:migration_confirmation],
+      step_size_eth: params[:max_step_size_eth],
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
+    )
+    level = result.status == "success" ? :notice : :alert
+    redirect_to position_path(position, hedge_venue: params[:to_venue].presence || position.hedge&.execution_venue),
+      flash: { level => migration_result_message("Manual migration", result) }
+  end
+
+  def migration_finalize
+    position = load_position_for_migration
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
+      alert: "Dashboard finalize is fail-closed. Use the dedicated gated migration finalize task after read-only snapshot confirms readiness."
+  end
+
+  def migration_cancel
+    position = load_position_for_migration
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
+      notice: "No active dashboard migration state was changed."
+  end
+
   private
+
+  def load_position_for_migration
+    Current.user.positions.includes(:dex, :hedge, :position_dashboard_snapshot).find(params[:id])
+  end
+
+  def migration_result_message(label, result)
+    receipt = result.receipt
+    if result.blockers.present?
+      "#{label} #{result.status}: #{result.blockers.join('; ')}"
+    else
+      "#{label} #{result.status}: #{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}, #{receipt[:planned_to_leg]&.dig(:size_eth) || '0'} ETH target leg, #{receipt[:planned_from_leg]&.dig(:size_eth) || '0'} ETH source leg."
+    end
+  end
 
   def load_aerodrome_position_for_diagnostics
     @position = Current.user.positions.includes(:dex, :hedge, wallet: :network).find(params[:id])
@@ -519,6 +579,35 @@ class PositionsController < ApplicationController
     else
       { label: "Migration status needs diagnostics.", complete: false, ethereal_flat: ethereal_flat, nado_flat: nado_flat }
     end
+  end
+
+  def cached_migration_control_plan
+    HedgeVenueMigrationPlanner.new.plan(
+      position: @position,
+      from_venue: @position.hedge&.execution_venue,
+      to_venue: selected_migration_to_venue,
+      mode: "preview",
+      step_size_eth: default_migration_step_size_eth,
+      full_migration_allowed: false
+    ).receipt
+  rescue => e
+    {
+      status: "unavailable",
+      blockers: [ "Migration planner unavailable: #{e.class}: #{e.message}" ],
+      warnings: [],
+      orders_placed: 0,
+      signatures_created: 0,
+      submitted: false
+    }
+  end
+
+  def selected_migration_to_venue
+    production = HedgeVenues.normalize(@position.hedge&.execution_venue)
+    production == "extended" ? "ethereal" : "extended"
+  end
+
+  def default_migration_step_size_eth
+    ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")
   end
 
   def latest_jsonl_receipt(*patterns)
