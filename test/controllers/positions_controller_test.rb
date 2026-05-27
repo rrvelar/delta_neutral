@@ -51,6 +51,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended", response.body
     assert_match "In tolerance", response.body
     assert_match position.external_id, response.body
+    assert_match position_path(position, hedge_venue: "extended"), response.body
     assert_no_match "No active positions found.", response.body
   end
 

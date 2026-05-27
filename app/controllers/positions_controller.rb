@@ -11,7 +11,13 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def index
-    @positions = DashboardVisiblePositions.new(user: Current.user).call
+    @visible_positions = DashboardVisiblePositions.new(user: Current.user).call.to_a
+    @positions = @visible_positions
+    Rails.logger.info(
+      "PositionsController#index visible_positions user_id=#{Current.user.id} " \
+      "email=#{Current.user.email_address} visible_count=#{@positions.size} " \
+      "visible_position_ids=#{@positions.map(&:id).join(',')}"
+    )
   end
 
   def new

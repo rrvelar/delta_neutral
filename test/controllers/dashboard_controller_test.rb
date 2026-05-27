@@ -52,6 +52,8 @@ class DashboardControllerTest < ActionDispatch::IntegrationTest
     assert_match "Mellow", response.body
     assert_match "Extended", response.body
     assert_match "In tolerance", response.body
+    assert_match %r{Active Positions.*?>[1-9]\d*<}m, response.body
+    assert_match %r{Active Hedges.*?>[1-9]\d*<}m, response.body
     assert_no_match "No active positions.", response.body
   end
 
