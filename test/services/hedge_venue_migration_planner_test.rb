@@ -65,6 +65,31 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
     assert_includes result.warnings, "Target-venue-first sequence temporarily overhedges until source venue reduction confirms."
   end
 
+  test "Extended to Ethereal full preview lands final combined at target when current combined is outside tolerance" do
+    position = migration_position(execution_venue: "extended")
+    snapshot_for(position, extended_short: "0.974", ethereal_short: "0", nado_short: "0", target: "0.944872")
+
+    result = HedgeVenueMigrationPlanner.new.plan(position: position, from_venue: "extended", to_venue: "ethereal", mode: "full", full_migration_allowed: true)
+
+    assert_equal "preview", result.status, result.blockers.inspect
+    assert_equal "0.944872", result.receipt.fetch(:planned_target_leg).fetch(:size_eth)
+    assert_equal "0.974", result.receipt.fetch(:planned_source_leg).fetch(:size_eth)
+    assert_equal "0.944872", result.receipt.fetch(:expected_final_combined)
+    assert_equal "0.0", result.receipt.fetch(:expected_final_drift)
+  end
+
+  test "Extended to Ethereal stepwise preview transfers max step and warns final combined may remain unchanged" do
+    position = migration_position(execution_venue: "extended")
+    snapshot_for(position, extended_short: "0.8", ethereal_short: "0", nado_short: "0", target: "0.8")
+
+    result = HedgeVenueMigrationPlanner.new.plan(position: position, from_venue: "extended", to_venue: "ethereal", mode: "stepwise", step_size_eth: "0.05")
+
+    assert_equal "0.05", result.receipt.fetch(:planned_target_leg).fetch(:size_eth)
+    assert_equal "0.05", result.receipt.fetch(:planned_source_leg).fetch(:size_eth)
+    assert_equal "0.8", result.receipt.fetch(:expected_final_combined)
+    assert result.warnings.any? { |warning| warning.include?("Stepwise migration transfers only the step size") }
+  end
+
   test "Nado migration is unavailable" do
     position = migration_position(execution_venue: "extended")
     snapshot_for(position, extended_short: "0.8", ethereal_short: "0", nado_short: "0", target: "0.8")

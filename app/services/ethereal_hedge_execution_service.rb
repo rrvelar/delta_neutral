@@ -66,16 +66,16 @@ class EtherealHedgeExecutionService
     }
   end
 
-  def open_short(position:, size_eth:, current_position:, confirmation:, max_slippage:)
-    execute(position: position, action: "open", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def open_short(position:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute(position: position, action: "open", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, migration: migration)
   end
 
-  def close_short(position:, size_eth:, current_position:, confirmation:, max_slippage:)
-    execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def close_short(position:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, migration: migration)
   end
 
-  def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:)
-    execute(position: position, action: "rebalance", size_eth: delta_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute(position: position, action: "rebalance", size_eth: delta_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, migration: migration)
   end
 
   def auto_rebalance_short(position:, delta_eth:, current_position:, max_slippage:)
@@ -535,9 +535,9 @@ class EtherealHedgeExecutionService
     status
   end
 
-  def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
+  def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, current_position: current_position, max_slippage: max_slippage)
-    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
+    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation, migration: migration)
     return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil) if blockers.any?
 
     signing = sign(order.fetch(:typed_data), order: order)
@@ -561,10 +561,10 @@ class EtherealHedgeExecutionService
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
   end
 
-  def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
+  def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true, migration: false)
     blockers = order.fetch(:blockers).dup
-    blockers << "selected hedge execution venue must be ethereal" unless position.hedge&.ethereal_execution?
-    blockers << "Current active hedge venue is #{HedgeVenues.label(position.hedge.execution_venue)}; opening Ethereal would create a second hedge unless migration is intended." if position.hedge && !position.hedge.ethereal_execution?
+    blockers << "selected hedge execution venue must be ethereal" if !migration && !position.hedge&.ethereal_execution?
+    blockers << "Current active hedge venue is #{HedgeVenues.label(position.hedge.execution_venue)}; opening Ethereal would create a second hedge unless migration is intended." if !migration && position.hedge && !position.hedge.ethereal_execution?
     blockers << "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true" unless @venue.live_enabled?
     blockers << "submitted confirmation must equal #{CONFIRMATION}" if require_confirmation && confirmation.to_s != CONFIRMATION
     blockers << "active hedge-ready Mellow position is required" unless position.active? && (!position.mellow_autopilot? || position.hedge_ready?)

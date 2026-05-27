@@ -14,6 +14,7 @@ class HedgeVenueMigrationPlanner
   def plan(position:, from_venue:, to_venue:, mode: "preview", step_size_eth: nil, full_migration_allowed: false)
     from = HedgeVenues.normalize(from_venue)
     to = HedgeVenues.normalize(to_venue)
+    mode = normalized_mode(mode)
     snapshot = position.position_dashboard_snapshot
     blockers = snapshot_blockers(snapshot)
     blockers << "from_venue and to_venue must differ" if from == to
@@ -30,37 +31,56 @@ class HedgeVenueMigrationPlanner
     from_short = venue_short(snapshot, from)
     to_short = venue_short(snapshot, to)
     step_size = decimal_or_nil(step_size_eth)
-    full = mode.to_s == "full" || full_migration_allowed
+    full = mode == "full" || full_migration_allowed
     migration_size = planned_size(target: target, from_short: from_short, to_short: to_short, step_size: step_size, full: full)
     blockers << "target short is unavailable in dashboard snapshot" unless target.positive?
     blockers << "source venue #{HedgeVenues.label(from)} has no current short to migrate" unless from_short.positive?
     blockers << "planned migration size is zero" unless migration_size.positive?
+    blockers << "full migration requires full_migration_allowed=true" if mode == "full" && !full_migration_allowed
 
     to_leg = build_to_leg(to, target_short: target, current_short: to_short, size: migration_size, full: full)
-    from_leg = build_from_leg(from, current_short: from_short, size: [ migration_size, from_short ].min, full: full)
+    from_leg = build_from_leg(from, current_short: from_short, size: full ? from_short : [ migration_size, from_short ].min, full: full)
     expected_to = to_short + BigDecimal(to_leg.fetch(:size_eth).to_s)
     expected_from = [ from_short - BigDecimal(from_leg.fetch(:size_eth).to_s), BigDecimal("0") ].max
     temporary_combined = snapshot.combined_short_eth.to_d + BigDecimal(to_leg.fetch(:size_eth).to_s)
     expected_combined = expected_from + expected_to + other_venue_short(snapshot, from, to)
+    expected_drift = target - expected_combined
 
     warnings = receipt[:warnings]
     warnings << "Target-venue-first sequence temporarily overhedges until source venue reduction confirms."
-    warnings << "Extended -> Ethereal is dry-run/preflight only in the generic dashboard migration path." if from == "extended" && to == "ethereal"
-    warnings << "Full migration requires an explicit live gate and confirmation; production venue is not switched by this planner." if full
+    warnings << "Stepwise migration transfers only the step size and may leave the combined hedge unchanged unless a separate correction is planned." if mode == "stepwise"
+    warnings << "Full migration plans final combined short at target_short_eth instead of preserving current combined exposure." if full
+    warnings << "Live migration requires explicit migration gate, exact confirmation, venue live gates, zero open orders, and leg readback confirmation."
 
     receipt.merge!(
       current_production_venue: position.hedge&.execution_venue,
+      source_snapshot_id: snapshot.id,
+      source_snapshot_refreshed_at: snapshot.refreshed_at&.utc&.iso8601,
       from_short_before: decimal_string(from_short),
       to_short_before: decimal_string(to_short),
+      target_short: decimal_string(target),
       target_short_eth: decimal_string(target),
+      tolerance_abs_eth: decimal_string(snapshot.tolerance_abs_eth),
+      combined_before: decimal_string(snapshot.combined_short_eth),
       combined_short_before: decimal_string(snapshot.combined_short_eth),
+      drift_before: decimal_string(snapshot.drift_eth),
+      source_inside_tolerance_before: snapshot.inside_tolerance,
       planned_from_leg: from_leg,
       planned_to_leg: to_leg,
+      planned_source_leg: from_leg,
+      planned_target_leg: to_leg,
       migration_sequence: DEFAULT_SEQUENCE,
+      max_step_size_eth: decimal_string(step_size),
       temporary_combined_short_eth: decimal_string(temporary_combined),
+      temporary_exposure: decimal_string(temporary_combined),
       expected_from_short_after: decimal_string(expected_from),
       expected_to_short_after: decimal_string(expected_to),
       expected_combined_short_after: decimal_string(expected_combined),
+      expected_final_combined: decimal_string(expected_combined),
+      expected_final_drift: decimal_string(expected_drift),
+      final_expected_inside_tolerance: snapshot.tolerance_abs_eth.present? ? expected_drift.abs <= snapshot.tolerance_abs_eth : nil,
+      full_migration_allowed: full_migration_allowed,
+      finalize_available: full && expected_from.zero? && snapshot.tolerance_abs_eth.present? && expected_drift.abs <= snapshot.tolerance_abs_eth,
       required_gates: required_gates(from: from, to: to, mode: mode),
       blockers: blockers.uniq,
       warnings: warnings.uniq
@@ -70,6 +90,14 @@ class HedgeVenueMigrationPlanner
   end
 
   private
+
+  def normalized_mode(value)
+    text = value.to_s
+    return "preview" if text.blank?
+    return text if text.in?(%w[preview stepwise full])
+
+    "preview"
+  end
 
   def base_receipt(position:, snapshot:, from_venue:, to_venue:, mode:)
     {
@@ -105,7 +133,7 @@ class HedgeVenueMigrationPlanner
     return BigDecimal("0") unless desired_add.positive?
     return [ step_size, desired_add, from_short ].min if step_size&.positive? && !full
 
-    [ desired_add, from_short ].min
+    desired_add
   end
 
   def build_to_leg(venue, target_short:, current_short:, size:, full:)

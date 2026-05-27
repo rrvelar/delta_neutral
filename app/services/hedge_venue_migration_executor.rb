@@ -3,14 +3,21 @@ class HedgeVenueMigrationExecutor
   CONFIRMATION = "I_UNDERSTAND_THIS_MIGRATES_HEDGE_BETWEEN_VENUES".freeze
   RECEIPT_DIR = Rails.root.join("storage/hedge_migration_checks")
 
-  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current })
+  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil)
     @env = env
     @planner = planner
-    @leg_runner = leg_runner || FailClosedLegRunner.new
+    @leg_runner = leg_runner || DefaultLegRunner.new(env: env)
     @now = now
+    @snapshot_refresher = snapshot_refresher || method(:refresh_dashboard_snapshot)
   end
 
   def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false)
+    refreshed_snapshot = nil
+    if !dry_run && live_preflight_gate_open?(confirmation)
+      refreshed_snapshot = @snapshot_refresher.call(position)
+      position.reload
+    end
+
     plan = @planner.plan(
       position: position,
       from_venue: from_venue,
@@ -23,39 +30,58 @@ class HedgeVenueMigrationExecutor
       action: "hedge_venue_migration",
       dry_run: dry_run,
       live: !dry_run,
-      confirmation_present: confirmation.present?,
+      source_snapshot_id: refreshed_snapshot&.id || plan.receipt[:source_snapshot_id],
+      source_snapshot_refreshed_at: refreshed_snapshot&.refreshed_at&.utc&.iso8601 || plan.receipt[:source_snapshot_refreshed_at],
+      confirmation_type: confirmation == CONFIRMATION ? "dashboard_migration_confirmation" : (confirmation.present? ? "invalid_confirmation" : "missing_confirmation"),
+      orders_placed: 0,
+      signatures_created: 0,
+      exchange_order_ids: [],
+      leg_readbacks: [],
+      manual_action_required: true,
       final_status: dry_run ? plan.status : "blocked_before_submit"
     )
     blockers = Array(plan.blockers) + live_blockers(position: position, receipt: receipt, dry_run: dry_run, confirmation: confirmation)
     if dry_run || blockers.any?
       receipt[:blockers] = blockers.uniq
       receipt[:final_status] = dry_run ? "dry_run" : "blocked_before_submit"
+      receipt[:manual_action_required] = !dry_run
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
-    first_leg = @leg_runner.call(receipt.fetch(:planned_to_leg))
+    first_leg = @leg_runner.call(receipt.fetch(:planned_target_leg), context: leg_context(position, confirmation, receipt))
     receipt[:to_leg_execution] = sanitize_sensitive(first_leg)
+    receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     unless leg_confirmed?(first_leg)
       receipt[:final_status] = "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "Target venue leg was not confirmed; source leg was not submitted." ]
+      receipt[:manual_action_required] = true
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
-    second_leg = @leg_runner.call(receipt.fetch(:planned_from_leg))
+    second_leg = @leg_runner.call(receipt.fetch(:planned_source_leg), context: leg_context(position, confirmation, receipt))
     receipt[:from_leg_execution] = sanitize_sensitive(second_leg)
+    receipt[:leg_readbacks] << second_leg[:readback] if second_leg[:readback]
     receipt[:orders_placed] = leg_order_count(first_leg) + leg_order_count(second_leg)
     receipt[:signatures_created] = leg_signature_count(first_leg) + leg_signature_count(second_leg)
+    receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id], second_leg[:exchange_order_id] ].compact
     receipt[:submitted] = receipt[:orders_placed].positive?
-    receipt[:final_status] = leg_confirmed?(second_leg) ? "success" : "partial_migration_manual_action_required"
-    receipt[:blockers] = Array(second_leg[:blockers]).uniq
+    if leg_confirmed?(second_leg)
+      final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
+      receipt.merge!(final)
+      finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
+    else
+      receipt[:final_status] = "partial_migration_manual_action_required"
+      receipt[:manual_action_required] = true
+      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Source venue leg was not confirmed after target leg succeeded." ]
+    end
     write_receipt(receipt)
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
   class FailClosedLegRunner
-    def call(_leg)
+    def call(_leg, context: {})
       {
         status: "blocked",
         confirmed: false,
@@ -66,7 +92,130 @@ class HedgeVenueMigrationExecutor
     end
   end
 
+  class DefaultLegRunner
+    def initialize(env: ENV, venue_builder: HedgeVenues, sleeper: ->(seconds) { sleep(seconds) })
+      @env = env
+      @venue_builder = venue_builder
+      @sleeper = sleeper
+    end
+
+    def call(leg, context:)
+      venue = HedgeVenues.normalize(leg.fetch(:venue))
+      case venue
+      when "ethereal"
+        run_ethereal_leg(leg, context)
+      when "extended"
+        run_extended_leg(leg, context)
+      else
+        blocked_leg(leg, [ "Nado migration live execution is not implemented." ])
+      end
+    rescue => e
+      blocked_leg(leg, [ "#{e.class}: #{e.message}" ], status: "failed_before_submit")
+    end
+
+    private
+
+    def run_ethereal_leg(leg, context)
+      venue = @venue_builder.build("ethereal", env: @env)
+      service = EtherealHedgeExecutionService.new(env: @env, venue: venue, sleeper: @sleeper)
+      current = venue.read_position(symbol: "ETH")
+      size = BigDecimal(leg.fetch(:size_eth).to_s)
+      result = if leg.fetch(:side) == "sell"
+        if short_size(current).positive?
+          service.rebalance_short(position: context.fetch(:position), delta_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        else
+          service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        end
+      else
+        if BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
+          service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        else
+          service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        end
+      end
+      normalize_service_result(result, leg)
+    end
+
+    def run_extended_leg(leg, context)
+      size = BigDecimal(leg.fetch(:size_eth).to_s)
+      env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
+      venue = @venue_builder.build("extended", env: env)
+      service = ExtendedHedgeExecutionService.new(venue: venue)
+      current = venue.read_position(symbol: "ETH")
+      result = if leg.fetch(:side) == "sell"
+        if short_size(current).positive?
+          service.rebalance_short(position: context.fetch(:position), delta_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        else
+          service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        end
+      else
+        if BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
+          service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        else
+          service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        end
+      end
+      normalize_service_result(result, leg)
+    end
+
+    def normalize_service_result(result, leg)
+      receipt = result.receipt
+      {
+        status: result.status,
+        confirmed: result.status.in?(%w[success submitted_and_confirmed]),
+        orders_placed: receipt[:orders_placed] || receipt[:orders_submitted] || (receipt[:submitted] ? 1 : 0),
+        signatures_created: receipt[:signatures_created].to_i,
+        exchange_order_id: receipt[:exchange_order_id],
+        readback: receipt[:post_submit_readback] || receipt[:final_readback] || receipt[:readback_attempts] || receipt[:readback_poll_attempts],
+        after_short_eth: confirmed_short_from_receipt(receipt, leg),
+        blockers: result.blockers,
+        warnings: result.warnings,
+        receipt: receipt
+      }
+    end
+
+    def confirmed_short_from_receipt(receipt, leg)
+      value = receipt.dig(:post_submit_readback, :short_size) ||
+        receipt.dig(:final_readback, :short_size) ||
+        receipt[:expected_short_eth] ||
+        leg[:expected_after_short_eth]
+      BigDecimal(value.to_s).to_s("F")
+    rescue ArgumentError, TypeError
+      leg[:expected_after_short_eth]
+    end
+
+    def blocked_leg(leg, blockers, status: "blocked")
+      { status: status, confirmed: false, orders_placed: 0, signatures_created: 0, blockers: blockers, leg: leg }
+    end
+
+    def short_size(position)
+      BigDecimal(position&.fetch(:short_size, 0).to_s)
+    rescue ArgumentError
+      BigDecimal("0")
+    end
+
+    def max_slippage
+      @env.fetch("MIGRATION_MAX_SLIPPAGE", @env.fetch("AERODROME_DASHBOARD_HEDGE_MAX_SLIPPAGE", "0.01"))
+    end
+  end
+
   private
+
+  def live_preflight_gate_open?(confirmation)
+    bool_env("MIGRATION_LIVE_ENABLED") && confirmation == CONFIRMATION
+  end
+
+  def refresh_dashboard_snapshot(position)
+    DashboardSnapshotRefresh.new(position: position, force: true).refresh
+  end
+
+  def leg_context(position, confirmation, receipt)
+    {
+      position: position,
+      confirmation: confirmation,
+      receipt: receipt
+    }
+  end
 
   def live_blockers(position:, receipt:, dry_run:, confirmation:)
     return [] if dry_run
@@ -75,9 +224,16 @@ class HedgeVenueMigrationExecutor
     blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers << "Nado must be flat before dashboard migration." unless nado_flat?(position.position_dashboard_snapshot)
+    blockers << "position hedge execution_venue must be #{receipt[:from_venue]} before migration" unless HedgeVenues.normalize(position.hedge&.execution_venue) == receipt[:from_venue]
+    blockers << "#{HedgeVenues.label(receipt[:from_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:from_venue])
+    blockers << "#{HedgeVenues.label(receipt[:to_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:to_venue])
+    blockers << "#{HedgeVenues.label(receipt[:from_venue])} auto must be disabled during migration." if venue_auto_enabled?(position.position_dashboard_snapshot, receipt[:from_venue])
+    blockers << "#{HedgeVenues.label(receipt[:to_venue])} auto must be disabled during migration." if venue_auto_enabled?(position.position_dashboard_snapshot, receipt[:to_venue])
     blockers << "target venue readiness failed or is not cached." unless target_readiness_cached?(position.position_dashboard_snapshot, receipt[:to_venue])
     blockers << "source current position must exist." unless decimal(receipt[:from_short_before]).positive?
     blockers << "target/source open orders must be zero." unless open_orders_clear?(position.position_dashboard_snapshot, receipt[:from_venue], receipt[:to_venue])
+    blockers << "dashboard snapshot must be fresh immediately before live migration." if position.position_dashboard_snapshot&.stale_now?
+    blockers.concat(recent_rebalance_blockers(position, receipt[:from_venue], receipt[:to_venue]))
     blockers
   end
 
@@ -96,10 +252,76 @@ class HedgeVenueMigrationExecutor
     snapshot.open_orders_count_extended.to_i.zero?
   end
 
+  def venue_live_enabled?(venue)
+    case venue
+    when "extended" then bool_env("EXTENDED_LIVE_ENABLED")
+    when "ethereal" then bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
+    else false
+    end
+  end
+
+  def venue_auto_enabled?(snapshot, venue)
+    return true unless snapshot
+
+    case venue
+    when "extended" then ActiveModel::Type::Boolean.new.cast(snapshot.extended_auto_enabled)
+    when "ethereal" then ActiveModel::Type::Boolean.new.cast(snapshot.ethereal_auto_enabled)
+    else true
+    end
+  end
+
+  def recent_rebalance_blockers(position, from, to)
+    return [] unless position.hedge
+
+    venues = [ from, to ]
+    pending = position.hedge.short_rebalances.where(venue: venues, status: ShortRebalance::STATUS_PENDING).order(created_at: :desc).first
+    blockers = []
+    blockers << "pending #{HedgeVenues.label(pending.venue)} ShortRebalance ##{pending.id} must be resolved before migration." if pending
+    recent = position.hedge.short_rebalances.where(venue: venues).where("created_at >= ?", 2.minutes.ago).order(created_at: :desc).first
+    blockers << "recent #{HedgeVenues.label(recent.venue)} ShortRebalance ##{recent.id} is too recent for migration; refresh and retry after the guard window." if recent
+    blockers
+  end
+
   def nado_flat?(snapshot)
     snapshot && BigDecimal(snapshot.nado_short_eth.to_s).zero?
   rescue ArgumentError
     false
+  end
+
+  def final_readback_status(receipt:, first_leg:, second_leg:)
+    from_after = decimal(second_leg[:after_short_eth] || receipt.dig(:planned_source_leg, :expected_after_short_eth))
+    to_after = decimal(first_leg[:after_short_eth] || receipt.dig(:planned_target_leg, :expected_after_short_eth))
+    target = decimal(receipt[:target_short])
+    tolerance = decimal(receipt[:tolerance_abs_eth])
+    tolerance = decimal(receipt[:target_short]) * BigDecimal("0.03") unless tolerance.positive?
+    combined = from_after + to_after
+    drift = target - combined
+    source_flat = from_after <= BigDecimal("0.001")
+    target_holds = (to_after - target).abs <= [ tolerance, BigDecimal("0.001") ].max
+    inside = drift.abs <= [ tolerance, BigDecimal("0.001") ].max
+    full = receipt[:mode].to_s == "full" || ActiveModel::Type::Boolean.new.cast(receipt[:full_migration_allowed])
+    success = !full || (source_flat && target_holds && inside)
+    {
+      from_short_after_readback: from_after.to_s("F"),
+      to_short_after_readback: to_after.to_s("F"),
+      final_combined: combined.to_s("F"),
+      final_drift: drift.to_s("F"),
+      source_flat_confirmed: source_flat,
+      target_holds_hedge_confirmed: target_holds,
+      final_inside_tolerance: inside,
+      finalize_available: success && full,
+      final_status: success ? "success" : "combined_outside_tolerance_manual_action_required",
+      manual_action_required: !success,
+      blockers: success ? [] : [ "Final migration readback did not confirm source flat, target hedge, and combined exposure inside tolerance." ]
+    }
+  end
+
+  def finalize_production_venue(position, receipt)
+    return unless position.hedge
+
+    position.hedge.update!(execution_venue: receipt[:to_venue])
+    receipt[:production_venue_finalized] = true
+    receipt[:finalized_hedge_id] = position.hedge.id
   end
 
   def bool_env(key)

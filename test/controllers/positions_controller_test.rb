@@ -567,7 +567,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     post migration_preview_position_path(position), params: { from_venue: "extended", to_venue: "ethereal", migration_mode: "full" }
 
-    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_response :redirect
+    assert_includes response.location, position_path(position)
+    assert_includes response.location, "hedge_venue=ethereal"
     assert_match "snapshot is stale", flash[:alert]
   end
 
@@ -590,7 +592,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       full_migration_allowed: "1"
     }
 
-    assert_redirected_to position_path(position, hedge_venue: "ethereal")
+    assert_response :redirect
+    assert_includes response.location, position_path(position)
+    assert_includes response.location, "hedge_venue=ethereal"
     assert_match "MIGRATION_LIVE_ENABLED must be true", flash[:alert]
   end
 

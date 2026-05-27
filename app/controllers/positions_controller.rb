@@ -223,7 +223,7 @@ class PositionsController < ApplicationController
       full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
     )
     level = result.blockers.present? ? :alert : :notice
-    redirect_to position_path(position, hedge_venue: params[:to_venue].presence || position.hedge&.execution_venue),
+    redirect_to position_path(position, migration_query_params(position)),
       flash: { level => migration_result_message("Migration preview", result) }
   end
 
@@ -240,7 +240,7 @@ class PositionsController < ApplicationController
       full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
     )
     level = result.status == "success" ? :notice : :alert
-    redirect_to position_path(position, hedge_venue: params[:to_venue].presence || position.hedge&.execution_venue),
+    redirect_to position_path(position, migration_query_params(position)),
       flash: { level => migration_result_message("Manual migration", result) }
   end
 
@@ -591,11 +591,11 @@ class PositionsController < ApplicationController
   def cached_migration_control_plan
     HedgeVenueMigrationPlanner.new.plan(
       position: @position,
-      from_venue: @position.hedge&.execution_venue,
-      to_venue: selected_migration_to_venue,
-      mode: "preview",
-      step_size_eth: default_migration_step_size_eth,
-      full_migration_allowed: false
+      from_venue: params[:from_venue].presence || @position.hedge&.execution_venue,
+      to_venue: params[:to_venue].presence || selected_migration_to_venue,
+      mode: params[:migration_mode].presence || "preview",
+      step_size_eth: params[:max_step_size_eth].presence || default_migration_step_size_eth,
+      full_migration_allowed: ActiveModel::Type::Boolean.new.cast(params[:full_migration_allowed])
     ).receipt
   rescue => e
     {
@@ -615,6 +615,17 @@ class PositionsController < ApplicationController
 
   def default_migration_step_size_eth
     ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")
+  end
+
+  def migration_query_params(position)
+    {
+      hedge_venue: params[:to_venue].presence || position.hedge&.execution_venue,
+      from_venue: params[:from_venue],
+      to_venue: params[:to_venue],
+      migration_mode: params[:migration_mode],
+      max_step_size_eth: params[:max_step_size_eth],
+      full_migration_allowed: params[:full_migration_allowed]
+    }.compact
   end
 
   def latest_jsonl_receipt(*patterns)

@@ -324,7 +324,7 @@ end %>
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
           <h2 class="mt-1 text-lg font-semibold text-white">Manual hedge venue migration</h2>
-          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration remains gated and fail-closed.</p>
+          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration is target-first, manually gated, and readback-confirmed leg by leg.</p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-sm">
           <p class="text-gray-500">Active migration status</p>
@@ -351,11 +351,23 @@ end %>
           <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
             <div><p class="text-xs text-gray-500">From short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:from_short_before]) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">To short</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:to_short_before]) %> ETH</p></div>
-            <div><p class="text-xs text-gray-500">Temporary combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:temporary_combined_short_eth]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Current drift</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:drift_before] || drift_eth) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Temporary combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:temporary_exposure] || migration_plan[:temporary_combined_short_eth]) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">Target venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_to_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_to_leg, :size_eth)) %> ETH</p></div>
             <div><p class="text-xs text-gray-500">Source venue leg</p><p class="text-white"><%= migration_plan.dig(:planned_from_leg, :side).presence || "—" %> <%= format_venue_eth_amount(migration_plan.dig(:planned_from_leg, :size_eth)) %> ETH</p></div>
-            <div><p class="text-xs text-gray-500">Projected final combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:expected_combined_short_after]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Projected final combined</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:expected_final_combined] || migration_plan[:expected_combined_short_after]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Projected final drift</p><p class="text-white"><%= format_venue_eth_amount(migration_plan[:expected_final_drift]) %> ETH</p></div>
+            <div><p class="text-xs text-gray-500">Finalize availability</p><p class="<%= migration_plan[:finalize_available] ? 'text-green-300' : 'text-yellow-200' %>"><%= migration_plan[:finalize_available] ? "Available after live readback" : "Not available from this plan" %></p></div>
           </div>
+          <% if migration_plan[:mode].to_s == "full" && inside_tolerance == false %>
+            <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+              Full migration correction: this plan targets <%= format_venue_eth_amount(migration_plan[:target_short]) %> ETH final combined exposure instead of preserving the current combined short. Temporary target-first exposure may reach <%= format_venue_eth_amount(migration_plan[:temporary_exposure]) %> ETH before the source reduction confirms.
+            </div>
+          <% elsif migration_plan[:mode].to_s == "stepwise" %>
+            <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+              Stepwise migration transfers at most <%= format_venue_eth_amount(migration_plan[:max_step_size_eth]) %> ETH per run. It may preserve current combined exposure and may not correct drift unless a separate correction is planned.
+            </div>
+          <% end %>
           <% if migration_plan[:warnings].present? %>
             <ul class="mt-4 list-disc space-y-1 pl-5 text-xs text-yellow-100">
               <% migration_plan[:warnings].first(3).each do |warning| %><li><%= warning %></li><% end %>
@@ -379,7 +391,8 @@ end %>
           <% end %>
           <div class="mt-4 border-t border-gray-800 pt-3">
             <p class="text-xs uppercase tracking-wide text-gray-500">Auto migration</p>
-            <p class="mt-1 text-sm text-gray-300">Decision-only. <%= auto_migration_decision[:would_migrate] ? "Would migrate if enabled." : "Disabled / blocked." %></p>
+            <p class="mt-1 text-sm text-gray-300">Decision-only. <%= auto_migration_decision[:would_migrate] ? "Would recommend migration if enabled." : "No-op / blocked." %></p>
+            <p class="mt-1 text-xs text-gray-500">No signatures or orders.</p>
             <% if auto_migration_decision[:blockers].present? %>
               <p class="mt-1 break-words text-xs text-gray-500"><%= auto_migration_decision[:blockers].first %></p>
             <% end %>
@@ -404,11 +417,11 @@ end %>
             </div>
             <div>
               <%= form.label :max_step_size_eth, "Max step ETH", class: "block text-xs uppercase tracking-wide text-gray-500" %>
-              <%= form.text_field :max_step_size_eth, value: migration_plan.dig(:planned_to_leg, :size_eth).presence || "0.01", class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
+              <%= form.text_field :max_step_size_eth, value: params[:max_step_size_eth].presence || migration_plan[:max_step_size_eth].presence || "0.01", class: "mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white" %>
             </div>
             <div class="flex items-end">
               <label class="flex items-center gap-2 rounded-lg border border-gray-800 px-3 py-2 text-sm text-gray-300">
-                <%= form.check_box :full_migration_allowed, checked: false, class: "rounded border-gray-700 bg-gray-950" %>
+                <%= form.check_box :full_migration_allowed, checked: ActiveModel::Type::Boolean.new.cast(migration_plan[:full_migration_allowed]), class: "rounded border-gray-700 bg-gray-950" %>
                 Full allowed
               </label>
             </div>
@@ -420,12 +433,13 @@ end %>
 
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs uppercase tracking-wide text-gray-500">Manual live controls</p>
-          <p class="mt-1 text-xs text-gray-400">Live is blocked unless the migration env gate and exact phrase are present.</p>
+          <p class="mt-1 text-xs text-gray-400">Live is blocked unless the migration env gate, venue live gates, zero open orders, disabled auto, fresh snapshot, and exact phrase are present.</p>
           <%= form_with url: migration_run_position_path(@position), method: :post, class: "mt-3 space-y-2" do |form| %>
             <%= form.hidden_field :from_venue, value: migration_from_default %>
             <%= form.hidden_field :to_venue, value: migration_to_default %>
-            <%= form.hidden_field :migration_mode, value: "preview" %>
-            <%= form.hidden_field :max_step_size_eth, value: "0.01" %>
+            <%= form.hidden_field :migration_mode, value: migration_plan[:mode].presence || "preview" %>
+            <%= form.hidden_field :max_step_size_eth, value: params[:max_step_size_eth].presence || migration_plan[:max_step_size_eth].presence || "0.01" %>
+            <%= form.hidden_field :full_migration_allowed, value: ActiveModel::Type::Boolean.new.cast(migration_plan[:full_migration_allowed]) ? "1" : "0" %>
             <code class="block break-all rounded border border-gray-800 bg-gray-950 p-2 text-[11px] text-gray-300"><%= HedgeVenueMigrationExecutor::CONFIRMATION %></code>
             <%= form.text_field :migration_confirmation, autocomplete: "off", placeholder: HedgeVenueMigrationExecutor::CONFIRMATION, class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
             <%= form.submit "Run manual migration", class: "w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900" %>
