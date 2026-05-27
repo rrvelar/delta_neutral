@@ -104,4 +104,40 @@ namespace :dashboard do
       signatures_created: 0
     )
   end
+
+  desc "Print read-only production health for one position"
+  task production_health: :environment do
+    position = dashboard_position_from_env
+    report = ExtendedAutoOperationalHealth.new(position: position).report
+
+    puts JSON.pretty_generate(
+      production_health: {
+        status: report.fetch(:status),
+        warnings: report.fetch(:warnings),
+        action_required: report.fetch(:action_required)
+      },
+      current_snapshot_summary: {
+        snapshot: report.fetch(:snapshot),
+        exposure: report.fetch(:exposure),
+        rewards_snapshot: report.fetch(:rewards_snapshot),
+        accounting_snapshot: report.fetch(:accounting_snapshot)
+      },
+      auto_health_summary: {
+        auto: report.fetch(:auto),
+        signer: report.fetch(:signer),
+        auto_should_act: report.fetch(:auto_should_act),
+        auto_should_be_waiting: report.fetch(:auto_should_be_waiting),
+        duplicate_risk_detected: report.fetch(:duplicate_risk_detected),
+        frequent_rebalance_warning: report.fetch(:frequent_rebalance_warning)
+      },
+      last_rebalances: {
+        latest: report.fetch(:latest_rebalance),
+        last_successful: report.fetch(:last_successful_rebalance),
+        pending_count_last_24h: report.fetch(:pending_count_last_24h),
+        failed_count_last_24h: report.fetch(:failed_count_last_24h)
+      },
+      orders_submitted: report.fetch(:orders_submitted),
+      signatures_created: report.fetch(:signatures_created)
+    )
+  end
 end

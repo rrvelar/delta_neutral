@@ -115,6 +115,7 @@ class PositionsController < ApplicationController
       @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
       @migration_control_plan = cached_migration_control_plan
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new.plan(position: @position, recommended_venue: selected_migration_to_venue, reason: nil).receipt
+      @production_health = ExtendedAutoOperationalHealth.new(position: @position).report
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
           position: @position,

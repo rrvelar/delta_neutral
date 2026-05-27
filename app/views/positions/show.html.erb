@@ -63,6 +63,7 @@ end %>
 <% snapshot_realized_pnl = selected_snapshot[:realized_pnl_usd] %>
 <% rewards_report = @aerodrome_rewards_report || {} %>
 <% fees_report = @aerodrome_fees_report || {} %>
+<% production_health = @production_health || {} %>
 <% reward_value_state = rewards_report[:value_state].presence || (rewards_report[:claimable_aero_usd].present? ? (rewards_report[:claimable_aero_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
 <% fee_value_state = fees_report[:value_state].presence || (fees_report[:total_fees_usd].present? ? (fees_report[:total_fees_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
 <% rewards_usable = %w[estimated verified_zero detected].include?(reward_value_state) %>
@@ -199,6 +200,73 @@ end %>
           <p class="text-xs uppercase tracking-wide text-gray-500"><%= label %></p>
           <p class="mt-2 text-xl font-semibold text-white"><%= value %></p>
           <p class="mt-1 break-words text-xs text-gray-500"><%= detail %></p>
+        </div>
+      <% end %>
+    </section>
+
+    <% health_status = production_health[:status].presence || "UNKNOWN" %>
+    <% health_class = case health_status
+    when "HEALTHY" then "border-green-800 bg-green-950/50 text-green-200"
+    when "WATCH" then "border-yellow-800 bg-yellow-950/50 text-yellow-100"
+    when "ACTION REQUIRED" then "border-red-800 bg-red-950/50 text-red-100"
+    else "border-gray-700 bg-gray-950 text-gray-300"
+    end %>
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Production Health</p>
+          <h2 class="mt-1 text-lg font-semibold text-white">Extended hedge bot status</h2>
+          <p class="mt-1 text-sm text-gray-400">Snapshot-backed health. Rebalance rows are action history only, never current exposure.</p>
+        </div>
+        <span class="rounded-full border px-3 py-1 text-xs font-semibold <%= health_class %>"><%= health_status %></span>
+      </div>
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Live venue exposure</p>
+          <p class="mt-1 text-white"><%= production_health[:production_venue_name].presence || cached_snapshot[:production_venue_name] || selected_venue_name %> · <%= format_venue_eth_amount(production_health.dig(:exposure, :extended_short_eth) || current_short_eth) %> ETH</p>
+          <p class="mt-1 text-xs text-gray-500">Target <%= format_venue_eth_amount(production_health.dig(:exposure, :target_short_eth) || target_eth_short) %> ETH</p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Conflict checks</p>
+          <p class="mt-1 text-white">Ethereal <%= production_health.dig(:exposure, :ethereal_status).presence || "unknown" %> · Nado <%= production_health.dig(:exposure, :nado_status).presence || "unknown" %></p>
+          <p class="mt-1 text-xs text-gray-500">Open orders <%= production_health.dig(:exposure, :open_orders_count_extended).nil? ? "unknown" : production_health.dig(:exposure, :open_orders_count_extended) %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Snapshot refresh</p>
+          <p class="mt-1 text-white"><%= production_health.dig(:snapshot, :age_seconds).nil? ? "not refreshed" : "#{production_health.dig(:snapshot, :age_seconds)}s ago" %></p>
+          <p class="mt-1 text-xs text-gray-500">position <%= production_health.dig(:snapshot, :refresh_status).presence || "unknown" %> · rewards <%= production_health.dig(:rewards_snapshot, :status).presence || "missing" %> · accounting <%= production_health.dig(:accounting_snapshot, :status).presence || "missing" %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Auto / signer</p>
+          <p class="mt-1 text-white"><%= production_health.dig(:auto, :extended_auto_enabled) ? "Auto enabled" : "Auto off" %> · signer <%= production_health.dig(:signer, :status).presence || "unknown" %></p>
+          <p class="mt-1 text-xs text-gray-500">Last success <%= production_health.dig(:last_successful_rebalance, :id) ? "##{production_health.dig(:last_successful_rebalance, :id)}" : "none" %></p>
+        </div>
+      </div>
+      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <% latest_health_rebalance = production_health[:latest_rebalance] || {} %>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Latest Extended rebalance</p>
+          <p class="mt-1 text-white"><%= latest_health_rebalance[:id] ? "##{latest_health_rebalance[:id]} · #{latest_health_rebalance[:status]}" : "No Extended action history" %></p>
+          <p class="mt-1 text-xs text-gray-500"><%= latest_health_rebalance[:old_short_size] || "—" %> → <%= latest_health_rebalance[:new_short_size] || "—" %> ETH</p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">24h action count</p>
+          <p class="mt-1 text-white">pending <%= production_health[:pending_count_last_24h] || 0 %> · failed <%= production_health[:failed_count_last_24h] || 0 %></p>
+          <p class="mt-1 text-xs text-gray-500">Duplicate risk <%= production_health[:duplicate_risk_detected] ? "detected" : "clear" %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Auto decision</p>
+          <p class="mt-1 text-white"><%= production_health[:auto_should_act] ? "Auto should act" : (production_health[:auto_should_be_waiting] ? "Auto should wait" : "Unknown") %></p>
+          <p class="mt-1 text-xs text-gray-500">Inside tolerance <%= production_health.dig(:exposure, :inside_tolerance).nil? ? "unknown" : production_health.dig(:exposure, :inside_tolerance) %></p>
+        </div>
+      </div>
+      <% health_messages = (Array(production_health[:action_required]) + Array(production_health[:warnings])).uniq %>
+      <% if health_messages.any? %>
+        <div class="mt-4 rounded-xl border <%= production_health[:action_required].present? ? 'border-red-900 bg-red-950/20' : 'border-yellow-900 bg-yellow-950/20' %> p-4">
+          <p class="text-sm font-semibold <%= production_health[:action_required].present? ? 'text-red-100' : 'text-yellow-100' %>"><%= production_health[:action_required].present? ? "Operator attention" : "Watch items" %></p>
+          <ul class="mt-2 list-disc space-y-1 pl-5 text-sm <%= production_health[:action_required].present? ? 'text-red-100' : 'text-yellow-100' %>">
+            <% health_messages.first(6).each do |message| %><li class="break-words"><%= message %></li><% end %>
+          </ul>
         </div>
       <% end %>
     </section>

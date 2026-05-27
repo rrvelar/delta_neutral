@@ -505,6 +505,39 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Cancel / clear migration state", response.body
   end
 
+  test "show renders production health summary from snapshots and history" do
+    position = create_aerodrome_position
+    hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_auto_enabled: true,
+      refreshed_at: Time.current,
+      extended_attrs: { leverage: "1", open_orders_count: 0 }
+    )
+    position.create_position_rewards_fees_snapshot!(refreshed_at: Time.current, refresh_status: "ok")
+    position.create_position_hedge_accounting_snapshot!(refreshed_at: Time.current, refresh_status: "ok", venue: "extended")
+    hedge.short_rebalances.create!(
+      venue: "extended",
+      asset: "WETH",
+      old_short_size: "1.20",
+      new_short_size: "1.25",
+      status: ShortRebalance::STATUS_SUCCESS,
+      rebalanced_at: 1.minute.ago
+    )
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "Production Health", response.body
+    assert_match "Extended hedge bot status", response.body
+    assert_match "Snapshot-backed health", response.body
+    assert_match "Last success", response.body
+    assert_match "pending 0", response.body
+  end
+
   test "migration preview action is read only and blocks stale snapshot" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
