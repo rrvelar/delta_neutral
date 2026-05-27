@@ -25,24 +25,36 @@
         <th class="text-right text-gray-400 text-xs uppercase tracking-wide p-4">Pool PnL</th>
         <th class="text-right text-gray-400 text-xs uppercase tracking-wide p-4">Hedge PnL</th>
         <th class="text-right text-gray-400 text-xs uppercase tracking-wide p-4">Fees</th>
-        <th class="text-center text-gray-400 text-xs uppercase tracking-wide p-4">Hedged</th>
+        <th class="text-center text-gray-400 text-xs uppercase tracking-wide p-4">Hedge Venue</th>
+        <th class="text-center text-gray-400 text-xs uppercase tracking-wide p-4">Health</th>
       </tr>
     </thead>
     <tbody>
       <% @positions.each do |position| %>
         <% valuation = PositionValuation.current(position) %>
         <% snapshot = position.pnl_snapshots.max_by(&:captured_at) %>
+        <% dashboard_snapshot = position.position_dashboard_snapshot %>
+        <% accounting_snapshot = position.position_hedge_accounting_snapshot %>
+        <% rewards_snapshot = position.position_rewards_fees_snapshot %>
+        <% hedge_venue = HedgeVenues.normalize(position.hedge&.execution_venue) %>
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
           <td class="p-4">
-            <%= link_to position_path(position), class: "text-blue-400 hover:text-blue-300" do %>
+            <%= link_to position_path(position, hedge_venue: hedge_venue), class: "text-blue-400 hover:text-blue-300" do %>
               <span class="font-medium text-white"><%= position.asset0 %>/<%= position.asset1 %></span>
               <span class="text-gray-500 text-xs ml-2"><%= dex_display_name(position) %></span>
             <% end %>
             <% if aerodrome_position?(position) %>
               <div class="mt-2 flex flex-wrap gap-1">
-                <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900/40 text-yellow-300 border border-yellow-800">Monitor-only</span>
+                <% if position.mellow_autopilot? %>
+                  <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-900/40 text-indigo-300 border border-indigo-800">Mellow</span>
+                <% end %>
                 <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">Base</span>
-                <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">No orders</span>
+                <% if position.hedge&.active? %>
+                  <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-green-900/40 text-green-300 border border-green-800"><%= HedgeVenues.label(hedge_venue) %></span>
+                <% else %>
+                  <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900/40 text-yellow-300 border border-yellow-800">Monitor-only</span>
+                  <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">No orders</span>
+                <% end %>
               </div>
             <% end %>
           </td>
@@ -51,11 +63,12 @@
             <td class="p-4 text-right <%= (valuation.pool_delta_usd || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
               <%= valuation.pool_delta_usd ? format_usd(valuation.pool_delta_usd) : "Unavailable" %>
             </td>
-            <td class="p-4 text-right <%= ((snapshot&.hedge_unrealized || 0) + (snapshot&.hedge_realized || 0)) >= 0 ? 'text-green-400' : 'text-red-400' %>">
-              <%= snapshot ? format_usd((snapshot.hedge_unrealized || 0) + (snapshot.hedge_realized || 0)) : "Unavailable" %>
+            <% hedge_pnl = accounting_snapshot&.net_hedge_pnl_usd || dashboard_snapshot&.extended_unrealized_pnl_usd || ((snapshot&.hedge_unrealized || 0) + (snapshot&.hedge_realized || 0) if snapshot) %>
+            <td class="p-4 text-right <%= (hedge_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400' %>">
+              <%= hedge_pnl ? format_usd(hedge_pnl) : "Unavailable" %>
             </td>
             <td class="p-4 text-right text-green-400">
-              <%= snapshot ? format_usd(snapshot.total_fees_usd) : "Unavailable" %>
+              <%= rewards_snapshot&.lp_fee_total_usd ? format_usd(rewards_snapshot.lp_fee_total_usd) : (snapshot ? format_usd(snapshot.total_fees_usd) : "Unavailable") %>
             </td>
           <% else %>
             <td class="p-4 text-right text-gray-500">-</td>
@@ -63,19 +76,30 @@
             <td class="p-4 text-right text-gray-500">-</td>
           <% end %>
           <td class="p-4 text-center">
-            <% if aerodrome_position?(position) %>
-              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-yellow-900/50 text-yellow-300 border border-yellow-800">Hedge disabled</span>
-            <% elsif position.hedge&.active? %>
+            <% if position.hedge&.active? %>
               <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-green-900/50 text-green-400 border border-green-800">Active</span>
+            <% elsif aerodrome_position?(position) %>
+              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-yellow-900/50 text-yellow-300 border border-yellow-800">Hedge disabled</span>
             <% else %>
               <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-800 text-gray-500 border border-gray-700">None</span>
+            <% end %>
+          </td>
+          <td class="p-4 text-center">
+            <% if dashboard_snapshot&.inside_tolerance == true %>
+              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-green-900/50 text-green-300 border border-green-800">In tolerance</span>
+            <% elsif dashboard_snapshot&.inside_tolerance == false %>
+              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-yellow-900/50 text-yellow-300 border border-yellow-800">Out of tolerance</span>
+            <% elsif dashboard_snapshot %>
+              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">Snapshot <%= dashboard_snapshot.refresh_status %></span>
+            <% else %>
+              <span class="inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-800 text-gray-500 border border-gray-700">Not refreshed</span>
             <% end %>
           </td>
         </tr>
       <% end %>
       <% if @positions.empty? %>
         <tr>
-          <td colspan="6" class="p-8 text-center text-gray-500">No active positions. <%= link_to "Add a wallet", new_wallet_path, class: "text-blue-400 hover:text-blue-300" %> to get started.</td>
+          <td colspan="7" class="p-8 text-center text-gray-500">No active positions. <%= link_to "Add a wallet", new_wallet_path, class: "text-blue-400 hover:text-blue-300" %> to get started.</td>
         </tr>
       <% end %>
     </tbody>

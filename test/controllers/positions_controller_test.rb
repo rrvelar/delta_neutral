@@ -39,6 +39,21 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "$3,000.00", response.body
   end
 
+  test "index includes active Mellow Extended position owned through current user's wallet" do
+    position = create_wallet_owned_mellow_extended_position(user: users(:two), wallet_user: users(:one))
+
+    get positions_path
+
+    assert_response :success
+    assert_match "WETH/USDC", response.body
+    assert_match "Mellow", response.body
+    assert_match "Production hedge", response.body
+    assert_match "Extended", response.body
+    assert_match "In tolerance", response.body
+    assert_match position.external_id, response.body
+    assert_no_match "No active positions found.", response.body
+  end
+
   test "index links to Aerodrome LP import form" do
     get positions_path
 
@@ -1905,6 +1920,50 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       pool_address: pool_address,
       active: active
     )
+  end
+
+  def create_wallet_owned_mellow_extended_position(user:, wallet_user:)
+    wallet = Wallet.create!(
+      user: wallet_user,
+      network: networks(:base),
+      address: "0x#{SecureRandom.hex(20)}"
+    )
+    position = Position.create!(
+      user: user,
+      wallet: wallet,
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("0.727"),
+      asset1_amount: BigDecimal("1500"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
+      external_id: "mellow:71261528",
+      pool_address: "0xpool",
+      active: true
+    )
+    position.create_hedge!(target: BigDecimal("1.0"), tolerance: BigDecimal("0.03"), active: true, execution_venue: "extended")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      extended_short_eth: BigDecimal("0.727"),
+      extended_status: "active",
+      ethereal_short_eth: BigDecimal("0"),
+      ethereal_status: "flat",
+      nado_short_eth: BigDecimal("0"),
+      nado_status: "flat",
+      combined_short_eth: BigDecimal("0.727"),
+      target_short_eth: BigDecimal("0.727"),
+      tolerance_abs_eth: BigDecimal("0.02181"),
+      drift_eth: BigDecimal("0"),
+      inside_tolerance: true,
+      signer_status: "ok"
+    )
+    position
   end
 
   def import_params(dex:, wallet:, external_id:, deactivate_existing: "0")

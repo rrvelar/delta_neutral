@@ -11,7 +11,7 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def index
-    @positions = Current.user.positions.active.includes(:dex, :hedge, wallet: :network)
+    @positions = DashboardVisiblePositions.new(user: Current.user).relation
   end
 
   def new
