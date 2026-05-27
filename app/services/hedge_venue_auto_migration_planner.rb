@@ -1,22 +1,31 @@
 class HedgeVenueAutoMigrationPlanner
   Result = Data.define(:would_migrate, :blockers, :warnings, :receipt)
 
-  def initialize(env: ENV, now: -> { Time.current }, migration_events: nil)
+  def initialize(env: ENV, now: -> { Time.current }, migration_events: nil, route_proof_events: nil)
     @env = env
     @now = now
     @migration_events = migration_events
+    @route_proof_events = route_proof_events
   end
 
   def plan(position:, recommended_venue: nil, reason: nil)
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
-    recommended = recommended_venue.present? ? HedgeVenues.normalize(recommended_venue) : current
+    recommended = recommended_venue.present? ? HedgeVenues.normalize(recommended_venue) : next_allowed_venue(current)
+    route_key = "#{current}->#{recommended}"
     blockers = []
     warnings = []
     blockers << "MIGRATION_AUTO_ENABLED must be true" unless bool_env("MIGRATION_AUTO_ENABLED")
+    blockers << "MIGRATION_AUTO_DRY_RUN_ONLY must be false before automatic live migration" if bool_env_default("MIGRATION_AUTO_DRY_RUN_ONLY", true)
     blockers << "migration reason is required" if bool_env_default("MIGRATION_REASON_REQUIRED", true) && reason.blank?
     blockers << "recommended venue matches current venue" if recommended == current
     blockers << "current venue #{current} is not in MIGRATION_ALLOWED_FROM_VENUES" unless allowed?("MIGRATION_ALLOWED_FROM_VENUES", current)
     blockers << "recommended venue #{recommended} is not in MIGRATION_ALLOWED_TO_VENUES" unless allowed?("MIGRATION_ALLOWED_TO_VENUES", recommended)
+    blockers << "current venue #{current} is not in MIGRATION_ALLOWED_VENUES" unless allowed?("MIGRATION_ALLOWED_VENUES", current)
+    blockers << "recommended venue #{recommended} is not in MIGRATION_ALLOWED_VENUES" unless allowed?("MIGRATION_ALLOWED_VENUES", recommended)
+    blockers << "route #{route_key} is not in MIGRATION_ALLOWED_ROUTES" unless route_allowed?(route_key)
+    route_proof_status = route_proof_status(current, recommended)
+    blockers << "route proof missing or not ready for #{route_key}" if bool_env_default("MIGRATION_REQUIRE_ROUTE_PROOF", true) && route_proof_status != "READY_FOR_DRY_RUN"
+    blockers << "Nado route proof is not ready; Nado cannot be selected for future live migration" if [ current, recommended ].include?("nado") && route_proof_status != "READY_FOR_DRY_RUN"
     blockers << "daily migration limit reached" if daily_migration_count >= max_per_day
     cooldown = cooldown_remaining
     blockers << "migration cooldown remaining #{cooldown.round(2)}h" if cooldown.positive?
@@ -26,13 +35,17 @@ class HedgeVenueAutoMigrationPlanner
       action: "hedge_venue_auto_migration_decision",
       position_id: position.id,
       current_venue: current,
+      candidate_next_venue: recommended,
       recommended_venue: recommended,
+      proposed_route: route_key,
+      route_proof_status: route_proof_status,
       reason: reason,
       would_migrate: blockers.empty?,
       blockers: blockers,
       warnings: warnings,
       daily_migration_count: daily_migration_count,
       cooldown_remaining_hours: cooldown,
+      orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0,
       submitted: false
@@ -45,6 +58,23 @@ class HedgeVenueAutoMigrationPlanner
   def allowed?(key, venue)
     values = @env[key].to_s.split(",").map { |value| HedgeVenues.normalize(value.strip) }.reject(&:blank?)
     values.empty? || values.include?(venue)
+  end
+
+  def route_allowed?(route_key)
+    values = @env["MIGRATION_ALLOWED_ROUTES"].to_s.split(",").map(&:strip).reject(&:blank?)
+    values.empty? || values.include?(route_key)
+  end
+
+  def next_allowed_venue(current)
+    values = @env.fetch("MIGRATION_ALLOWED_VENUES", "extended,ethereal,nado").split(",").map { |value| HedgeVenues.normalize(value.strip) }.reject(&:blank?)
+    values.find { |venue| venue != current } || current
+  end
+
+  def route_proof_status(from, to)
+    latest = route_proof_events
+      .select { |event| event[:from_venue] == from && event[:to_venue] == to && event[:action] == "migration_route_proof" }
+      .max_by { |event| event[:timestamp].to_s }
+    latest&.fetch(:route_status, nil) || "missing"
   end
 
   def daily_migration_count
@@ -65,8 +95,20 @@ class HedgeVenueAutoMigrationPlanner
     @events ||= @migration_events || read_receipt_events
   end
 
+  def route_proof_events
+    @route_proof_events ||= read_route_proof_events
+  end
+
   def read_receipt_events
     Dir.glob(Rails.root.join("storage/hedge_migration_checks/*.jsonl")).flat_map do |path|
+      File.readlines(path).filter_map { |line| JSON.parse(line).symbolize_keys rescue nil }
+    end
+  rescue SystemCallError
+    []
+  end
+
+  def read_route_proof_events
+    Dir.glob(Rails.root.join("storage/hedge_migration_route_proofs/*.jsonl")).flat_map do |path|
       File.readlines(path).filter_map { |line| JSON.parse(line).symbolize_keys rescue nil }
     end
   rescue SystemCallError

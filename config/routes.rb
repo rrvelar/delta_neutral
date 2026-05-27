@@ -20,6 +20,7 @@ Rails.application.routes.draw do
     post :migration_run, on: :member
     post :migration_finalize, on: :member
     post :migration_cancel, on: :member
+    post :migration_route_proof, on: :member
     patch :hedge_venue, on: :member
     get :extended_diagnostics, on: :member
     get :hedge_accounting_diagnostics, on: :member

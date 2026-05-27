@@ -526,6 +526,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Run manual migration", response.body
     assert_match "Finalize migration", response.body
     assert_match "Cancel / clear migration state", response.body
+    assert_match "Route Proof Matrix", response.body
+    assert_match "Daily venue rotation readiness", response.body
+    assert_match "Extended → Nado", response.body
+    assert_match "Nado → Ethereal", response.body
+    assert_match "Run dry-run route proof", response.body
   end
 
   test "show renders production health summary from snapshots and history" do
@@ -592,8 +597,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       get position_path(position, hedge_venue: "extended", preview_from_venue: "extended", preview_to_venue: "ethereal")
     end
 
-    lines = File.readlines(receipt_path)
-    assert_operator lines.size, :>, before_lines
+    lines = File.readlines(receipt_path).drop(before_lines)
+    assert_operator lines.size, :>, 0
     receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |item| item["position_id"] == position.id && item["action"] == "migration_preview" }
     assert receipt, "expected migration_preview receipt for position #{position.id}"
     assert_equal "preview_ready", receipt.fetch("final_status")
@@ -632,6 +637,32 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.location, "hedge_venue=extended"
     assert_includes response.location, "preview_to_venue=ethereal"
     assert_match "snapshot is stale", flash[:alert]
+  end
+
+  test "migration route proof action writes dry run proof receipts" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    receipt_path = Rails.root.join("storage/hedge_migration_route_proofs/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    before_lines = File.exist?(receipt_path) ? File.readlines(receipt_path).size : 0
+
+    post migration_route_proof_position_path(position)
+
+    assert_response :redirect
+    assert_match "Dry-run route proof wrote", flash[:notice]
+    lines = File.readlines(receipt_path).drop(before_lines)
+    assert_operator lines.size, :>, 0
+    receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "migration_route_proof" }
+    assert receipt
+    assert_equal 0, receipt.fetch("orders_submitted")
+    assert_equal 0, receipt.fetch("signatures_created")
   end
 
   test "migration run is fail closed without env gate" do

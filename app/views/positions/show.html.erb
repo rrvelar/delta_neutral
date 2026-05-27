@@ -467,6 +467,55 @@ end %>
           </div>
         </div>
       </div>
+
+      <% route_matrix = @migration_route_matrix || {} %>
+      <% route_rows = route_matrix[:routes] || [] %>
+      <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p class="text-xs uppercase tracking-wide text-gray-500">Route Proof Matrix</p>
+            <h3 class="mt-1 text-base font-semibold text-white">Daily venue rotation readiness</h3>
+            <p class="mt-1 text-xs text-gray-400">Dry-run proof only. Matrix rows use PositionDashboardSnapshot exposure and never sign or submit orders.</p>
+          </div>
+          <%= button_to "Run dry-run route proof", migration_route_proof_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+        </div>
+        <div class="mt-4 overflow-x-auto">
+          <table class="min-w-full divide-y divide-gray-800 text-left text-xs">
+            <thead class="text-gray-500">
+              <tr>
+                <th class="px-3 py-2 font-medium">Route</th>
+                <th class="px-3 py-2 font-medium">Preview</th>
+                <th class="px-3 py-2 font-medium">Live</th>
+                <th class="px-3 py-2 font-medium">Full</th>
+                <th class="px-3 py-2 font-medium">Stepwise</th>
+                <th class="px-3 py-2 font-medium">Target-first</th>
+                <th class="px-3 py-2 font-medium">Source-first</th>
+                <th class="px-3 py-2 font-medium">Status</th>
+                <th class="px-3 py-2 font-medium">Blockers</th>
+                <th class="px-3 py-2 font-medium">Last proof time</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-800 text-gray-300">
+              <% route_rows.each do |route| %>
+                <% ready = route[:route_status] == "READY_FOR_DRY_RUN" %>
+                <tr>
+                  <td class="whitespace-nowrap px-3 py-2 text-white"><%= HedgeVenues.label(route[:from_venue]) %> → <%= HedgeVenues.label(route[:to_venue]) %></td>
+                  <td class="<%= route[:preview_available] ? 'text-green-300' : 'text-yellow-200' %> whitespace-nowrap px-3 py-2"><%= route[:preview_available] ? "Available" : "Blocked" %></td>
+                  <td class="whitespace-nowrap px-3 py-2 text-yellow-200"><%= route[:live_available] ? "Gated" : "Blocked" %></td>
+                  <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_modes]&.include?("full") ? "yes" : "no" %></td>
+                  <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_modes]&.include?("stepwise") ? "yes" : "no" %></td>
+                  <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_sequences]&.include?("target_first") ? "yes" : "no" %></td>
+                  <td class="whitespace-nowrap px-3 py-2"><%= route[:supported_sequences]&.include?("source_first") ? "yes" : "no" %></td>
+                  <td class="<%= ready ? 'text-green-300' : 'text-yellow-200' %> whitespace-nowrap px-3 py-2"><%= route[:route_status] %></td>
+                  <td class="max-w-md px-3 py-2 text-gray-400"><%= Array(route[:blockers]).first(2).join("; ").presence || "none" %></td>
+                  <td class="whitespace-nowrap px-3 py-2 text-gray-400"><%= route[:last_proof_time].presence || "not recorded" %></td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-xs text-gray-500">Nado routes are intentionally visible and fail-closed until Nado readback, open-order, close/open, and migration executor proof is implemented.</p>
+      </div>
     </section>
 
     <section>

@@ -31,6 +31,28 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     assert result.blockers.any? { |blocker| blocker.start_with?("migration cooldown remaining") }
   end
 
+  test "auto migration planner refuses Nado routes without route proof ready" do
+    position = migration_position
+    env = {
+      "MIGRATION_AUTO_ENABLED" => "true",
+      "MIGRATION_AUTO_DRY_RUN_ONLY" => "false",
+      "MIGRATION_REASON_REQUIRED" => "false",
+      "MIGRATION_ALLOWED_VENUES" => "extended,ethereal,nado",
+      "MIGRATION_REQUIRE_ROUTE_PROOF" => "true",
+      "MIGRATION_MAX_PER_DAY" => "2",
+      "MIGRATION_MIN_COOLDOWN_HOURS" => "0"
+    }
+
+    result = HedgeVenueAutoMigrationPlanner.new(env: env, route_proof_events: []).plan(position: position, recommended_venue: "nado", reason: "daily rotation")
+
+    assert_equal false, result.would_migrate
+    assert_equal "extended->nado", result.receipt.fetch(:proposed_route)
+    assert_equal "missing", result.receipt.fetch(:route_proof_status)
+    assert_includes result.blockers, "Nado route proof is not ready; Nado cannot be selected for future live migration"
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   private
 
   def migration_position
