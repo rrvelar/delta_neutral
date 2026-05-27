@@ -51,8 +51,9 @@ when "close" then :close
 else :open
 end %>
 <% active_preflight = action_preflights[recommended_action_key] || venue_dashboard[:live_preflight] || {} %>
-<% selected_action_blockers = (active_preflight[:blockers] || []).uniq %>
-<% selected_action_warnings = (active_preflight[:warnings] || []).uniq.reject { |warning| selected_action_blockers.include?(warning) } %>
+<% neutral_preflight_messages = [ "Live preflight is loaded separately." ] %>
+<% selected_action_blockers = (active_preflight[:blockers] || []).uniq.reject { |blocker| neutral_preflight_messages.include?(blocker.to_s) } %>
+<% selected_action_warnings = ((active_preflight[:warnings] || []) + ((active_preflight[:blockers] || []).uniq & neutral_preflight_messages)).uniq.reject { |warning| selected_action_blockers.include?(warning) } %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
 <% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
@@ -104,12 +105,34 @@ end %>
 <% selected_auto_readiness_loaded = extended_auto_readiness[:status] != "unavailable" %>
 <% selected_auto_ready = selected_auto_readiness_loaded ? extended_auto_readiness[:continuous_auto_ready] : nil %>
 <% snapshot_open_orders_count = selected_snapshot[:open_orders_count] %>
+<% extended_isolated_equivalent_confirmed = selected_venue == "extended" && (
+  ActiveModel::Type::Boolean.new.cast(ENV.fetch("EXTENDED_ISOLATED_ACCOUNT_CONFIRMED", "false")) ||
+  cached_snapshot[:leverage_margin_gate_status].to_s.in?(%w[ok pass passed ready confirmed])
+) %>
 <% snapshot_margin_label = if margin_mode.present?
   margin_mode.to_s == "isolated" ? "Isolated 1.0x" : margin_mode.to_s.humanize
+elsif selected_venue == "extended" && selected_snapshot[:leverage].present? && BigDecimal(selected_snapshot[:leverage].to_s) == 1 && extended_isolated_equivalent_confirmed
+  "1x isolated-equivalent"
 elsif selected_venue == "extended" && selected_snapshot[:leverage].present? && BigDecimal(selected_snapshot[:leverage].to_s) == 1
-  "isolated-equivalent / account-level"
+  "1x / margin mode not directly exposed"
 else
   "Unavailable"
+end %>
+<% snapshot_margin_detail = if selected_venue == "extended" && margin_mode.blank? && selected_snapshot[:leverage].present? && BigDecimal(selected_snapshot[:leverage].to_s) == 1
+  extended_isolated_equivalent_confirmed ? "mode not directly exposed by API; dedicated account confirmed" : "mode not directly exposed by API"
+else
+  selected_venue == "ethereal" ? "Ethereal cross only" : "Snapshot venue readback"
+end %>
+<% effective_leverage_display = effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : nil %>
+<% effective_leverage_detail = current_notional.present? ? "Notional #{format_venue_usd_amount(current_notional)}" : "Account value not loaded" %>
+<% partial_hedge_pnl = hedge_unrealized_available ? hedge_unrealized + (hedge_realized || 0) : nil %>
+<% partial_hedge_pnl_note = hedge_realized_available ? "Known realized + unrealized; fees/funding diagnostics separate" : "Partial, excluding unavailable realized PnL, fees, and funding" %>
+<% total_pnl_note = if total_unrealized && !hedge_realized_available
+  "Partial total, excluding unavailable realized PnL, fees, and rewards"
+elsif total_pnl
+  "Excludes rewards and LP fees"
+else
+  "Diagnostics not loaded"
 end %>
 <% drift_negative = begin
   drift_eth.present? && BigDecimal(drift_eth.to_s).negative?
@@ -137,8 +160,8 @@ end %>
         <% end %>
         <div class="mt-4 flex flex-wrap gap-2">
           <span class="rounded-full border border-indigo-700 bg-indigo-950/60 px-3 py-1 text-xs font-semibold text-indigo-200">Selected Venue: <%= selected_venue_name %></span>
-          <% if margin_mode.present? %>
-            <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-200"><%= margin_mode.to_s == "isolated" ? "Isolated 1.0x" : "#{margin_mode.to_s.humanize} Margin" %></span>
+          <% if snapshot_margin_label != "Unavailable" %>
+            <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-200"><%= snapshot_margin_label %></span>
           <% end %>
           <span class="rounded-full border <%= selected_live_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-yellow-800 bg-yellow-950/60 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= live_status_label %></span>
           <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_operational_label %></span>
@@ -247,12 +270,11 @@ end %>
           [ "Drift", format_venue_eth_amount(drift_eth), drift_usd.present? ? format_venue_usd_amount(drift_usd) : "USD unavailable" ],
           [ "Unrealized hedge PnL", format_venue_usd_amount(hedge_unrealized), "Snapshot venue readback" ],
           [ "Tolerance state", tolerance_label, "Tolerance #{format_venue_eth_amount(tolerance_eth)}" ],
-          [ "Margin mode", snapshot_margin_label, selected_venue == "ethereal" ? "Ethereal cross only" : "Snapshot venue readback" ],
-          [ "Effective leverage", effective_leverage.present? ? "#{number_with_precision(BigDecimal(effective_leverage.to_s), precision: 3)}x" : "Unavailable", current_notional.present? ? "Notional #{format_venue_usd_amount(current_notional)}" : "Notional unavailable" ],
+          [ "Margin mode", snapshot_margin_label, snapshot_margin_detail ],
           [ "Entry price", format_venue_usd_amount(entry_price), "Readback entry" ],
           [ "Mark price", format_venue_usd_amount(mark_price), "Readback mark" ],
           [ "Isolated margin", format_venue_usd_amount(isolated_margin), margin_mode.to_s == "isolated" ? "Isolated collateral" : "Not applicable" ]
-        ].each do |label, value, detail| %>
+        ].tap { |rows| rows.insert(10, [ "Effective leverage", effective_leverage_display, effective_leverage_detail ]) if effective_leverage_display.present? }.each do |label, value, detail| %>
           <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-900 p-4">
             <p class="truncate text-xs uppercase tracking-wide text-gray-500"><%= label %></p>
             <p class="mt-2 truncate text-xl font-semibold text-white" title="<%= value %>"><%= value %></p>
@@ -308,6 +330,9 @@ end %>
           <% if selected_venue == "extended" %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-300">
               <p>Extended production venue. Auto: <%= auto_operational_label %>. Signer: <%= signer_label %>. Required: 1x isolated-equivalent.</p>
+              <% if selected_snapshot[:leverage].present? && BigDecimal(selected_snapshot[:leverage].to_s) == 1 && margin_mode.blank? %>
+                <p class="mt-2 text-gray-400"><%= snapshot_margin_detail %>.</p>
+              <% end %>
               <% if cached_snapshot.dig(:migration_status, :complete) %>
                 <p class="mt-2 text-green-200"><%= cached_snapshot.dig(:migration_status, :label) %></p>
               <% else %>
@@ -340,7 +365,7 @@ end %>
                 <p class="text-xs uppercase tracking-wide text-gray-500">Live Gates</p>
                 <p class="mt-1 text-sm text-gray-300"><%= live_status_label %> for <%= selected_venue_name %>. Preview actions do not create orders.</p>
               </div>
-              <span class="rounded-full border <%= selected_action_blockers.blank? ? 'border-green-800 bg-green-950/50 text-green-300' : 'border-yellow-800 bg-yellow-950/50 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= selected_action_blockers.blank? ? "Preflight clear" : "#{selected_action_blockers.size} blocker#{'s' unless selected_action_blockers.size == 1}" %></span>
+              <span class="rounded-full border <%= selected_action_blockers.blank? ? 'border-gray-700 bg-gray-950 text-gray-300' : 'border-yellow-800 bg-yellow-950/50 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= selected_action_blockers.blank? ? "Preflight diagnostics separate" : "#{selected_action_blockers.size} blocker#{'s' unless selected_action_blockers.size == 1}" %></span>
             </div>
             <% if selected_action_blockers.present? %>
               <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-yellow-100">
@@ -349,7 +374,7 @@ end %>
                 <% end %>
               </ul>
             <% else %>
-              <p class="mt-3 text-sm text-green-200">No live preflight blockers reported for the planned action.</p>
+              <p class="mt-3 text-sm text-gray-300">Detailed live preflight loads separately; no blocker is counted from unloaded diagnostics.</p>
             <% end %>
             <% if selected_action_warnings.present? %>
               <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-yellow-200">
@@ -588,20 +613,29 @@ end %>
         [ "Trading fees", accounting_components.dig(:trading_fees_usd, :value), accounting_components.dig(:trading_fees_usd, :state), accounting_components.dig(:trading_fees_usd, :source) ],
         [ "Funding", accounting_components.dig(:funding_pnl_usd, :value), accounting_components.dig(:funding_pnl_usd, :state), accounting_components.dig(:funding_pnl_usd, :source) ],
         [ "Borrow / interest", accounting_components.dig(:borrow_interest_usd, :value), accounting_components.dig(:borrow_interest_usd, :state), accounting_components.dig(:borrow_interest_usd, :source) ],
-        [ "Net hedge PnL", hedge_accounting[:net_venue_pnl_usd], hedge_accounting[:net_venue_pnl_usd].present? ? "available" : "unavailable", "realized + unrealized + funding - fees - borrow + rebates" ]
+        [ "Partial hedge PnL", hedge_accounting[:net_venue_pnl_usd].presence || partial_hedge_pnl, hedge_accounting[:net_venue_pnl_usd].present? ? "available" : (partial_hedge_pnl.present? ? "partial" : "unavailable"), hedge_accounting[:net_venue_pnl_usd].present? ? "realized + unrealized + funding - fees - borrow + rebates" : partial_hedge_pnl_note ]
       ] %>
-      <% if accounting_rows.none? { |_label, value, _state, _source| value.present? } %>
+      <% visible_accounting_rows = accounting_rows.select { |label, value, _state, _source| value.present? || label == "Realized hedge PnL" } %>
+      <% compact_missing_accounting = accounting_rows.select { |label, value, _state, _source| value.blank? && ![ "Realized hedge PnL", "Partial hedge PnL" ].include?(label) }.map(&:first) %>
+      <% if visible_accounting_rows.none? { |_label, value, _state, _source| value.present? } %>
         <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-sm font-medium text-white">Venue accounting unavailable on initial render</p>
           <p class="mt-1 text-sm text-gray-400">Detailed PnL, fee, funding, and borrow components load from the Hedge accounting diagnostics link. Missing data is not treated as zero.</p>
         </div>
       <% else %>
-        <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <% accounting_rows.each do |label, value, state, source| %>
+        <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <% visible_accounting_rows.each do |label, value, state, source| %>
             <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
               <p class="text-xs text-gray-500"><%= label %></p>
               <p class="mt-2 text-lg font-semibold <%= value.present? && BigDecimal(value.to_s) < 0 ? 'text-red-300' : 'text-white' rescue 'text-white' %>"><%= value.present? ? format_venue_usd_amount(value) : "Unavailable" %></p>
               <p class="mt-1 break-words text-xs text-gray-500"><%= state.presence || "unavailable" %> · <%= source.presence || "venue does not expose this component" %></p>
+            </div>
+          <% end %>
+          <% if compact_missing_accounting.any? %>
+            <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+              <p class="text-xs text-gray-500">Fees / funding / borrow</p>
+              <p class="mt-2 text-lg font-semibold text-white">Diagnostics not loaded</p>
+              <p class="mt-1 break-words text-xs text-gray-500"><%= compact_missing_accounting.join(", ") %> load from Hedge accounting diagnostics and are not treated as zero.</p>
             </div>
           <% end %>
         </div>
@@ -624,7 +658,7 @@ end %>
         <p class="text-xs uppercase tracking-wide text-gray-500">PnL & Rewards</p>
         <h2 class="mt-1 text-lg font-semibold text-white">PnL Summary</h2>
         <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total PnL Excluding Rewards / Fees</p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p></div>
+              <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500"><%= hedge_realized_available ? "Total PnL Excluding Rewards / Fees" : "Partial PnL Excluding Rewards / Fees" %></p><p class="mt-2 text-xl font-semibold <%= (total_pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_pnl ? format_usd(total_pnl) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500"><%= total_pnl_note %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Total unrealized</p><p class="mt-2 text-xl font-semibold <%= (total_unrealized || 0) >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= total_unrealized ? format_usd(total_unrealized) : "Unavailable" %></p><p class="mt-1 text-xs text-gray-500">Pool <%= pool_unrealized ? format_usd(pool_unrealized) : "Unavailable" %> / Hedge <%= hedge_unrealized_available ? format_usd(hedge_unrealized) : "Unavailable" %></p></div>
               <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Realized</p><p class="mt-2 text-xl font-semibold <%= !hedge_realized_available || hedge_realized >= 0 ? 'text-green-300' : 'text-red-300' %>"><%= hedge_realized_available ? format_usd(hedge_realized) : "Unavailable" %></p></div>
               <% if !rewards_usable && !fees_usable && reward_value_state != "verified_zero" && fee_value_state != "verified_zero" %>
@@ -674,6 +708,13 @@ end %>
             <% end %>
             <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/50 p-4">
               <summary class="cursor-pointer text-sm font-medium text-gray-200">Rewards and Fee Readback Details</summary>
+              <% if rewards_report[:status] == "unavailable" && fees_report[:status] == "unavailable" %>
+                <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-4">
+                  <p class="text-sm text-gray-300">Rewards/fees diagnostics are not loaded on initial render.</p>
+                  <p class="mt-1 text-xs text-gray-500">Open the dedicated diagnostics endpoint to run read-only reward and fee checks.</p>
+                  <%= link_to "Open rewards/fees diagnostics", rewards_fees_diagnostics_position_path(@position), class: "mt-3 inline-block rounded border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800" %>
+                </div>
+              <% else %>
               <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <div class="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-4">
                   <h3 class="text-sm font-semibold text-white">AERO Rewards</h3>
@@ -719,6 +760,7 @@ end %>
                   <% end %>
                 </div>
               </div>
+              <% end %>
             </details>
           </div>
 

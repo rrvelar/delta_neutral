@@ -404,13 +404,53 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "$2,000.00", response.body
     assert_match "$2,100.00", response.body
     assert_match "-$125.00", response.body
+    assert_match "Partial hedge PnL", response.body
+    assert_match "Partial, excluding unavailable realized PnL, fees, and funding", response.body
     assert_match "Isolated 1.0x", response.body
     assert_match "1.0x", response.body
     assert_match "Open orders", response.body
     assert_match ">0<", response.body
+    assert_match "Preflight diagnostics separate", response.body
+    assert_no_match "1 blocker", response.body
     assert_match "Last selected-venue success", response.body
     assert_match "auto success", response.body
     assert_no_match "Expected final", response.body
+  end
+
+  test "show treats Extended one times leverage as isolated equivalent when gate is confirmed" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_auto_enabled: true,
+      source_errors: { extended_optional: "Timeout::Error: execution expired" },
+      extended_attrs: {
+        notional_usd: "2625",
+        entry_price: "2000",
+        mark_price: "2100",
+        unrealized_pnl_usd: "2.47",
+        leverage: "1",
+        open_orders_count: 0,
+        leverage_margin_gate_status: "pass"
+      }
+    )
+
+    with_env("EXTENDED_AUTO_REBALANCE_ENABLED" => "true", "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true") do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "1x isolated-equivalent", response.body
+    assert_match "mode not directly exposed by API; dedicated account confirmed", response.body
+    assert_no_match "Unknown Margin", response.body
+    assert_no_match(/Effective leverage.*Unavailable/m, response.body)
+    assert_match "$2.47", response.body
+    assert_match "Auto Active", response.body
+    assert_match "In tolerance", response.body
+    assert_no_match "Timeout::Error", response.body
   end
 
   test "show does not report in tolerance when selected current short is unknown" do
@@ -479,8 +519,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_operator elapsed, :<, 0.5
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
-    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
   end
 
   test "show renders when rewards and fees diagnostics are slow" do
@@ -506,8 +545,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
-    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_no_match(/\{:\w+=>/, response.body)
   end
 
@@ -906,13 +944,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "AERO Rewards", response.body
-    assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
-    assert_match "Claimable AERO", response.body
-    assert_match "Claimable AERO USD", response.body
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
+    assert_match "Open rewards/fees diagnostics", response.body
     assert_match "unavailable", response.body
-    assert_match "AERO USD price source", response.body
     assert_match "$500.00", response.body
     assert_no_match "Claim rewards", response.body
     assert_no_match "Execute", response.body
@@ -948,11 +982,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "AERO Rewards", response.body
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_no_match "14.140000", response.body
     assert_no_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
-    assert_match "Read-only. Claiming is not implemented. Rewards are not included in Total PnL.", response.body
     assert_match "$500.00", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
     assert_match "Rewards / fees diagnostics", response.body
@@ -996,8 +1028,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Mellow pro-rata delta from entry", response.body
     assert_match "Mellow WETH pro-rata exposure", response.body
     assert_match "Observed strategy token ID", response.body
-    assert_match "Mellow pro-rata AERO rewards estimate", response.body
-    assert_match "Mellow pro-rata LP fee estimate", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
+    assert_match "Open rewards/fees diagnostics", response.body
     assert_match "$2,611.87", response.body
     assert_no_match "$186.00", response.body
     assert_no_match "-$2,422", response.body
@@ -1066,11 +1098,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Mellow pro-rata AERO rewards estimate", response.body
-    assert_match "Mellow pro-rata AERO USD estimate", response.body
-    assert_match "Mellow pro-rata LP fee estimate", response.body
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
-    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
+    assert_match "Open rewards/fees diagnostics", response.body
     assert_no_match "mellow_strategy_observed_token", response.body
     assert_no_match "invalid value for Integer", response.body
   end
@@ -1207,12 +1236,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Unclaimed fees USD estimate", response.body
-    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_no_match "0.010000 WETH", response.body
     assert_match "Total PnL Excluding Rewards / Fees", response.body
     assert_match "Rewards / fees diagnostics", response.body
-    assert_match "Unclaimed fees are not realized PnL until collected", response.body
+    assert_match "Open rewards/fees diagnostics", response.body
     assert_no_match "Collect fees", response.body
     assert_no_match "Claim rewards", response.body
   end
@@ -1242,9 +1270,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Unclaimed fees USD estimate", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_match "unavailable", response.body
-    assert_match "Fee diagnostics are not loaded during initial dashboard render.", response.body
     assert_match "Unavailable values are not treated as zero", response.body
     assert_no_match "Aerodrome fee read not implemented yet.", response.body
   end
@@ -1259,9 +1286,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "AERO Rewards", response.body
+    assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_match "unavailable", response.body
-    assert_match "Rewards diagnostics are not loaded during initial dashboard render.", response.body
   end
 
   test "show displays latest manual proposal as local manual-only record" do
@@ -1705,7 +1731,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     }
   end
 
-  def create_dashboard_snapshot(position, extended_short_eth:, ethereal_short_eth:, nado_short_eth:, extended_auto_enabled: false, refreshed_at: 2.minutes.ago, extended_attrs: {})
+  def create_dashboard_snapshot(position, extended_short_eth:, ethereal_short_eth:, nado_short_eth:, extended_auto_enabled: false, refreshed_at: 2.minutes.ago, extended_attrs: {}, source_errors: {})
     target = BigDecimal(position.asset0_amount.to_s) * position.hedge.target
     combined = BigDecimal(extended_short_eth.to_s) + BigDecimal(ethereal_short_eth.to_s) + BigDecimal(nado_short_eth.to_s)
     tolerance = target * position.hedge.tolerance
@@ -1745,7 +1771,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       extended_source_status: "ok",
       ethereal_source_status: "ok",
       nado_source_status: "ok",
-      source_errors: "{}"
+      source_errors: source_errors.to_json
     )
   end
 
