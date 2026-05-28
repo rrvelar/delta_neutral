@@ -26,10 +26,11 @@ class HedgeVenueAutoMigrationPlanner
     base_blockers = base_blockers(current: current, allowed: allowed, daily_count: daily_count, cooldown: cooldown)
     routes = Array(matrix[:routes] || matrix["routes"])
     candidates = allowed.reject { |venue| venue == current }.map { |venue| route_for(routes, current, venue) }
-    eligible, excluded = classify_routes(position: position, current: current, candidates: candidates)
+    dry_run_eligible, decision_excluded, live_eligible, live_blocked = classify_routes(position: position, current: current, candidates: candidates)
     base_blockers << "route proof incomplete because snapshot critical fields are missing" if route_proof_incomplete?(routes)
-    selected = base_blockers.empty? ? random_route(eligible) : nil
+    selected = base_blockers.empty? ? random_route(dry_run_eligible) : nil
     warnings = [ "Random rotation planner is decision-only; no orders are submitted and no venue is finalized." ]
+    selected_live_available = selected ? live_eligible.any? { |route| same_route?(route, selected) } : false
 
     receipt = {
       action: "random_rotation_decision",
@@ -37,13 +38,18 @@ class HedgeVenueAutoMigrationPlanner
       strategy: STRATEGY,
       current_venue: current,
       allowed_venues: allowed,
-      eligible_target_venues: eligible.map { |route| route.fetch(:to_venue) },
-      eligible_routes: eligible,
-      excluded_routes: excluded,
+      eligible_target_venues: dry_run_eligible.map { |route| route.fetch(:to_venue) },
+      eligible_routes: dry_run_eligible,
+      dry_run_eligible_routes: dry_run_eligible,
+      live_eligible_routes: live_eligible,
+      excluded_routes: decision_excluded,
+      decision_excluded_routes: decision_excluded,
+      live_blocked_routes: live_blocked,
       selected_route: selected,
       randomly_selected_route: selected,
       selected_target_venue: selected&.fetch(:to_venue, nil),
       randomly_selected_target_venue: selected&.fetch(:to_venue, nil),
+      selected_route_live_available: selected_live_available,
       random_seed: random_seed.presence,
       selection_id: selection_id(selected),
       status: selected ? "RANDOM_ROUTE_SELECTED" : "NO_ELIGIBLE_ROUTE",
@@ -56,7 +62,7 @@ class HedgeVenueAutoMigrationPlanner
       warnings: warnings,
       cooldown_status: { remaining_hours: cooldown, passed: cooldown.zero? },
       daily_limit_status: { count: daily_count, max_per_day: max_per_day, passed: daily_count < max_per_day },
-      route_proof_status: route_proof_summary(eligible: eligible, excluded: excluded),
+      route_proof_status: route_proof_summary(dry_run_eligible: dry_run_eligible, decision_excluded: decision_excluded, live_eligible: live_eligible, live_blocked: live_blocked),
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0,
@@ -83,37 +89,61 @@ class HedgeVenueAutoMigrationPlanner
   end
 
   def classify_routes(position:, current:, candidates:)
-    candidates.each_with_object([ [], [] ]) do |route, (eligible, excluded)|
+    candidates.each_with_object([ [], [], [], [] ]) do |route, (dry_run_eligible, decision_excluded, live_eligible, live_blocked)|
       if route.nil?
-        excluded << { from_venue: current, to_venue: nil, reasons: [ "route is missing from proof matrix" ] }
+        missing = { from_venue: current, to_venue: nil, reasons: [ "route is missing from proof matrix" ] }
+        decision_excluded << missing
+        live_blocked << missing.merge(live_blockers: missing.fetch(:reasons))
         next
       end
 
-      reasons = exclusion_reasons(position: position, route: route)
-      if reasons.empty?
-        eligible << route_payload(route)
+      decision_reasons = decision_exclusion_reasons(position: position, route: route)
+      live_reasons = live_exclusion_reasons(position: position, route: route)
+      payload = route_payload(route)
+      if decision_reasons.empty?
+        dry_run_eligible << payload.merge(dry_run_decision_eligible: true, live_execution_eligible: live_reasons.empty?)
       else
-        excluded << route_payload(route).merge(reasons: reasons)
+        decision_excluded << payload.merge(dry_run_decision_eligible: false, reasons: decision_reasons)
+      end
+
+      if live_reasons.empty?
+        live_eligible << payload.merge(dry_run_decision_eligible: decision_reasons.empty?, live_execution_eligible: true)
+      else
+        live_blocked << payload.merge(dry_run_decision_eligible: decision_reasons.empty?, live_execution_eligible: false, live_blockers: live_reasons)
       end
     end
   end
 
-  def exclusion_reasons(position:, route:)
+  def decision_exclusion_reasons(position:, route:)
     reasons = []
     route_key = "#{route.fetch(:from_venue)}->#{route.fetch(:to_venue)}"
     reasons << "route #{route_key} is not in MIGRATION_ALLOWED_ROUTES" unless route_allowed?(route_key)
     reasons << "route proof is not READY_FOR_DRY_RUN" if require_route_proof? && route[:route_status] != "READY_FOR_DRY_RUN"
+    reasons << "route preview is unavailable" unless route[:preview_available]
     reasons << "source venue has no current short" unless venue_short(position, route.fetch(:from_venue)).positive?
-    reasons.concat(safety_blockers(route))
+    reasons.concat(decision_safety_blockers(route))
     reasons.uniq
   end
 
-  def safety_blockers(route)
+  def live_exclusion_reasons(position:, route:)
+    reasons = []
+    route_key = "#{route.fetch(:from_venue)}->#{route.fetch(:to_venue)}"
+    reasons << "route #{route_key} is not in MIGRATION_ALLOWED_ROUTES" unless route_allowed?(route_key)
+    reasons << "route proof is not READY_FOR_DRY_RUN" if require_route_proof? && route[:route_status] != "READY_FOR_DRY_RUN"
+    reasons << "route preview is unavailable" unless route[:preview_available]
+    reasons << "source venue has no current short" unless venue_short(position, route.fetch(:from_venue)).positive?
+    reasons << "route live execution is unavailable" unless route[:live_available]
+    reasons.concat(Array(route[:blockers]))
+    reasons.uniq
+  end
+
+  def decision_safety_blockers(route)
     Array(route[:blockers]).reject { |blocker| live_disabled_blocker?(blocker) }
   end
 
   def live_disabled_blocker?(blocker)
-    LIVE_DISABLED_BLOCKERS.include?(blocker.to_s) || blocker.to_s.match?(/live .*not implemented|live .*disabled|live migration.*unavailable/i)
+    LIVE_DISABLED_BLOCKERS.include?(blocker.to_s) ||
+      blocker.to_s.match?(/live .*not implemented|live .*disabled|live migration.*unavailable|live submit|live execution|live path/i)
   end
 
   def route_payload(route)
@@ -122,10 +152,14 @@ class HedgeVenueAutoMigrationPlanner
       to_venue: route.fetch(:to_venue),
       route_status: route[:route_status],
       preview_available: route[:preview_available],
-      live_available: false,
+      live_available: route[:live_available] || false,
       blockers: Array(route[:blockers]),
       last_proof_time: route[:last_proof_time]
     }
+  end
+
+  def same_route?(left, right)
+    left.fetch(:from_venue) == right.fetch(:from_venue) && left.fetch(:to_venue) == right.fetch(:to_venue)
   end
 
   def route_for(routes, from, to)
@@ -161,10 +195,12 @@ class HedgeVenueAutoMigrationPlanner
     Digest::SHA256.hexdigest(base).first(16)
   end
 
-  def route_proof_summary(eligible:, excluded:)
+  def route_proof_summary(dry_run_eligible:, decision_excluded:, live_eligible:, live_blocked:)
     {
-      eligible_count: eligible.size,
-      excluded_count: excluded.size,
+      dry_run_eligible_count: dry_run_eligible.size,
+      decision_excluded_count: decision_excluded.size,
+      live_eligible_count: live_eligible.size,
+      live_blocked_count: live_blocked.size,
       require_route_proof: require_route_proof?
     }
   end

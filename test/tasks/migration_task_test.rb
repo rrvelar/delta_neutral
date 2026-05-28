@@ -116,12 +116,18 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert_equal position.id, summary.fetch("position_id")
     assert_equal "random_rotation", summary.fetch("strategy")
     assert_equal false, summary.fetch("would_migrate")
+    assert summary.key?("dry_run_eligible_routes")
+    assert summary.key?("live_eligible_routes")
+    assert summary.key?("live_blocked_routes")
+    assert_equal false, summary.fetch("selected_route_live_available") if summary.fetch("selected_route")
     assert_equal 0, summary.fetch("orders_submitted")
     assert_equal 0, summary.fetch("signatures_created")
     assert_match "storage/hedge_migration_random_rotation", summary.fetch("receipt_path")
     lines = File.readlines(receipt_path).drop(before_lines)
     receipt = lines.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "random_rotation_decision" }
     assert receipt
+    assert receipt.key?("dry_run_eligible_routes")
+    assert receipt.key?("live_blocked_routes")
     assert_equal 0, receipt.fetch("orders_placed")
     assert_equal 0, receipt.fetch("signatures_created")
   ensure

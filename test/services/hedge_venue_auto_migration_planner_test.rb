@@ -66,18 +66,45 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     result = planner(env: { "MIGRATION_ALLOWED_ROUTES" => "extended->nado" }).plan(position: migration_position)
 
     assert_equal [ "nado" ], result.receipt.fetch(:eligible_target_venues)
+    assert_equal [ "nado" ], result.receipt.fetch(:dry_run_eligible_routes).map { |route| route.fetch(:to_venue) }
     assert_equal "nado", result.receipt.fetch(:selected_target_venue)
+    assert_equal false, result.receipt.fetch(:selected_route_live_available)
     assert_equal false, result.receipt.fetch(:live_available)
     assert_equal false, result.receipt.fetch(:would_migrate)
+  end
+
+  test "random planner does not exclude Nado decision route due live submit blocker" do
+    result = planner(
+      env: { "MIGRATION_ALLOWED_ROUTES" => "extended->nado" },
+      route_matrix: nado_live_blocked_route_matrix
+    ).plan(position: migration_position)
+
+    assert_equal "nado", result.receipt.fetch(:selected_target_venue)
+    assert_nil result.receipt.fetch(:decision_excluded_routes).find { |route| route.fetch(:to_venue) == "nado" }
+    live_blocked = result.receipt.fetch(:live_blocked_routes).find { |route| route.fetch(:to_venue) == "nado" }
+    assert live_blocked
+    assert_includes live_blocked.fetch(:live_blockers), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit"
   end
 
   test "random planner excludes Nado from live while Nado live is unavailable" do
     result = planner(env: { "MIGRATION_AUTO_ENABLED" => "true", "MIGRATION_AUTO_DRY_RUN_ONLY" => "false", "MIGRATION_ALLOW_NADO_LIVE" => "false", "MIGRATION_ALLOWED_ROUTES" => "extended->nado" }).plan(position: migration_position)
 
     assert_equal "nado", result.receipt.fetch(:selected_target_venue)
+    assert_equal [ "nado" ], result.receipt.fetch(:dry_run_eligible_routes).map { |route| route.fetch(:to_venue) }
+    assert_empty result.receipt.fetch(:live_eligible_routes)
+    assert_equal false, result.receipt.fetch(:selected_route_live_available)
     assert_equal false, result.receipt.fetch(:live_execution_enabled)
     assert_equal false, result.receipt.fetch(:live_available)
     assert_equal false, result.receipt.fetch(:would_migrate)
+  end
+
+  test "random planner output separates decision exclusions from live blockers" do
+    result = planner(route_matrix: nado_live_blocked_route_matrix).plan(position: migration_position)
+
+    assert_equal %w[ethereal nado], result.receipt.fetch(:dry_run_eligible_routes).map { |route| route.fetch(:to_venue) }.sort
+    assert_empty result.receipt.fetch(:decision_excluded_routes)
+    assert_equal %w[ethereal nado], result.receipt.fetch(:live_blocked_routes).map { |route| route.fetch(:to_venue) }.sort
+    assert result.receipt.fetch(:live_blocked_routes).all? { |route| route.fetch(:live_execution_eligible) == false }
   end
 
   test "random planner is deterministic with seed" do
@@ -87,6 +114,16 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal first.fetch(:selected_route), second.fetch(:selected_route)
     assert_equal first.fetch(:selection_id), second.fetch(:selection_id)
     assert_equal "same-seed", first.fetch(:random_seed)
+  end
+
+  test "different seeds can select ethereal or nado from dry run eligible routes" do
+    selected_targets = 1.upto(20).map do |index|
+      seed = "seed-#{index}"
+      planner(random_seed: seed).plan(position: migration_position).receipt.fetch(:selected_target_venue)
+    end.uniq
+
+    assert_includes selected_targets, "ethereal"
+    assert_includes selected_targets, "nado"
   end
 
   private
@@ -154,8 +191,17 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     {
       routes: [
         route("extended", "ethereal", "READY_FOR_DRY_RUN"),
-        route("extended", "nado", "READY_FOR_DRY_RUN", blockers: [ "Nado live migration path not implemented." ]),
+        route("extended", "nado", "READY_FOR_DRY_RUN", blockers: nado_live_blockers),
         route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate." ])
+      ]
+    }
+  end
+
+  def nado_live_blocked_route_matrix
+    {
+      routes: [
+        route("extended", "ethereal", "READY_FOR_DRY_RUN"),
+        route("extended", "nado", "READY_FOR_DRY_RUN", blockers: nado_live_blockers)
       ]
     }
   end
@@ -164,7 +210,7 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     {
       routes: [
         route("extended", "ethereal", "READY_FOR_DRY_RUN").merge(funding_rate: "-100", fee_score: "bad", unrealized_pnl: "999"),
-        route("extended", "nado", "READY_FOR_DRY_RUN", blockers: [ "Nado live migration path not implemented." ]).merge(funding_rate: "100", fee_score: "best", pnl_score: "best")
+        route("extended", "nado", "READY_FOR_DRY_RUN", blockers: nado_live_blockers).merge(funding_rate: "100", fee_score: "best", pnl_score: "best")
       ]
     }
   end
@@ -175,6 +221,13 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
 
   def incomplete_route_matrix
     { routes: [ route("extended", "ethereal", "PREVIEW_BLOCKED", blockers: [ "target short is unavailable in dashboard snapshot" ]) ] }
+  end
+
+  def nado_live_blockers
+    [
+      "Nado live migration path not implemented.",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit"
+    ]
   end
 
   def route(from, to, status, blockers: [])

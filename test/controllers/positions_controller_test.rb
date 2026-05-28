@@ -530,6 +530,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Daily venue rotation readiness", response.body
     assert_match "Random Rotation Planner", response.body
     assert_match "Run random rotation decision", response.body
+    assert_match "Dry-run eligible targets", response.body
+    assert_match "Live eligible routes", response.body
+    assert_match "Selected route live", response.body
     assert_match "Extended → Nado", response.body
     assert_match "Nado → Ethereal", response.body
     assert_match "Run dry-run route proof", response.body
