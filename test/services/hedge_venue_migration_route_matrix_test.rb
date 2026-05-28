@@ -85,6 +85,10 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     assert_equal false, item.fetch(:live_available)
     assert_equal "PREVIEW_BLOCKED", item.fetch(:route_status)
     assert_includes item.fetch(:blockers), "source venue Nado has no current short to migrate."
+    assert_equal true, item.dig(:nado_readiness, :nado_reduce_only_close_preview_available)
+    assert_equal "synthetic", item.dig(:nado_readiness, :nado_reduce_only_close_preview_proof_mode)
+    assert_equal false, item.dig(:nado_readiness, :production_source_route_available)
+    assert_equal true, item.dig(:nado_readiness, :route_still_blocked_because_source_flat)
   end
 
   test "proof receipts are written with zero orders and signatures" do
@@ -120,6 +124,34 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
       assert_equal true, receipt.fetch("planned_source_leg").fetch("reduce_only")
       assert_equal "0.4", receipt.fetch("planned_source_leg").fetch("size_eth")
       assert_equal 0, receipt.fetch("orders_submitted")
+      assert_equal 0, receipt.fetch("signatures_created")
+    end
+  end
+
+  test "proof receipts include synthetic Nado source close proof when production Nado is flat" do
+    Dir.mktmpdir do |dir|
+      service = FakeNadoService.new(current_position: nil)
+      summary = HedgeVenueMigrationRouteMatrix.new(position: migration_position, receipt_dir: dir, nado_service: service).prove_routes!
+      rows = File.readlines(summary.fetch(:receipt_paths).first).map { |line| JSON.parse(line) }
+      receipt = rows.find { |row| row["from_venue"] == "nado" && row["to_venue"] == "extended" && row["mode"] == "full" }
+
+      assert receipt
+      proof = receipt.fetch("nado_source_leg_preview_proof")
+      assert_nil receipt["planned_source_leg"]
+      assert_includes receipt.fetch("blockers"), "source venue Nado has no current short to migrate."
+      assert_equal true, receipt.fetch("nado_readiness").fetch("nado_reduce_only_close_preview_available")
+      assert_equal "synthetic", receipt.fetch("nado_readiness").fetch("nado_reduce_only_close_preview_proof_mode")
+      assert_equal false, receipt.fetch("nado_readiness").fetch("production_source_route_available")
+      assert_equal true, receipt.fetch("nado_readiness").fetch("route_still_blocked_because_source_flat")
+      assert_equal "close_short", proof.fetch("action")
+      assert_equal "buy", proof.fetch("side")
+      assert_equal true, proof.fetch("reduce_only")
+      assert_equal true, proof.fetch("synthetic_proof")
+      assert_equal true, proof.fetch("not_current_position")
+      assert_equal "0.0", proof.fetch("production_current_short_eth")
+      assert_equal true, proof.fetch("route_still_blocked_because_source_flat")
+      assert_equal 0, receipt.fetch("orders_submitted")
+      assert_equal 0, receipt.fetch("orders_placed")
       assert_equal 0, receipt.fetch("signatures_created")
     end
   end

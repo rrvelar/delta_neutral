@@ -256,6 +256,9 @@ class HedgeVenueMigrationRouteMatrix
         :nado_market_read_available,
         :nado_open_short_preview_available,
         :nado_reduce_only_close_preview_available,
+        :nado_reduce_only_close_preview_proof_mode,
+        :production_source_route_available,
+        :route_still_blocked_because_source_flat,
         :nado_live_migration_supported
       )
     }
@@ -263,6 +266,7 @@ class HedgeVenueMigrationRouteMatrix
     fields[:nado_target_leg_preview] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?
     fields[:planned_source_leg] = readiness[:source_leg_preview] if from == "nado" && readiness[:source_leg_preview].present?
     fields[:nado_source_leg_preview] = readiness[:source_leg_preview] if from == "nado" && readiness[:source_leg_preview].present?
+    fields[:nado_source_leg_preview_proof] = readiness[:nado_source_leg_preview_proof] if from == "nado" && readiness[:nado_source_leg_preview_proof].present?
     fields
   end
 

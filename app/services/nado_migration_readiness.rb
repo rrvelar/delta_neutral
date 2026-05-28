@@ -1,5 +1,6 @@
 class NadoMigrationReadiness
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
+  DEFAULT_SYNTHETIC_PROOF_SHORT_ETH = BigDecimal("0.01")
   LIVE_BLOCKER = "Nado live migration path not implemented.".freeze
 
   def initialize(position: nil, position_id: nil, snapshot: nil, intended_role: "either", mode: "full", sequence: "target_first", env: ENV, nado_service: nil, synthetic_proof_short_eth: nil)
@@ -10,7 +11,7 @@ class NadoMigrationReadiness
     @sequence = sequence.to_s
     @env = env
     @nado_service = nado_service
-    @synthetic_proof_short_eth = synthetic_proof_short_eth
+    @synthetic_proof_short_eth = synthetic_proof_short_eth || env["NADO_MIGRATION_SYNTHETIC_PROOF_SHORT_ETH"] || DEFAULT_SYNTHETIC_PROOF_SHORT_ETH
   end
 
   def report
@@ -28,17 +29,19 @@ class NadoMigrationReadiness
 
     target_preview = target_leg_preview
     source_preview = source_leg_preview
+    source_proof = source_leg_preview_proof
     blockers << "Nado open/increase short payload preview unavailable." if target_role? && !target_preview_available?(target_preview)
-    blockers << "Nado reduce-only close/reduce payload preview unavailable." if source_role? && !source_preview_available?(source_preview)
+    blockers << "Nado reduce-only close/reduce payload preview unavailable." if source_role? && !source_preview_available?(source_preview) && !source_preview_available?(source_proof)
     blockers << "source venue Nado has no current short to migrate." if source_role? && nado_current_short&.zero?
 
     missing = missing_capabilities(
       target_preview: target_preview,
-      source_preview: source_preview
+      source_preview: source_preview,
+      source_proof: source_proof
     )
 
     {
-      status: readiness_status(blockers: blockers, target_preview: target_preview, source_preview: source_preview),
+      status: readiness_status(blockers: blockers, target_preview: target_preview, source_preview: source_preview, source_proof: source_proof),
       intended_role: intended_role,
       mode: mode,
       sequence: sequence,
@@ -51,15 +54,20 @@ class NadoMigrationReadiness
       nado_open_orders_read_diagnostics: nado_open_orders_read_diagnostics,
       nado_market_read_available: nado_market_read_available?,
       nado_open_short_preview_available: target_preview_available?(target_preview),
-      nado_reduce_only_close_preview_available: source_preview_available?(source_preview),
+      nado_reduce_only_close_preview_available: source_preview_available?(source_preview) || source_preview_available?(source_proof),
+      nado_reduce_only_close_preview_proof_mode: nado_current_short&.positive? ? "current_position" : "synthetic",
+      production_source_route_available: nado_current_short&.positive?,
+      route_still_blocked_because_source_flat: source_role? && nado_current_short&.zero?,
       nado_open_short_supported: target_preview_available?(target_preview),
-      nado_reduce_only_close_supported: source_preview_available?(source_preview),
+      nado_reduce_only_close_supported: source_preview_available?(source_preview) || source_preview_available?(source_proof),
       nado_leverage_margin_known: nado_market_read_available?,
       nado_live_enabled: bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED"),
       nado_auto_enabled: bool_env("AERODROME_NADO_AUTO_ENABLED"),
       nado_live_migration_supported: false,
       target_leg_preview: target_preview,
       source_leg_preview: source_preview,
+      nado_source_leg_preview_proof: source_proof,
+      source_leg_preview_proof: source_proof,
       blockers: blockers.uniq,
       warnings: warnings.uniq,
       missing_capabilities: missing.uniq,
@@ -129,7 +137,7 @@ class NadoMigrationReadiness
   end
 
   def nado_market_read_available?
-    [ target_leg_preview, source_leg_preview ].compact.any? { |preview| preview.dig(:payload_summary, :product_id).present? || preview.dig(:payload_summary, :rounded_price).present? }
+    [ target_leg_preview, source_leg_preview, source_leg_preview_proof ].compact.any? { |preview| preview.dig(:payload_summary, :product_id).present? || preview.dig(:payload_summary, :rounded_price).present? }
   end
 
   def nado_current_short
@@ -159,32 +167,48 @@ class NadoMigrationReadiness
   def source_leg_preview
     return @source_leg_preview if defined?(@source_leg_preview)
     return @source_leg_preview = nil unless source_role? && snapshot && position
-    return @source_leg_preview = nil unless source_preview_short&.positive?
+    return @source_leg_preview = nil unless nado_current_short&.positive?
 
-    size = source_leg_size
-    return @source_leg_preview = nil unless size&.positive?
+    @source_leg_preview = build_source_leg_preview(short: nado_current_short, synthetic: false)
+  end
+
+  def source_leg_preview_proof
+    return @source_leg_preview_proof if defined?(@source_leg_preview_proof)
+    return @source_leg_preview_proof = nil unless source_role? && snapshot && position
+    return @source_leg_preview_proof = source_leg_preview if nado_current_short&.positive?
+
+    @source_leg_preview_proof = build_source_leg_preview(short: synthetic_proof_short, synthetic: true)
+  end
+
+  def build_source_leg_preview(short:, synthetic:)
+    return nil unless short&.positive?
+
+    size = source_leg_size(short)
+    return nil unless size&.positive?
 
     service_action = mode == "full" ? "close" : "rebalance"
     service_size = mode == "full" ? size : -size
-    expected_after = [ source_preview_short - size, BigDecimal("0") ].max
+    expected_after = [ short - size, BigDecimal("0") ].max
     order = nado_service.build_order_preview(
       position: position,
       action: service_action,
       size_eth: service_size,
       max_slippage: DEFAULT_MAX_SLIPPAGE,
-      current_position: source_preview_position
+      current_position: synthetic ? synthetic_position(short) : nado_position
     )
-    @source_leg_preview = leg_preview(
+    leg_preview(
       order: order,
       action: mode == "full" ? "close_short" : "decrease_short",
       size: size,
-      expected_after: expected_after
+      expected_after: expected_after,
+      synthetic: synthetic,
+      production_current_short: nado_current_short
     )
   rescue => e
-    @source_leg_preview = unavailable_preview("Nado source leg preview unavailable: #{e.class}: #{e.message}")
+    unavailable_preview("Nado source leg preview unavailable: #{e.class}: #{e.message}")
   end
 
-  def leg_preview(order:, action:, size:, expected_after:)
+  def leg_preview(order:, action:, size:, expected_after:, synthetic: false, production_current_short: nil)
     summary = order.fetch(:summary, {}).to_h.symbolize_keys
     {
       venue: "nado",
@@ -216,6 +240,10 @@ class NadoMigrationReadiness
       blockers: order.fetch(:blockers, []),
       warnings: order.fetch(:warnings, []),
       ok: order.fetch(:ok, false),
+      synthetic_proof: synthetic,
+      not_current_position: synthetic,
+      production_current_short_eth: decimal_string(production_current_short),
+      route_still_blocked_because_source_flat: synthetic && production_current_short&.zero?,
       submitted: false,
       signatures_created: 0,
       orders_submitted: 0
@@ -249,32 +277,25 @@ class NadoMigrationReadiness
     nil
   end
 
-  def source_leg_size
-    return source_preview_short if mode == "full"
+  def source_leg_size(short)
+    return short if mode == "full"
 
-    [ source_preview_short, BigDecimal(ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")) ].min
+    [ short, BigDecimal(ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")) ].min
   rescue ArgumentError
-    source_preview_short
+    short
   end
 
-  def source_preview_position
-    return nado_position if nado_current_short&.positive?
-    return nil unless synthetic_proof_short&.positive?
-
+  def synthetic_position(short)
     {
       venue: "Nado",
       asset: "ETH",
       symbol: "ETH-PERP",
       side: "short",
-      size: -synthetic_proof_short,
-      short_size: synthetic_proof_short,
+      size: -short,
+      short_size: short,
       margin_mode: "isolated",
-      isolated_margin_usd: synthetic_proof_short * BigDecimal("2500")
+      isolated_margin_usd: short * BigDecimal("2500")
     }
-  end
-
-  def source_preview_short
-    nado_current_short&.positive? ? nado_current_short : synthetic_proof_short
   end
 
   def synthetic_proof_short
@@ -293,25 +314,25 @@ class NadoMigrationReadiness
     preview.present? && preview.fetch(:ok, false) && preview.fetch(:blockers, []).empty?
   end
 
-  def missing_capabilities(target_preview:, source_preview:)
+  def missing_capabilities(target_preview:, source_preview:, source_proof:)
     missing = []
     missing << "Nado current position readback" unless nado_position_read_available?
     missing << "Nado open orders readback" unless nado_open_orders_read_available?
     missing << "Nado market metadata" unless nado_market_read_available?
     missing << "Nado open/increase short payload preview" if target_role? && !target_preview_available?(target_preview)
-    missing << "Nado reduce-only close/reduce payload preview" if source_role? && !source_preview_available?(source_preview)
+    missing << "Nado reduce-only close/reduce payload preview" if source_role? && !source_preview_available?(source_preview) && !source_preview_available?(source_proof)
     missing << LIVE_BLOCKER
     missing
   end
 
-  def readiness_status(blockers:, target_preview:, source_preview:)
+  def readiness_status(blockers:, target_preview:, source_preview:, source_proof:)
     return "not_implemented" unless nado_position_read_available? || nado_market_read_available?
 
     preview_ok = (!target_role? || target_preview_available?(target_preview)) &&
-      (!source_role? || source_preview_available?(source_preview))
+      (!source_role? || source_preview_available?(source_preview) || source_preview_available?(source_proof))
     operational_blockers = blockers - [ LIVE_BLOCKER ]
     return "partial" if preview_ok && operational_blockers.empty?
-    return "partial" if [ target_preview, source_preview ].compact.any? { |preview| preview.fetch(:ok, false) }
+    return "partial" if [ target_preview, source_preview, source_proof ].compact.any? { |preview| preview.fetch(:ok, false) }
 
     "blocked"
   end

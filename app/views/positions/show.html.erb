@@ -510,7 +510,10 @@ end %>
                   <td class="max-w-md px-3 py-2 text-gray-400">
                     <% if route[:nado_readiness].present? %>
                       <span class="block text-gray-300">Nado: <%= route.dig(:nado_readiness, :nado_flat).nil? ? "unknown" : (route.dig(:nado_readiness, :nado_flat) ? "flat" : "#{format_venue_eth_amount(route.dig(:nado_readiness, :nado_current_short_eth))} ETH short") %>; open orders <%= route.dig(:nado_readiness, :nado_open_orders_count).nil? ? "unknown" : route.dig(:nado_readiness, :nado_open_orders_count) %>.</span>
-                      <span class="block text-gray-500">Nado previews: open <%= route.dig(:nado_readiness, :nado_open_short_preview_available) ? "yes" : "no" %>, close <%= route.dig(:nado_readiness, :nado_reduce_only_close_preview_available) ? "yes" : "no" %>.</span>
+                      <span class="block text-gray-500">Nado previews: open <%= route.dig(:nado_readiness, :nado_open_short_preview_available) ? "yes" : "no" %>, close <%= route.dig(:nado_readiness, :nado_reduce_only_close_preview_available) ? "proven (#{route.dig(:nado_readiness, :nado_reduce_only_close_preview_proof_mode)})" : "no" %>.</span>
+                      <% if route.dig(:nado_readiness, :route_still_blocked_because_source_flat) %>
+                        <span class="block text-yellow-200">Source route blocked because production Nado is flat.</span>
+                      <% end %>
                       <% if route.dig(:nado_readiness, :nado_open_orders_unavailable_reason).present? %>
                         <span class="block text-gray-500"><%= route.dig(:nado_readiness, :nado_open_orders_unavailable_reason) %></span>
                       <% end %>

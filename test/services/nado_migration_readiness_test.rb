@@ -93,12 +93,25 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
   test "source preview can use synthetic proof short without live Nado short" do
     service = FakeNadoService.new(current_position: nil)
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "source", nado_service: service, synthetic_proof_short_eth: "0.25").report
-    preview = report.fetch(:source_leg_preview)
+    preview = report.fetch(:nado_source_leg_preview_proof)
 
     assert_equal true, report.fetch(:nado_flat)
+    assert_nil report.fetch(:source_leg_preview)
     assert_equal true, report.fetch(:nado_reduce_only_close_preview_available)
+    assert_equal "synthetic", report.fetch(:nado_reduce_only_close_preview_proof_mode)
+    assert_equal false, report.fetch(:production_source_route_available)
+    assert_equal true, report.fetch(:route_still_blocked_because_source_flat)
+    assert_includes report.fetch(:blockers), "source venue Nado has no current short to migrate."
+    assert_equal true, preview.fetch(:synthetic_proof)
+    assert_equal true, preview.fetch(:not_current_position)
+    assert_equal "0.0", preview.fetch(:production_current_short_eth)
+    assert_equal true, preview.fetch(:route_still_blocked_because_source_flat)
+    assert_equal "buy", preview.fetch(:side)
+    assert_equal true, preview.fetch(:reduce_only)
     assert_equal "0.25", preview.fetch(:size_eth)
     assert_equal "0.0", preview.fetch(:expected_after_short_eth)
+    assert_equal 0, preview.fetch(:orders_submitted)
+    assert_equal 0, preview.fetch(:signatures_created)
   end
 
   private
