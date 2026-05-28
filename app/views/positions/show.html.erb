@@ -398,11 +398,27 @@ end %>
             <p class="mt-2 text-sm text-gray-300">No generic migration receipt yet.</p>
           <% end %>
           <div class="mt-4 border-t border-gray-800 pt-3">
-            <p class="text-xs uppercase tracking-wide text-gray-500">Auto migration</p>
-            <p class="mt-1 text-sm text-gray-300">Decision-only. <%= auto_migration_decision[:would_migrate] ? "Would recommend migration if enabled." : "No-op / blocked." %></p>
-            <p class="mt-1 text-xs text-gray-500">No signatures or orders.</p>
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="text-xs uppercase tracking-wide text-gray-500">Random Rotation Planner</p>
+                <p class="mt-1 text-sm text-gray-300">Decision-only random rotation. No economics, funding, fees, PnL, scoring, signatures, or orders.</p>
+              </div>
+              <%= button_to "Run random rotation decision", migration_random_rotation_decision_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            </div>
+            <div class="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
+              <div><span class="text-gray-500">Strategy</span><p class="text-white"><%= auto_migration_decision[:strategy].presence || "random_rotation" %></p></div>
+              <div><span class="text-gray-500">Current venue</span><p class="text-white"><%= HedgeVenues.label(auto_migration_decision[:current_venue]) %></p></div>
+              <div><span class="text-gray-500">Eligible targets</span><p class="text-white"><%= Array(auto_migration_decision[:eligible_target_venues]).map { |venue| HedgeVenues.label(venue) }.presence&.join(", ") || "none" %></p></div>
+              <div><span class="text-gray-500">Selected route</span><p class="text-white"><%= auto_migration_decision[:selected_route].present? ? "#{HedgeVenues.label(auto_migration_decision.dig(:selected_route, :from_venue))} -> #{HedgeVenues.label(auto_migration_decision.dig(:selected_route, :to_venue))}" : "none" %></p></div>
+              <div><span class="text-gray-500">Daily limit</span><p class="text-white"><%= auto_migration_decision.dig(:daily_limit_status, :count) || 0 %>/<%= auto_migration_decision.dig(:daily_limit_status, :max_per_day) || 1 %></p></div>
+              <div><span class="text-gray-500">Cooldown</span><p class="text-white"><%= auto_migration_decision.dig(:cooldown_status, :remaining_hours).to_f.round(2) %>h remaining</p></div>
+            </div>
+            <p class="mt-2 text-xs text-gray-500">Live execution: blocked/gated. would_migrate=<%= auto_migration_decision[:would_migrate] ? "true" : "false" %>.</p>
             <% if auto_migration_decision[:blockers].present? %>
               <p class="mt-1 break-words text-xs text-gray-500"><%= auto_migration_decision[:blockers].first %></p>
+            <% end %>
+            <% if auto_migration_decision[:excluded_routes].present? %>
+              <p class="mt-2 break-words text-xs text-gray-500">Excluded: <%= auto_migration_decision[:excluded_routes].first(2).map { |route| "#{HedgeVenues.label(route[:from_venue])}->#{HedgeVenues.label(route[:to_venue])}: #{Array(route[:reasons]).first}" }.join("; ") %></p>
             <% end %>
           </div>
         </div>

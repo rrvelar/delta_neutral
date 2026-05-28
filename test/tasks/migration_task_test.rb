@@ -5,6 +5,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks unless Rake::Task.task_defined?("migration:prove_routes")
     Rake::Task["migration:prove_routes"].reenable
+    Rake::Task["migration:random_rotation_decision"].reenable if Rake::Task.task_defined?("migration:random_rotation_decision")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -75,6 +76,31 @@ class MigrationTaskTest < ActiveSupport::TestCase
       assert_equal true, summary.fetch("route_plans_used_fresh_snapshot")
       assert_not_includes route.fetch("blockers"), "Position dashboard snapshot is stale; refresh read-only data before planning migration."
     end
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "random rotation decision task writes decision receipt" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    receipt_path = Rails.root.join("storage/hedge_migration_random_rotation/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    before_lines = File.exist?(receipt_path) ? File.readlines(receipt_path).size : 0
+
+    out, = capture_io { Rake::Task["migration:random_rotation_decision"].invoke }
+    summary = JSON.parse(out)
+
+    assert_equal "random_rotation_decision", summary.fetch("action")
+    assert_equal position.id, summary.fetch("position_id")
+    assert_equal "random_rotation", summary.fetch("strategy")
+    assert_equal false, summary.fetch("would_migrate")
+    assert_equal 0, summary.fetch("orders_submitted")
+    assert_equal 0, summary.fetch("signatures_created")
+    assert_match "storage/hedge_migration_random_rotation", summary.fetch("receipt_path")
+    lines = File.readlines(receipt_path).drop(before_lines)
+    receipt = lines.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "random_rotation_decision" }
+    assert receipt
+    assert_equal 0, receipt.fetch("orders_placed")
+    assert_equal 0, receipt.fetch("signatures_created")
   ensure
     ENV.delete("position_id")
   end

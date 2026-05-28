@@ -121,7 +121,7 @@ class PositionsController < ApplicationController
       @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
       @migration_control_plan = cached_migration_control_plan
       @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
-      @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new.plan(position: @position, recommended_venue: selected_migration_to_venue, reason: nil).receipt
+      @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
       @production_health = ExtendedAutoOperationalHealth.new(position: @position).report
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
@@ -265,6 +265,16 @@ class PositionsController < ApplicationController
     summary = HedgeVenueMigrationRouteMatrix.new(position: position).prove_routes!
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
       notice: "Dry-run route proof wrote #{summary.fetch(:receipts_written)} receipt rows. No orders or signatures."
+  end
+
+  def migration_random_rotation_decision
+    position = load_position_for_migration
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: position).report
+    planner = HedgeVenueAutoMigrationPlanner.new(route_matrix: matrix)
+    result = planner.plan(position: position)
+    path = planner.write_receipt(result.receipt)
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
+      notice: "Random rotation decision recorded#{path ? " at #{path}" : ""}. No orders or signatures."
   end
 
   private

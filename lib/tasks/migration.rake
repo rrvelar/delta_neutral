@@ -58,6 +58,30 @@ namespace :migration do
     puts JSON.pretty_generate(summary)
   end
 
+  desc "Write a read-only random venue rotation decision receipt for a position"
+  task random_rotation_decision: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:hedge, :position_dashboard_snapshot).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        status: "blocked",
+        action: "random_rotation_decision",
+        position_id: position_id,
+        blockers: [ "Position #{position_id || '(missing)'} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: position).report
+    planner = HedgeVenueAutoMigrationPlanner.new(route_matrix: matrix)
+    result = planner.plan(position: position)
+    path = planner.write_receipt(result.receipt)
+    puts JSON.pretty_generate(result.receipt.merge(receipt_path: path&.to_s))
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false } unless refresh_snapshot_for_route_proof?
 
