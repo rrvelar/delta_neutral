@@ -26,6 +26,17 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal 1, service.preview_calls.size
   end
 
+  test "open orders readback unavailable is explicit and non fatal" do
+    service = FakeNadoService.new(current_position: nil, open_orders_count: nil, open_orders_reason: "Nado open orders endpoint unavailable in fixture.")
+    report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
+
+    assert_equal false, report.fetch(:nado_open_orders_read_available)
+    assert_nil report.fetch(:nado_open_orders_count)
+    assert_equal "Nado open orders endpoint unavailable in fixture.", report.fetch(:nado_open_orders_unavailable_reason)
+    assert_includes report.fetch(:blockers), "Nado open orders readback is unavailable."
+    assert_includes report.fetch(:blockers), "Nado open orders endpoint unavailable in fixture."
+  end
+
   test "target leg dry run preview can be built from snapshot target" do
     service = FakeNadoService.new(current_position: nil)
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
@@ -50,6 +61,35 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal "0.4", preview.fetch(:size_eth)
     assert_equal "0.0", preview.fetch(:expected_after_short_eth)
     assert_equal "close", service.preview_calls.first.fetch(:action)
+    assert_equal 0, preview.fetch(:orders_submitted)
+    assert_equal 0, preview.fetch(:signatures_created)
+  end
+
+  test "stepwise source preview uses step size for Nado decrease" do
+    service = FakeNadoService.new(current_position: { short_size: BigDecimal("0.4"), size: BigDecimal("-0.4") })
+    with_env("MIGRATION_MAX_STEP_SIZE_ETH" => "0.05") do
+      report = NadoMigrationReadiness.new(position: migration_position, intended_role: "source", mode: "stepwise", nado_service: service).report
+      preview = report.fetch(:source_leg_preview)
+
+      assert_equal "decrease_short", preview.fetch(:action)
+      assert_equal "buy", preview.fetch(:side)
+      assert_equal true, preview.fetch(:reduce_only)
+      assert_equal "0.05", preview.fetch(:size_eth)
+      assert_equal "0.35", preview.fetch(:expected_after_short_eth)
+      assert_equal "rebalance", service.preview_calls.first.fetch(:action)
+      assert_equal "-0.05", service.preview_calls.first.fetch(:size_eth)
+    end
+  end
+
+  test "source preview can use synthetic proof short without live Nado short" do
+    service = FakeNadoService.new(current_position: nil)
+    report = NadoMigrationReadiness.new(position: migration_position, intended_role: "source", nado_service: service, synthetic_proof_short_eth: "0.25").report
+    preview = report.fetch(:source_leg_preview)
+
+    assert_equal true, report.fetch(:nado_flat)
+    assert_equal true, report.fetch(:nado_reduce_only_close_preview_available)
+    assert_equal "0.25", preview.fetch(:size_eth)
+    assert_equal "0.0", preview.fetch(:expected_after_short_eth)
   end
 
   private
@@ -57,8 +97,10 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
   class FakeNadoService
     attr_reader :preview_calls
 
-    def initialize(current_position:)
+    def initialize(current_position:, open_orders_count: 0, open_orders_reason: nil)
       @current_position = current_position
+      @open_orders_count = open_orders_count
+      @open_orders_reason = open_orders_reason
       @preview_calls = []
     end
 
@@ -67,7 +109,7 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     end
 
     def account_state
-      { open_orders_count: 0, blockers: [], warnings: [] }
+      { open_orders_count: @open_orders_count, open_orders_unavailable_reason: @open_orders_reason, blockers: [], warnings: [] }
     end
 
     def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position:)
@@ -134,5 +176,13 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
       leverage_margin_gate_status: "pass"
     )
     position
+  end
+
+  def with_env(values)
+    old = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    old.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 end

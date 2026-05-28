@@ -43,6 +43,7 @@ module HedgeVenues
     def account_state
       return super if config_blockers.any?
 
+      open_orders = open_orders_count
       {
         venue: venue_name,
         mode: mode,
@@ -60,6 +61,9 @@ module HedgeVenues
         unresolved_position_like_count: unresolved_position_like_rows.size,
         normalized_positions_count: positions.size,
         hedge_positions_count: eth_perp_positions.size,
+        open_orders_read_available: !open_orders.nil?,
+        open_orders_unavailable_reason: open_orders_unavailable_reason,
+        open_orders_count: open_orders,
         current_short_eth: current_eth_perp_short&.dig(:short_size)&.to_s("F"),
         current_side: current_eth_perp_short&.dig(:side),
         product_id: current_eth_perp_short&.dig(:product_id),
@@ -68,6 +72,26 @@ module HedgeVenues
         warnings: warnings,
         blockers: blockers
       }
+    end
+
+    def open_orders_count
+      return nil if config_blockers.any?
+
+      rows = open_orders_rows
+      return nil if rows.nil?
+
+      rows.count { |row| nado_eth_order_row?(row) }
+    rescue => e
+      @open_orders_read_error = "Nado open orders readback unavailable: #{e.class}: #{e.message}"
+      nil
+    end
+
+    def open_orders_unavailable_reason
+      return "Nado read-only config is incomplete." if config_blockers.any?
+      return @open_orders_read_error if @open_orders_read_error.present?
+      return nil unless defined?(@open_orders_rows) && @open_orders_rows.nil?
+
+      "Nado open orders query returned no parseable order list."
     end
 
     def blockers
@@ -79,7 +103,7 @@ module HedgeVenues
       [
         "Nado preview applies configured size increment rounding when available.",
         "Nado account readback uses GET-only gateway queries when read-only config is supplied."
-      ] + parser_warnings + @read_warnings
+      ] + parser_warnings + @read_warnings + Array(@open_orders_read_error)
     end
 
     def raw_positions_present_but_unnormalized?
@@ -153,6 +177,24 @@ module HedgeVenues
     rescue => e
       @read_warnings << "Nado isolated position readback unavailable: #{e.class}: #{e.message}"
       {}
+    end
+
+    def open_orders_rows
+      return @open_orders_rows if defined?(@open_orders_rows)
+
+      raw_response = get_json("/query", type: "open_orders", subaccount: subaccount)
+      response = raw_response.is_a?(Array) ? raw_response : response_payload(raw_response)
+      rows = response["open_orders"] || response["orders"] || response["data"] || response
+      @open_orders_rows = rows.is_a?(Array) ? rows.select { |row| row.is_a?(Hash) } : nil
+    rescue => e
+      @open_orders_read_error = "Nado open orders readback unavailable: #{e.class}: #{e.message}"
+      @open_orders_rows = nil
+    end
+
+    def nado_eth_order_row?(row)
+      product_id = product_id_from(row)
+      symbol = canonical_symbol(row["symbol"] || row["market"] || row["ticker"] || row["product"] || "perp_product:#{product_id}")
+      eth_perp_position?(symbol, product_id)
     end
 
     def raw_position_rows

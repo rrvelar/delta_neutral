@@ -229,8 +229,10 @@ class HedgeVenueMigrationRouteMatrix
     return false unless readiness.fetch(:nado_open_orders_read_available)
     return false unless readiness.fetch(:nado_open_orders_count).to_i.zero?
     return readiness.fetch(:nado_open_short_preview_available) if to == "nado"
-    return readiness.fetch(:nado_reduce_only_close_preview_available) if from == "nado"
+    return readiness.fetch(:nado_reduce_only_close_preview_available) && BigDecimal(readiness.fetch(:nado_current_short_eth).to_s).positive? if from == "nado"
 
+    false
+  rescue ArgumentError
     false
   end
 
@@ -249,6 +251,7 @@ class HedgeVenueMigrationRouteMatrix
         :nado_current_short_eth,
         :nado_flat,
         :nado_open_orders_count,
+        :nado_open_orders_unavailable_reason,
         :nado_market_read_available,
         :nado_open_short_preview_available,
         :nado_reduce_only_close_preview_available,
@@ -256,7 +259,9 @@ class HedgeVenueMigrationRouteMatrix
       )
     }
     fields[:planned_target_leg] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?
+    fields[:nado_target_leg_preview] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?
     fields[:planned_source_leg] = readiness[:source_leg_preview] if from == "nado" && readiness[:source_leg_preview].present?
+    fields[:nado_source_leg_preview] = readiness[:source_leg_preview] if from == "nado" && readiness[:source_leg_preview].present?
     fields
   end
 

@@ -641,6 +641,48 @@ module HedgeVenues
       assert_equal "type=subaccount_info&subaccount=0xsubaccount", calls.first.query
     end
 
+    test "nado open orders count uses read only query when available" do
+      calls = []
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        calls << uri
+        if uri.query.include?("open_orders")
+          {
+            data: {
+              open_orders: [
+                { product_id: 4, symbol: "ETH-PERP", id: "eth-order" },
+                { product_id: 9, symbol: "BTC-PERP", id: "btc-order" }
+              ]
+            }
+          }.to_json
+        elsif uri.query.include?("isolated_positions")
+          { data: { isolated_positions: [] } }.to_json
+        else
+          { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+        end
+      })
+
+      state = venue.account_state
+
+      assert_equal true, state.fetch(:open_orders_read_available)
+      assert_equal 1, state.fetch(:open_orders_count)
+      assert_nil state.fetch(:open_orders_unavailable_reason)
+      assert calls.any? { |uri| uri.query.include?("type=open_orders") }
+    end
+
+    test "nado open orders unavailable is non fatal" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        raise "open orders unavailable" if uri.query.include?("open_orders")
+
+        { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+      })
+
+      state = venue.account_state
+
+      assert_equal false, state.fetch(:open_orders_read_available)
+      assert_nil state.fetch(:open_orders_count)
+      assert_match "Nado open orders readback unavailable", state.fetch(:open_orders_unavailable_reason)
+    end
+
     test "nado read position parses cross margin ETH-PERP short from subaccount info" do
       venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(_uri) { nado_cross_margin_response(amount: "-955000000000000000").to_json })
 

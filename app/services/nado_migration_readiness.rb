@@ -2,7 +2,7 @@ class NadoMigrationReadiness
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   LIVE_BLOCKER = "Nado live migration path not implemented.".freeze
 
-  def initialize(position: nil, position_id: nil, snapshot: nil, intended_role: "either", mode: "full", sequence: "target_first", env: ENV, nado_service: nil)
+  def initialize(position: nil, position_id: nil, snapshot: nil, intended_role: "either", mode: "full", sequence: "target_first", env: ENV, nado_service: nil, synthetic_proof_short_eth: nil)
     @position = position || Position.find_by(id: position_id)
     @snapshot = snapshot || @position&.position_dashboard_snapshot
     @intended_role = intended_role.to_s
@@ -10,6 +10,7 @@ class NadoMigrationReadiness
     @sequence = sequence.to_s
     @env = env
     @nado_service = nado_service
+    @synthetic_proof_short_eth = synthetic_proof_short_eth
   end
 
   def report
@@ -20,6 +21,7 @@ class NadoMigrationReadiness
     blockers << LIVE_BLOCKER
     blockers << "Nado close/open readback proof required." unless nado_position_read_available?
     blockers << "Nado open orders readback is unavailable." unless nado_open_orders_read_available?
+    blockers << nado_open_orders_unavailable_reason if !nado_open_orders_read_available? && nado_open_orders_unavailable_reason.present?
     blockers << "Nado open orders must be zero for migration proof." if nado_open_orders_count.to_i.positive?
     blockers << "Nado market metadata is unavailable." unless nado_market_read_available?
     blockers.concat(account_blockers)
@@ -28,6 +30,7 @@ class NadoMigrationReadiness
     source_preview = source_leg_preview
     blockers << "Nado open/increase short payload preview unavailable." if target_role? && !target_preview_available?(target_preview)
     blockers << "Nado reduce-only close/reduce payload preview unavailable." if source_role? && !source_preview_available?(source_preview)
+    blockers << "source venue Nado has no current short to migrate." if source_role? && nado_current_short&.zero?
 
     missing = missing_capabilities(
       target_preview: target_preview,
@@ -44,6 +47,7 @@ class NadoMigrationReadiness
       nado_current_short_eth: decimal_string(nado_current_short),
       nado_flat: nado_current_short&.zero?,
       nado_open_orders_count: nado_open_orders_count,
+      nado_open_orders_unavailable_reason: nado_open_orders_unavailable_reason,
       nado_market_read_available: nado_market_read_available?,
       nado_open_short_preview_available: target_preview_available?(target_preview),
       nado_reduce_only_close_preview_available: source_preview_available?(source_preview),
@@ -66,7 +70,7 @@ class NadoMigrationReadiness
 
   private
 
-  attr_reader :position, :snapshot, :intended_role, :mode, :sequence, :env
+  attr_reader :position, :snapshot, :intended_role, :mode, :sequence, :env, :synthetic_proof_short_eth
 
   def nado_service
     @nado_service ||= NadoHedgeExecutionService.new(env: env)
@@ -111,6 +115,10 @@ class NadoMigrationReadiness
     raw.to_i
   end
 
+  def nado_open_orders_unavailable_reason
+    account_state[:open_orders_unavailable_reason] || account_state["open_orders_unavailable_reason"] || "Nado open orders endpoint is unavailable or not configured."
+  end
+
   def account_blockers
     Array(account_state[:blockers] || account_state["blockers"])
   end
@@ -146,19 +154,27 @@ class NadoMigrationReadiness
   def source_leg_preview
     return @source_leg_preview if defined?(@source_leg_preview)
     return @source_leg_preview = nil unless source_role? && snapshot && position
-    return @source_leg_preview = nil unless nado_current_short&.positive?
+    return @source_leg_preview = nil unless source_preview_short&.positive?
 
     size = source_leg_size
     return @source_leg_preview = nil unless size&.positive?
 
+    service_action = mode == "full" ? "close" : "rebalance"
+    service_size = mode == "full" ? size : -size
+    expected_after = [ source_preview_short - size, BigDecimal("0") ].max
     order = nado_service.build_order_preview(
       position: position,
-      action: "close",
-      size_eth: size,
+      action: service_action,
+      size_eth: service_size,
       max_slippage: DEFAULT_MAX_SLIPPAGE,
-      current_position: nado_position == :unavailable ? nil : nado_position
+      current_position: source_preview_position
     )
-    @source_leg_preview = leg_preview(order: order, action: "close", size: size, expected_after: BigDecimal("0"))
+    @source_leg_preview = leg_preview(
+      order: order,
+      action: mode == "full" ? "close_short" : "decrease_short",
+      size: size,
+      expected_after: expected_after
+    )
   rescue => e
     @source_leg_preview = unavailable_preview("Nado source leg preview unavailable: #{e.class}: #{e.message}")
   end
@@ -229,11 +245,39 @@ class NadoMigrationReadiness
   end
 
   def source_leg_size
-    return nado_current_short if mode == "full"
+    return source_preview_short if mode == "full"
 
-    [ nado_current_short, BigDecimal(ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")) ].min
+    [ source_preview_short, BigDecimal(ENV.fetch("MIGRATION_MAX_STEP_SIZE_ETH", "0.01")) ].min
   rescue ArgumentError
-    nado_current_short
+    source_preview_short
+  end
+
+  def source_preview_position
+    return nado_position if nado_current_short&.positive?
+    return nil unless synthetic_proof_short&.positive?
+
+    {
+      venue: "Nado",
+      asset: "ETH",
+      symbol: "ETH-PERP",
+      side: "short",
+      size: -synthetic_proof_short,
+      short_size: synthetic_proof_short,
+      margin_mode: "isolated",
+      isolated_margin_usd: synthetic_proof_short * BigDecimal("2500")
+    }
+  end
+
+  def source_preview_short
+    nado_current_short&.positive? ? nado_current_short : synthetic_proof_short
+  end
+
+  def synthetic_proof_short
+    return nil if synthetic_proof_short_eth.blank?
+
+    BigDecimal(synthetic_proof_short_eth.to_s)
+  rescue ArgumentError
+    nil
   end
 
   def target_preview_available?(preview)

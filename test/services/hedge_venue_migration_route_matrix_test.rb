@@ -62,6 +62,17 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     assert_equal "0.4", item.dig(:nado_readiness, :nado_current_short_eth)
   end
 
+  test "Nado source route with flat Nado blocks with source flat blocker" do
+    service = FakeNadoService.new(current_position: nil)
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position, nado_service: service).report
+    item = route(matrix, "nado", "extended")
+
+    assert_equal false, item.fetch(:preview_available)
+    assert_equal false, item.fetch(:live_available)
+    assert_equal "PREVIEW_BLOCKED", item.fetch(:route_status)
+    assert_includes item.fetch(:blockers), "source venue Nado has no current short to migrate."
+  end
+
   test "proof receipts are written with zero orders and signatures" do
     Dir.mktmpdir do |dir|
       summary = HedgeVenueMigrationRouteMatrix.new(position: migration_position, receipt_dir: dir).prove_routes!
@@ -71,6 +82,7 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
       assert_equal 24, summary.fetch(:receipts_written)
       assert rows.any? { |row| row["from_venue"] == "extended" && row["to_venue"] == "ethereal" && row["planned_first_leg"].present? }
       assert rows.any? { |row| row["to_venue"] == "nado" && row["nado_readiness"].present? }
+      assert rows.any? { |row| row["from_venue"] == "nado" && row["nado_readiness"].key?("nado_reduce_only_close_preview_available") }
       rows.each do |row|
         assert_equal "migration_route_proof", row.fetch("action")
         assert_equal 0, row.fetch("orders_submitted")
@@ -78,6 +90,23 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
         assert_equal 0, row.fetch("signatures_created")
         assert_no_match HedgeVenueMigrationExecutor::CONFIRMATION, row.to_json
       end
+    end
+  end
+
+  test "proof receipts include Nado source leg preview when current Nado short exists" do
+    Dir.mktmpdir do |dir|
+      service = FakeNadoService.new(current_position: { short_size: BigDecimal("0.4"), size: BigDecimal("-0.4") })
+      summary = HedgeVenueMigrationRouteMatrix.new(position: migration_position, receipt_dir: dir, nado_service: service).prove_routes!
+      rows = File.readlines(summary.fetch(:receipt_paths).first).map { |line| JSON.parse(line) }
+      receipt = rows.find { |row| row["from_venue"] == "nado" && row["to_venue"] == "extended" && row["mode"] == "full" }
+
+      assert receipt
+      assert_equal "close_short", receipt.fetch("planned_source_leg").fetch("action")
+      assert_equal "buy", receipt.fetch("planned_source_leg").fetch("side")
+      assert_equal true, receipt.fetch("planned_source_leg").fetch("reduce_only")
+      assert_equal "0.4", receipt.fetch("planned_source_leg").fetch("size_eth")
+      assert_equal 0, receipt.fetch("orders_submitted")
+      assert_equal 0, receipt.fetch("signatures_created")
     end
   end
 
