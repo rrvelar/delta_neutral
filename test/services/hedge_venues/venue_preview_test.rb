@@ -645,10 +645,12 @@ module HedgeVenues
       calls = []
       venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
         calls << uri
-        if uri.query.include?("open_orders")
+        if uri.query.include?("subaccount_orders")
+          assert uri.query.include?("sender=0xsubaccount")
+          assert uri.query.include?("product_id=4")
           {
             data: {
-              open_orders: [
+              orders: [
                 { product_id: 4, symbol: "ETH-PERP", id: "eth-order" },
                 { product_id: 9, symbol: "BTC-PERP", id: "btc-order" }
               ]
@@ -666,12 +668,13 @@ module HedgeVenues
       assert_equal true, state.fetch(:open_orders_read_available)
       assert_equal 1, state.fetch(:open_orders_count)
       assert_nil state.fetch(:open_orders_unavailable_reason)
-      assert calls.any? { |uri| uri.query.include?("type=open_orders") }
+      assert_equal "subaccount_orders", state.fetch(:open_orders_read_diagnostics).fetch(:query_type)
+      assert calls.any? { |uri| uri.query.include?("type=subaccount_orders") }
     end
 
     test "nado open orders unavailable is non fatal" do
       venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
-        raise "open orders unavailable" if uri.query.include?("open_orders")
+        raise "open orders unavailable" if uri.query.include?("subaccount_orders")
 
         { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
       })
@@ -681,6 +684,38 @@ module HedgeVenues
       assert_equal false, state.fetch(:open_orders_read_available)
       assert_nil state.fetch(:open_orders_count)
       assert_match "Nado open orders readback unavailable", state.fetch(:open_orders_unavailable_reason)
+      assert_equal "error", state.dig(:open_orders_read_diagnostics, :attempts, 0, :status)
+    end
+
+    test "nado open orders http 400 reports sanitized diagnostics" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        if uri.query.include?("subaccount_orders")
+          raise "Nado read-only GET failed with HTTP 400 path=/v1/query query_keys=product_id,sender,type body={\"error\":\"bad request\"}"
+        end
+
+        { data: { perp_products: [ { product_id: 4, symbol: "ETH-PERP" } ], perp_balances: [] } }.to_json
+      })
+
+      state = venue.account_state
+      reason = state.fetch(:open_orders_unavailable_reason)
+
+      assert_equal false, state.fetch(:open_orders_read_available)
+      assert_match "HTTP 400", reason
+      assert_match "query_keys=product_id,sender,type", reason
+      assert_no_match(/0xsubaccount|api[_-]?key|secret|private/i, reason)
+    end
+
+    test "nado http error formatter redacts query values" do
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env)
+      uri = URI("https://nado.example/v1/query?type=subaccount_orders&sender=0xsubaccountsecret&product_id=4")
+      response = Struct.new(:code, :body).new("400", '{"error":"bad request","api_key":"must-not-leak"}')
+
+      message = venue.send(:safe_http_error, uri, response)
+
+      assert_match "HTTP 400", message
+      assert_match "path=/v1/query", message
+      assert_match "query_keys=product_id,sender,type", message
+      assert_no_match(/0xsubaccountsecret|must-not-leak|api_key/i, message)
     end
 
     test "nado read position parses cross margin ETH-PERP short from subaccount info" do

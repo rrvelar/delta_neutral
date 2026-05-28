@@ -48,6 +48,7 @@ class NadoMigrationReadiness
       nado_flat: nado_current_short&.zero?,
       nado_open_orders_count: nado_open_orders_count,
       nado_open_orders_unavailable_reason: nado_open_orders_unavailable_reason,
+      nado_open_orders_read_diagnostics: nado_open_orders_read_diagnostics,
       nado_market_read_available: nado_market_read_available?,
       nado_open_short_preview_available: target_preview_available?(target_preview),
       nado_reduce_only_close_preview_available: source_preview_available?(source_preview),
@@ -117,6 +118,10 @@ class NadoMigrationReadiness
 
   def nado_open_orders_unavailable_reason
     account_state[:open_orders_unavailable_reason] || account_state["open_orders_unavailable_reason"] || "Nado open orders endpoint is unavailable or not configured."
+  end
+
+  def nado_open_orders_read_diagnostics
+    account_state[:open_orders_read_diagnostics] || account_state["open_orders_read_diagnostics"]
   end
 
   def account_blockers

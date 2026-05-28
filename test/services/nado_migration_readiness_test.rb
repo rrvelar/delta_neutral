@@ -37,6 +37,15 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "Nado open orders endpoint unavailable in fixture."
   end
 
+  test "open orders count greater than zero blocks readiness" do
+    service = FakeNadoService.new(current_position: nil, open_orders_count: 2)
+    report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
+
+    assert_equal true, report.fetch(:nado_open_orders_read_available)
+    assert_equal 2, report.fetch(:nado_open_orders_count)
+    assert_includes report.fetch(:blockers), "Nado open orders must be zero for migration proof."
+  end
+
   test "target leg dry run preview can be built from snapshot target" do
     service = FakeNadoService.new(current_position: nil)
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
@@ -109,7 +118,13 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     end
 
     def account_state
-      { open_orders_count: @open_orders_count, open_orders_unavailable_reason: @open_orders_reason, blockers: [], warnings: [] }
+      {
+        open_orders_count: @open_orders_count,
+        open_orders_unavailable_reason: @open_orders_reason,
+        open_orders_read_diagnostics: { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
+        blockers: [],
+        warnings: []
+      }
     end
 
     def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position:)

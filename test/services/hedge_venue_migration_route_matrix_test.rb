@@ -49,6 +49,20 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     assert_equal "READY_FOR_DRY_RUN", item.fetch(:route_status)
     assert_equal "blocked_for_live", item.fetch(:readiness_status)
     assert_equal "0.0", item.dig(:nado_readiness, :nado_current_short_eth)
+    assert_not_includes item.fetch(:blockers), "Nado open orders readback is unavailable."
+    assert_equal 0, item.dig(:nado_readiness, :nado_open_orders_count)
+  end
+
+  test "Nado target route blocks when open orders are present" do
+    service = FakeNadoService.new(current_position: nil, open_orders_count: 1)
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position, nado_service: service).report
+    item = route(matrix, "extended", "nado")
+
+    assert_equal false, item.fetch(:preview_available)
+    assert_equal false, item.fetch(:live_available)
+    assert_equal "PREVIEW_BLOCKED", item.fetch(:route_status)
+    assert_includes item.fetch(:blockers), "Nado open orders must be zero for migration proof."
+    assert_equal 1, item.dig(:nado_readiness, :nado_open_orders_count)
   end
 
   test "Nado to Extended route uses readiness and can expose dry run source leg preview" do
@@ -163,8 +177,9 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
   end
 
   class FakeNadoService
-    def initialize(current_position:)
+    def initialize(current_position:, open_orders_count: 0)
       @current_position = current_position
+      @open_orders_count = open_orders_count
     end
 
     def read_position
@@ -172,7 +187,12 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     end
 
     def account_state
-      { open_orders_count: 0, blockers: [], warnings: [] }
+      {
+        open_orders_count: @open_orders_count,
+        open_orders_read_diagnostics: { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
+        blockers: [],
+        warnings: []
+      }
     end
 
     def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position:)

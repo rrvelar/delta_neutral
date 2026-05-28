@@ -63,6 +63,7 @@ module HedgeVenues
         hedge_positions_count: eth_perp_positions.size,
         open_orders_read_available: !open_orders.nil?,
         open_orders_unavailable_reason: open_orders_unavailable_reason,
+        open_orders_read_diagnostics: open_orders_read_diagnostics,
         open_orders_count: open_orders,
         current_short_eth: current_eth_perp_short&.dig(:short_size)&.to_s("F"),
         current_side: current_eth_perp_short&.dig(:side),
@@ -92,6 +93,12 @@ module HedgeVenues
       return nil unless defined?(@open_orders_rows) && @open_orders_rows.nil?
 
       "Nado open orders query returned no parseable order list."
+    end
+
+    def open_orders_read_diagnostics
+      return nil unless defined?(@open_orders_read_diagnostics)
+
+      @open_orders_read_diagnostics
     end
 
     def blockers
@@ -182,19 +189,76 @@ module HedgeVenues
     def open_orders_rows
       return @open_orders_rows if defined?(@open_orders_rows)
 
-      raw_response = get_json("/query", type: "open_orders", subaccount: subaccount)
-      response = raw_response.is_a?(Array) ? raw_response : response_payload(raw_response)
-      rows = response["open_orders"] || response["orders"] || response["data"] || response
-      @open_orders_rows = rows.is_a?(Array) ? rows.select { |row| row.is_a?(Hash) } : nil
+      product_ids = open_order_product_ids
+      if product_ids.empty?
+        @open_orders_read_error = "Nado subaccount_orders read requires product_id; subaccount_info did not include product ids."
+        @open_orders_read_diagnostics = {
+          endpoint_path: "/query",
+          query_type: "subaccount_orders",
+          query_keys: %w[type sender product_id],
+          product_ids_available: false
+        }
+        return @open_orders_rows = nil
+      end
+
+      @open_orders_read_diagnostics = {
+        endpoint_path: "/query",
+        query_type: "subaccount_orders",
+        query_keys: %w[type sender product_id],
+        product_ids_available: true,
+        attempts: []
+      }
+      rows = product_ids.flat_map do |product_id|
+        read_open_orders_for_product(product_id)
+      end
+      return @open_orders_rows = nil if @open_orders_read_error.present?
+
+      @open_orders_rows = rows
     rescue => e
       @open_orders_read_error = "Nado open orders readback unavailable: #{e.class}: #{e.message}"
       @open_orders_rows = nil
+    end
+
+    def read_open_orders_for_product(product_id)
+      raw_response = get_json("/query", type: "subaccount_orders", sender: subaccount, product_id: product_id)
+      response = raw_response.is_a?(Array) ? raw_response : response_payload(raw_response)
+      rows = response["orders"] || response["open_orders"] || response["data"] || response
+      parsed = rows.is_a?(Array) ? rows.select { |row| row.is_a?(Hash) && active_open_order_row?(row) } : []
+      @open_orders_read_diagnostics[:attempts] << {
+        query_type: "subaccount_orders",
+        query_keys: %w[type sender product_id],
+        product_id: product_id.to_s,
+        status: "ok",
+        rows_count: parsed.size
+      }
+      parsed
+    rescue => e
+      @open_orders_read_diagnostics[:attempts] << {
+        query_type: "subaccount_orders",
+        query_keys: %w[type sender product_id],
+        product_id: product_id.to_s,
+        status: "error",
+        error: e.message
+      }
+      @open_orders_read_error = "Nado open orders readback unavailable: #{e.class}: #{e.message}"
+      []
+    end
+
+    def open_order_product_ids
+      product_map(subaccount_info).keys.presence || eth_perp_positions.filter_map { |position| position[:product_id]&.to_s }
     end
 
     def nado_eth_order_row?(row)
       product_id = product_id_from(row)
       symbol = canonical_symbol(row["symbol"] || row["market"] || row["ticker"] || row["product"] || "perp_product:#{product_id}")
       eth_perp_position?(symbol, product_id)
+    end
+
+    def active_open_order_row?(row)
+      status = (row["status"] || row["state"]).to_s.downcase
+      return true if status.blank?
+
+      !status.in?(%w[canceled cancelled filled closed rejected expired])
     end
 
     def raw_position_rows
@@ -340,10 +404,24 @@ module HedgeVenues
       Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: HTTP_TIMEOUT_SECONDS, read_timeout: HTTP_TIMEOUT_SECONDS) do |http|
         request = Net::HTTP::Get.new(uri)
         response = http.request(request)
-        raise "Nado read-only GET failed with HTTP #{response.code}" unless response.is_a?(Net::HTTPSuccess)
+        raise safe_http_error(uri, response) unless response.is_a?(Net::HTTPSuccess)
 
         response.body
       end
+    end
+
+    def safe_http_error(uri, response)
+      keys = URI.decode_www_form(uri.query.to_s).map(&:first).uniq.sort.join(",")
+      body = sanitize_response_snippet(response.body)
+      "Nado read-only GET failed with HTTP #{response.code} path=#{uri.path} query_keys=#{keys} body=#{body}"
+    end
+
+    def sanitize_response_snippet(body)
+      body.to_s
+        .gsub(/"[^"]*(api[_-]?key|secret|private|authorization|cookie)[^"]*"\s*:\s*"[^"]*"/i, '"redacted":"<redacted>"')
+        .gsub(/[[:cntrl:]]+/, " ")
+        .squish
+        .truncate(180)
     end
 
     def query_base_url
