@@ -124,6 +124,7 @@ class PositionsController < ApplicationController
       @migration_control_plan = cached_migration_control_plan
       @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
+      @live_autopilot_readiness = MigrationLiveAutopilotReadiness.new(position: @position, route_matrix: @migration_route_matrix).report
       @production_health = ExtendedAutoOperationalHealth.new(position: @position).report
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(

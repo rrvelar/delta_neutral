@@ -529,6 +529,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Route Proof Matrix", response.body
     assert_match "Daily venue rotation readiness", response.body
     assert_match "Random Rotation Planner", response.body
+    assert_match "Live Autopilot Readiness", response.body
+    assert_match "No live orders are submitted by this readiness panel.", response.body
     assert_match "Run virtual random rotation decision", response.body
     assert_match "Dry-run eligible targets", response.body
     assert_match "Live eligible routes", response.body

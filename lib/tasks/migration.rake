@@ -161,6 +161,36 @@ namespace :migration do
     puts JSON.pretty_generate(state.merge(action: "reset_random_rotation_state", status: "ok"))
   end
 
+  desc "Show read-only live autopilot readiness for a position"
+  task live_autopilot_readiness: :environment do
+    position = migration_position_from_env(action: "live_autopilot_readiness")
+    next unless position
+
+    puts JSON.pretty_generate(MigrationLiveAutopilotReadiness.new(position: position).report)
+  end
+
+  desc "Show read-only supervised manual live canary readiness for one route"
+  task manual_live_canary_readiness: :environment do
+    position = migration_position_from_env(action: "manual_live_canary_readiness")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    puts JSON.pretty_generate(MigrationManualLiveCanaryReadiness.new(position: position, from: from, to: to).report)
+  end
+
+  desc "Run gated supervised manual live canary if all live gates are open"
+  task run_manual_live_canary: :environment do
+    position = migration_position_from_env(action: "run_manual_live_canary")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationManualLiveCanaryRunner.new.run(position: position, from: from, to: to, confirmation: confirmation)
+    puts JSON.pretty_generate(result.receipt)
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false, reason: "disabled" } unless refresh_snapshot_for_route_proof?
 
@@ -172,6 +202,22 @@ namespace :migration do
     { refreshed: true, reason: reason }
   rescue => e
     { refreshed: false, reason: "refresh_error", error: "#{e.class}: #{e.message}" }
+  end
+
+  def migration_position_from_env(action:)
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:hedge, :position_dashboard_snapshot).find_by(id: position_id)
+    return position if position
+
+    puts JSON.pretty_generate(
+      status: "blocked",
+      action: action,
+      position_id: position_id,
+      blockers: [ "Position #{position_id || '(missing)'} not found." ],
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+    nil
   end
 
   def snapshot_refresh_reason(snapshot)

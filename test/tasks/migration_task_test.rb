@@ -9,6 +9,9 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:daily_random_rotation_dry_run"].reenable if Rake::Task.task_defined?("migration:daily_random_rotation_dry_run")
     Rake::Task["migration:random_rotation_state"].reenable if Rake::Task.task_defined?("migration:random_rotation_state")
     Rake::Task["migration:reset_random_rotation_state"].reenable if Rake::Task.task_defined?("migration:reset_random_rotation_state")
+    Rake::Task["migration:live_autopilot_readiness"].reenable if Rake::Task.task_defined?("migration:live_autopilot_readiness")
+    Rake::Task["migration:manual_live_canary_readiness"].reenable if Rake::Task.task_defined?("migration:manual_live_canary_readiness")
+    Rake::Task["migration:run_manual_live_canary"].reenable if Rake::Task.task_defined?("migration:run_manual_live_canary")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -206,6 +209,62 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert_equal "nado", payload.fetch("previous_virtual_venue")
   ensure
     ENV.delete("position_id")
+  end
+
+  test "live autopilot readiness task outputs read only counters" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+
+    out, = capture_io { Rake::Task["migration:live_autopilot_readiness"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "live_autopilot_readiness", payload.fetch("action")
+    assert_equal false, payload.fetch("would_execute_live")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "manual live canary readiness task outputs blockers and zero counters" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "extended"
+    ENV["to"] = "ethereal"
+
+    out, = capture_io { Rake::Task["migration:manual_live_canary_readiness"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "manual_live_canary_readiness", payload.fetch("action")
+    assert_equal "extended->ethereal", payload.fetch("route")
+    assert_equal false, payload.fetch("ready_for_supervised_canary")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+  end
+
+  test "run manual live canary task blocks without gates" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "extended"
+    ENV["to"] = "ethereal"
+    ENV["confirmation"] = "wrong"
+
+    out, = capture_io { Rake::Task["migration:run_manual_live_canary"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "blocked_before_submit", payload.fetch("final_status")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+    assert_equal "extended", position.hedge.reload.execution_venue
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("confirmation")
   end
 
   private
