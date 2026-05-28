@@ -27,6 +27,7 @@ class HedgeVenueAutoMigrationPlanner
     routes = Array(matrix[:routes] || matrix["routes"])
     candidates = allowed.reject { |venue| venue == current }.map { |venue| route_for(routes, current, venue) }
     eligible, excluded = classify_routes(position: position, current: current, candidates: candidates)
+    base_blockers << "route proof incomplete because snapshot critical fields are missing" if route_proof_incomplete?(routes)
     selected = base_blockers.empty? ? random_route(eligible) : nil
     warnings = [ "Random rotation planner is decision-only; no orders are submitted and no venue is finalized." ]
 
@@ -136,6 +137,11 @@ class HedgeVenueAutoMigrationPlanner
     return route_matrix.deep_symbolize_keys if route_matrix.present?
 
     HedgeVenueMigrationRouteMatrix.new(position: position).report
+  end
+
+  def route_proof_incomplete?(routes)
+    blockers = routes.flat_map { |route| Array(route[:blockers] || route["blockers"]) }
+    blockers.any? { |blocker| blocker.to_s.match?(/target short is unavailable|snapshot critical fields|Position dashboard snapshot.*missing|missing critical migration fields/i) }
   end
 
   def random_route(eligible)

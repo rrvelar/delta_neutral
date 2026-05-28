@@ -43,13 +43,82 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_equal BigDecimal("0.8"), snapshot.extended_short_eth
     assert_equal BigDecimal("0"), snapshot.ethereal_short_eth
     assert_equal BigDecimal("0"), snapshot.nado_short_eth
+    assert_equal BigDecimal("1.25"), snapshot.target_short_eth
+    assert_equal BigDecimal("0.0625"), snapshot.tolerance_abs_eth
     assert_equal BigDecimal("0.8"), snapshot.combined_short_eth
     assert_equal BigDecimal("0.45"), snapshot.drift_eth
+    assert_equal false, snapshot.inside_tolerance
     assert_equal "active", snapshot.extended_status
     assert_equal "flat", snapshot.ethereal_status
     assert_equal "flat", snapshot.nado_status
     assert_equal "ok", snapshot.signer_status
     assert_equal 0, snapshot.open_orders_count_extended
+  end
+
+  test "refresh derives target from position and hedge even when valuation exposure is unavailable" do
+    position = create_position_with_hedge
+    PositionValuation.stub(:current, PositionValuation::Result.new(
+      source: "test",
+      current_value_usd: nil,
+      entry_value_usd: nil,
+      pool_delta_usd: nil,
+      weth_exposure: nil,
+      usdc_exposure: nil,
+      current_value_label: "Current value",
+      entry_value_label: "Entry value",
+      pool_delta_label: "Delta",
+      hedge_target_label: "Target",
+      status: "stale_unavailable",
+      warnings: []
+    )) do
+      snapshot = DashboardSnapshotRefresh.new(
+        position: position,
+        env: snapshot_env,
+        venue_builder: fake_builder(
+          "extended" => { position: { short_size: "1.25" }, account_state: { open_orders_count: 0, margin_gate: { status: "pass" } } },
+          "ethereal" => { position: nil },
+          "nado" => { position: nil }
+        ),
+        signer_client: fake_signer(ok: true)
+      ).refresh
+
+      assert_equal "ok", snapshot.refresh_status
+      assert_equal BigDecimal("1.25"), snapshot.target_short_eth
+      assert_equal BigDecimal("1.25"), snapshot.combined_short_eth
+      assert_equal BigDecimal("0"), snapshot.drift_eth
+      assert_equal true, snapshot.inside_tolerance
+    end
+  end
+
+  test "refresh status is partial when critical migration fields are missing" do
+    position = Position.create!(
+      user: users(:one),
+      wallet: base_wallet,
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("1.25"),
+      asset1_amount: BigDecimal("500"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
+      external_id: SecureRandom.hex(4),
+      active: true
+    )
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "1.25" }, account_state: { open_orders_count: 0 } },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal "partial", snapshot.refresh_status
+    assert_includes snapshot.source_errors_hash.fetch("critical_derived_fields"), "target_short_eth"
+    assert_includes snapshot.source_errors_hash.fetch("critical_derived_fields"), "production_venue"
   end
 
   test "refresh stores partial snapshot when one venue read fails" do

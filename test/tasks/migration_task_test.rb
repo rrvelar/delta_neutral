@@ -57,6 +57,29 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("position_id")
   end
 
+  test "prove routes task refreshes incomplete snapshot before proof" do
+    position = migration_position
+    position.position_dashboard_snapshot.update!(target_short_eth: nil, drift_eth: nil, inside_tolerance: nil)
+    ENV["position_id"] = position.id.to_s
+    refresh_calls = []
+
+    DashboardSnapshotRefresh.stub(:new, ->(position:, force: false) { route_proof_refresher(position, force, refresh_calls) }) do
+      out, = capture_io { Rake::Task["migration:prove_routes"].invoke }
+      summary = JSON.parse(out)
+      route = summary.fetch("routes").find { |row| row["from_venue"] == "extended" && row["to_venue"] == "ethereal" }
+
+      assert_equal [ true ], refresh_calls
+      assert_equal true, summary.fetch("snapshot_refreshed_before_proof")
+      assert_match "incomplete", summary.fetch("snapshot_refresh_reason")
+      assert_equal true, summary.fetch("route_plans_used_complete_snapshot")
+      assert_empty summary.fetch("snapshot_missing_fields")
+      assert_not_includes route.fetch("blockers"), "target short is unavailable in dashboard snapshot"
+      assert_not_includes route.fetch("blockers"), "planned migration size is zero"
+    end
+  ensure
+    ENV.delete("position_id")
+  end
+
   test "prove routes reports fresh start separately from stale end" do
     now = Time.zone.local(2026, 5, 28, 12, 0, 0)
     position = migration_position(refreshed_at: now - 119.seconds)
@@ -156,7 +179,12 @@ class MigrationTaskTest < ActiveSupport::TestCase
         position.position_dashboard_snapshot.update!(
           refreshed_at: Time.current,
           refresh_status: "ok",
-          stale: false
+          stale: false,
+          target_short_eth: position.asset0_amount * position.hedge.target,
+          tolerance_abs_eth: position.asset0_amount * position.hedge.target * position.hedge.tolerance,
+          combined_short_eth: position.position_dashboard_snapshot.extended_short_eth.to_d + position.position_dashboard_snapshot.ethereal_short_eth.to_d + position.position_dashboard_snapshot.nado_short_eth.to_d,
+          drift_eth: (position.asset0_amount * position.hedge.target) - (position.position_dashboard_snapshot.extended_short_eth.to_d + position.position_dashboard_snapshot.ethereal_short_eth.to_d + position.position_dashboard_snapshot.nado_short_eth.to_d),
+          inside_tolerance: true
         )
         position.position_dashboard_snapshot.reload
       end

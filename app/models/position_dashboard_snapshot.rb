@@ -23,6 +23,27 @@ class PositionDashboardSnapshot < ApplicationRecord
     {}
   end
 
+  def migration_complete_for_proof?
+    missing_migration_fields.empty?
+  end
+
+  def migration_critical_fields_present?
+    migration_complete_for_proof?
+  end
+
+  def missing_migration_fields
+    missing = []
+    missing << "production_venue" if production_venue.blank?
+    missing << "target_short_eth" unless positive_decimal?(target_short_eth)
+    missing << "combined_short_eth" unless decimal_present?(combined_short_eth)
+    missing << "drift_eth" unless decimal_present?(drift_eth)
+    missing << "inside_tolerance" if inside_tolerance.nil?
+    missing << "extended_short_eth" unless decimal_present?(extended_short_eth)
+    missing << "ethereal_short_eth" unless decimal_present?(ethereal_short_eth)
+    missing << "nado_short_eth" unless decimal_present?(nado_short_eth)
+    missing
+  end
+
   def venue_state(venue)
     key = venue.to_s
     {
@@ -50,6 +71,21 @@ class PositionDashboardSnapshot < ApplicationRecord
 
   def decimal_string(value)
     value&.to_s("F")
+  end
+
+  def decimal_present?(value)
+    return false if value.nil?
+
+    BigDecimal(value.to_s)
+    true
+  rescue ArgumentError
+    false
+  end
+
+  def positive_decimal?(value)
+    decimal_present?(value) && BigDecimal(value.to_s).positive?
+  rescue ArgumentError
+    false
   end
 
   def stale_after_seconds

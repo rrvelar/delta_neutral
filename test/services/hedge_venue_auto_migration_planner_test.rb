@@ -54,6 +54,14 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     assert_includes result.blockers, "no eligible random rotation route"
   end
 
+  test "random planner reports incomplete proof when snapshot critical fields are missing" do
+    result = planner(route_matrix: incomplete_route_matrix).plan(position: migration_position)
+
+    assert_equal "NO_ELIGIBLE_ROUTE", result.receipt.fetch(:status)
+    assert_includes result.blockers, "route proof incomplete because snapshot critical fields are missing"
+    assert_nil result.receipt.fetch(:selected_route)
+  end
+
   test "random planner can include Nado in decision only when route proof is ready" do
     result = planner(env: { "MIGRATION_ALLOWED_ROUTES" => "extended->nado" }).plan(position: migration_position)
 
@@ -163,6 +171,10 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
 
   def blocked_route_matrix
     { routes: [ route("extended", "ethereal", "PREVIEW_BLOCKED", blockers: [ "open orders present" ]) ] }
+  end
+
+  def incomplete_route_matrix
+    { routes: [ route("extended", "ethereal", "PREVIEW_BLOCKED", blockers: [ "target short is unavailable in dashboard snapshot" ]) ] }
   end
 
   def route(from, to, status, blockers: [])

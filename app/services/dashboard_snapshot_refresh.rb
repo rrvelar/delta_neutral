@@ -20,8 +20,7 @@ class DashboardSnapshotRefresh
 
   def refresh
     now = Time.current
-    valuation = PositionValuation.current(position)
-    target = target_short(valuation)
+    target = target_short
     tolerance_abs = target && position.hedge ? target * position.hedge.tolerance : nil
     venue_results = %w[extended ethereal nado].to_h { |venue| [ venue, read_venue(venue) ] }
     combined = combined_short(venue_results)
@@ -32,21 +31,30 @@ class DashboardSnapshotRefresh
     end
     signer = read_signer_health
     errors[:signer] = signer[:error] if signer[:error].present?
-    refresh_status = snapshot_status(venue_results, signer)
+    derived_attrs = {
+      production_venue: position.hedge&.execution_venue,
+      target_short_eth: target,
+      combined_short_eth: combined,
+      drift_eth: drift,
+      inside_tolerance: drift && tolerance_abs ? drift.abs <= tolerance_abs : nil
+    }.merge(venue_attrs(venue_results))
+    missing_critical = missing_critical_fields(derived_attrs)
+    errors[:critical_derived_fields] = "missing critical migration fields: #{missing_critical.join(', ')}" if missing_critical.any?
+    refresh_status = snapshot_status(venue_results, signer, missing_critical: missing_critical)
 
     attrs = {
       refreshed_at: now,
       refresh_status: refresh_status,
       stale: false,
       error_summary: errors.values.join("; ").presence,
-      production_venue: position.hedge&.execution_venue,
+      production_venue: derived_attrs[:production_venue],
       selected_venue: position.hedge&.execution_venue,
-      target_short_eth: target,
+      target_short_eth: derived_attrs[:target_short_eth],
       tolerance_ratio: position.hedge&.tolerance,
       tolerance_abs_eth: tolerance_abs,
-      combined_short_eth: combined,
-      drift_eth: drift,
-      inside_tolerance: drift && tolerance_abs ? drift.abs <= tolerance_abs : nil,
+      combined_short_eth: derived_attrs[:combined_short_eth],
+      drift_eth: derived_attrs[:drift_eth],
+      inside_tolerance: derived_attrs[:inside_tolerance],
       extended_live_enabled: bool_env("EXTENDED_LIVE_ENABLED"),
       extended_auto_enabled: bool_env("EXTENDED_AUTO_REBALANCE_ENABLED"),
       ethereal_auto_enabled: bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"),
@@ -55,7 +63,7 @@ class DashboardSnapshotRefresh
       signer_checked_at: signer[:checked_at],
       timeout_seconds_used: timeout_seconds,
       source_errors: JSON.generate(errors)
-    }.merge(venue_attrs(venue_results))
+    }.merge(derived_attrs.except(:production_venue, :target_short_eth, :combined_short_eth, :drift_eth, :inside_tolerance))
 
     position.create_position_dashboard_snapshot! unless position.position_dashboard_snapshot
     position.position_dashboard_snapshot.update!(attrs)
@@ -277,7 +285,8 @@ class DashboardSnapshotRefresh
     }
   end
 
-  def snapshot_status(results, signer)
+  def snapshot_status(results, signer, missing_critical: [])
+    return "partial" if missing_critical.any?
     return "ok" if results.values.all? { |result| result[:source_status] == "ok" } && signer[:error].blank?
     return "error" if results.values.all? { |result| result[:source_status] == "error" }
 
@@ -291,10 +300,38 @@ class DashboardSnapshotRefresh
     values.sum(BigDecimal("0"))
   end
 
-  def target_short(valuation)
-    return nil unless valuation.weth_exposure && position.hedge
+  def target_short
+    return nil unless position.asset0_amount && position.hedge
 
-    valuation.weth_exposure * position.hedge.target
+    position.asset0_amount * position.hedge.target
+  end
+
+  def missing_critical_fields(attrs)
+    missing = []
+    missing << "production_venue" if attrs[:production_venue].blank?
+    missing << "target_short_eth" unless positive_decimal?(attrs[:target_short_eth])
+    missing << "combined_short_eth" unless decimal_present?(attrs[:combined_short_eth])
+    missing << "drift_eth" unless decimal_present?(attrs[:drift_eth])
+    missing << "inside_tolerance" if attrs[:inside_tolerance].nil?
+    missing << "extended_short_eth" unless decimal_present?(attrs[:extended_short_eth])
+    missing << "ethereal_short_eth" unless decimal_present?(attrs[:ethereal_short_eth])
+    missing << "nado_short_eth" unless decimal_present?(attrs[:nado_short_eth])
+    missing
+  end
+
+  def decimal_present?(value)
+    return false if value.nil?
+
+    BigDecimal(value.to_s)
+    true
+  rescue ArgumentError
+    false
+  end
+
+  def positive_decimal?(value)
+    decimal_present?(value) && BigDecimal(value.to_s).positive?
+  rescue ArgumentError
+    false
   end
 
   def short_size(current_position)
