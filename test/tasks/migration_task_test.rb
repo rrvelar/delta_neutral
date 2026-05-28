@@ -29,9 +29,31 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("position_id")
   end
 
+  test "prove routes task refreshes stale snapshot before proof" do
+    position = migration_position(refreshed_at: 10.minutes.ago)
+    ENV["position_id"] = position.id.to_s
+    refresh_calls = []
+
+    DashboardSnapshotRefresh.stub(:new, ->(position:, force: false) { route_proof_refresher(position, force, refresh_calls) }) do
+      out, = capture_io { Rake::Task["migration:prove_routes"].invoke }
+      summary = JSON.parse(out)
+      route = summary.fetch("routes").find { |row| row["from_venue"] == "extended" && row["to_venue"] == "ethereal" }
+
+      assert_equal [ true ], refresh_calls
+      assert_equal true, summary.fetch("snapshot_refreshed_before_proof")
+      assert_operator summary.fetch("snapshot_age_seconds"), :<, 5
+      assert_equal "ok", summary.fetch("snapshot_status")
+      assert_not_includes route.fetch("blockers"), "Position dashboard snapshot is stale; refresh read-only data before planning migration."
+      assert_equal 0, summary.fetch("orders_submitted")
+      assert_equal 0, summary.fetch("signatures_created")
+    end
+  ensure
+    ENV.delete("position_id")
+  end
+
   private
 
-  def migration_position
+  def migration_position(refreshed_at: Time.current)
     position = Position.create!(
       user: users(:one),
       wallet: wallets(:one),
@@ -47,7 +69,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
     )
     position.create_hedge!(target: "0.8", tolerance: "0.03", active: true, execution_venue: "extended")
     position.create_position_dashboard_snapshot!(
-      refreshed_at: Time.current,
+      refreshed_at: refreshed_at,
       refresh_status: "ok",
       stale: false,
       production_venue: "extended",
@@ -71,5 +93,19 @@ class MigrationTaskTest < ActiveSupport::TestCase
       leverage_margin_gate_status: "pass"
     )
     position
+  end
+
+  def route_proof_refresher(position, force, calls)
+    Object.new.tap do |object|
+      object.define_singleton_method(:refresh) do
+        calls << force
+        position.position_dashboard_snapshot.update!(
+          refreshed_at: Time.current,
+          refresh_status: "ok",
+          stale: false
+        )
+        position.position_dashboard_snapshot.reload
+      end
+    end
   end
 end

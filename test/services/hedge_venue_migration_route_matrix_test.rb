@@ -114,14 +114,20 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
 
   test "proof receipts omit Nado open orders unavailable reason when readback succeeds" do
     Dir.mktmpdir do |dir|
-      service = FakeNadoService.new(current_position: nil)
+      service = FakeNadoService.new(current_position: nil, diagnostics: open_orders_diagnostics)
       summary = HedgeVenueMigrationRouteMatrix.new(position: migration_position, receipt_dir: dir, nado_service: service).prove_routes!
       rows = File.readlines(summary.fetch(:receipt_paths).first).map { |line| JSON.parse(line) }
       receipt = rows.find { |row| row["from_venue"] == "extended" && row["to_venue"] == "nado" && row["mode"] == "full" }
 
       assert receipt
+      diagnostics = receipt.fetch("nado_readiness").fetch("nado_open_orders_read_diagnostics")
       assert_equal 0, receipt.fetch("nado_readiness").fetch("nado_open_orders_count")
       assert_not receipt.fetch("nado_readiness").key?("nado_open_orders_unavailable_reason")
+      assert_equal 2, diagnostics.fetch("nado_open_orders_product_ids_checked_count")
+      assert_equal 2, diagnostics.fetch("nado_open_orders_successful_attempts_count")
+      assert_equal "4", diagnostics.fetch("nado_eth_perp_product_id")
+      assert_equal 0, diagnostics.fetch("nado_eth_perp_open_orders_count")
+      assert_not diagnostics.key?("attempts")
       assert_not_includes receipt.fetch("blockers"), "Nado open orders readback is unavailable."
     end
   end
@@ -224,9 +230,10 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
   end
 
   class FakeNadoService
-    def initialize(current_position:, open_orders_count: 0)
+    def initialize(current_position:, open_orders_count: 0, diagnostics: nil)
       @current_position = current_position
       @open_orders_count = open_orders_count
+      @diagnostics = diagnostics
     end
 
     def read_position
@@ -236,7 +243,7 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     def account_state
       {
         open_orders_count: @open_orders_count,
-        open_orders_read_diagnostics: { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
+        open_orders_read_diagnostics: @diagnostics || { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
         blockers: [],
         warnings: []
       }
@@ -263,5 +270,18 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
         warnings: []
       }
     end
+  end
+
+  def open_orders_diagnostics
+    {
+      endpoint_path: "/query",
+      query_type: "subaccount_orders",
+      query_keys: %w[type sender product_id],
+      product_ids_available: true,
+      attempts: [
+        { product_id: "4", status: "ok", rows_count: 0 },
+        { product_id: "9", status: "ok", rows_count: 1 }
+      ]
+    }
   end
 end

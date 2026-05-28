@@ -23,6 +23,7 @@ class HedgeVenueMigrationRouteMatrix
     @sequences = sequences
     @venues = venues
     @now = now
+    @proof_started_at = now.call
     @receipt_dir = Pathname(receipt_dir)
     @nado_service = nado_service
   end
@@ -32,7 +33,7 @@ class HedgeVenueMigrationRouteMatrix
       position_id: position&.id,
       source_snapshot_id: snapshot&.id,
       source_snapshot_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
-      generated_at: now.call.utc.iso8601,
+      generated_at: proof_started_at.utc.iso8601,
       routes: route_pairs.map { |from, to| route_report(from, to) },
       orders_submitted: 0,
       signatures_created: 0
@@ -65,7 +66,7 @@ class HedgeVenueMigrationRouteMatrix
 
   private
 
-  attr_reader :position, :snapshot, :modes, :sequences, :venues, :now, :receipt_dir, :nado_service
+  attr_reader :position, :snapshot, :modes, :sequences, :venues, :now, :proof_started_at, :receipt_dir, :nado_service
 
   def route_pairs
     ROUTE_ORDER.select { |from, to| venues.include?(from) && venues.include?(to) }
@@ -121,7 +122,7 @@ class HedgeVenueMigrationRouteMatrix
       signatures_created: 0,
       dry_run: true,
       submitted: false,
-      timestamp: now.call.utc.iso8601
+      timestamp: proof_started_at.utc.iso8601
     }
     receipt.merge!(proof.fetch(:planned_fields))
     receipt
@@ -131,7 +132,7 @@ class HedgeVenueMigrationRouteMatrix
     return nado_proof(from, to, mode: mode, sequence: sequence) if [ from, to ].include?("nado")
     return unsupported_proof(from, to) unless SUPPORTED_PREVIEW_ROUTES.include?([ from, to ])
 
-    result = HedgeVenueMigrationPlanner.new(now: now).plan(
+    result = HedgeVenueMigrationPlanner.new(now: -> { proof_started_at }).plan(
       position: position,
       from_venue: from,
       to_venue: to,
@@ -298,6 +299,6 @@ class HedgeVenueMigrationRouteMatrix
   end
 
   def receipt_writer
-    @receipt_writer ||= HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir)
+    @receipt_writer ||= HedgeVenueMigrationReceiptWriter.new(now: -> { proof_started_at }, receipt_dir: receipt_dir)
   end
 end

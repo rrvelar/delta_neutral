@@ -50,6 +50,29 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "Nado open orders must be zero for migration proof."
   end
 
+  test "open orders diagnostics are compact by default" do
+    service = FakeNadoService.new(current_position: nil, diagnostics: open_orders_diagnostics)
+    report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
+    diagnostics = report.fetch(:nado_open_orders_read_diagnostics)
+
+    assert_equal "/query", diagnostics.fetch(:endpoint_path)
+    assert_equal "subaccount_orders", diagnostics.fetch(:query_type)
+    assert_equal 2, diagnostics.fetch(:nado_open_orders_product_ids_checked_count)
+    assert_equal 2, diagnostics.fetch(:nado_open_orders_successful_attempts_count)
+    assert_equal "4", diagnostics.fetch(:nado_eth_perp_product_id)
+    assert_equal 0, diagnostics.fetch(:nado_eth_perp_open_orders_count)
+    assert_not diagnostics.key?(:attempts)
+  end
+
+  test "open orders diagnostics can include full attempts in verbose mode" do
+    service = FakeNadoService.new(current_position: nil, diagnostics: open_orders_diagnostics)
+    with_env("NADO_OPEN_ORDERS_DIAGNOSTICS_VERBOSE" => "true") do
+      report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
+
+      assert_equal 2, report.fetch(:nado_open_orders_read_diagnostics).fetch(:attempts).size
+    end
+  end
+
   test "target leg dry run preview can be built from snapshot target" do
     service = FakeNadoService.new(current_position: nil)
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "target", nado_service: service).report
@@ -123,10 +146,11 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
   class FakeNadoService
     attr_reader :preview_calls
 
-    def initialize(current_position:, open_orders_count: 0, open_orders_reason: nil)
+    def initialize(current_position:, open_orders_count: 0, open_orders_reason: nil, diagnostics: nil)
       @current_position = current_position
       @open_orders_count = open_orders_count
       @open_orders_reason = open_orders_reason
+      @diagnostics = diagnostics
       @preview_calls = []
     end
 
@@ -138,7 +162,7 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
       {
         open_orders_count: @open_orders_count,
         open_orders_unavailable_reason: @open_orders_reason,
-        open_orders_read_diagnostics: { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
+        open_orders_read_diagnostics: @diagnostics || { endpoint_path: "/query", query_type: "subaccount_orders", query_keys: %w[type sender product_id] },
         blockers: [],
         warnings: []
       }
@@ -216,5 +240,18 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     yield
   ensure
     old.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def open_orders_diagnostics
+    {
+      endpoint_path: "/query",
+      query_type: "subaccount_orders",
+      query_keys: %w[type sender product_id],
+      product_ids_available: true,
+      attempts: [
+        { product_id: "4", status: "ok", rows_count: 0 },
+        { product_id: "9", status: "ok", rows_count: 1 }
+      ]
+    }
   end
 end

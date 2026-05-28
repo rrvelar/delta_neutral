@@ -155,7 +155,7 @@ class HedgeVenueMigrationPlanner
     return [ "Position dashboard snapshot is missing; refresh read-only data before planning migration." ] unless snapshot
 
     blockers = []
-    blockers << "Position dashboard snapshot is stale; refresh read-only data before planning migration." if snapshot.stale_now?
+    blockers << "Position dashboard snapshot is stale; refresh read-only data before planning migration." if snapshot.stale_at?(@now.call)
     blockers << "Position dashboard snapshot refresh_status=#{snapshot.refresh_status}; refresh read-only data before planning migration." if snapshot.refresh_status != "ok"
     blockers
   end

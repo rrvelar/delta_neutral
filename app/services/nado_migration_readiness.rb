@@ -131,11 +131,33 @@ class NadoMigrationReadiness
   end
 
   def nado_open_orders_read_diagnostics
-    account_state[:open_orders_read_diagnostics] || account_state["open_orders_read_diagnostics"]
+    diagnostics = account_state[:open_orders_read_diagnostics] || account_state["open_orders_read_diagnostics"]
+    return diagnostics if bool_env("NADO_OPEN_ORDERS_DIAGNOSTICS_VERBOSE")
+
+    compact_open_orders_diagnostics(diagnostics)
   end
 
   def account_blockers
     Array(account_state[:blockers] || account_state["blockers"])
+  end
+
+  def compact_open_orders_diagnostics(diagnostics)
+    return nil unless diagnostics.is_a?(Hash)
+
+    data = diagnostics.with_indifferent_access
+    attempts = Array(data[:attempts]).select { |attempt| attempt.is_a?(Hash) }
+    successful_attempts = attempts.select { |attempt| attempt.with_indifferent_access[:status].to_s == "ok" }
+    eth_attempt = attempts.find { |attempt| attempt.with_indifferent_access[:product_id].to_s == "4" }
+    {
+      endpoint_path: data[:endpoint_path],
+      query_type: data[:query_type],
+      query_keys: data[:query_keys],
+      product_ids_available: data[:product_ids_available],
+      nado_open_orders_product_ids_checked_count: attempts.size,
+      nado_open_orders_successful_attempts_count: successful_attempts.size,
+      nado_eth_perp_product_id: eth_attempt ? "4" : nil,
+      nado_eth_perp_open_orders_count: eth_attempt&.with_indifferent_access&.fetch(:rows_count, nil)
+    }.compact
   end
 
   def nado_market_read_available?

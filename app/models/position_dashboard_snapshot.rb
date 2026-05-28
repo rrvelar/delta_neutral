@@ -8,7 +8,11 @@ class PositionDashboardSnapshot < ApplicationRecord
   validates :refresh_status, inclusion: { in: STATUSES }
 
   def stale_now?
-    stale? || refreshed_at.nil? || refreshed_at < stale_after_seconds.seconds.ago
+    stale_at?(Time.current)
+  end
+
+  def stale_at?(time)
+    stale? || refreshed_at.nil? || refreshed_at < (time - stale_after_seconds.seconds)
   end
 
   def source_errors_hash
