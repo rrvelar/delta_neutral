@@ -560,6 +560,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       status: "RANDOM_ROUTE_SELECTED",
       selected_route: { from_venue: "extended", to_venue: "nado" },
       selected_target_venue: "nado",
+      virtual_current_venue_before: "extended",
+      virtual_current_venue_after: "nado",
       daily_enabled: true,
       would_migrate: false,
       orders_submitted: 0,
@@ -571,6 +573,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Last Daily Dry-run", response.body
     assert_match "Extended-&gt;Nado", response.body
+    assert_match "Virtual before / after", response.body
     assert_match "RANDOM_ROUTE_SELECTED", response.body
     assert_match "0 / 0", response.body
   end

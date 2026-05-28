@@ -108,9 +108,17 @@ class HedgeVenueAutoMigrationPlanner
       live_reasons = live_exclusion_reasons(position: position, route: route)
       payload = route_payload(route)
       if decision_reasons.empty?
-        dry_run_eligible << payload.merge(dry_run_decision_eligible: true, live_execution_eligible: live_reasons.empty?)
+        dry_run_eligible << payload.merge(
+          dry_run_decision_eligible: true,
+          live_execution_eligible: live_reasons.empty?,
+          virtual_decision_eligible: virtual_mode ? virtual_route_decision_eligible?(route) : nil
+        ).compact
       else
-        decision_excluded << payload.merge(dry_run_decision_eligible: false, reasons: decision_reasons)
+        decision_excluded << payload.merge(
+          dry_run_decision_eligible: false,
+          virtual_decision_eligible: virtual_mode ? false : nil,
+          reasons: decision_reasons
+        ).compact
       end
 
       if live_reasons.empty?
@@ -156,18 +164,27 @@ class HedgeVenueAutoMigrationPlanner
   end
 
   def route_payload(route)
+    virtual_status = virtual_route_status(route)
+    virtual_preview = virtual_preview_available?(route)
     {
       from_venue: route.fetch(:from_venue),
       to_venue: route.fetch(:to_venue),
-      route_status: route[:route_status],
-      preview_available: route[:preview_available],
+      route_status: virtual_mode && virtual_status ? virtual_status : route[:route_status],
+      preview_available: virtual_mode && !virtual_preview.nil? ? virtual_preview : route[:preview_available],
+      production_route_status: route[:route_status],
+      production_preview_available: route[:preview_available],
+      virtual_route_status: virtual_status,
+      virtual_preview_available: virtual_preview,
+      virtual_blockers: virtual_blockers(route),
+      virtual_warnings: virtual_warnings(route),
       live_available: route[:live_available] || false,
       blockers: Array(route[:blockers]),
       last_proof_time: route[:last_proof_time],
       nado_readiness: route[:nado_readiness],
       virtual_route: virtual_mode,
-      production_source_short_not_required: virtual_mode
-    }
+      production_source_short_not_required: virtual_mode && virtual_capability_proven?(route),
+      synthetic_source_leg_proof_required: virtual_mode && virtual_synthetic_source_proof?(route)
+    }.compact
   end
 
   def decision_route_proven?(route)
@@ -183,7 +200,56 @@ class HedgeVenueAutoMigrationPlanner
     return false unless route.fetch(:from_venue) == "nado"
 
     readiness = (route[:nado_readiness] || {}).with_indifferent_access
-    readiness[:nado_reduce_only_close_preview_available] && readiness[:nado_reduce_only_close_preview_proof_mode].present?
+    readiness[:nado_reduce_only_close_preview_available] &&
+      readiness[:nado_reduce_only_close_preview_proof_mode].present? &&
+      source_leg_preview_proof_ok?(readiness)
+  end
+
+  def virtual_route_decision_eligible?(route)
+    virtual_mode && decision_route_proven?(route) && decision_preview_available?(route)
+  end
+
+  def virtual_route_status(route)
+    return nil unless virtual_mode
+    return "READY_FOR_DRY_RUN" if route[:route_status] == "READY_FOR_DRY_RUN"
+    return "READY_FOR_VIRTUAL_DRY_RUN" if virtual_capability_proven?(route)
+
+    "VIRTUAL_PREVIEW_BLOCKED"
+  end
+
+  def virtual_preview_available?(route)
+    return nil unless virtual_mode
+
+    virtual_route_status(route).in?(%w[READY_FOR_DRY_RUN READY_FOR_VIRTUAL_DRY_RUN])
+  end
+
+  def virtual_blockers(route)
+    return nil unless virtual_mode
+
+    decision_safety_blockers(route)
+  end
+
+  def virtual_warnings(route)
+    return nil unless virtual_mode
+
+    warnings = []
+    warnings << "Production route remains blocked because Nado has no real source short." if route.fetch(:from_venue) == "nado" && route[:route_status] == "PREVIEW_BLOCKED"
+    warnings << "Virtual dry-run allowed via synthetic Nado close proof." if virtual_synthetic_source_proof?(route)
+    warnings
+  end
+
+  def virtual_synthetic_source_proof?(route)
+    return false unless route.fetch(:from_venue) == "nado"
+
+    readiness = (route[:nado_readiness] || {}).with_indifferent_access
+    readiness[:nado_reduce_only_close_preview_proof_mode].to_s == "synthetic"
+  end
+
+  def source_leg_preview_proof_ok?(readiness)
+    proof = readiness[:nado_source_leg_preview_proof] || readiness[:source_leg_preview_proof]
+    return true unless proof.is_a?(Hash)
+
+    proof.with_indifferent_access[:ok] != false
   end
 
   def same_route?(left, right)

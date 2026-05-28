@@ -102,7 +102,8 @@ class MigrationRandomRotationDailyRunner
     random_receipt_path = planner.write_receipt(decision.receipt)
     selected_route = decision.receipt[:selected_route]
     selected_target = decision.receipt[:selected_target_venue]
-    virtual_after = decision.receipt[:status] == "RANDOM_ROUTE_SELECTED" && selected_target.present? ? selected_target : virtual_current
+    should_advance = virtual_decision_selected?(decision.receipt)
+    virtual_after = should_advance && selected_target.present? ? selected_target : virtual_current
 
     receipt = {
       action: "daily_random_rotation_dry_run",
@@ -136,7 +137,7 @@ class MigrationRandomRotationDailyRunner
       signatures_created: 0
     }
     daily_receipt_path = write_daily_receipt(receipt)
-    state_after = decision.receipt[:status] == "RANDOM_ROUTE_SELECTED" ? virtual_state.update_from_decision!(decision_receipt: decision.receipt, daily_receipt_path: daily_receipt_path&.to_s) : state_before
+    state_after = should_advance ? virtual_state.update_from_decision!(decision_receipt: decision.receipt, daily_receipt_path: daily_receipt_path&.to_s) : state_before
     receipt.merge(
       virtual_current_venue_after: state_after.fetch(:virtual_current_venue),
       virtual_state_path: state_dir.join("position_#{position.id}.json").to_s,
@@ -153,6 +154,13 @@ class MigrationRandomRotationDailyRunner
       orders_submitted: 0,
       signatures_created: 0
     )
+  end
+
+  def virtual_decision_selected?(decision_receipt)
+    selected = decision_receipt[:selected_route] || decision_receipt["selected_route"]
+    decision_receipt[:status] == "RANDOM_ROUTE_SELECTED" &&
+      selected.present? &&
+      selected.fetch(:virtual_decision_eligible, selected["virtual_decision_eligible"]) == true
   end
 
   def missing_position_result(position_id)

@@ -129,8 +129,32 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal true, result.receipt.fetch(:virtual_mode)
     assert_equal %w[ethereal extended], result.receipt.fetch(:dry_run_eligible_routes).map { |route| route.fetch(:to_venue) }.sort
     assert result.receipt.fetch(:dry_run_eligible_routes).all? { |route| route.fetch(:production_source_short_not_required) }
+    selected = result.receipt.fetch(:selected_route)
+    assert_equal "READY_FOR_VIRTUAL_DRY_RUN", selected.fetch(:route_status)
+    assert_equal "READY_FOR_VIRTUAL_DRY_RUN", selected.fetch(:virtual_route_status)
+    assert_equal true, selected.fetch(:virtual_preview_available)
+    assert_equal true, selected.fetch(:virtual_decision_eligible)
+    assert_equal "PREVIEW_BLOCKED", selected.fetch(:production_route_status)
+    assert_equal false, selected.fetch(:production_preview_available)
+    assert_equal false, selected.fetch(:live_execution_eligible)
     assert_empty result.receipt.fetch(:decision_excluded_routes)
     assert_empty result.receipt.fetch(:live_eligible_routes)
+  end
+
+  test "virtual Nado source route is excluded without synthetic close proof" do
+    result = planner(
+      route_matrix: virtual_nado_route_without_proof_matrix,
+      random_seed: "seed-1",
+      current_venue_override: "nado",
+      virtual_mode: true
+    ).plan(position: migration_position)
+
+    assert_equal "NO_ELIGIBLE_ROUTE", result.receipt.fetch(:status)
+    assert_nil result.receipt.fetch(:selected_route)
+    excluded = result.receipt.fetch(:decision_excluded_routes).find { |route| route.fetch(:to_venue) == "extended" }
+    assert excluded
+    assert_equal "VIRTUAL_PREVIEW_BLOCKED", excluded.fetch(:virtual_route_status)
+    assert_equal false, excluded.fetch(:virtual_decision_eligible)
   end
 
   test "different seeds can select ethereal or nado from dry run eligible routes" do
@@ -249,14 +273,30 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: true,
-            nado_reduce_only_close_preview_proof_mode: "synthetic"
+            nado_reduce_only_close_preview_proof_mode: "synthetic",
+            nado_source_leg_preview_proof: { ok: true }
           }
         ),
         route("nado", "ethereal", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: true,
-            nado_reduce_only_close_preview_proof_mode: "synthetic"
+            nado_reduce_only_close_preview_proof_mode: "synthetic",
+            nado_source_leg_preview_proof: { ok: true }
+          }
+        )
+      ]
+    }
+  end
+
+  def virtual_nado_route_without_proof_matrix
+    {
+      routes: [
+        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+          preview_available: false,
+          nado_readiness: {
+            nado_reduce_only_close_preview_available: false,
+            nado_reduce_only_close_preview_proof_mode: nil
           }
         )
       ]

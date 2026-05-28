@@ -91,7 +91,28 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal "nado", receipt.fetch("virtual_current_venue_before")
     assert_includes %w[extended ethereal], receipt.fetch("selected_target_venue")
     assert_equal receipt.fetch("selected_target_venue"), receipt.fetch("virtual_current_venue_after")
+    selected = receipt.fetch("selected_route")
+    assert_equal "READY_FOR_VIRTUAL_DRY_RUN", selected.fetch("virtual_route_status")
+    assert_equal "PREVIEW_BLOCKED", selected.fetch("production_route_status")
+    assert_equal true, selected.fetch("virtual_preview_available")
+    assert_equal true, selected.fetch("production_source_short_not_required")
+    assert_equal false, selected.fetch("live_execution_eligible")
     assert_equal "extended", position.hedge.reload.execution_venue
+  end
+
+  test "daily runner does not advance virtual state without virtual proof" do
+    position = migration_position
+    dirs = receipt_dirs
+
+    runner(**dirs).call(position_id: position.id, enabled_override: true, force: true, seed: "seed-5")
+    runner(**dirs, route_matrix_class: nado_source_without_virtual_proof_matrix_class).call(position_id: position.id, enabled_override: true, force: true, seed: "seed-1")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+    state = JSON.parse(File.read(Pathname(dirs.fetch(:state_dir)).join("position_#{position.id}.json")))
+
+    assert_equal "NO_ELIGIBLE_ROUTE", receipt.fetch("status")
+    assert_equal "nado", receipt.fetch("virtual_current_venue_before")
+    assert_equal "nado", receipt.fetch("virtual_current_venue_after")
+    assert_equal "nado", state.fetch("virtual_current_venue")
   end
 
   private
@@ -192,9 +213,42 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: true,
-            nado_reduce_only_close_preview_proof_mode: "synthetic"
+            nado_reduce_only_close_preview_proof_mode: "synthetic",
+            nado_source_leg_preview_proof: { ok: true }
           }
         )
+      end
+    end
+  end
+
+  def nado_source_without_virtual_proof_matrix_class
+    Class.new do
+      def initialize(position:, snapshot:, receipt_dir:)
+        @position = position
+      end
+
+      def prove_routes!
+        {
+          action: "migration_route_proof_summary",
+          position_id: @position.id,
+          receipt_paths: [],
+          routes: [
+            {
+              from_venue: "nado",
+              to_venue: "extended",
+              route_status: "PREVIEW_BLOCKED",
+              preview_available: false,
+              live_available: false,
+              blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ],
+              nado_readiness: {
+                nado_reduce_only_close_preview_available: false
+              },
+              last_proof_time: "2026-05-28T12:00:00Z"
+            }
+          ],
+          orders_submitted: 0,
+          signatures_created: 0
+        }
       end
     end
   end

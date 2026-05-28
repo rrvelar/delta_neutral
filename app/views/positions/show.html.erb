@@ -430,12 +430,20 @@ end %>
                 <div class="mt-2 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
                   <div><span class="text-gray-500">Time</span><p class="text-white"><%= latest_daily_random_rotation_receipt["timestamp"] || "unknown" %></p></div>
                   <div><span class="text-gray-500">Status</span><p class="text-white"><%= latest_daily_random_rotation_receipt["status"] || "recorded" %></p></div>
-                  <div><span class="text-gray-500">Selected route</span><p class="text-white"><%= latest_daily_random_rotation_receipt["selected_route"].present? ? "#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "from_venue"))}->#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "to_venue"))}" : "none" %></p></div>
+                  <div><span class="text-gray-500">Virtual route selected</span><p class="text-white"><%= latest_daily_random_rotation_receipt["selected_route"].present? ? "#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "from_venue"))}->#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "to_venue"))}" : "none" %></p></div>
                   <div><span class="text-gray-500">Selected target</span><p class="text-white"><%= HedgeVenues.label(latest_daily_random_rotation_receipt["selected_target_venue"]) %></p></div>
+                  <div><span class="text-gray-500">Route status</span><p class="text-white"><%= latest_daily_random_rotation_receipt.dig("selected_route", "virtual_route_status") || latest_daily_random_rotation_receipt.dig("selected_route", "route_status") || "unknown" %></p></div>
+                  <div><span class="text-gray-500">Production status</span><p class="text-white"><%= latest_daily_random_rotation_receipt.dig("selected_route", "production_route_status") || "unknown" %></p></div>
                   <div><span class="text-gray-500">Virtual before / after</span><p class="text-white"><%= HedgeVenues.label(latest_daily_random_rotation_receipt["virtual_current_venue_before"]) %> -> <%= HedgeVenues.label(latest_daily_random_rotation_receipt["virtual_current_venue_after"]) %></p></div>
                   <div><span class="text-gray-500">Daily enabled</span><p class="text-white"><%= latest_daily_random_rotation_receipt["daily_enabled"] ? "true" : "false" %></p></div>
                   <div><span class="text-gray-500">Orders / signatures</span><p class="text-white"><%= latest_daily_random_rotation_receipt["orders_submitted"] || 0 %> / <%= latest_daily_random_rotation_receipt["signatures_created"] || 0 %></p></div>
                 </div>
+                <% if latest_daily_random_rotation_receipt.dig("selected_route", "production_route_status") == "PREVIEW_BLOCKED" %>
+                  <p class="mt-2 text-xs text-yellow-200">Production route remains blocked because Nado has no real source short.</p>
+                <% end %>
+                <% if latest_daily_random_rotation_receipt.dig("selected_route", "synthetic_source_leg_proof_required") %>
+                  <p class="mt-1 text-xs text-yellow-200">Virtual dry-run allowed via synthetic Nado close proof.</p>
+                <% end %>
                 <p class="mt-2 break-words text-xs text-gray-500"><%= latest_daily_random_rotation_receipt["receipt_path"] %></p>
               <% else %>
                 <p class="mt-2 text-xs text-gray-400">No daily random rotation dry-run receipt yet.</p>
