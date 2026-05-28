@@ -533,6 +533,52 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Run dry-run route proof", response.body
   end
 
+  test "show omits Nado open orders unavailable reason when readback succeeded" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    matrix = Struct.new(:report).new(
+      {
+        routes: [
+          {
+            from_venue: "extended",
+            to_venue: "nado",
+            preview_available: true,
+            live_available: false,
+            route_status: "READY_FOR_DRY_RUN",
+            supported_modes: %w[full stepwise],
+            supported_sequences: %w[target_first source_first],
+            blockers: [],
+            last_proof_time: nil,
+            nado_readiness: {
+              nado_flat: true,
+              nado_current_short_eth: "0.0",
+              nado_open_orders_count: 0,
+              nado_open_short_preview_available: true,
+              nado_reduce_only_close_preview_available: true,
+              nado_reduce_only_close_preview_proof_mode: "synthetic"
+            }
+          }
+        ]
+      }
+    )
+
+    HedgeVenueMigrationRouteMatrix.stub(:new, matrix) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "Nado: flat; open orders 0.", response.body
+    assert_match "Nado previews: open yes, close proven (synthetic).", response.body
+    assert_no_match "Nado open orders endpoint is unavailable or not configured.", response.body
+  end
+
   test "show renders production health summary from snapshots and history" do
     position = create_aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

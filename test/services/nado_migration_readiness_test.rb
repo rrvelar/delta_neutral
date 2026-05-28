@@ -17,9 +17,12 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "source", nado_service: service).report
 
     assert_equal true, report.fetch(:nado_position_read_available)
+    assert_equal true, report.fetch(:nado_open_orders_read_available)
     assert_equal "0.4", report.fetch(:nado_current_short_eth)
     assert_equal false, report.fetch(:nado_flat)
     assert_equal 0, report.fetch(:nado_open_orders_count)
+    assert_nil report.fetch(:nado_open_orders_unavailable_reason)
+    assert_not_includes report.fetch(:blockers), "Nado open orders readback is unavailable."
     assert_equal true, report.fetch(:nado_reduce_only_close_preview_available)
     assert_equal 0, report.fetch(:orders_submitted)
     assert_equal 0, report.fetch(:signatures_created)
@@ -43,6 +46,7 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
 
     assert_equal true, report.fetch(:nado_open_orders_read_available)
     assert_equal 2, report.fetch(:nado_open_orders_count)
+    assert_nil report.fetch(:nado_open_orders_unavailable_reason)
     assert_includes report.fetch(:blockers), "Nado open orders must be zero for migration proof."
   end
 

@@ -260,7 +260,7 @@ class HedgeVenueMigrationRouteMatrix
         :production_source_route_available,
         :route_still_blocked_because_source_flat,
         :nado_live_migration_supported
-      )
+      ).compact
     }
     fields[:planned_target_leg] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?
     fields[:nado_target_leg_preview] = readiness[:target_leg_preview] if to == "nado" && readiness[:target_leg_preview].present?

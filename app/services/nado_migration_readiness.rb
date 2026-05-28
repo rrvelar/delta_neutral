@@ -125,6 +125,8 @@ class NadoMigrationReadiness
   end
 
   def nado_open_orders_unavailable_reason
+    return nil if nado_open_orders_read_available?
+
     account_state[:open_orders_unavailable_reason] || account_state["open_orders_unavailable_reason"] || "Nado open orders endpoint is unavailable or not configured."
   end
 

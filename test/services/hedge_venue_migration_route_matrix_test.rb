@@ -51,6 +51,7 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     assert_equal "0.0", item.dig(:nado_readiness, :nado_current_short_eth)
     assert_not_includes item.fetch(:blockers), "Nado open orders readback is unavailable."
     assert_equal 0, item.dig(:nado_readiness, :nado_open_orders_count)
+    assert_not item.dig(:nado_readiness, :nado_open_orders_unavailable_reason)
   end
 
   test "Nado target route blocks when open orders are present" do
@@ -108,6 +109,20 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
         assert_equal 0, row.fetch("signatures_created")
         assert_no_match HedgeVenueMigrationExecutor::CONFIRMATION, row.to_json
       end
+    end
+  end
+
+  test "proof receipts omit Nado open orders unavailable reason when readback succeeds" do
+    Dir.mktmpdir do |dir|
+      service = FakeNadoService.new(current_position: nil)
+      summary = HedgeVenueMigrationRouteMatrix.new(position: migration_position, receipt_dir: dir, nado_service: service).prove_routes!
+      rows = File.readlines(summary.fetch(:receipt_paths).first).map { |line| JSON.parse(line) }
+      receipt = rows.find { |row| row["from_venue"] == "extended" && row["to_venue"] == "nado" && row["mode"] == "full" }
+
+      assert receipt
+      assert_equal 0, receipt.fetch("nado_readiness").fetch("nado_open_orders_count")
+      assert_not receipt.fetch("nado_readiness").key?("nado_open_orders_unavailable_reason")
+      assert_not_includes receipt.fetch("blockers"), "Nado open orders readback is unavailable."
     end
   end
 
