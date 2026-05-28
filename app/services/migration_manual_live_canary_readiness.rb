@@ -50,7 +50,13 @@ class MigrationManualLiveCanaryReadiness
     blockers << "MIGRATION_MANUAL_LIVE_CANARY_ENABLED must be true." unless bool_env("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
     blockers << "source venue must have a real short before canary." unless source_short.positive?
     blockers << "Nado live migration path not implemented." if [ from, to ].include?("nado")
-    blockers.concat(Array(route&.fetch(:blockers, []))).uniq
+    blockers.concat(manual_canary_route_blockers(route)).uniq
+  end
+
+  def manual_canary_route_blockers(route)
+    Array(route&.fetch(:blockers, [])).reject do |blocker|
+      blocker.to_s.match?(/LIVE_CANARY_CONFIRMED receipt is required/i)
+    end
   end
 
   def warnings

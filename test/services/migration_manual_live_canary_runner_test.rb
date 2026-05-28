@@ -11,6 +11,7 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
 
     assert_equal "blocked_before_submit", result.status
     assert_includes result.blockers, "submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}"
+    assert_not_includes result.blockers, "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal."
     assert_equal 0, result.receipt.fetch(:orders_submitted)
     assert_equal 0, result.receipt.fetch(:signatures_created)
     assert_equal "extended", position.hedge.reload.execution_venue

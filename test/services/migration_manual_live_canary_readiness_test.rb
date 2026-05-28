@@ -7,7 +7,9 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_equal "manual_live_canary_readiness", report.fetch(:action)
     assert_equal "extended->ethereal", report.fetch(:route)
     assert_equal false, report.fetch(:ready_for_supervised_canary)
+    assert_equal false, report.fetch(:canary_already_confirmed)
     assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be true for supervised live canary."
+    assert_not_includes report.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal."
     assert_equal 0, report.fetch(:orders_submitted)
     assert_equal 0, report.fetch(:signatures_created)
   end
