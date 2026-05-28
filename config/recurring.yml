@@ -15,6 +15,10 @@ default: &default
     class: HedgeSyncJob
     schedule: every 5 minutes
 
+  migration_random_rotation_daily:
+    class: MigrationRandomRotationDailyJob
+    schedule: every day at 03:30
+
 production:
   <<: *default
   clear_solid_queue_finished_jobs:

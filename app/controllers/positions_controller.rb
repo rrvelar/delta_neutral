@@ -119,6 +119,8 @@ class PositionsController < ApplicationController
       @aerodrome_fees_report = cached_fees_report || unavailable_fees_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
       @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
+      @latest_daily_random_rotation_receipt = latest_jsonl_receipt_for_position(@position.id, "storage/hedge_migration_random_rotation_daily/*.jsonl")
+      @random_rotation_virtual_state = MigrationRandomRotationVirtualState.new(position: @position).current
       @migration_control_plan = cached_migration_control_plan
       @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
@@ -270,7 +272,13 @@ class PositionsController < ApplicationController
   def migration_random_rotation_decision
     position = load_position_for_migration
     matrix = HedgeVenueMigrationRouteMatrix.new(position: position).report
-    planner = HedgeVenueAutoMigrationPlanner.new(route_matrix: matrix)
+    use_virtual_state = ActiveModel::Type::Boolean.new.cast(params[:use_virtual_state])
+    state = use_virtual_state ? MigrationRandomRotationVirtualState.new(position: position).current : nil
+    planner = HedgeVenueAutoMigrationPlanner.new(
+      route_matrix: matrix,
+      current_venue_override: state&.fetch(:virtual_current_venue, nil),
+      virtual_mode: use_virtual_state
+    )
     result = planner.plan(position: position)
     path = planner.write_receipt(result.receipt)
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
@@ -674,6 +682,23 @@ class PositionsController < ApplicationController
     line = File.readlines(path).reverse.find(&:present?)
     line ? JSON.parse(line) : nil
   rescue JSON::ParserError, SystemCallError
+    nil
+  end
+
+  def latest_jsonl_receipt_for_position(position_id, *patterns)
+    files = patterns.flat_map { |pattern| Dir.glob(Rails.root.join(pattern)) }.sort
+    files.reverse_each do |path|
+      File.readlines(path).reverse_each do |line|
+        next if line.blank?
+
+        receipt = JSON.parse(line)
+        return receipt if receipt["position_id"].to_s == position_id.to_s
+      rescue JSON::ParserError
+        next
+      end
+    end
+    nil
+  rescue SystemCallError
     nil
   end
 

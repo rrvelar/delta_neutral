@@ -6,6 +6,9 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rails.application.load_tasks unless Rake::Task.task_defined?("migration:prove_routes")
     Rake::Task["migration:prove_routes"].reenable
     Rake::Task["migration:random_rotation_decision"].reenable if Rake::Task.task_defined?("migration:random_rotation_decision")
+    Rake::Task["migration:daily_random_rotation_dry_run"].reenable if Rake::Task.task_defined?("migration:daily_random_rotation_dry_run")
+    Rake::Task["migration:random_rotation_state"].reenable if Rake::Task.task_defined?("migration:random_rotation_state")
+    Rake::Task["migration:reset_random_rotation_state"].reenable if Rake::Task.task_defined?("migration:reset_random_rotation_state")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -130,6 +133,77 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert receipt.key?("live_blocked_routes")
     assert_equal 0, receipt.fetch("orders_placed")
     assert_equal 0, receipt.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "daily random rotation dry run task passes enabled override and outputs read only counters" do
+    calls = []
+    fake_runner = Object.new
+    fake_runner.define_singleton_method(:call) do |position_id:, force:, seed:, enabled_override:|
+      calls << { position_id: position_id, force: force, seed: seed, enabled_override: enabled_override }
+      MigrationRandomRotationDailyRunner::Result.new(
+        "ok",
+        [
+          {
+            action: "daily_random_rotation_dry_run",
+            position_id: position_id.to_i,
+            selected_target_venue: "nado",
+            would_migrate: false,
+            orders_submitted: 0,
+            signatures_created: 0
+          }
+        ],
+        [],
+        [],
+        0,
+        0
+      )
+    end
+
+    ENV["position_id"] = "3"
+    ENV["enabled_override"] = "true"
+    ENV["force"] = "true"
+    ENV["seed"] = "test-seed"
+    MigrationRandomRotationDailyRunner.stub(:new, -> { fake_runner }) do
+      out, = capture_io { Rake::Task["migration:daily_random_rotation_dry_run"].invoke }
+      summary = JSON.parse(out)
+
+      assert_equal "daily_random_rotation_dry_run_summary", summary.fetch("action")
+      assert_equal "ok", summary.fetch("status")
+      assert_equal 0, summary.fetch("orders_submitted")
+      assert_equal 0, summary.fetch("signatures_created")
+      assert_equal [ { position_id: "3", force: true, seed: "test-seed", enabled_override: true } ], calls
+    end
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("enabled_override")
+    ENV.delete("force")
+    ENV.delete("seed")
+  end
+
+  test "random rotation state task shows virtual venue and reset returns it to production" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    state = MigrationRandomRotationVirtualState.new(position: position)
+    state.update_from_decision!(
+      decision_receipt: {
+        selected_target_venue: "nado",
+        selected_route: { from_venue: "extended", to_venue: "nado" }
+      }
+    )
+
+    out, = capture_io { Rake::Task["migration:random_rotation_state"].invoke }
+    payload = JSON.parse(out)
+    assert_equal "nado", payload.fetch("virtual_current_venue")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+
+    Rake::Task["migration:reset_random_rotation_state"].reenable
+    out, = capture_io { Rake::Task["migration:reset_random_rotation_state"].invoke }
+    payload = JSON.parse(out)
+    assert_equal "extended", payload.fetch("virtual_current_venue")
+    assert_equal "nado", payload.fetch("previous_virtual_venue")
   ensure
     ENV.delete("position_id")
   end

@@ -7,7 +7,7 @@ class HedgeVenueAutoMigrationPlanner
     "Nado live migration path not implemented."
   ].freeze
 
-  def initialize(env: ENV, now: -> { Time.current }, migration_events: nil, route_proof_events: nil, route_matrix: nil, random_seed: nil, receipt_dir: RECEIPT_DIR)
+  def initialize(env: ENV, now: -> { Time.current }, migration_events: nil, route_proof_events: nil, route_matrix: nil, random_seed: nil, receipt_dir: RECEIPT_DIR, current_venue_override: nil, virtual_mode: false)
     @env = env
     @now = now
     @migration_events = migration_events
@@ -15,10 +15,13 @@ class HedgeVenueAutoMigrationPlanner
     @route_matrix = route_matrix
     @random_seed = random_seed || env["MIGRATION_RANDOM_SEED"]
     @receipt_dir = Pathname(receipt_dir)
+    @current_venue_override = current_venue_override
+    @virtual_mode = virtual_mode
   end
 
   def plan(position:, recommended_venue: nil, reason: nil)
-    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    production_current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    current = HedgeVenues.normalize(current_venue_override.presence || production_current)
     allowed = allowed_venues
     matrix = route_matrix_for(position)
     cooldown = cooldown_remaining
@@ -37,6 +40,10 @@ class HedgeVenueAutoMigrationPlanner
       position_id: position.id,
       strategy: STRATEGY,
       current_venue: current,
+      production_venue: production_current,
+      virtual_mode: virtual_mode,
+      virtual_route: virtual_mode,
+      production_source_short_not_required: virtual_mode,
       allowed_venues: allowed,
       eligible_target_venues: dry_run_eligible.map { |route| route.fetch(:to_venue) },
       eligible_routes: dry_run_eligible,
@@ -77,7 +84,7 @@ class HedgeVenueAutoMigrationPlanner
 
   private
 
-  attr_reader :env, :now, :migration_events, :route_proof_events, :route_matrix, :random_seed, :receipt_dir
+  attr_reader :env, :now, :migration_events, :route_proof_events, :route_matrix, :random_seed, :receipt_dir, :current_venue_override, :virtual_mode
 
   def base_blockers(current:, allowed:, daily_count:, cooldown:)
     blockers = []
@@ -118,9 +125,9 @@ class HedgeVenueAutoMigrationPlanner
     reasons = []
     route_key = "#{route.fetch(:from_venue)}->#{route.fetch(:to_venue)}"
     reasons << "route #{route_key} is not in MIGRATION_ALLOWED_ROUTES" unless route_allowed?(route_key)
-    reasons << "route proof is not READY_FOR_DRY_RUN" if require_route_proof? && route[:route_status] != "READY_FOR_DRY_RUN"
-    reasons << "route preview is unavailable" unless route[:preview_available]
-    reasons << "source venue has no current short" unless venue_short(position, route.fetch(:from_venue)).positive?
+    reasons << "route proof is not READY_FOR_DRY_RUN" if require_route_proof? && !decision_route_proven?(route)
+    reasons << "route preview is unavailable" unless decision_preview_available?(route)
+    reasons << "source venue has no current short" if !virtual_mode && !venue_short(position, route.fetch(:from_venue)).positive?
     reasons.concat(decision_safety_blockers(route))
     reasons.uniq
   end
@@ -138,7 +145,9 @@ class HedgeVenueAutoMigrationPlanner
   end
 
   def decision_safety_blockers(route)
-    Array(route[:blockers]).reject { |blocker| live_disabled_blocker?(blocker) }
+    Array(route[:blockers]).reject do |blocker|
+      live_disabled_blocker?(blocker) || (virtual_mode && blocker.to_s.match?(/source venue .* has no current short to migrate/i))
+    end
   end
 
   def live_disabled_blocker?(blocker)
@@ -154,8 +163,27 @@ class HedgeVenueAutoMigrationPlanner
       preview_available: route[:preview_available],
       live_available: route[:live_available] || false,
       blockers: Array(route[:blockers]),
-      last_proof_time: route[:last_proof_time]
+      last_proof_time: route[:last_proof_time],
+      nado_readiness: route[:nado_readiness],
+      virtual_route: virtual_mode,
+      production_source_short_not_required: virtual_mode
     }
+  end
+
+  def decision_route_proven?(route)
+    route[:route_status] == "READY_FOR_DRY_RUN" || (virtual_mode && virtual_capability_proven?(route))
+  end
+
+  def decision_preview_available?(route)
+    route[:preview_available] || (virtual_mode && virtual_capability_proven?(route))
+  end
+
+  def virtual_capability_proven?(route)
+    return true if route[:route_status] == "READY_FOR_DRY_RUN"
+    return false unless route.fetch(:from_venue) == "nado"
+
+    readiness = (route[:nado_readiness] || {}).with_indifferent_access
+    readiness[:nado_reduce_only_close_preview_available] && readiness[:nado_reduce_only_close_preview_proof_mode].present?
   end
 
   def same_route?(left, right)

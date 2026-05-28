@@ -529,13 +529,50 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Route Proof Matrix", response.body
     assert_match "Daily venue rotation readiness", response.body
     assert_match "Random Rotation Planner", response.body
-    assert_match "Run random rotation decision", response.body
+    assert_match "Run virtual random rotation decision", response.body
     assert_match "Dry-run eligible targets", response.body
     assert_match "Live eligible routes", response.body
     assert_match "Selected route live", response.body
+    assert_match "Virtual current venue", response.body
+    assert_match "Virtual dry-run state only. Production hedge venue was not changed.", response.body
+    assert_match "Last Daily Dry-run", response.body
+    assert_match "Decision-only. No migration executed.", response.body
     assert_match "Extended → Nado", response.body
     assert_match "Nado → Ethereal", response.body
     assert_match "Run dry-run route proof", response.body
+  end
+
+  test "show renders latest daily random rotation dry run receipt" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_random_rotation_daily")).write(
+      action: "daily_random_rotation_dry_run",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      status: "RANDOM_ROUTE_SELECTED",
+      selected_route: { from_venue: "extended", to_venue: "nado" },
+      selected_target_venue: "nado",
+      daily_enabled: true,
+      would_migrate: false,
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "Last Daily Dry-run", response.body
+    assert_match "Extended-&gt;Nado", response.body
+    assert_match "RANDOM_ROUTE_SELECTED", response.body
+    assert_match "0 / 0", response.body
   end
 
   test "show omits Nado open orders unavailable reason when readback succeeded" do

@@ -10,6 +10,15 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     assert_equal "every minute", entry.fetch("schedule")
   end
 
+  test "recurring schedule includes daily random rotation dry run job" do
+    config = YAML.safe_load_file(Rails.root.join("config", "recurring.yml"), aliases: true)
+    default = config.fetch("default")
+    entry = default.fetch("migration_random_rotation_daily")
+
+    assert_equal "MigrationRandomRotationDailyJob", entry.fetch("class")
+    assert_equal "every day at 03:30", entry.fetch("schedule")
+  end
+
   test "refreshes all snapshot types for active Aerodrome positions" do
     position = aerodrome_position(active: true)
     inactive = aerodrome_position(active: false)

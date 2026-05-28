@@ -116,6 +116,23 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal "same-seed", first.fetch(:random_seed)
   end
 
+  test "virtual planner starts from override venue and ignores production source short" do
+    result = planner(
+      route_matrix: virtual_nado_route_matrix,
+      random_seed: "seed-1",
+      current_venue_override: "nado",
+      virtual_mode: true
+    ).plan(position: migration_position)
+
+    assert_equal "nado", result.receipt.fetch(:current_venue)
+    assert_equal "extended", result.receipt.fetch(:production_venue)
+    assert_equal true, result.receipt.fetch(:virtual_mode)
+    assert_equal %w[ethereal extended], result.receipt.fetch(:dry_run_eligible_routes).map { |route| route.fetch(:to_venue) }.sort
+    assert result.receipt.fetch(:dry_run_eligible_routes).all? { |route| route.fetch(:production_source_short_not_required) }
+    assert_empty result.receipt.fetch(:decision_excluded_routes)
+    assert_empty result.receipt.fetch(:live_eligible_routes)
+  end
+
   test "different seeds can select ethereal or nado from dry run eligible routes" do
     selected_targets = 1.upto(20).map do |index|
       seed = "seed-#{index}"
@@ -128,13 +145,15 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
 
   private
 
-  def planner(env: {}, route_matrix: ready_route_matrix, now: -> { Time.zone.local(2026, 5, 28, 12, 0, 0) }, migration_events: [], random_seed: "seed")
+  def planner(env: {}, route_matrix: ready_route_matrix, now: -> { Time.zone.local(2026, 5, 28, 12, 0, 0) }, migration_events: [], random_seed: "seed", current_venue_override: nil, virtual_mode: false)
     HedgeVenueAutoMigrationPlanner.new(
       env: default_env.merge(env),
       route_matrix: route_matrix,
       now: now,
       migration_events: migration_events,
-      random_seed: random_seed
+      random_seed: random_seed,
+      current_venue_override: current_venue_override,
+      virtual_mode: virtual_mode
     )
   end
 
@@ -221,6 +240,27 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
 
   def incomplete_route_matrix
     { routes: [ route("extended", "ethereal", "PREVIEW_BLOCKED", blockers: [ "target short is unavailable in dashboard snapshot" ]) ] }
+  end
+
+  def virtual_nado_route_matrix
+    {
+      routes: [
+        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+          preview_available: false,
+          nado_readiness: {
+            nado_reduce_only_close_preview_available: true,
+            nado_reduce_only_close_preview_proof_mode: "synthetic"
+          }
+        ),
+        route("nado", "ethereal", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+          preview_available: false,
+          nado_readiness: {
+            nado_reduce_only_close_preview_available: true,
+            nado_reduce_only_close_preview_proof_mode: "synthetic"
+          }
+        )
+      ]
+    }
   end
 
   def nado_live_blockers

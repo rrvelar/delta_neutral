@@ -316,6 +316,8 @@ end %>
 
     <% migration_plan = @migration_control_plan || {} %>
     <% latest_migration_receipt = @latest_hedge_migration_receipt || {} %>
+    <% latest_daily_random_rotation_receipt = @latest_daily_random_rotation_receipt || {} %>
+    <% random_rotation_virtual_state = @random_rotation_virtual_state || {} %>
     <% auto_migration_decision = @auto_migration_decision || {} %>
     <% migration_from_default = migration_plan[:from_venue].presence || cached_snapshot[:production_venue].presence || selected_venue %>
     <% migration_to_default = migration_plan[:to_venue].presence || (migration_from_default == "extended" ? "ethereal" : "extended") %>
@@ -403,11 +405,12 @@ end %>
                 <p class="text-xs uppercase tracking-wide text-gray-500">Random Rotation Planner</p>
                 <p class="mt-1 text-sm text-gray-300">Decision-only random rotation. No economics, funding, fees, PnL, scoring, signatures, or orders.</p>
               </div>
-              <%= button_to "Run random rotation decision", migration_random_rotation_decision_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+              <%= button_to "Run virtual random rotation decision", migration_random_rotation_decision_position_path(@position), method: :post, params: { use_virtual_state: true }, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
             </div>
             <div class="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
               <div><span class="text-gray-500">Strategy</span><p class="text-white"><%= auto_migration_decision[:strategy].presence || "random_rotation" %></p></div>
-              <div><span class="text-gray-500">Current venue</span><p class="text-white"><%= HedgeVenues.label(auto_migration_decision[:current_venue]) %></p></div>
+              <div><span class="text-gray-500">Production venue</span><p class="text-white"><%= HedgeVenues.label(random_rotation_virtual_state[:production_venue].presence || auto_migration_decision[:production_venue]) %></p></div>
+              <div><span class="text-gray-500">Virtual current venue</span><p class="text-white"><%= HedgeVenues.label(random_rotation_virtual_state[:virtual_current_venue].presence || auto_migration_decision[:current_venue]) %></p></div>
               <div><span class="text-gray-500">Dry-run eligible targets</span><p class="text-white"><%= Array(auto_migration_decision[:eligible_target_venues]).map { |venue| HedgeVenues.label(venue) }.presence&.join(", ") || "none" %></p></div>
               <div><span class="text-gray-500">Selected route</span><p class="text-white"><%= auto_migration_decision[:selected_route].present? ? "#{HedgeVenues.label(auto_migration_decision.dig(:selected_route, :from_venue))} -> #{HedgeVenues.label(auto_migration_decision.dig(:selected_route, :to_venue))}" : "none" %></p></div>
               <div><span class="text-gray-500">Live eligible routes</span><p class="text-white"><%= Array(auto_migration_decision[:live_eligible_routes]).map { |route| "#{HedgeVenues.label(route[:from_venue])}->#{HedgeVenues.label(route[:to_venue])}" }.presence&.join(", ") || "none" %></p></div>
@@ -420,6 +423,25 @@ end %>
               <p class="mt-2 break-words text-xs text-yellow-200">Selected for decision-only dry-run rotation; live unavailable because Nado live migration path is not implemented.</p>
             <% end %>
             <p class="mt-2 text-xs text-gray-500">Live execution: blocked/gated. would_migrate=<%= auto_migration_decision[:would_migrate] ? "true" : "false" %>.</p>
+            <p class="mt-1 text-xs text-gray-500">Virtual dry-run state only. Production hedge venue was not changed.</p>
+            <div class="mt-3 rounded-lg border border-gray-800 bg-gray-950/80 p-3">
+              <p class="text-xs uppercase tracking-wide text-gray-500">Last Daily Dry-run</p>
+              <% if latest_daily_random_rotation_receipt.present? %>
+                <div class="mt-2 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
+                  <div><span class="text-gray-500">Time</span><p class="text-white"><%= latest_daily_random_rotation_receipt["timestamp"] || "unknown" %></p></div>
+                  <div><span class="text-gray-500">Status</span><p class="text-white"><%= latest_daily_random_rotation_receipt["status"] || "recorded" %></p></div>
+                  <div><span class="text-gray-500">Selected route</span><p class="text-white"><%= latest_daily_random_rotation_receipt["selected_route"].present? ? "#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "from_venue"))}->#{HedgeVenues.label(latest_daily_random_rotation_receipt.dig("selected_route", "to_venue"))}" : "none" %></p></div>
+                  <div><span class="text-gray-500">Selected target</span><p class="text-white"><%= HedgeVenues.label(latest_daily_random_rotation_receipt["selected_target_venue"]) %></p></div>
+                  <div><span class="text-gray-500">Virtual before / after</span><p class="text-white"><%= HedgeVenues.label(latest_daily_random_rotation_receipt["virtual_current_venue_before"]) %> -> <%= HedgeVenues.label(latest_daily_random_rotation_receipt["virtual_current_venue_after"]) %></p></div>
+                  <div><span class="text-gray-500">Daily enabled</span><p class="text-white"><%= latest_daily_random_rotation_receipt["daily_enabled"] ? "true" : "false" %></p></div>
+                  <div><span class="text-gray-500">Orders / signatures</span><p class="text-white"><%= latest_daily_random_rotation_receipt["orders_submitted"] || 0 %> / <%= latest_daily_random_rotation_receipt["signatures_created"] || 0 %></p></div>
+                </div>
+                <p class="mt-2 break-words text-xs text-gray-500"><%= latest_daily_random_rotation_receipt["receipt_path"] %></p>
+              <% else %>
+                <p class="mt-2 text-xs text-gray-400">No daily random rotation dry-run receipt yet.</p>
+              <% end %>
+              <p class="mt-2 text-xs text-gray-500">Decision-only. No migration executed.</p>
+            </div>
             <% if auto_migration_decision[:blockers].present? %>
               <p class="mt-1 break-words text-xs text-gray-500"><%= auto_migration_decision[:blockers].first %></p>
             <% end %>

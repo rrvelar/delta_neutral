@@ -82,10 +82,83 @@ namespace :migration do
     end
 
     matrix = HedgeVenueMigrationRouteMatrix.new(position: position).report
-    planner = HedgeVenueAutoMigrationPlanner.new(route_matrix: matrix)
+    use_virtual_state = ActiveModel::Type::Boolean.new.cast(ENV["use_virtual_state"].presence || ENV["USE_VIRTUAL_STATE"])
+    state = use_virtual_state ? MigrationRandomRotationVirtualState.new(position: position).current : nil
+    planner = HedgeVenueAutoMigrationPlanner.new(
+      route_matrix: matrix,
+      current_venue_override: state&.fetch(:virtual_current_venue, nil),
+      virtual_mode: use_virtual_state
+    )
     result = planner.plan(position: position)
     path = planner.write_receipt(result.receipt)
-    puts JSON.pretty_generate(result.receipt.merge(receipt_path: path&.to_s))
+    puts JSON.pretty_generate(result.receipt.merge(receipt_path: path&.to_s, virtual_state: state).compact)
+  end
+
+  desc "Run the read-only daily random rotation dry-run workflow"
+  task daily_random_rotation_dry_run: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    force = ActiveModel::Type::Boolean.new.cast(ENV["force"].presence || ENV["FORCE"])
+    enabled_override = ActiveModel::Type::Boolean.new.cast(ENV["enabled_override"].presence || ENV["ENABLED_OVERRIDE"])
+    seed = ENV["seed"].presence || ENV["MIGRATION_RANDOM_SEED"].presence
+    result = MigrationRandomRotationDailyRunner.new.call(
+      position_id: position_id,
+      force: force,
+      seed: seed,
+      enabled_override: enabled_override
+    )
+
+    puts JSON.pretty_generate(
+      action: "daily_random_rotation_dry_run_summary",
+      status: result.status,
+      position_id: position_id,
+      positions: result.positions,
+      blockers: result.blockers,
+      warnings: result.warnings,
+      orders_submitted: result.orders_submitted,
+      signatures_created: result.signatures_created
+    )
+  end
+
+  desc "Show read-only random rotation virtual state for a position"
+  task random_rotation_state: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:hedge).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        status: "blocked",
+        action: "random_rotation_state",
+        position_id: position_id,
+        blockers: [ "Position #{position_id || '(missing)'} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    state = MigrationRandomRotationVirtualState.new(position: position).current
+    puts JSON.pretty_generate(state.merge(action: "random_rotation_state", status: "ok"))
+  end
+
+  desc "Reset read-only random rotation virtual state to the production venue"
+  task reset_random_rotation_state: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:hedge).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        status: "blocked",
+        action: "reset_random_rotation_state",
+        position_id: position_id,
+        blockers: [ "Position #{position_id || '(missing)'} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    state = MigrationRandomRotationVirtualState.new(position: position).reset!
+    puts JSON.pretty_generate(state.merge(action: "reset_random_rotation_state", status: "ok"))
   end
 
   def refresh_snapshot_for_route_proof(position)
