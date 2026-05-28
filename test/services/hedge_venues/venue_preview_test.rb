@@ -670,6 +670,37 @@ module HedgeVenues
       assert_nil state.fetch(:open_orders_unavailable_reason)
       assert_equal "subaccount_orders", state.fetch(:open_orders_read_diagnostics).fetch(:query_type)
       assert calls.any? { |uri| uri.query.include?("type=subaccount_orders") }
+      assert_equal 1, calls.count { |uri| uri.query.include?("type=subaccount_orders") }
+    end
+
+    test "nado open orders readback queries only ETH product when product id is known" do
+      calls = []
+      venue = HedgeVenues::Nado.new(env: nado_readonly_env, http_get: ->(uri) {
+        calls << uri
+        if uri.query.include?("subaccount_orders")
+          { data: { orders: [] } }.to_json
+        else
+          {
+            data: {
+              perp_products: [
+                { product_id: 4, symbol: "ETH-PERP" },
+                { product_id: 9, symbol: "BTC-PERP" },
+                { product_id: 11, symbol: "SOL-PERP" }
+              ],
+              perp_balances: []
+            }
+          }.to_json
+        end
+      })
+
+      state = venue.account_state
+      order_queries = calls.select { |uri| uri.query.include?("type=subaccount_orders") }
+
+      assert_equal true, state.fetch(:open_orders_read_available)
+      assert_equal 0, state.fetch(:open_orders_count)
+      assert_equal 1, order_queries.size
+      assert_match "product_id=4", order_queries.first.query
+      assert_equal 1, state.dig(:open_orders_read_diagnostics, :attempts).size
     end
 
     test "nado open orders unavailable is non fatal" do

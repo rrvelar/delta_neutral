@@ -245,7 +245,13 @@ module HedgeVenues
     end
 
     def open_order_product_ids
-      product_map(subaccount_info).keys.presence || eth_perp_positions.filter_map { |position| position[:product_id]&.to_s }
+      products = product_map(subaccount_info)
+      eth_product_id = products.keys.find { |product_id| product_id.to_i == 4 } ||
+        products.find { |product_id, product| eth_perp_position?(position_symbol({}, product, product_id), product_id) }&.first ||
+        eth_perp_positions.filter_map { |position| position[:product_id]&.to_s }.first
+      return [ eth_product_id.to_s ] if eth_product_id.present?
+
+      products.keys.presence || []
     end
 
     def nado_eth_order_row?(row)

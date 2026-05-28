@@ -16,15 +16,44 @@ namespace :migration do
       next
     end
 
+    task_started_at = Time.current
     refresh_result = refresh_snapshot_for_route_proof(position)
     position.reload
     snapshot = position.position_dashboard_snapshot
-    summary = HedgeVenueMigrationRouteMatrix.new(position: position, snapshot: snapshot).prove_routes!
+    proof_started_at = Time.current
+    snapshot_age_at_start = snapshot_age_seconds(snapshot, at: proof_started_at)
+    snapshot_status_at_start = snapshot_status(snapshot, at: proof_started_at)
+    if refresh_result[:error].present?
+      puts JSON.pretty_generate(
+        status: "blocked",
+        action: "migration_route_proof_summary",
+        position_id: position.id,
+        blockers: [ "Snapshot refresh before route proof failed: #{refresh_result[:error]}" ],
+        snapshot_refreshed_before_proof: refresh_result.fetch(:refreshed),
+        proof_started_at: proof_started_at.utc.iso8601,
+        snapshot_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
+        snapshot_age_seconds_at_start: snapshot_age_at_start,
+        snapshot_status_at_start: snapshot_status_at_start,
+        route_plans_used_fresh_snapshot: false,
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    summary = HedgeVenueMigrationRouteMatrix.new(position: position, snapshot: snapshot, now: -> { proof_started_at }).prove_routes!
+    proof_finished_at = Time.current
     summary.merge!(
       snapshot_refreshed_before_proof: refresh_result.fetch(:refreshed),
-      snapshot_age_seconds: snapshot_age_seconds(snapshot),
-      snapshot_status: snapshot_status(snapshot),
-      snapshot_refresh_error: refresh_result[:error]
+      proof_started_at: proof_started_at.utc.iso8601,
+      proof_finished_at: proof_finished_at.utc.iso8601,
+      proof_duration_seconds: (proof_finished_at - task_started_at).round(3),
+      snapshot_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
+      snapshot_age_seconds_at_start: snapshot_age_at_start,
+      snapshot_status_at_start: snapshot_status_at_start,
+      snapshot_age_seconds_at_end: snapshot_age_seconds(snapshot, at: proof_finished_at),
+      snapshot_status_at_end: snapshot_status(snapshot, at: proof_finished_at),
+      route_plans_used_fresh_snapshot: snapshot_status_at_start == "fresh"
     ).compact!
     puts JSON.pretty_generate(summary)
   end
@@ -45,16 +74,16 @@ namespace :migration do
     ActiveModel::Type::Boolean.new.cast(ENV.fetch("refresh_snapshot", "true"))
   end
 
-  def snapshot_age_seconds(snapshot)
+  def snapshot_age_seconds(snapshot, at: Time.current)
     return nil unless snapshot&.refreshed_at
 
-    (Time.current - snapshot.refreshed_at).round
+    (at - snapshot.refreshed_at).round
   end
 
-  def snapshot_status(snapshot)
+  def snapshot_status(snapshot, at: Time.current)
     return "missing" unless snapshot
-    return "stale" if snapshot.stale_now?
+    return "stale" if snapshot.stale_at?(at)
 
-    snapshot.refresh_status
+    snapshot.refresh_status == "ok" ? "fresh" : snapshot.refresh_status
   end
 end

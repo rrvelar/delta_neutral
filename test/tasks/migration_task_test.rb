@@ -19,6 +19,10 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert_equal "migration_route_proof_summary", summary.fetch("action")
     assert_equal position.id, summary.fetch("position_id")
     assert_equal 24, summary.fetch("receipts_written")
+    assert_equal false, summary.fetch("snapshot_refreshed_before_proof")
+    assert_equal "fresh", summary.fetch("snapshot_status_at_start")
+    assert_equal true, summary.fetch("route_plans_used_fresh_snapshot")
+    assert_operator summary.fetch("proof_duration_seconds"), :>=, 0
     lines = File.readlines(receipt_path)
     assert_operator lines.size, :>, before_lines
     receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "migration_route_proof" }
@@ -41,11 +45,35 @@ class MigrationTaskTest < ActiveSupport::TestCase
 
       assert_equal [ true ], refresh_calls
       assert_equal true, summary.fetch("snapshot_refreshed_before_proof")
-      assert_operator summary.fetch("snapshot_age_seconds"), :<, 5
-      assert_equal "ok", summary.fetch("snapshot_status")
+      assert_operator summary.fetch("snapshot_age_seconds_at_start"), :<, 5
+      assert_equal "fresh", summary.fetch("snapshot_status_at_start")
+      assert_equal true, summary.fetch("route_plans_used_fresh_snapshot")
       assert_not_includes route.fetch("blockers"), "Position dashboard snapshot is stale; refresh read-only data before planning migration."
       assert_equal 0, summary.fetch("orders_submitted")
       assert_equal 0, summary.fetch("signatures_created")
+    end
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "prove routes reports fresh start separately from stale end" do
+    now = Time.zone.local(2026, 5, 28, 12, 0, 0)
+    position = migration_position(refreshed_at: now - 119.seconds)
+    ENV["position_id"] = position.id.to_s
+    calls = 0
+
+    Time.stub(:current, -> {
+      calls += 1
+      calls <= 3 ? now : now + 5.seconds
+    }) do
+      out, = capture_io { Rake::Task["migration:prove_routes"].invoke }
+      summary = JSON.parse(out)
+      route = summary.fetch("routes").find { |row| row["from_venue"] == "extended" && row["to_venue"] == "ethereal" }
+
+      assert_equal "fresh", summary.fetch("snapshot_status_at_start")
+      assert_equal "stale", summary.fetch("snapshot_status_at_end")
+      assert_equal true, summary.fetch("route_plans_used_fresh_snapshot")
+      assert_not_includes route.fetch("blockers"), "Position dashboard snapshot is stale; refresh read-only data before planning migration."
     end
   ensure
     ENV.delete("position_id")

@@ -55,6 +55,7 @@ class HedgeVenueMigrationRouteMatrix
       action: "migration_route_proof_summary",
       position_id: position&.id,
       source_snapshot_id: snapshot&.id,
+      proof_started_at: proof_started_at.utc.iso8601,
       routes_count: route_pairs.size,
       receipts_written: rows.size,
       receipt_paths: paths,
@@ -208,14 +209,22 @@ class HedgeVenueMigrationRouteMatrix
   end
 
   def nado_readiness(from:, to:, mode:, sequence:)
-    NadoMigrationReadiness.new(
+    nado_readiness_reports[[ nado_role(from: from, to: to), mode, sequence ]] ||= NadoMigrationReadiness.new(
       position: position,
       snapshot: snapshot,
       intended_role: nado_role(from: from, to: to),
       mode: mode,
       sequence: sequence,
-      nado_service: nado_service
+      nado_service: matrix_nado_service
     ).report
+  end
+
+  def nado_readiness_reports
+    @nado_readiness_reports ||= {}
+  end
+
+  def matrix_nado_service
+    @matrix_nado_service ||= nado_service || NadoHedgeExecutionService.new
   end
 
   def nado_role(from:, to:)

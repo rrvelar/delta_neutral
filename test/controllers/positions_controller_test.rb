@@ -645,7 +645,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     lines = File.readlines(receipt_path).drop(before_lines)
     assert_operator lines.size, :>, 0
-    receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |item| item["position_id"] == position.id && item["action"] == "migration_preview" }
+    receipt = lines.reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find do |item|
+      item["position_id"] == position.id &&
+        item["action"] == "migration_preview" &&
+        item["from_venue"] == "extended" &&
+        item["to_venue"] == "ethereal" &&
+        item["migration_sequence"] == "source_first"
+    end
     assert receipt, "expected migration_preview receipt for position #{position.id}"
     assert_equal "preview_ready", receipt.fetch("final_status")
     assert_equal true, receipt.fetch("dry_run")
