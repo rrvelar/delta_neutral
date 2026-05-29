@@ -211,6 +211,36 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Trade", response.body
   end
 
+  test "show displays emergency restore section for underhedged Extended production position" do
+    position = create_aerodrome_position
+    position.create_hedge!(target: BigDecimal("1.0"), tolerance: BigDecimal("0.03"), active: true, execution_venue: "extended")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      extended_short_eth: BigDecimal("0"),
+      extended_status: "flat",
+      ethereal_short_eth: BigDecimal("0"),
+      ethereal_status: "flat",
+      nado_short_eth: BigDecimal("0"),
+      nado_status: "flat",
+      combined_short_eth: BigDecimal("0"),
+      target_short_eth: BigDecimal("1.25"),
+      tolerance_abs_eth: BigDecimal("0.0375"),
+      drift_eth: BigDecimal("1.25"),
+      inside_tolerance: false
+    )
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "Emergency Restore Hedge", response.body
+    assert_match "Emergency Restore Dry Run", response.body
+    assert_match HedgeEmergencyRestore::CONFIRMATION, response.body
+  end
+
   test "show displays read-only Aerodrome hedge status and pnl baseline" do
     position = create_aerodrome_position
     position.update!(entry_value_usd: BigDecimal("2500"))

@@ -286,6 +286,21 @@ class PositionsController < ApplicationController
       notice: "Random rotation decision recorded#{path ? " at #{path}" : ""}. No orders or signatures."
   end
 
+  def hedge_emergency_restore
+    position = load_position_for_migration
+    live = ActiveModel::Type::Boolean.new.cast(params[:live])
+    result = HedgeEmergencyRestore.new(
+      position: position,
+      dry_run: !live,
+      live: live,
+      confirmation: params[:hedge_emergency_restore_confirmation],
+      explicit_position_id: params[:id].present?
+    ).run
+    level = result.blockers.present? || result.status.to_s.include?("MANUAL_ACTION") || result.status.to_s.include?("FAILED") ? :alert : :notice
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),
+      flash: { level => hedge_emergency_restore_message(result.receipt) }
+  end
+
   private
 
   def load_position_for_migration
@@ -298,6 +313,14 @@ class PositionsController < ApplicationController
       "#{label} #{result.status}: #{result.blockers.join('; ')}"
     else
       "#{label} #{result.status}: #{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}, #{receipt[:planned_to_leg]&.dig(:size_eth) || '0'} ETH target leg, #{receipt[:planned_from_leg]&.dig(:size_eth) || '0'} ETH source leg."
+    end
+  end
+
+  def hedge_emergency_restore_message(receipt)
+    if receipt[:blockers].present?
+      "Emergency restore #{receipt[:final_status]}: #{receipt[:blockers].join('; ')}"
+    else
+      "Emergency restore #{receipt[:final_status]}: target #{receipt[:target_short_eth]} ETH, order #{receipt[:rounded_size_eth] || receipt[:order_size_eth]} ETH, orders #{receipt[:orders_submitted]}."
     end
   end
 
