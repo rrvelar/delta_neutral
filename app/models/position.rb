@@ -91,7 +91,7 @@ class Position < ApplicationRecord
     return false unless mellow_autopilot?
 
     metadata = mellow_metadata_hash
-    metadata["hedge_ready"] == true && metadata["last_probe_confidence"].to_s == "high"
+    metadata["hedge_ready"] == true && metadata["last_probe_confidence"].to_s.in?(%w[high current_share_token_resolver_high share_token_current_fallback])
   end
 
   def mellow_metadata_decimal(key)

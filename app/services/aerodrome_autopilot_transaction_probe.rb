@@ -23,6 +23,7 @@ class AerodromeAutopilotTransactionProbe
     underlying_tvl: "0x079c3b88",
     tvl: "0xe5328e06",
     get_tvl: "0xd075dd42",
+    preview_mint: "0xb3d7f6b9",
     vault: "0xfbfa77cf",
     strategy: "0x4a1d70a1",
     pool: "0x16f0115b"
@@ -489,8 +490,9 @@ class AerodromeAutopilotTransactionProbe
     attempts = []
 
     [ token_address, strategy_address, vault_address ].compact.uniq.each do |read_address|
-      CURRENT_TOTAL_AMOUNT_METHODS.each_key do |method|
-        raw_amounts = read_two_uints_with_attempt(read_address, method, attempts)
+      methods = [ :preview_mint, *CURRENT_TOTAL_AMOUNT_METHODS.keys ]
+      methods.each do |method|
+        raw_amounts = method == :preview_mint ? read_two_uints_with_attempt(read_address, method, attempts, encoded_arg: uint_word(share[:total_supply])) : read_two_uints_with_attempt(read_address, method, attempts)
         next unless raw_amounts
 
         amounts = token_amounts_from_raw(raw_amounts, token0, token1)
@@ -516,11 +518,11 @@ class AerodromeAutopilotTransactionProbe
     { current_share_token_total_amounts_attempts: attempts }
   end
 
-  def read_two_uints_with_attempt(address, selector_key, attempts)
-    result = eth_call(address, SELECTORS.fetch(selector_key))
+  def read_two_uints_with_attempt(address, selector_key, attempts, encoded_arg: "")
+    result = eth_call(address, SELECTORS.fetch(selector_key) + encoded_arg)
     attempts << {
       address: normalize_address(address),
-      method: CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
+      method: selector_key == :preview_mint ? "previewMint(uint256)" : CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
       selector: SELECTORS.fetch(selector_key),
       status: result&.match?(/\A0x[0-9a-fA-F]{128}\z/) ? "ok" : "unavailable"
     }
@@ -531,7 +533,7 @@ class AerodromeAutopilotTransactionProbe
   rescue => e
     attempts << {
       address: normalize_address(address),
-      method: CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
+      method: selector_key == :preview_mint ? "previewMint(uint256)" : CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
       selector: SELECTORS.fetch(selector_key),
       status: "error",
       error: "#{e.class}: #{e.message}"
@@ -551,6 +553,10 @@ class AerodromeAutopilotTransactionProbe
   def decimal_token_amount(raw_amount, address)
     decimals = usdc_token?(address, nil) ? 6 : 18
     BigDecimal(raw_amount) / BigDecimal(10**decimals)
+  end
+
+  def uint_word(value)
+    (BigDecimal(value.to_s) * BigDecimal(10**18)).to_i.to_s(16).rjust(64, "0")
   end
 
   def blank_strategy_nft_exposure

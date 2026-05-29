@@ -73,7 +73,7 @@ class PositionValuation
   def metadata_warnings(metadata)
     warnings = []
     warnings << "Mellow metadata is not hedge-ready." unless metadata["hedge_ready"] == true
-    warnings << "Mellow probe confidence is not high." unless metadata["last_probe_confidence"].to_s == "high"
+    warnings << "Mellow probe confidence is not high." unless metadata["last_probe_confidence"].to_s.in?(%w[high current_share_token_resolver_high share_token_current_fallback])
     warnings
   end
 

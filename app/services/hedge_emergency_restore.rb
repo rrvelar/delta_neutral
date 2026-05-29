@@ -86,7 +86,7 @@ class HedgeEmergencyRestore
     snapshot = position.position_dashboard_snapshot
     ethereal_short = decimal_or_nil(snapshot&.ethereal_short_eth)
     nado_short = decimal_or_nil(snapshot&.nado_short_eth)
-    target = explicit_target? ? @operator_target_short_eth : target_short_eth
+    target = explicit_target? || refresh[:status].to_s == "synced" ? (explicit_target? ? @operator_target_short_eth : target_short_eth) : nil
     tolerance = target && hedge ? target * BigDecimal(hedge.tolerance.to_s) : nil
     combined = combine_known(extended_short, ethereal_short, nado_short)
     signed_delta = target && combined ? target - extended_short : nil
@@ -261,6 +261,7 @@ class HedgeEmergencyRestore
       fresh_asset0_after: context.dig(:exposure_refresh, :after, :asset0_amount),
       fresh_asset1_after: context.dig(:exposure_refresh, :after, :asset1_amount),
       exposure_refresh_status: context.dig(:exposure_refresh, :status),
+      no_op: no_op?(context, inside),
       operator_provided_target: explicit_target?,
       target_short_eth: decimal_string(context.fetch(:target_short_eth)),
       combined_short_before: decimal_string(context.fetch(:combined_short_before)),
@@ -294,6 +295,11 @@ class HedgeEmergencyRestore
     return "dry_run" unless live?
 
     execution&.status == "success" && inside_tolerance ? "RESTORE_CONFIRMED" : "RESTORE_MANUAL_ACTION_REQUIRED"
+  end
+
+  def no_op?(context, inside)
+    inside == true && context.fetch(:order_size_eth).present? && context.fetch(:tolerance_eth).present? &&
+      context.fetch(:order_size_eth) <= context.fetch(:tolerance_eth)
   end
 
   def live_gates(context)

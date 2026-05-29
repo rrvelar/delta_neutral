@@ -1,4 +1,40 @@
 namespace :mellow do
+  desc "Read-only current Mellow pro-rata exposure diagnostics"
+  task current_exposure: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    unless position_id
+      puts JSON.pretty_generate(
+        action: "mellow_current_exposure",
+        status: "blocked",
+        blockers: [ "position_id is required" ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    position = Position.includes(:wallet).find_by(id: position_id)
+    unless position
+      puts JSON.pretty_generate(
+        action: "mellow_current_exposure",
+        position_id: position_id,
+        status: "blocked",
+        blockers: [ "Position #{position_id} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    result = MellowCurrentExposureResolver.new(position: position).resolve
+    puts JSON.pretty_generate(
+      {
+        action: "mellow_current_exposure",
+        position_id: position.id
+      }.merge(result)
+    )
+  end
+
   desc "Read-only Mellow rewards/fees route diagnostics"
   task rewards_route_check: :environment do
     position_id = ENV["POSITION_ID"].presence

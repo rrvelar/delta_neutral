@@ -25,7 +25,11 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
     report = hedgeable_report(user_weth: "0.333")
     report[:pro_rata_exposure] = report.fetch(:pro_rata_exposure).merge(strategy_token_id: "80000001", user_total_value_usd: "999.0")
 
-    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+    result = MellowAutopilotPositionSync.new(
+      position: position,
+      probe_factory: ->(*) { ProbeMock.new(report) },
+      resolver_factory: ->(*) { ResolverMock.new(status: "blocked", blockers: report.fetch(:blockers)) }
+    ).sync
 
     assert_equal "synced", result.fetch(:status)
     position.reload
@@ -43,7 +47,11 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
       pro_rata_exposure: hedgeable_report(user_weth: nil).fetch(:pro_rata_exposure).merge(user_weth_exposure: nil)
     )
 
-    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+    result = MellowAutopilotPositionSync.new(
+      position: position,
+      probe_factory: ->(*) { ProbeMock.new(report) },
+      resolver_factory: ->(*) { ResolverMock.new(status: "blocked", blockers: report.fetch(:blockers)) }
+    ).sync
 
     assert_equal "blocked", result.fetch(:status)
     assert_equal false, position.reload.hedge_ready?
@@ -76,7 +84,11 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
       ]
     )
 
-    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+    result = MellowAutopilotPositionSync.new(
+      position: position,
+      probe_factory: ->(*) { ProbeMock.new(report) },
+      resolver_factory: ->(*) { ResolverMock.new(status: "blocked", blockers: report.fetch(:blockers)) }
+    ).sync
 
     assert_equal "synced", result.fetch(:status)
     position.reload
@@ -103,13 +115,62 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
       )
     )
 
-    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+    result = MellowAutopilotPositionSync.new(
+      position: position,
+      probe_factory: ->(*) { ProbeMock.new(report) },
+      resolver_factory: ->(*) { ResolverMock.new(status: "blocked", blockers: report.fetch(:blockers)) }
+    ).sync
 
     assert_equal "blocked", result.fetch(:status)
     position.reload
     assert_equal BigDecimal("0.1"), position.asset0_amount
     assert_equal false, position.hedge_ready?
     assert_includes position.mellow_metadata_hash.fetch("last_probe_blockers"), "current share-token total WETH/USDC unavailable"
+  end
+
+  test "sync updates stale position from current exposure resolver when probe is blocked" do
+    position = create_mellow_position
+    position.update!(asset0_amount: "1.28366857878458", asset1_amount: "0")
+    blocked_report = hedgeable_report(user_weth: nil).merge(
+      hedgeable: false,
+      blockers: [ "current share-token total WETH/USDC unavailable" ],
+      pro_rata_exposure: hedgeable_report(user_weth: nil).fetch(:pro_rata_exposure).merge(
+        share_token: "0xshare",
+        user_weth_exposure: nil
+      )
+    )
+    resolver = ResolverMock.new(
+      status: "ok",
+      share_token: "0xshare",
+      strategy_pool_address: "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+      user_share_balance: "0.001072847820176313",
+      total_supply: "0.650660374341310525",
+      share_fraction: "0.001648859931361887",
+      user_share_percent: "0.1648859931361887",
+      strategy_total_weth: "616.629150428444549772",
+      strategy_total_usdc: "323204.389919",
+      user_weth_exposure: "1.01675",
+      user_usdc_exposure: "532.91",
+      successful_contract: "0xshare",
+      successful_method: "previewMint(uint256)",
+      attempted_methods: [ { method: "previewMint(uint256)", status: "ok" } ],
+      diagnostics: { attempted_methods_count: 1 },
+      blockers: []
+    )
+
+    result = MellowAutopilotPositionSync.new(
+      position: position,
+      probe_factory: ->(*) { ProbeMock.new(blocked_report) },
+      resolver_factory: ->(*) { resolver }
+    ).sync
+
+    assert_equal "synced", result.fetch(:status)
+    position.reload
+    assert_equal BigDecimal("1.01675"), position.asset0_amount
+    assert_equal BigDecimal("532.91"), position.asset1_amount
+    assert_equal true, position.hedge_ready?
+    assert_equal "current_share_token_resolver", position.mellow_metadata_hash.fetch("exposure_source")
+    assert_equal "previewMint(uint256)", position.mellow_metadata_hash.fetch("successful_method")
   end
 
   private
@@ -121,6 +182,16 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
 
     def report
       @report
+    end
+  end
+
+  class ResolverMock
+    def initialize(result)
+      @result = result
+    end
+
+    def resolve
+      @result
     end
   end
 
