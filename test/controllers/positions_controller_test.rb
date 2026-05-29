@@ -238,7 +238,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Emergency Restore Hedge", response.body
     assert_match "Emergency Refresh", response.body
-    assert_match "Stale exposure warning", response.body
+    assert_match "does not use stale DB exposure", response.body
     assert_match HedgeEmergencyRestore::ADJUST_CONFIRMATION, response.body
   end
 
@@ -1492,6 +1492,56 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "$2,611.87", response.body
     assert_no_match "$186.00", response.body
     assert_no_match "-$2,422", response.body
+  end
+
+  test "show displays current share-token source and does not block on old hedge_ready false" do
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:71261528",
+      asset0_amount: "0.8",
+      asset1_amount: "500",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      mellow_metadata: {
+        "hedge_ready" => false,
+        "exposure_source" => "current_share_token_resolver",
+        "successful_method" => "previewMint(uint256)",
+        "last_current_exposure_at" => Time.current.iso8601,
+        "last_probe_confidence" => "low",
+        "user_weth_exposure" => "0.8",
+        "user_usdc_exposure" => "500",
+        "user_total_value_usd" => "2100"
+      }.to_json
+    )
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "0.8",
+      tolerance_abs_eth: "0.024",
+      combined_short_eth: "0.74",
+      drift_eth: "0.06",
+      inside_tolerance: false,
+      extended_short_eth: "0.74",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat",
+      planned_auto_action: "increase_short"
+    )
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "current_share_token_resolver", response.body
+    assert_match "previewMint(uint256)", response.body
+    assert_match "SELL non-reduce-only / increase short", response.body
+    assert_no_match "Mellow Autopilot pro-rata exposure is not hedge-ready", response.body
   end
 
   test "show displays Mellow rewards and LP fee estimates without parsing synthetic id as direct NFT" do

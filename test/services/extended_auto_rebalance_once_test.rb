@@ -720,7 +720,8 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     live_env.merge(
       "EXTENDED_ONE_SHOT_REBALANCE_ENABLED" => "false",
       "EXTENDED_AUTO_REBALANCE_ENABLED" => "true",
-      "EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH" => "0.1"
+      "EXTENDED_AUTO_MAX_REBALANCE_SIZE_ETH" => "0.1",
+      "EXTENDED_AUTO_REQUIRE_CONSECUTIVE_OUTSIDE_TOLERANCE" => "1"
     )
   end
 

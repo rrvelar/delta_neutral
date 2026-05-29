@@ -326,6 +326,16 @@ class HedgeSyncJob < ApplicationJob
 
   def sync_extended_aerodrome_hedge(hedge)
     readiness = ExtendedAutoReadiness.new.report(position: hedge.position)
+    Rails.logger.info(
+      "HedgeSyncJob Extended target decision hedge=#{hedge.id} " \
+      "target_source=#{readiness[:target_source] || readiness[:exposure_source]} " \
+      "exposure_refreshed_at=#{readiness[:exposure_refreshed_at]} " \
+      "target_short_eth=#{readiness[:target_short_eth]} " \
+      "current_short=#{readiness[:extended_current_short_eth]} " \
+      "drift=#{readiness[:drift_eth]} tolerance=#{readiness[:tolerance_eth]} " \
+      "planned_auto_action=#{readiness[:planned_auto_action]} " \
+      "suppressed=#{readiness[:action_suppressed_reason].presence || 'none'}"
+    )
     unless readiness.fetch(:continuous_auto_ready)
       Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — #{readiness.fetch(:blockers).join('; ')}")
       return

@@ -4,7 +4,7 @@ class ExtendedAutoRebalanceOnce
   DEFAULT_RECENT_REBALANCE_GUARD_SECONDS = 60
   PRE_SUBMIT_EPSILON_ETH = BigDecimal("0.00000001")
 
-  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), nado_venue: HedgeVenues::Nado.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) }, fresh_target_factory: nil)
+  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), nado_venue: HedgeVenues::Nado.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) }, fresh_target_factory: nil, anti_churn_policy: nil)
     @env = env
     @venue = venue
     @signer_client = signer_client
@@ -12,6 +12,7 @@ class ExtendedAutoRebalanceOnce
     @now = now
     @sleeper = sleeper
     @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
+    @anti_churn_policy = anti_churn_policy || ExtendedAutoAntiChurnPolicy.new(env: env, now: now)
   end
 
   def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil)
@@ -134,6 +135,16 @@ class ExtendedAutoRebalanceOnce
     partial_auto = !one_shot && cap_exceeded == true && auto_partial_allowed?
     capped_delta = (probe_mode || partial_auto) && cap_exceeded ? capped_delta(delta: delta, cap: cap) : delta
     preview = preview_for(action: action, delta: capped_delta, current_short: current_short, max_slippage: max_slippage)
+    anti_churn = one_shot ? {} : @anti_churn_policy.evaluate(
+      position: position,
+      hedge: position.hedge,
+      action: action,
+      drift: delta,
+      tolerance: tolerance,
+      order_size: requested_order_size,
+      mark_price: mark_price(current_position: current_position, preview: preview),
+      readonly: false
+    )
 
     {
       source: one_shot ? source_for_one_shot(probe_mode: probe_mode) : "continuous_auto",
@@ -150,6 +161,16 @@ class ExtendedAutoRebalanceOnce
       delta_eth: decimal_string(capped_delta),
       tolerance_eth: decimal_string(tolerance),
       intended_action: action,
+      planned_auto_action: anti_churn[:planned_auto_action] || action,
+      action_suppressed_reason: anti_churn[:action_suppressed_reason],
+      min_rebalance_size_eth: anti_churn[:min_rebalance_size_eth],
+      min_rebalance_notional_usd: anti_churn[:min_rebalance_notional_usd],
+      rebalance_cooldown_seconds: anti_churn[:rebalance_cooldown_seconds],
+      cooldown_remaining_seconds: anti_churn[:cooldown_remaining_seconds],
+      consecutive_outside_tolerance_required: anti_churn[:consecutive_outside_tolerance_required],
+      consecutive_outside_tolerance_count: anti_churn[:consecutive_outside_tolerance_count],
+      strong_drift_bypass_multiplier: anti_churn[:strong_drift_bypass_multiplier],
+      strong_drift_bypass_used: anti_churn[:strong_drift_bypass_used],
       requested_order_size_eth: decimal_string(requested_order_size),
       capped_order_size_eth: order_size_for(action: action, delta: capped_delta),
       order_size_eth: order_size_for(action: action, delta: capped_delta),
@@ -194,6 +215,7 @@ class ExtendedAutoRebalanceOnce
     end
     blockers << "Position hedge execution_venue must be extended for Extended live rebalance" if !dry_run && !plan[:partial_probe] && position.hedge&.execution_venue != "extended"
     blockers << "Current Nado position must be flat before Extended live rebalance" if conflict_state[:nado_short_eth].to_d.positive?
+    blockers << plan[:action_suppressed_reason] if !one_shot && plan[:action_suppressed_reason].present?
     blockers.concat(recent_rebalance_blockers(position: position, dry_run: dry_run, one_shot: one_shot))
     blockers.concat(signer_health_blockers(signer_health)) unless dry_run
     blockers.uniq
@@ -231,6 +253,16 @@ class ExtendedAutoRebalanceOnce
       delta_eth: plan[:delta_eth],
       tolerance_eth: plan[:tolerance_eth],
       intended_action: plan[:intended_action],
+      planned_auto_action: plan[:planned_auto_action],
+      action_suppressed_reason: plan[:action_suppressed_reason],
+      min_rebalance_size_eth: plan[:min_rebalance_size_eth],
+      min_rebalance_notional_usd: plan[:min_rebalance_notional_usd],
+      rebalance_cooldown_seconds: plan[:rebalance_cooldown_seconds],
+      cooldown_remaining_seconds: plan[:cooldown_remaining_seconds],
+      consecutive_outside_tolerance_required: plan[:consecutive_outside_tolerance_required],
+      consecutive_outside_tolerance_count: plan[:consecutive_outside_tolerance_count],
+      strong_drift_bypass_multiplier: plan[:strong_drift_bypass_multiplier],
+      strong_drift_bypass_used: plan[:strong_drift_bypass_used],
       requested_order_size_eth: plan[:requested_order_size_eth],
       capped_order_size_eth: plan[:capped_order_size_eth],
       cap_eth: plan[:cap_eth],
@@ -402,6 +434,18 @@ class ExtendedAutoRebalanceOnce
     Integer(@env.fetch("EXTENDED_AUTO_RECENT_REBALANCE_GUARD_SECONDS", DEFAULT_RECENT_REBALANCE_GUARD_SECONDS.to_s))
   rescue ArgumentError
     DEFAULT_RECENT_REBALANCE_GUARD_SECONDS
+  end
+
+  def mark_price(current_position:, preview:)
+    decimal_or_nil(current_position&.fetch(:mark_price, nil)) || decimal_or_nil(preview&.dig(:payload, :mark_price))
+  end
+
+  def decimal_or_nil(value)
+    return nil if value.blank?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError
+    nil
   end
 
   def lifecycle_env(plan)

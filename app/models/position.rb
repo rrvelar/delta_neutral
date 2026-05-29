@@ -91,7 +91,8 @@ class Position < ApplicationRecord
     return false unless mellow_autopilot?
 
     metadata = mellow_metadata_hash
-    metadata["hedge_ready"] == true && metadata["last_probe_confidence"].to_s.in?(%w[high current_share_token_resolver_high share_token_current_fallback])
+    current_share_token_resolver_ready?(metadata) ||
+      (metadata["hedge_ready"] == true && metadata["last_probe_confidence"].to_s.in?(%w[high current_share_token_resolver_high share_token_current_fallback]))
   end
 
   def mellow_metadata_decimal(key)
@@ -107,7 +108,13 @@ class Position < ApplicationRecord
     return true unless mellow_autopilot?
 
     metadata = mellow_metadata_hash
-    metadata["hedge_ready"] == true && metadata["last_probe_confidence"].present? && asset0_amount.present?
+    asset0_amount.present? && (current_share_token_resolver_ready?(metadata) || (metadata["hedge_ready"] == true && metadata["last_probe_confidence"].present?))
+  end
+
+  def current_share_token_resolver_ready?(metadata = mellow_metadata_hash)
+    metadata["exposure_source"].to_s == "current_share_token_resolver" &&
+      metadata["last_current_exposure_at"].present? &&
+      metadata["user_weth_exposure"].present?
   end
 
   def self.multiple_active_hedgeable_blocker(excluding: nil)

@@ -140,4 +140,76 @@ namespace :dashboard do
       signatures_created: report.fetch(:signatures_created)
     )
   end
+
+  desc "Read-only production dashboard smoke diagnostics for one position"
+  task production_smoke: :environment do
+    position_id = ENV["position_id"] || ENV["POSITION_ID"] || ARGV.find { |arg| arg.start_with?("position_id=") }&.split("=", 2)&.last
+    route_exists = Rails.application.routes.routes.any? { |route| route.name == "mellow_autopilot_probe" }
+    position = Position.includes(:hedge, :position_dashboard_snapshot).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        action: "dashboard_production_smoke",
+        status: "blocked",
+        blocker: "position #{position_id || '(missing)'} not found in local DB",
+        tx_hash_onboarding_route_exists: route_exists,
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
+    readiness = safe_smoke_section { ExtendedAutoReadiness.new.report(position: position) }
+    snapshot = position.position_dashboard_snapshot
+    last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
+
+    puts JSON.pretty_generate(
+      action: "dashboard_production_smoke",
+      status: "ok",
+      position_id: position.id,
+      mellow_current_exposure_status: mellow[:status],
+      exposure_source: mellow[:exposure_source] || position.mellow_metadata_hash["exposure_source"],
+      successful_method: mellow[:successful_method] || position.mellow_metadata_hash["successful_method"],
+      db_asset0_amount: position.asset0_amount&.to_s("F"),
+      db_asset1_amount: position.asset1_amount&.to_s("F"),
+      extended_current_short_eth: readiness[:extended_current_short_eth],
+      target_short_eth: readiness[:target_short_eth],
+      inside_tolerance: readiness[:within_tolerance],
+      extended_auto_readiness: {
+        continuous_auto_ready: readiness[:continuous_auto_ready],
+        planned_auto_action: readiness[:planned_auto_action],
+        action_suppressed_reason: readiness[:action_suppressed_reason],
+        min_rebalance_size_eth: readiness[:min_rebalance_size_eth],
+        cooldown_remaining_seconds: readiness[:cooldown_remaining_seconds],
+        consecutive_outside_tolerance_count: readiness[:consecutive_outside_tolerance_count],
+        strong_drift_bypass_used: readiness[:strong_drift_bypass_used],
+        blockers: readiness[:blockers]
+      },
+      last_successful_extended_rebalance: last_success && {
+        id: last_success.id,
+        old_short_size: last_success.old_short_size&.to_s("F"),
+        new_short_size: last_success.new_short_size&.to_s("F"),
+        rebalanced_at: last_success.rebalanced_at&.iso8601,
+        exchange_order_id: last_success.exchange_order_id
+      },
+      dashboard_emergency_section_visible: dashboard_emergency_visible?(snapshot),
+      tx_hash_onboarding_route_exists: route_exists,
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+  end
+
+  def safe_smoke_section
+    yield
+  rescue => e
+    { status: "blocked", blockers: [ "#{e.class}: #{e.message}" ], orders_submitted: 0, signatures_created: 0 }
+  end
+
+  def dashboard_emergency_visible?(snapshot)
+    return false unless snapshot&.production_venue == "extended"
+    return true if snapshot.inside_tolerance == false
+
+    snapshot.stale_now? || snapshot.target_short_eth.nil? || snapshot.combined_short_eth.nil?
+  end
 end

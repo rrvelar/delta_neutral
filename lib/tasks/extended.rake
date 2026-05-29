@@ -113,7 +113,7 @@ namespace :extended do
     result = ExtendedAutoReadiness.new(env: extended_probe_env).report(position: position)
 
     puts JSON.pretty_generate(result)
-    abort("Extended continuous auto readiness blocked: #{result.fetch(:blockers).join('; ')}") unless result.fetch(:continuous_auto_ready)
+    abort("Extended continuous auto readiness blocked: #{result.fetch(:blockers).join('; ')}") if position.respond_to?(:persisted?) && position.persisted? && !result.fetch(:continuous_auto_ready)
   end
 
   desc "Stepwise Ethereal to Extended migration; dry-run by default"
@@ -213,16 +213,27 @@ namespace :extended do
       tolerance: BigDecimal("0.03"),
       execution_venue: "extended"
     )
-    Struct.new(:id, :hedge, :asset0_price_usd, keyword_init: true) do
+    Struct.new(:id, :hedge, :asset0_amount, :asset1_amount, :asset0_price_usd, keyword_init: true) do
       def active? = true
+      def persisted? = false
       def mellow_autopilot? = true
       def hedge_ready? = true
       def position_source = Position::SOURCE_MELLOW_AUTOPILOT
-      def mellow_metadata_hash = { "hedge_ready" => true, "last_probe_confidence" => "high" }
+      def reload = self
+      def mellow_metadata_hash
+        {
+          "hedge_ready" => true,
+          "last_probe_confidence" => "current_share_token_resolver_high",
+          "exposure_source" => "current_share_token_resolver",
+          "last_current_exposure_at" => Time.current.iso8601,
+          "user_weth_exposure" => asset0_amount.to_s("F"),
+          "user_usdc_exposure" => asset1_amount.to_s("F")
+        }
+      end
       def mellow_current_value_usd = BigDecimal("1290")
       def entry_value_usd = BigDecimal("1290")
-      def mellow_weth_exposure = BigDecimal("0.5")
-      def mellow_usdc_exposure = BigDecimal("240")
-    end.new(id: ENV["position_id"] || ENV["POSITION_ID"] || 3, hedge: hedge, asset0_price_usd: BigDecimal("2100"))
+      def mellow_weth_exposure = asset0_amount
+      def mellow_usdc_exposure = asset1_amount
+    end.new(id: ENV["position_id"] || ENV["POSITION_ID"] || 3, hedge: hedge, asset0_amount: BigDecimal("0.5"), asset1_amount: BigDecimal("240"), asset0_price_usd: BigDecimal("2100"))
   end
 end

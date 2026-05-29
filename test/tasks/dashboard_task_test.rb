@@ -6,6 +6,7 @@ class DashboardTaskTest < ActiveSupport::TestCase
     Rails.application.load_tasks unless Rake::Task.task_defined?("dashboard:refresh_all_position_snapshots")
     Rake::Task["dashboard:refresh_all_position_snapshots"].reenable
     Rake::Task["dashboard:production_health"].reenable if Rake::Task.task_defined?("dashboard:production_health")
+    Rake::Task["dashboard:production_smoke"].reenable if Rake::Task.task_defined?("dashboard:production_smoke")
   end
 
   test "refresh all position snapshots runs all read-only refreshers" do
@@ -87,6 +88,40 @@ class DashboardTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "production smoke outputs expected read-only diagnostics" do
+    position = aerodrome_position
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+    readiness = {
+      extended_current_short_eth: "0.8",
+      target_short_eth: "0.8",
+      within_tolerance: true,
+      continuous_auto_ready: true,
+      planned_auto_action: "no_op",
+      action_suppressed_reason: nil,
+      min_rebalance_size_eth: "0.03",
+      cooldown_remaining_seconds: 0,
+      consecutive_outside_tolerance_count: 0,
+      strong_drift_bypass_used: false,
+      blockers: []
+    }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      ExtendedAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "ok", payload.fetch("mellow_current_exposure_status")
+          assert_equal "current_share_token_resolver", payload.fetch("exposure_source")
+          assert_equal "previewMint(uint256)", payload.fetch("successful_method")
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
+          assert_equal true, payload.fetch("tx_hash_onboarding_route_exists")
+        end
+      end
+    end
+  end
+
   private
 
   def aerodrome_position
@@ -120,6 +155,14 @@ class DashboardTaskTest < ActiveSupport::TestCase
       object.define_singleton_method(:refresh) do
         calls << name
         snapshot
+      end
+    end
+  end
+
+  def resolver_result(result, method_name: :resolve)
+    Object.new.tap do |object|
+      object.define_singleton_method(method_name) do |**|
+        result
       end
     end
   end

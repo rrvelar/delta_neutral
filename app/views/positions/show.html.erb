@@ -57,6 +57,15 @@ end %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
 <% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
+<% extended_readiness_planned_action = extended_auto_readiness[:status].to_s == "unavailable" ? nil : extended_auto_readiness[:planned_auto_action].presence %>
+<% extended_planned_action = extended_readiness_planned_action || cached_snapshot[:planned_auto_action].presence || (rebalance_needed ? next_action.to_s : "no_op") %>
+<% extended_action_label = case extended_planned_action.to_s
+when "no_op" then "No-op / inside tolerance"
+when "increase_short" then "SELL non-reduce-only / increase short"
+when "decrease_short" then "BUY reduce-only / reduce short"
+when "blocked" then "Blocked / fresh target required"
+else extended_planned_action.to_s.humanize
+end %>
 <% hedge_accounting = @hedge_venue_accounting || {} %>
 <% accounting_components = hedge_accounting[:components] || {} %>
 <% snapshot_unrealized_pnl = selected_snapshot[:unrealized_pnl_usd] %>
@@ -690,7 +699,10 @@ end %>
             <% if selected_venue == "extended" %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Open orders</span><span class="text-white"><%= snapshot_open_orders_count.nil? ? "not refreshed" : snapshot_open_orders_count %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Auto readiness</span><span class="text-gray-300"><%= selected_auto_readiness_loaded ? (selected_auto_ready ? "ready" : "blocked") : "diagnostics separate" %></span></div>
-              <div class="flex justify-between gap-4"><span class="text-gray-500">Planned auto</span><span class="text-white"><%= cached_snapshot[:planned_auto_action].presence || (rebalance_needed ? next_action.to_s.humanize : "no-op") %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Planned auto</span><span class="text-white"><%= extended_action_label %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Min size</span><span class="text-white"><%= extended_auto_readiness[:min_rebalance_size_eth].presence || "0.03" %> ETH / $<%= extended_auto_readiness[:min_rebalance_notional_usd].presence || "50" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Cooldown</span><span class="text-white"><%= extended_auto_readiness[:cooldown_remaining_seconds].presence || 0 %>s</span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Confirmations</span><span class="text-white"><%= extended_auto_readiness[:consecutive_outside_tolerance_count].presence || 0 %>/<%= extended_auto_readiness[:consecutive_outside_tolerance_required].presence || 2 %></span></div>
             <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>
@@ -705,6 +717,12 @@ end %>
           <% if selected_venue == "extended" %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-300">
               <p>Extended production venue. Auto: <%= auto_operational_label %>. Signer: <%= signer_label %>. Required: 1x isolated-equivalent.</p>
+              <div class="mt-3 grid grid-cols-1 gap-2 border-t border-gray-800 pt-3 sm:grid-cols-2">
+                <div><span class="text-gray-500">Production venue</span><p class="text-white">Extended</p></div>
+                <div><span class="text-gray-500">Normal Extended auto</span><p class="<%= auto_gate_enabled ? 'text-green-300' : 'text-gray-300' %>"><%= auto_gate_enabled ? "enabled" : "disabled" %></p></div>
+                <div><span class="text-gray-500">Migration / canary</span><p class="text-gray-300">disabled unless manually gated</p></div>
+                <div><span class="text-gray-500">Live random autopilot</span><p class="text-gray-300">disabled</p></div>
+              </div>
               <% if selected_snapshot[:leverage].present? && BigDecimal(selected_snapshot[:leverage].to_s) == 1 && margin_mode.blank? %>
                 <p class="mt-2 text-gray-400"><%= snapshot_margin_detail %>.</p>
               <% end %>
@@ -729,6 +747,11 @@ end %>
               <% if selected_auto_readiness_loaded && extended_auto_readiness[:blockers].present? %>
                 <p class="mt-3 break-words border-t border-yellow-900/60 pt-3 text-yellow-200">Continuous auto readiness blockers: <%= extended_auto_readiness[:blockers].uniq.join("; ") %></p>
               <% end %>
+              <% if selected_venue == "extended" && extended_auto_readiness[:action_suppressed_reason].present? %>
+                <p class="mt-3 break-words border-t border-yellow-900/60 pt-3 text-yellow-200">Auto watch: <%= extended_auto_readiness[:action_suppressed_reason] %>. No live order will be submitted while this condition holds.</p>
+              <% elsif selected_venue == "extended" && extended_planned_action == "no_op" %>
+                <p class="mt-3 border-t border-gray-800 pt-3 text-green-200">Extended auto is a no-op because the current short is inside tolerance.</p>
+              <% end %>
             </div>
           <% end %>
         </div>
@@ -738,7 +761,7 @@ end %>
         rescue ArgumentError, TypeError
           false
         end %>
-        <% emergency_restore_visible = cached_snapshot[:production_venue].to_s == "extended" && cached_snapshot[:inside_tolerance] == false && emergency_restore_outside %>
+        <% emergency_restore_visible = cached_snapshot[:production_venue].to_s == "extended" && ((cached_snapshot[:inside_tolerance] == false && emergency_restore_outside) || cached_snapshot[:stale] || cached_snapshot[:target_short_eth].blank?) %>
         <% if emergency_restore_visible %>
           <div class="rounded-xl border border-red-900 bg-red-950/20 p-4 xl:col-span-2">
             <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -772,7 +795,7 @@ end %>
                 <%= form.submit "Emergency Refresh & Adjust Live", id: "hedge-emergency-restore-submit", disabled: true, class: "w-full rounded-lg border border-red-800 bg-red-950/80 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-900 disabled:border-gray-800 disabled:bg-gray-900 disabled:text-gray-600" %>
               <% end %>
             </div>
-            <p class="mt-3 text-xs text-yellow-200">Stale exposure warning: DB exposure can be stale after Mellow position changes. Emergency adjust refreshes source-of-truth exposure before computing target. Current DB WETH: <%= format_venue_eth_amount(@position.asset0_amount) %>; source: DB until refresh completes.</p>
+            <p class="mt-3 text-xs text-yellow-200">Emergency adjust refreshes source-of-truth Mellow exposure before computing target and does not use stale DB exposure if the fresh resolver is unavailable. Current DB WETH is displayed for context only: <%= format_venue_eth_amount(@position.asset0_amount) %>.</p>
             <p class="mt-3 text-xs text-gray-500">Default is dry-run. Live requires HEDGE_EMERGENCY_ADJUST_ENABLED=true or HEDGE_EMERGENCY_RESTORE_ENABLED=true, Extended live/probe gates, zero Extended open orders, exact phrase, target within caps, and successful Extended readback. No production venue is changed.</p>
           </div>
         <% end %>

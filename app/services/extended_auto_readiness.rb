@@ -1,6 +1,6 @@
 class ExtendedAutoReadiness
   def initialize(env: ENV, extended_venue: HedgeVenues::Extended.new(env: env), ethereal_service: EtherealHedgeExecutionService.new(env: env),
-                 nado_venue: HedgeVenues::Nado.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, fresh_target_factory: nil)
+                 nado_venue: HedgeVenues::Nado.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, fresh_target_factory: nil, anti_churn_policy: nil)
     @env = env
     @extended_venue = extended_venue
     @ethereal_service = ethereal_service
@@ -8,6 +8,7 @@ class ExtendedAutoReadiness
     @signer_client = signer_client
     @now = now
     @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
+    @anti_churn_policy = anti_churn_policy || ExtendedAutoAntiChurnPolicy.new(env: env, now: now)
   end
 
   def report(position:)
@@ -22,16 +23,29 @@ class ExtendedAutoReadiness
       hedge_id: position.hedge&.id,
       execution_venue: position.hedge&.execution_venue,
       target_short_eth: decimal_string(state[:target_short]),
+      target_source: state.dig(:fresh_target, :target_source),
+      exposure_source: state.dig(:fresh_target, :exposure_source),
+      exposure_refreshed_at: state.dig(:fresh_target, :exposure_refreshed_at),
+      exposure_stale: state.dig(:fresh_target, :exposure_stale),
       extended_current_short_eth: decimal_string(state[:extended_short]),
       drift_eth: decimal_string(state[:drift]),
       tolerance_eth: decimal_string(state[:tolerance]),
       within_tolerance: state[:drift] && state[:tolerance] ? state[:drift].abs <= state[:tolerance] : nil,
       drift_outside_tolerance: plan[:drift_outside_tolerance],
       planned_auto_action: plan[:planned_auto_action],
+      action_suppressed_reason: plan[:action_suppressed_reason],
+      min_rebalance_size_eth: plan[:min_rebalance_size_eth],
+      min_rebalance_notional_usd: plan[:min_rebalance_notional_usd],
+      rebalance_cooldown_seconds: plan[:rebalance_cooldown_seconds],
+      cooldown_remaining_seconds: plan[:cooldown_remaining_seconds],
+      consecutive_outside_tolerance_required: plan[:consecutive_outside_tolerance_required],
+      consecutive_outside_tolerance_count: plan[:consecutive_outside_tolerance_count],
+      strong_drift_bypass_multiplier: plan[:strong_drift_bypass_multiplier],
+      strong_drift_bypass_used: plan[:strong_drift_bypass_used],
       planned_auto_order_size_eth: decimal_string(plan[:planned_auto_order_size]),
       auto_max_rebalance_size_eth: decimal_string(plan[:auto_max_rebalance_size]),
       partial_auto_rebalance: plan[:partial_auto_rebalance],
-      auto_can_act: blockers.empty? && plan[:planned_auto_action] != "no_op",
+      auto_can_act: blockers.empty? && plan[:planned_auto_action] != "no_op" && plan[:action_suppressed_reason].blank?,
       ethereal_short_eth: decimal_string(state[:ethereal_short]),
       ethereal_flat: state[:ethereal_flat],
       nado_short_eth: decimal_string(state[:nado_short]),
@@ -60,6 +74,7 @@ class ExtendedAutoReadiness
     extended_short = short_size(extended_position)
     tolerance = target && position.hedge ? target * position.hedge.tolerance : nil
     {
+      position: position,
       target_short: target,
       fresh_target: fresh_target,
       extended_position: extended_position,
@@ -92,6 +107,7 @@ class ExtendedAutoReadiness
     blockers.concat(signer_health_blockers(state[:signer_health]))
     blockers << "target short could not be computed" unless state[:target_short]
     blockers.concat(Array(state.dig(:fresh_target, :blockers)))
+    blockers << state.dig(:plan, :action_suppressed_reason) if state.dig(:plan, :action_suppressed_reason).present?
     blockers.uniq
   end
 
@@ -110,9 +126,30 @@ class ExtendedAutoReadiness
     end
     raw_size = %w[increase_short decrease_short].include?(action) ? drift.abs : nil
     partial = raw_size && raw_size > cap && auto_partial_allowed?
+    order_size = partial ? cap : raw_size
+    anti_churn = @anti_churn_policy.evaluate(
+      position: state[:position],
+      hedge: state[:position].hedge,
+      action: action,
+      drift: drift,
+      tolerance: tolerance,
+      order_size: raw_size,
+      mark_price: mark_price(state),
+      readonly: true
+    )
+    state[:plan] = anti_churn
     {
       planned_auto_action: action,
-      planned_auto_order_size: partial ? cap : raw_size,
+      action_suppressed_reason: anti_churn[:action_suppressed_reason],
+      min_rebalance_size_eth: anti_churn[:min_rebalance_size_eth],
+      min_rebalance_notional_usd: anti_churn[:min_rebalance_notional_usd],
+      rebalance_cooldown_seconds: anti_churn[:rebalance_cooldown_seconds],
+      cooldown_remaining_seconds: anti_churn[:cooldown_remaining_seconds],
+      consecutive_outside_tolerance_required: anti_churn[:consecutive_outside_tolerance_required],
+      consecutive_outside_tolerance_count: anti_churn[:consecutive_outside_tolerance_count],
+      strong_drift_bypass_multiplier: anti_churn[:strong_drift_bypass_multiplier],
+      strong_drift_bypass_used: anti_churn[:strong_drift_bypass_used],
+      planned_auto_order_size: order_size,
       auto_max_rebalance_size: cap,
       partial_auto_rebalance: partial == true,
       drift_outside_tolerance: %w[increase_short decrease_short].include?(action)
@@ -125,6 +162,20 @@ class ExtendedAutoReadiness
     blockers << "Extended Stark signer verified_algorithm=false" unless ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
     blockers << "Extended Stark signer signing_enabled=false" unless ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
     blockers
+  end
+
+  def mark_price(state)
+    decimal_or_nil(state.dig(:extended_position, :mark_price)) ||
+      decimal_or_nil(state.dig(:account_state, :market_metadata, :mark_price)) ||
+      decimal_or_nil(state.dig(:account_state, :read_only_diagnostics, :mark_price))
+  end
+
+  def decimal_or_nil(value)
+    return nil if value.blank?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError
+    nil
   end
 
   def target_short(position)

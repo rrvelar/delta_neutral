@@ -100,7 +100,7 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
     def read_position(symbol:)
       return nil if @short.zero?
 
-      { side: "short", short_size: @short.to_s("F"), size: -@short }
+      { side: "short", short_size: @short.to_s("F"), size: -@short, mark_price: "2000" }
     end
 
     def account_state
@@ -159,7 +159,8 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
       "EXTENDED_LIVE_ENABLED" => "true",
       "EXTENDED_AUTO_REBALANCE_ENABLED" => "true",
       "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false",
-      "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true"
+      "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true",
+      "EXTENDED_AUTO_REQUIRE_CONSECUTIVE_OUTSIDE_TOLERANCE" => "1"
     }
   end
 end
