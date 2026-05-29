@@ -50,6 +50,68 @@ class MellowAutopilotPositionSyncTest < ActiveSupport::TestCase
     assert_includes position.mellow_metadata_hash.fetch("last_probe_blockers"), "Cannot hedge: current shared strategy WETH exposure is unavailable."
   end
 
+  test "sync persists share token current fallback exposure" do
+    position = create_mellow_position
+    report = hedgeable_report(user_weth: "1.01675")
+    report[:strategy_nft_exposure] = report.fetch(:strategy_nft_exposure).merge(
+      strategy_token_id: "71261528",
+      error: "Aerodrome RPC error: execution reverted: ERC721: owner query for nonexistent token"
+    )
+    report[:pro_rata_exposure] = report.fetch(:pro_rata_exposure).merge(
+      strategy_token_id: "71261528",
+      stale_strategy_token_id: "71261528",
+      strategy_total_weth: "616.629150428444549772",
+      strategy_total_usdc: "323204.389919",
+      user_share_balance: "0.001072847820176313",
+      total_shares: "0.650660374341310525",
+      share_fraction: "0.001648859931361887",
+      user_share_percent: "0.1648859931361887",
+      user_weth_exposure: "1.01675",
+      user_usdc_exposure: "532.91",
+      confidence: "share_token_current_fallback",
+      exposure_confidence: "share_token_current_fallback",
+      exposure_source: "current_share_token_fallback",
+      current_share_token_total_amounts_attempts: [
+        { address: "0xshare", method: "getTotalAmounts()", status: "ok" }
+      ]
+    )
+
+    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+
+    assert_equal "synced", result.fetch(:status)
+    position.reload
+    assert_equal BigDecimal("1.01675"), position.asset0_amount
+    assert_equal BigDecimal("532.91"), position.asset1_amount
+    assert_equal true, position.hedge_ready?
+    assert_equal "current_share_token_fallback", position.mellow_metadata_hash.fetch("exposure_source")
+    assert_equal "71261528", position.mellow_metadata_hash.fetch("stale_strategy_token_id")
+    assert_equal "0.001648859931361887", position.mellow_metadata_hash.fetch("share_fraction")
+  end
+
+  test "sync blocks with diagnostics when share token current totals unavailable" do
+    position = create_mellow_position
+    report = hedgeable_report(user_weth: nil).merge(
+      hedgeable: false,
+      user_weth_exposure: nil,
+      blockers: [ "current share-token total WETH/USDC unavailable" ],
+      pro_rata_exposure: hedgeable_report(user_weth: nil).fetch(:pro_rata_exposure).merge(
+        user_weth_exposure: nil,
+        current_share_token_total_amounts_unavailable: true,
+        current_share_token_total_amounts_attempts: [
+          { address: "0xshare", method: "getTotalAmounts()", status: "unavailable" }
+        ]
+      )
+    )
+
+    result = MellowAutopilotPositionSync.new(position: position, probe_factory: ->(*) { ProbeMock.new(report) }).sync
+
+    assert_equal "blocked", result.fetch(:status)
+    position.reload
+    assert_equal BigDecimal("0.1"), position.asset0_amount
+    assert_equal false, position.hedge_ready?
+    assert_includes position.mellow_metadata_hash.fetch("last_probe_blockers"), "current share-token total WETH/USDC unavailable"
+  end
+
   private
 
   class ProbeMock

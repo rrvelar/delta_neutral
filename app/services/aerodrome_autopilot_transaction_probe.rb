@@ -18,10 +18,21 @@ class AerodromeAutopilotTransactionProbe
     token0: "0x0dfe1681",
     token1: "0xd21220a7",
     get_total_amounts: "0x1f2c4092",
+    total_amounts: "0x0c6ffc29",
     total_assets: "0x01e1d114",
+    underlying_tvl: "0x079c3b88",
+    tvl: "0xe5328e06",
+    get_tvl: "0xd075dd42",
     vault: "0xfbfa77cf",
     strategy: "0x4a1d70a1",
     pool: "0x16f0115b"
+  }.freeze
+  CURRENT_TOTAL_AMOUNT_METHODS = {
+    get_total_amounts: "getTotalAmounts()",
+    total_amounts: "totalAmounts()",
+    underlying_tvl: "underlyingTvl()",
+    tvl: "tvl()",
+    get_tvl: "getTvl()"
   }.freeze
 
   def initialize(tx_hash:, network: "base", wallet_address: nil, rpc_url: nil, receipt: nil, eth_call_results: {}, slipstream_service: nil)
@@ -54,7 +65,9 @@ class AerodromeAutopilotTransactionProbe
     blockers = []
     contract_held_share = share_tokens.any? { |token| token[:ownership_directly_attributable_to_user] == false && token[:contract_holders].present? }
     if classification == "autopilot_shared_strategy" && exposure[:user_weth_exposure].nil?
-      blockers << if strategy_nft[:strategy_total_weth].nil?
+      blockers << if exposure[:current_share_token_total_amounts_unavailable]
+        "current share-token total WETH/USDC unavailable"
+      elsif strategy_nft[:strategy_total_weth].nil?
         "Cannot hedge: current shared strategy WETH exposure is unavailable."
       else
         "Cannot hedge: user pro-rata WETH exposure is unknown."
@@ -356,6 +369,10 @@ class AerodromeAutopilotTransactionProbe
         strategy: read_address_method(address, :strategy),
         pool: read_address_method(address, :pool),
         get_total_amounts: read_two_uints(address, :get_total_amounts),
+        total_amounts: read_two_uints(address, :total_amounts),
+        underlying_tvl: read_two_uints(address, :underlying_tvl),
+        tvl: read_two_uints(address, :tvl),
+        get_tvl: read_two_uints(address, :get_tvl),
         total_assets: read_uint(address, :total_assets)&.to_s
       }
     end
@@ -410,35 +427,130 @@ class AerodromeAutopilotTransactionProbe
         token[:user_balance].present? &&
         token[:total_supply].present?
     end
-    return blank_pro_rata_exposure(strategy_nft) unless share && strategy_nft[:strategy_total_weth].present?
+    return blank_pro_rata_exposure(strategy_nft) unless share
 
     user_shares = BigDecimal(share[:user_balance])
     total_shares = BigDecimal(share[:total_supply])
     return blank_pro_rata_exposure(strategy_nft) unless user_shares.positive? && total_shares.positive?
 
     share_fraction = user_shares / total_shares
-    strategy_weth = BigDecimal(strategy_nft[:strategy_total_weth])
-    strategy_usdc = BigDecimal(strategy_nft[:strategy_total_usdc].presence || "0")
-    strategy_value = BigDecimal(strategy_nft[:strategy_total_value_usd].presence || "0")
+    source = strategy_nft[:strategy_total_weth].present? ? strategy_nft : current_share_token_exposure(share, strategy_nft)
+    unless source[:strategy_total_weth].present?
+      return blank_pro_rata_exposure(strategy_nft).merge(
+        share_token: share[:token_address],
+        user_share_balance: user_shares.to_s("F"),
+        total_shares: total_shares.to_s("F"),
+        user_share_percent: (share_fraction * 100).to_s("F"),
+        current_share_token_total_amounts_unavailable: true,
+        current_share_token_total_amounts_attempts: source[:current_share_token_total_amounts_attempts] || [],
+        confidence: "unavailable",
+        exposure_confidence: "unavailable"
+      )
+    end
+
+    strategy_weth = BigDecimal(source[:strategy_total_weth])
+    strategy_usdc = BigDecimal(source[:strategy_total_usdc].presence || "0")
+    strategy_value = BigDecimal(source[:strategy_total_value_usd].presence || "0")
+    fallback_source = source[:exposure_source] == "current_share_token_fallback"
     {
-      strategy_token_id: strategy_nft[:strategy_token_id],
-      strategy_pool_address: strategy_nft[:strategy_pool_address],
-      strategy_total_weth: strategy_nft[:strategy_total_weth],
-      strategy_total_usdc: strategy_nft[:strategy_total_usdc],
-      strategy_total_value_usd: strategy_nft[:strategy_total_value_usd],
+      strategy_token_id: source[:strategy_token_id],
+      stale_strategy_token_id: source[:stale_strategy_token_id],
+      strategy_pool_address: source[:strategy_pool_address],
+      strategy_token0: source[:token0_address],
+      strategy_token1: source[:token1_address],
+      strategy_total_weth: source[:strategy_total_weth],
+      strategy_total_usdc: source[:strategy_total_usdc],
+      strategy_total_value_usd: source[:strategy_total_value_usd],
       user_share_balance: user_shares.to_s("F"),
       total_shares: total_shares.to_s("F"),
+      share_fraction: share_fraction.to_s("F"),
       user_share_percent: (share_fraction * 100).to_s("F"),
       user_weth_exposure: (strategy_weth * share_fraction).to_s("F"),
       user_usdc_exposure: (strategy_usdc * share_fraction).to_s("F"),
       user_total_value_usd: strategy_value.positive? ? (strategy_value * share_fraction).to_s("F") : nil,
-      confidence: "high",
+      confidence: source[:confidence],
       share_token: share[:token_address],
-      exposure_confidence: "high",
-      source: "shared strategy Slipstream NFT"
+      exposure_confidence: source[:confidence],
+      source: fallback_source ? source[:source] : "shared strategy Slipstream NFT",
+      exposure_source: source[:exposure_source] || "shared_strategy_nft",
+      current_share_token_total_amounts_attempts: source[:current_share_token_total_amounts_attempts] || []
     }
   rescue
     blank_pro_rata_exposure(strategy_nft).merge(confidence: "low", exposure_confidence: "low")
+  end
+
+  def current_share_token_exposure(share, strategy_nft)
+    token_address = share[:token_address]
+    strategy_address = read_address_method(token_address, :strategy)
+    vault_address = read_address_method(token_address, :vault)
+    token0 = read_address_method(token_address, :token0) || strategy_nft[:token0_address]
+    token1 = read_address_method(token_address, :token1) || strategy_nft[:token1_address]
+    pool = read_address_method(token_address, :pool) || strategy_nft[:strategy_pool_address]
+    attempts = []
+
+    [ token_address, strategy_address, vault_address ].compact.uniq.each do |read_address|
+      CURRENT_TOTAL_AMOUNT_METHODS.each_key do |method|
+        raw_amounts = read_two_uints_with_attempt(read_address, method, attempts)
+        next unless raw_amounts
+
+        amounts = token_amounts_from_raw(raw_amounts, token0, token1)
+        next unless amounts[:weth].present?
+
+        return {
+          strategy_token_id: strategy_nft[:strategy_token_id],
+          stale_strategy_token_id: strategy_nft[:strategy_token_id],
+          strategy_pool_address: pool,
+          strategy_total_weth: amounts[:weth].to_s("F"),
+          strategy_total_usdc: amounts[:usdc]&.to_s("F"),
+          strategy_total_value_usd: nil,
+          token0_address: token0,
+          token1_address: token1,
+          source: "current share-token total amounts",
+          exposure_source: "current_share_token_fallback",
+          confidence: "share_token_current_fallback",
+          current_share_token_total_amounts_attempts: attempts
+        }
+      end
+    end
+
+    { current_share_token_total_amounts_attempts: attempts }
+  end
+
+  def read_two_uints_with_attempt(address, selector_key, attempts)
+    result = eth_call(address, SELECTORS.fetch(selector_key))
+    attempts << {
+      address: normalize_address(address),
+      method: CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
+      selector: SELECTORS.fetch(selector_key),
+      status: result&.match?(/\A0x[0-9a-fA-F]{128}\z/) ? "ok" : "unavailable"
+    }
+    return nil unless result&.match?(/\A0x[0-9a-fA-F]{128}\z/)
+
+    body = result.delete_prefix("0x")
+    { amount0: body[0, 64].to_i(16).to_s, amount1: body[64, 64].to_i(16).to_s }
+  rescue => e
+    attempts << {
+      address: normalize_address(address),
+      method: CURRENT_TOTAL_AMOUNT_METHODS.fetch(selector_key),
+      selector: SELECTORS.fetch(selector_key),
+      status: "error",
+      error: "#{e.class}: #{e.message}"
+    }
+    nil
+  end
+
+  def token_amounts_from_raw(raw_amounts, token0, token1)
+    amount0 = decimal_token_amount(raw_amounts[:amount0], token0)
+    amount1 = decimal_token_amount(raw_amounts[:amount1], token1)
+    {
+      weth: weth_token?(token0, nil) ? amount0 : (weth_token?(token1, nil) ? amount1 : nil),
+      usdc: usdc_token?(token0, nil) ? amount0 : (usdc_token?(token1, nil) ? amount1 : nil)
+    }
+  end
+
+  def decimal_token_amount(raw_amount, address)
+    decimals = usdc_token?(address, nil) ? 6 : 18
+    BigDecimal(raw_amount) / BigDecimal(10**decimals)
   end
 
   def blank_strategy_nft_exposure
@@ -473,7 +585,12 @@ class AerodromeAutopilotTransactionProbe
       user_usdc_exposure: nil,
       user_total_value_usd: nil,
       confidence: "unavailable",
-      exposure_confidence: "unavailable"
+      exposure_confidence: "unavailable",
+      exposure_source: nil,
+      stale_strategy_token_id: nil,
+      share_fraction: nil,
+      current_share_token_total_amounts_unavailable: false,
+      current_share_token_total_amounts_attempts: []
     }
   end
 

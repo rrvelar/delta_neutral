@@ -1217,8 +1217,17 @@ end %>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">User share %</dt><dd class="text-white"><%= format_percent_amount(mellow["user_share_percent"]) %></dd></div>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">User WETH exposure</dt><dd class="text-white"><%= format_venue_eth_amount(mellow["user_weth_exposure"].presence || @position.asset0_amount) %></dd></div>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">User USDC exposure</dt><dd class="text-white"><%= format_token_amount(mellow["user_usdc_exposure"].presence || @position.asset1_amount, decimals: 2) %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">Exposure source</dt><dd class="text-right text-white"><%= mellow["exposure_source"].presence || "historical NFT current read" %></dd></div>
+              <% if mellow["stale_strategy_token_id"].present? %>
+                <div class="flex justify-between gap-4"><dt class="text-gray-500">Stale strategy token ID</dt><dd class="text-white"><%= mellow["stale_strategy_token_id"] %></dd></div>
+              <% end %>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">Confidence</dt><dd class="text-white"><%= mellow["last_probe_confidence"].presence || "unavailable" %></dd></div>
             </dl>
+            <% if mellow["last_probe_blockers"].present? %>
+              <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+                <% Array(mellow["last_probe_blockers"]).each do |blocker| %><li><%= blocker %></li><% end %>
+              </ul>
+            <% end %>
           </details>
         <% end %>
 

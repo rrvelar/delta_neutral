@@ -111,6 +111,44 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     assert_equal "shared strategy Slipstream NFT", report.dig(:pro_rata_exposure, :source)
   end
 
+  test "computes pro rata exposure from current share token totals when strategy nft is nonexistent" do
+    receipt = {
+      "logs" => [
+        erc20_transfer(AerodromeAutopilotTransactionProbe::WETH_ADDRESS, USER, ROUTER, 1.2, 18),
+        erc20_transfer(SHARE, ROUTER, USER, "0.001072847820176313", 18),
+        nft_transfer(GAUGE, INTERMEDIATE, "71261528"),
+        nft_transfer(INTERMEDIATE, GAUGE, "71261528")
+      ]
+    }
+    calls = {
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:balance_of) + USER.delete_prefix("0x").rjust(64, "0") ] => word(BigDecimal("0.001072847820176313") * 10**18),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:total_supply) ] => word(BigDecimal("0.650660374341310525") * 10**18),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:token0) ] => address_word(AerodromeAutopilotTransactionProbe::WETH_ADDRESS),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:token1) ] => address_word(AerodromeAutopilotTransactionProbe::USDC_ADDRESS),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:pool) ] => address_word(POOL),
+      [ SHARE, AerodromeAutopilotTransactionProbe::SELECTORS.fetch(:get_total_amounts) ] => two_words(BigDecimal("616.629150428444549772") * 10**18, BigDecimal("323204.389919") * 10**6)
+    }
+    slipstream = FailingSlipstreamMock.new("Aerodrome RPC error: execution reverted: ERC721: owner query for nonexistent token")
+
+    report = AerodromeAutopilotTransactionProbe.new(
+      tx_hash: "0xtx",
+      wallet_address: USER,
+      receipt: receipt,
+      eth_call_results: calls,
+      slipstream_service: slipstream
+    ).report
+
+    assert_equal true, report.fetch(:hedgeable)
+    assert_empty report.fetch(:blockers)
+    assert_equal "71261528", report.dig(:pro_rata_exposure, :stale_strategy_token_id)
+    assert_equal "current_share_token_fallback", report.dig(:pro_rata_exposure, :exposure_source)
+    assert_equal "share_token_current_fallback", report.dig(:pro_rata_exposure, :confidence)
+    assert_in_delta BigDecimal("1.01675"), BigDecimal(report.dig(:pro_rata_exposure, :user_weth_exposure)), BigDecimal("0.0001")
+    assert_in_delta BigDecimal("532.91"), BigDecimal(report.dig(:pro_rata_exposure, :user_usdc_exposure)), BigDecimal("0.01")
+    assert_equal "71261528", report.fetch(:strategy_token_id)
+    assert_equal POOL, report.fetch(:strategy_pool_address)
+  end
+
   test "remains non hedgeable when strategy nft weth is unavailable" do
     receipt = {
       "logs" => [
@@ -133,8 +171,9 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     ).report
 
     assert_equal false, report.fetch(:hedgeable)
-    assert_includes report.fetch(:blockers), "Cannot hedge: current shared strategy WETH exposure is unavailable."
+    assert_includes report.fetch(:blockers), "current share-token total WETH/USDC unavailable"
     assert_nil report.dig(:pro_rata_exposure, :user_weth_exposure)
+    assert report.dig(:pro_rata_exposure, :current_share_token_total_amounts_attempts).present?
   end
 
   test "shares held by intermediate contract remain non hedgeable" do
@@ -216,6 +255,16 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
     end
   end
 
+  class FailingSlipstreamMock
+    def initialize(message)
+      @message = message
+    end
+
+    def fetch_position(_token_id)
+      raise @message
+    end
+  end
+
   def strategy_position(amount0_raw:, amount1_raw:)
     AerodromeSlipstreamService::PositionData.new(
       token_id: "70927538",
@@ -281,6 +330,14 @@ class AerodromeAutopilotTransactionProbeTest < ActiveSupport::TestCase
 
   def word(value)
     "0x#{value.to_i.to_s(16).rjust(64, '0')}"
+  end
+
+  def two_words(value0, value1)
+    "0x#{word(value0).delete_prefix('0x')}#{word(value1).delete_prefix('0x')}"
+  end
+
+  def address_word(address)
+    "0x#{address.delete_prefix('0x').rjust(64, '0')}"
   end
 
   def with_env(values)

@@ -14,7 +14,8 @@ class MellowAutopilotPositionSync
         "hedge_ready" => false,
         "last_probe_confidence" => report[:exposure_confidence] || report.dig(:pro_rata_exposure, :exposure_confidence),
         "last_probe_at" => Time.current.iso8601,
-        "last_probe_blockers" => report.fetch(:blockers, [])
+        "last_probe_blockers" => report.fetch(:blockers, []),
+        "current_share_token_total_amounts_attempts" => report.dig(:pro_rata_exposure, :current_share_token_total_amounts_attempts)
       )
       @position.update!(mellow_metadata: JSON.generate(metadata))
       return { status: "blocked", report: report, blockers: report.fetch(:blockers, []) }
@@ -69,15 +70,19 @@ class MellowAutopilotPositionSync
       "strategy_pool_address" => exposure[:strategy_pool_address],
       "user_share_balance" => exposure[:user_share_balance],
       "total_shares" => exposure[:total_shares],
+      "share_fraction" => exposure[:share_fraction],
       "user_share_percent" => exposure[:user_share_percent],
-      "strategy_token0" => report.dig(:strategy_nft_exposure, :token0_address),
-      "strategy_token1" => report.dig(:strategy_nft_exposure, :token1_address),
+      "strategy_token0" => report.dig(:strategy_nft_exposure, :token0_address) || exposure[:strategy_token0],
+      "strategy_token1" => report.dig(:strategy_nft_exposure, :token1_address) || exposure[:strategy_token1],
       "strategy_total_weth" => exposure[:strategy_total_weth],
       "strategy_total_usdc" => exposure[:strategy_total_usdc],
       "user_weth_exposure" => exposure[:user_weth_exposure],
       "user_usdc_exposure" => exposure[:user_usdc_exposure],
       "user_total_value_usd" => exposure[:user_total_value_usd],
-      "last_probe_confidence" => exposure[:exposure_confidence] || exposure[:confidence]
+      "last_probe_confidence" => exposure[:exposure_confidence] || exposure[:confidence],
+      "exposure_source" => exposure[:exposure_source],
+      "stale_strategy_token_id" => exposure[:stale_strategy_token_id],
+      "current_share_token_total_amounts_attempts" => exposure[:current_share_token_total_amounts_attempts]
     }
   end
 
