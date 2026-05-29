@@ -13,6 +13,46 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "emergency restore refuses stale DB target unless refresh succeeds" do
+    result = restore(position: position, venue: FakeExtendedVenue.new, refresher: FakeExposureRefresher.new(status: "blocked")).run
+
+    assert_equal "dry_run", result.status
+    assert_includes result.blockers, "fresh Mellow exposure required before hedge sizing"
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+  end
+
+  test "emergency refresh updates position exposure from mocked fresh Mellow source" do
+    current = position(asset0_amount: "1.28366857878458", source: Position::SOURCE_MELLOW_AUTOPILOT, mellow_metadata: { "hedge_ready" => false })
+
+    result = restore(position: current, venue: FakeExtendedVenue.new(current_short: "1.283"), action: "adjust", refresher: FakeExposureRefresher.new(asset0: "1.01675", asset1: "532.91")).run
+
+    assert_equal "dry_run", result.status
+    assert_equal BigDecimal("1.01675"), current.reload.asset0_amount
+    assert_equal "1.28366857878458", result.receipt.fetch(:db_asset0_before)
+    assert_equal "1.01675", result.receipt.fetch(:fresh_asset0_after)
+  end
+
+  test "overhedged adjust builds buy reduce only order" do
+    current = position(asset0_amount: "1.28366857878458")
+
+    result = restore(position: current, venue: FakeExtendedVenue.new(current_short: "1.283"), action: "adjust", refresher: FakeExposureRefresher.new(asset0: "1.01675", asset1: "532.91")).run
+
+    assert_equal "dry_run", result.status
+    assert_equal "buy", result.receipt.fetch(:side)
+    assert_equal true, result.receipt.fetch(:reduce_only)
+    assert_in_delta BigDecimal("0.26625"), BigDecimal(result.receipt.fetch(:order_size_eth)), BigDecimal("0.0001")
+  end
+
+  test "underhedged adjust builds sell non reduce-only order" do
+    current = position(asset0_amount: "0.8")
+
+    result = restore(position: current, venue: FakeExtendedVenue.new(current_short: "0.8"), action: "adjust", refresher: FakeExposureRefresher.new(asset0: "1.01675", asset1: "532.91")).run
+
+    assert_equal "dry_run", result.status
+    assert_equal "sell", result.receipt.fetch(:side)
+    assert_equal false, result.receipt.fetch(:reduce_only)
+  end
+
   test "dry-run does not depend on PositionValuation weth exposure" do
     PositionValuation.stub(:current, ->(*) { raise "PositionValuation must not be used" }) do
       result = restore(position: position, venue: FakeExtendedVenue.new).run
@@ -56,7 +96,7 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
     result = restore(position: position, venue: FakeExtendedVenue.new, live: true, confirmation: HedgeEmergencyRestore::CONFIRMATION, lifecycle: lifecycle).run
 
     assert_equal "RESTORE_BLOCKED", result.status
-    assert_includes result.blockers, "HEDGE_EMERGENCY_RESTORE_ENABLED must be true"
+    assert_includes result.blockers, "HEDGE_EMERGENCY_ADJUST_ENABLED or HEDGE_EMERGENCY_RESTORE_ENABLED must be true"
     assert_equal 0, lifecycle.calls
     assert_equal 0, result.receipt.fetch(:orders_submitted)
     assert_equal 0, result.receipt.fetch(:signatures_created)
@@ -97,9 +137,34 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
     assert_equal true, result.receipt.fetch(:inside_tolerance)
   end
 
+  test "live mocked adjust confirms readback against fresh target" do
+    current = position(asset0_amount: "1.28366857878458")
+    lifecycle = FakeLifecycle.new(final_short: "1.01675")
+
+    result = restore(
+      position: current,
+      venue: FakeExtendedVenue.new(current_short: "1.283"),
+      live: true,
+      confirmation: HedgeEmergencyRestore::ADJUST_CONFIRMATION,
+      env: live_env.merge("HEDGE_EMERGENCY_ADJUST_ENABLED" => "true"),
+      lifecycle: lifecycle,
+      action: "adjust",
+      refresher: FakeExposureRefresher.new(asset0: "1.01675", asset1: "532.91")
+    ).run
+
+    assert_equal "RESTORE_CONFIRMED", result.status
+    assert_equal "rebalance_delta", lifecycle.last_args.fetch(:mode)
+    assert_equal BigDecimal("-0.26625"), lifecycle.last_args.fetch(:delta_eth)
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal true, result.receipt.fetch(:inside_tolerance)
+  end
+
   private
 
-  def restore(position:, venue:, live: false, confirmation: nil, env: base_env, lifecycle: FakeLifecycle.new)
+  def restore(position:, venue:, live: false, confirmation: nil, env: base_env, lifecycle: FakeLifecycle.new, action: "restore", refresher: nil)
+    refresher ||= FakeExposureRefresher.new
+    refresher.position = position
     HedgeEmergencyRestore.new(
       position: position,
       dry_run: !live,
@@ -108,7 +173,9 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
       env: env,
       venue: venue,
       lifecycle_factory: ->(_lifecycle_env, _venue) { lifecycle },
-      receipt_dir: Rails.root.join("tmp/test-hedge-emergency-restore-#{SecureRandom.hex(4)}")
+      exposure_refresher: refresher,
+      receipt_dir: Rails.root.join("tmp/test-hedge-emergency-restore-#{SecureRandom.hex(4)}"),
+      action: action
     )
   end
 
@@ -181,7 +248,8 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
     end
 
     def rebalance_preview(symbol:, delta_eth:, max_slippage:)
-      preview(action: "increase_short", symbol: symbol, size_eth: delta_eth, max_slippage: max_slippage)
+      delta = BigDecimal(delta_eth.to_s)
+      preview(action: delta.negative? ? "decrease_short" : "increase_short", symbol: symbol, size_eth: delta.abs, max_slippage: max_slippage, reduce_only: delta.negative?)
     end
 
     def account_state
@@ -193,15 +261,15 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
 
     private
 
-    def preview(action:, symbol:, size_eth:, max_slippage:)
+    def preview(action:, symbol:, size_eth:, max_slippage:, reduce_only: false)
       size = BigDecimal(size_eth.to_s)
       {
         payload: {
           action: action,
           symbol: symbol,
-          side: "sell",
-          extended_side: "SELL",
-          reduce_only: false,
+          side: reduce_only ? "buy" : "sell",
+          extended_side: reduce_only ? "BUY" : "SELL",
+          reduce_only: reduce_only,
           requested_size_eth: size.to_s("F"),
           rounded_size_eth: size.to_s("F"),
           estimated_notional_usd: (size * BigDecimal("2000")).to_s("F"),
@@ -237,6 +305,41 @@ class HedgeEmergencyRestoreTest < ActiveSupport::TestCase
           final_status: "success"
         }
       )
+    end
+  end
+
+  class FakeExposureRefresher
+    def initialize(status: "synced", asset0: nil, asset1: nil)
+      @status = status
+      @asset0 = asset0
+      @asset1 = asset1
+    end
+
+    def refresh
+      before = snapshot
+      if @status == "synced"
+        @position.update!(asset0_amount: @asset0, asset1_amount: @asset1) if @asset0
+        @position.reload
+      end
+      {
+        status: @status,
+        before: before,
+        after: snapshot,
+        blockers: @status == "synced" ? [] : [ "fresh Mellow exposure required before hedge sizing" ]
+      }
+    end
+
+    def position=(value)
+      @position = value
+    end
+
+    private
+
+    def snapshot
+      {
+        asset0_amount: @position.asset0_amount&.to_s("F"),
+        asset1_amount: @position.asset1_amount&.to_s("F")
+      }
     end
   end
 end

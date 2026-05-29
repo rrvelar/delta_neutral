@@ -171,6 +171,28 @@ class AerodromeProductionLiveRunnerTest < ActiveSupport::TestCase
     end
   end
 
+  test "respects requested production live position id" do
+    first_position = create_aerodrome_position
+    Hedge.create!(position: first_position, target: "0.01", tolerance: "0.05", active: true)
+    requested_position = create_aerodrome_position
+    requested_hedge = Hedge.create!(position: requested_position, target: "0.01", tolerance: "0.05", active: true)
+    hyperliquid = HyperliquidReadMock.new(positions: [ nil, eth_position("-0.011"), eth_position("-0.011") ])
+    hedge_sync = ->(hedge_id) { create_success_rebalance(Hedge.find(hedge_id), new_short_size: "0.011") }
+
+    with_env(@env.merge("position_id" => requested_position.id.to_s)) do
+      report = build_service(hyperliquid_service: hyperliquid, hedge_sync: hedge_sync).report
+
+      assert_equal "success", report.fetch(:status)
+      assert_equal requested_position.id, report.dig(:gates, :selected_position_id)
+      assert_equal requested_position.id, report.dig(:gates, :requested_position_id)
+      assert_equal 1, requested_hedge.short_rebalances.count
+      assert_equal 0, first_position.hedge.short_rebalances.count
+    end
+  ensure
+    first_position&.destroy
+    requested_position&.destroy
+  end
+
   test "blocks if mainnet ETH exists before start and adopt false" do
     with_position_and_hedge do
       with_env(@env) do

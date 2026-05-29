@@ -294,7 +294,8 @@ class PositionsController < ApplicationController
       dry_run: !live,
       live: live,
       confirmation: params[:hedge_emergency_restore_confirmation],
-      explicit_position_id: params[:id].present?
+      explicit_position_id: params[:id].present?,
+      action: params[:emergency_action].presence || "adjust"
     ).run
     level = result.blockers.present? || result.status.to_s.include?("MANUAL_ACTION") || result.status.to_s.include?("FAILED") ? :alert : :notice
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue),

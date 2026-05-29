@@ -11,9 +11,9 @@ class MigrationManualLiveCanaryRunner
     @executor = executor
   end
 
-  def run(position:, from:, to:, confirmation:, sequence: "source_first")
+  def run(position:, from:, to:, confirmation:, sequence: "target_first")
     readiness = MigrationManualLiveCanaryReadiness.new(position: position, from: from, to: to, env: env).report
-    blockers = hard_blockers(readiness: readiness, confirmation: confirmation)
+    blockers = hard_blockers(readiness: readiness, confirmation: confirmation, sequence: sequence)
     receipt = base_receipt(position: position, readiness: readiness, confirmation: confirmation, sequence: sequence, blockers: blockers)
     if blockers.any?
       write_receipt(receipt)
@@ -43,9 +43,10 @@ class MigrationManualLiveCanaryRunner
     @executor ||= HedgeVenueMigrationExecutor.new(env: env, receipt_writer: HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir))
   end
 
-  def hard_blockers(readiness:, confirmation:)
+  def hard_blockers(readiness:, confirmation:, sequence:)
     blockers = []
     blockers.concat(readiness.fetch(:blockers))
+    blockers << "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true" if sequence.to_s == "source_first" && (!bool_env("MIGRATION_SOURCE_FIRST_CANARY_ALLOWED") || readiness.fetch(:target_leg_blockers, []).present?)
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers << "MIGRATION_NADO_LIVE_MIGRATION_ENABLED must be true for Nado canary." if readiness.fetch(:route).include?("nado") && !bool_env("MIGRATION_NADO_LIVE_MIGRATION_ENABLED")
     blockers.uniq

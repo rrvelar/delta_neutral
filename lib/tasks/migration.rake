@@ -187,7 +187,8 @@ namespace :migration do
     from = ENV["from"].presence || ENV["FROM"].presence
     to = ENV["to"].presence || ENV["TO"].presence
     confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
-    result = MigrationManualLiveCanaryRunner.new.run(position: position, from: from, to: to, confirmation: confirmation)
+    sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || "target_first"
+    result = MigrationManualLiveCanaryRunner.new.run(position: position, from: from, to: to, confirmation: confirmation, sequence: sequence)
     puts JSON.pretty_generate(result.receipt)
   end
 

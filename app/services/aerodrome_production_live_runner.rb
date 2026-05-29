@@ -573,12 +573,23 @@ class AerodromeProductionLiveRunner
       min_order_notional_usd: min_order_notional_usd&.to_s("F"),
       emergency_close_enabled: boolean_env("AERODROME_LIVE_EMERGENCY_CLOSE_ENABLED"),
       emergency_close_confirmation_valid: ENV["AERODROME_LIVE_EMERGENCY_CLOSE_CONFIRM"].to_s == AerodromeLiveEmergencyClose::CONFIRMATION,
-      emergency_close_max_eth: emergency_close_max_eth&.to_s("F")
+      emergency_close_max_eth: emergency_close_max_eth&.to_s("F"),
+      requested_position_id: requested_position_id,
+      selected_position_id: hedge&.position_id
     }
   end
 
   def hedge
-    @hedge ||= Hedge.joins(position: :dex).includes(:short_rebalances, position: :dex).find_by(positions: { dexes: { name: "aerodrome_slipstream" } })
+    @hedge ||= begin
+      scope = Hedge.joins(position: :dex).includes(:short_rebalances, position: :dex).where(positions: { dexes: { name: "aerodrome_slipstream" } })
+      scope = scope.where(position_id: requested_position_id) if requested_position_id
+      selected = scope.first
+      if requested_position_id && selected&.position_id != requested_position_id
+        @errors << "requested position_id #{requested_position_id} was not selected"
+        return nil
+      end
+      selected
+    end
   end
 
   def position
@@ -722,6 +733,13 @@ class AerodromeProductionLiveRunner
     return nil unless raw
 
     BigDecimal(raw)
+  rescue ArgumentError
+    nil
+  end
+
+  def requested_position_id
+    raw = ENV["position_id"].presence || ENV["POSITION_ID"].presence || ENV["AERODROME_POSITION_ID"].presence
+    raw ? Integer(raw) : nil
   rescue ArgumentError
     nil
   end

@@ -2,16 +2,30 @@ require "test_helper"
 
 class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
   test "readiness reports blockers and read only counters" do
-    report = MigrationManualLiveCanaryReadiness.new(position: position, from: "extended", to: "ethereal", capability_registry: capability_registry).report
+    report = MigrationManualLiveCanaryReadiness.new(position: position, from: "extended", to: "ethereal", capability_registry: capability_registry, target_preflight: { blockers: [] }).report
 
     assert_equal "manual_live_canary_readiness", report.fetch(:action)
     assert_equal "extended->ethereal", report.fetch(:route)
     assert_equal false, report.fetch(:ready_for_supervised_canary)
     assert_equal false, report.fetch(:canary_already_confirmed)
+    assert_equal "target_first", report.fetch(:recommended_sequence)
     assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be true for supervised live canary."
     assert_not_includes report.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal."
     assert_equal 0, report.fetch(:orders_submitted)
     assert_equal 0, report.fetch(:signatures_created)
+  end
+
+  test "manual canary readiness exposes target leg blocker before source close" do
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [ "active hedge-ready Mellow position is required" ] }
+    ).report
+
+    assert_includes report.fetch(:target_leg_blockers), "active hedge-ready Mellow position is required"
+    assert_includes report.fetch(:blockers), "active hedge-ready Mellow position is required"
   end
 
   test "nado readiness reports live path blocker" do

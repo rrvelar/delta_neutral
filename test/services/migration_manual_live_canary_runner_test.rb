@@ -17,6 +17,22 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal "extended", position.hedge.reload.execution_venue
   end
 
+  test "source first canary blocks before source close when target preflight can fail" do
+    result = MigrationManualLiveCanaryRunner.new(receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}")).run(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION,
+      sequence: "source_first"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true"
+    assert_includes result.blockers, "active hedge-ready Mellow position is required"
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   private
 
   def position
@@ -25,6 +41,8 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
         user: users(:one),
         wallet: wallets(:one),
         dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+        source: Position::SOURCE_MELLOW_AUTOPILOT,
+        mellow_metadata: JSON.generate({ "hedge_ready" => false }),
         asset0: "WETH",
         asset1: "USDC",
         asset0_amount: "1",

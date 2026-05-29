@@ -237,8 +237,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Emergency Restore Hedge", response.body
-    assert_match "Emergency Restore Dry Run", response.body
-    assert_match HedgeEmergencyRestore::CONFIRMATION, response.body
+    assert_match "Emergency Refresh", response.body
+    assert_match "Stale exposure warning", response.body
+    assert_match HedgeEmergencyRestore::ADJUST_CONFIRMATION, response.body
   end
 
   test "show displays read-only Aerodrome hedge status and pnl baseline" do
