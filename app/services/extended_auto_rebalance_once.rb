@@ -4,13 +4,14 @@ class ExtendedAutoRebalanceOnce
   DEFAULT_RECENT_REBALANCE_GUARD_SECONDS = 60
   PRE_SUBMIT_EPSILON_ETH = BigDecimal("0.00000001")
 
-  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), nado_venue: HedgeVenues::Nado.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
+  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), nado_venue: HedgeVenues::Nado.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) }, fresh_target_factory: nil)
     @env = env
     @venue = venue
     @signer_client = signer_client
     @nado_venue = nado_venue
     @now = now
     @sleeper = sleeper
+    @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
   end
 
   def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil)
@@ -121,8 +122,8 @@ class ExtendedAutoRebalanceOnce
   end
 
   def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:, one_shot:)
-    valuation = PositionValuation.current(position)
-    target = valuation.weth_exposure && position.hedge ? valuation.weth_exposure * position.hedge.target : nil
+    fresh_target = @fresh_target_factory.call(position).resolve(refresh_if_stale: true)
+    target = fresh_target[:target_short_eth]
     current_short = short_size(current_position)
     tolerance = target && position.hedge ? target * position.hedge.tolerance : nil
     delta = target ? target - current_short : nil
@@ -137,6 +138,12 @@ class ExtendedAutoRebalanceOnce
     {
       source: one_shot ? source_for_one_shot(probe_mode: probe_mode) : "continuous_auto",
       target_short_eth: decimal_string(target),
+      target_source: fresh_target[:target_source],
+      target_fresh: fresh_target[:target_fresh],
+      exposure_source: fresh_target[:exposure_source],
+      exposure_refreshed_at: fresh_target[:exposure_refreshed_at],
+      exposure_stale: fresh_target[:exposure_stale],
+      exposure_blockers: Array(fresh_target[:blockers]),
       current_short_eth: current_short.to_s("F"),
       current_side: current_position&.fetch(:side, nil),
       raw_delta_eth: decimal_string(delta),
@@ -162,6 +169,7 @@ class ExtendedAutoRebalanceOnce
 
   def readiness_blockers(position:, plan:, account_state:, signer_health:, conflict_state:, dry_run:, confirmation:, one_shot:)
     blockers = []
+    blockers.concat(Array(plan[:exposure_blockers]))
     blockers.concat(dry_run ? plan.fetch(:preview_blockers) : plan.fetch(:order_validation_blockers))
     blockers.concat(Array(account_state.dig(:margin_gate, :blockers)))
     blockers << "EXTENDED_LIVE_ENABLED must be true" unless bool_env("EXTENDED_LIVE_ENABLED")
@@ -212,6 +220,12 @@ class ExtendedAutoRebalanceOnce
       hedge_id: position.hedge&.id,
       timestamp: @now.call.utc.iso8601,
       target_short_eth: plan[:target_short_eth],
+      target_source: plan[:target_source],
+      target_fresh: plan[:target_fresh],
+      exposure_source: plan[:exposure_source],
+      exposure_refreshed_at: plan[:exposure_refreshed_at],
+      exposure_stale: plan[:exposure_stale],
+      exposure_blockers: plan[:exposure_blockers],
       current_short_eth: plan[:current_short_eth],
       raw_delta_eth: plan[:raw_delta_eth],
       delta_eth: plan[:delta_eth],

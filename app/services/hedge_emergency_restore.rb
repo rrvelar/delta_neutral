@@ -28,7 +28,7 @@ class HedgeEmergencyRestore
     blockers = safety_blockers(context)
     execution = nil
 
-    if live? && blockers.empty?
+    if live? && blockers.empty? && context[:order_size_eth].present?
       execution = run_extended_restore(context)
       context = context.merge(final_extended_short: final_extended_short(execution), final_combined_short: final_combined_short(execution, context))
       blockers = Array(execution.blockers) unless execution.status == "success"
@@ -89,7 +89,8 @@ class HedgeEmergencyRestore
     target = explicit_target? || refresh[:status].to_s == "synced" ? (explicit_target? ? @operator_target_short_eth : target_short_eth) : nil
     tolerance = target && hedge ? target * BigDecimal(hedge.tolerance.to_s) : nil
     combined = combine_known(extended_short, ethereal_short, nado_short)
-    signed_delta = target && combined ? target - extended_short : nil
+    raw_signed_delta = target && combined ? target - extended_short : nil
+    signed_delta = raw_signed_delta && tolerance && raw_signed_delta.abs <= tolerance ? nil : raw_signed_delta
     order_size = signed_delta ? signed_delta.abs : nil
     preview = order_size&.positive? ? restore_preview(signed_delta: signed_delta, current_extended_short: extended_short) : nil
 
@@ -108,6 +109,7 @@ class HedgeEmergencyRestore
       drift_before: target && combined ? target - combined : nil,
       order_size_eth: order_size,
       signed_delta_eth: signed_delta,
+      raw_signed_delta_eth: raw_signed_delta,
       preview: preview,
       rounded_size_eth: decimal_or_nil(preview&.dig(:payload, :rounded_size_eth)),
       eth_price_usd: eth_price,
@@ -147,11 +149,10 @@ class HedgeEmergencyRestore
     blockers = []
     return blockers unless target && tolerance && combined
 
-    blockers << "position is already inside tolerance" unless (target - combined).abs > tolerance
     blockers << "Ethereal has a conflicting short above tolerance" if context.fetch(:current_ethereal_short).to_d > tolerance
     blockers << "Nado has a conflicting short above tolerance" if context.fetch(:current_nado_short).to_d > tolerance
     blockers << "Extended current short is above target tolerance; emergency restore only increases shorts" if !adjust? && !explicit_target? && context.fetch(:signed_delta_eth)&.negative?
-    blockers << "restore order size is zero or within tolerance" unless context.fetch(:order_size_eth)&.positive? && context.fetch(:order_size_eth) > tolerance
+    blockers << "restore order size is zero or within tolerance" unless (target - combined).abs <= tolerance || (context.fetch(:order_size_eth)&.positive? && context.fetch(:order_size_eth) > tolerance)
     blockers
   end
 
@@ -176,6 +177,7 @@ class HedgeEmergencyRestore
   def preview_blockers(context)
     preview = context.fetch(:preview)
     blockers = []
+    return blockers if context.fetch(:signed_delta_eth).nil?
     blockers << "Extended restore preview unavailable" unless preview
     return blockers unless preview
 
@@ -292,6 +294,7 @@ class HedgeEmergencyRestore
 
   def final_status(blockers:, execution:, inside_tolerance:)
     return live? ? "RESTORE_BLOCKED" : "dry_run" if blockers.any?
+    return "NO_OP_INSIDE_TOLERANCE" if inside_tolerance && execution.nil?
     return "dry_run" unless live?
 
     execution&.status == "success" && inside_tolerance ? "RESTORE_CONFIRMED" : "RESTORE_MANUAL_ACTION_REQUIRED"

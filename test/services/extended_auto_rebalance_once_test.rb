@@ -599,8 +599,26 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
       venue: venue,
       signer_client: signer_client,
       nado_venue: FakeNadoVenue.new(position: nado_position),
-      sleeper: sleeper
+      sleeper: sleeper,
+      fresh_target_factory: ->(position) { FakeFreshTarget.new(position) }
     )
+  end
+
+  FakeFreshTarget = Struct.new(:position) do
+    def resolve(refresh_if_stale: true)
+      target_weth = position.respond_to?(:mellow_weth_exposure) ? position.mellow_weth_exposure : nil
+      target_weth ||= position.asset0_amount
+      {
+        status: "ok",
+        target_short_eth: target_weth * position.hedge.target,
+        target_source: "test_fresh_target",
+        target_fresh: true,
+        exposure_source: "test",
+        exposure_refreshed_at: Time.current.iso8601,
+        exposure_stale: false,
+        blockers: []
+      }
+    end
   end
 
   def fake_position(target: "1.0", tolerance: "0.05", execution_venue: "extended")

@@ -11,6 +11,10 @@ default: &default
     class: DashboardSnapshotJob
     schedule: every minute
 
+  mellow_exposure_refresh:
+    class: MellowExposureRefreshJob
+    schedule: every 2 minutes
+
   hedge_sync:
     class: HedgeSyncJob
     schedule: every 5 minutes

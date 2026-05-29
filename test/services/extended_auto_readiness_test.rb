@@ -129,8 +129,24 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
       extended_venue: FakeExtendedVenue.new(short: extended_short),
       ethereal_service: FakeVenue.new(short: ethereal_short),
       nado_venue: FakeVenue.new(short: nado_short),
-      signer_client: signer
+      signer_client: signer,
+      fresh_target_factory: ->(position) { FakeFreshTarget.new(position) }
     )
+  end
+
+  FakeFreshTarget = Struct.new(:position) do
+    def resolve(refresh_if_stale: true)
+      {
+        status: "ok",
+        target_short_eth: position.mellow_weth_exposure * position.hedge.target,
+        target_source: "test_fresh_target",
+        target_fresh: true,
+        exposure_source: "test",
+        exposure_refreshed_at: Time.current.iso8601,
+        exposure_stale: false,
+        blockers: []
+      }
+    end
   end
 
   def fake_position(execution_venue: "extended")

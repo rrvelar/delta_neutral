@@ -1,12 +1,13 @@
 class ExtendedAutoReadiness
   def initialize(env: ENV, extended_venue: HedgeVenues::Extended.new(env: env), ethereal_service: EtherealHedgeExecutionService.new(env: env),
-                 nado_venue: HedgeVenues::Nado.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current })
+                 nado_venue: HedgeVenues::Nado.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, fresh_target_factory: nil)
     @env = env
     @extended_venue = extended_venue
     @ethereal_service = ethereal_service
     @nado_venue = nado_venue
     @signer_client = signer_client
     @now = now
+    @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
   end
 
   def report(position:)
@@ -54,11 +55,13 @@ class ExtendedAutoReadiness
     ethereal_position = @ethereal_service.read_position
     nado_position = @nado_venue.read_position(symbol: "ETH")
     account_state = @extended_venue.account_state
-    target = target_short(position)
+    fresh_target = @fresh_target_factory.call(position).resolve(refresh_if_stale: true)
+    target = fresh_target[:target_short_eth]
     extended_short = short_size(extended_position)
     tolerance = target && position.hedge ? target * position.hedge.tolerance : nil
     {
       target_short: target,
+      fresh_target: fresh_target,
       extended_position: extended_position,
       ethereal_position: ethereal_position,
       nado_position: nado_position,
@@ -88,6 +91,7 @@ class ExtendedAutoReadiness
     blockers.concat(Array(state.dig(:account_state, :margin_gate, :blockers)))
     blockers.concat(signer_health_blockers(state[:signer_health]))
     blockers << "target short could not be computed" unless state[:target_short]
+    blockers.concat(Array(state.dig(:fresh_target, :blockers)))
     blockers.uniq
   end
 
@@ -124,8 +128,8 @@ class ExtendedAutoReadiness
   end
 
   def target_short(position)
-    valuation = PositionValuation.current(position)
-    valuation.weth_exposure && position.hedge ? valuation.weth_exposure * position.hedge.target : nil
+    fresh_target = @fresh_target_factory.call(position).resolve(refresh_if_stale: true)
+    fresh_target[:target_short_eth]
   end
 
   def short_size(position)

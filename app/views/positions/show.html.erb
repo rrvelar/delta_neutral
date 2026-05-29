@@ -1218,6 +1218,7 @@ end %>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">User WETH exposure</dt><dd class="text-white"><%= format_venue_eth_amount(mellow["user_weth_exposure"].presence || @position.asset0_amount) %></dd></div>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">User USDC exposure</dt><dd class="text-white"><%= format_token_amount(mellow["user_usdc_exposure"].presence || @position.asset1_amount, decimals: 2) %></dd></div>
               <div class="flex justify-between gap-4"><dt class="text-gray-500">Exposure source</dt><dd class="text-right text-white"><%= mellow["exposure_source"].presence || "historical NFT current read" %></dd></div>
+              <div class="flex justify-between gap-4"><dt class="text-gray-500">Exposure refreshed</dt><dd class="text-right text-white"><%= mellow["last_current_exposure_at"].presence || mellow["last_probe_at"].presence || "unavailable" %></dd></div>
               <% if mellow["successful_method"].present? %>
                 <div class="flex justify-between gap-4"><dt class="text-gray-500">Successful method</dt><dd class="text-right text-white"><%= mellow["successful_method"] %></dd></div>
               <% end %>
@@ -1233,6 +1234,10 @@ end %>
               <ul class="mt-3 list-disc space-y-1 pl-5 text-xs text-yellow-100">
                 <% Array(mellow["last_probe_blockers"]).each do |blocker| %><li><%= blocker %></li><% end %>
               </ul>
+            <% end %>
+            <% exposure_time = Time.zone.parse((mellow["last_current_exposure_at"].presence || mellow["last_probe_at"]).to_s) rescue nil %>
+            <% if exposure_time.nil? || exposure_time <= Integer(ENV.fetch("MELLOW_EXPOSURE_STALE_AFTER_SECONDS", "300")).seconds.ago %>
+              <p class="mt-3 rounded-lg border border-yellow-700/60 bg-yellow-950/40 p-3 text-xs text-yellow-100">Mellow exposure is stale or unavailable; hedge sizing requires a fresh resolver read.</p>
             <% end %>
           </details>
         <% end %>

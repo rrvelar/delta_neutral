@@ -351,6 +351,57 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_nil snapshot.inside_tolerance
   end
 
+  test "refresh uses fresh Mellow target before building snapshot" do
+    position = create_position_with_hedge
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      asset0_amount: "1.017",
+      mellow_metadata: {
+        "hedge_ready" => true,
+        "last_probe_confidence" => "current_share_token_resolver_high",
+        "exposure_source" => "current_share_token_resolver",
+        "last_current_exposure_at" => Time.current.iso8601
+      }.to_json
+    )
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "1.033" }, account_state: { open_orders_count: 0, margin_gate: { status: "pass" } } },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true),
+      fresh_target_factory: ->(_position) { FakeFreshTarget.new(status: "ok", target: BigDecimal("1.017")) }
+    ).refresh
+
+    assert_equal "ok", snapshot.refresh_status
+    assert_equal BigDecimal("1.017"), snapshot.target_short_eth
+    assert_equal true, snapshot.inside_tolerance
+  end
+
+  test "snapshot is partial when Mellow target refresh is blocked" do
+    position = create_position_with_hedge
+    position.update!(source: Position::SOURCE_MELLOW_AUTOPILOT)
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: { short_size: "1.033" }, account_state: { open_orders_count: 0, margin_gate: { status: "pass" } } },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true),
+      fresh_target_factory: ->(_position) { FakeFreshTarget.new(status: "blocked") }
+    ).refresh
+
+    assert_equal "partial", snapshot.refresh_status
+    assert_nil snapshot.target_short_eth
+    assert_includes JSON.parse(snapshot.source_errors).fetch("mellow_exposure"), "fresh Mellow exposure required before hedge sizing"
+  end
+
   private
 
   def create_position_with_hedge
@@ -445,6 +496,30 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
 
     def health
       @payload
+    end
+  end
+
+  FakeFreshTarget = Struct.new(:status, :target, keyword_init: true) do
+    def resolve(refresh_if_stale: true)
+      if status == "ok"
+        {
+          status: "ok",
+          target_short_eth: target,
+          target_source: "current_share_token_resolver",
+          target_fresh: true,
+          exposure_source: "current_share_token_resolver",
+          exposure_refreshed_at: Time.current.iso8601,
+          exposure_stale: false,
+          blockers: []
+        }
+      else
+        {
+          status: "blocked",
+          target_short_eth: nil,
+          target_fresh: false,
+          blockers: [ "fresh Mellow exposure required before hedge sizing" ]
+        }
+      end
     end
   end
 end

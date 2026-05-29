@@ -27,6 +27,7 @@ class MellowAutopilotPositionSync
     metadata = metadata.merge(metadata_from_report(report)).merge(
       "hedge_ready" => true,
       "last_probe_at" => Time.current.iso8601,
+      "last_current_exposure_at" => Time.current.iso8601,
       "last_probe_blockers" => []
     )
     if previous_token_id.present? && previous_token_id != metadata["strategy_token_id"]

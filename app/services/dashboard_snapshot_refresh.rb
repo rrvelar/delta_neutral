@@ -9,18 +9,20 @@ class DashboardSnapshotRefresh
     attr_reader :extended_optional_attempts
   end
 
-  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: nil, force: false)
+  def initialize(position:, env: ENV, venue_builder: HedgeVenues, signer_client: nil, timeout_seconds: nil, force: false, fresh_target_factory: nil)
     @position = position
     @env = env
     @venue_builder = venue_builder
     @signer_client = signer_client || ExtendedStarkSignerClient.new(env: env)
     @timeout_seconds = timeout_seconds || configured_timeout_seconds
     @force = force
+    @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
   end
 
   def refresh
     now = Time.current
-    target = target_short
+    fresh_target = @fresh_target_factory.call(position).resolve(refresh_if_stale: true)
+    target = fresh_target[:target_short_eth]
     tolerance_abs = target && position.hedge ? target * position.hedge.tolerance : nil
     venue_results = %w[extended ethereal nado].to_h { |venue| [ venue, read_venue(venue) ] }
     combined = combined_short(venue_results)
@@ -31,6 +33,7 @@ class DashboardSnapshotRefresh
     end
     signer = read_signer_health
     errors[:signer] = signer[:error] if signer[:error].present?
+    errors[:mellow_exposure] = fresh_target[:blockers].join("; ") if fresh_target[:blockers].present?
     derived_attrs = {
       production_venue: position.hedge&.execution_venue,
       target_short_eth: target,
