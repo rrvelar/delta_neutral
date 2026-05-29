@@ -703,6 +703,8 @@ end %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Min size</span><span class="text-white"><%= extended_auto_readiness[:min_rebalance_size_eth].presence || "0.03" %> ETH / $<%= extended_auto_readiness[:min_rebalance_notional_usd].presence || "50" %></span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Cooldown</span><span class="text-white"><%= extended_auto_readiness[:cooldown_remaining_seconds].presence || 0 %>s</span></div>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Confirmations</span><span class="text-white"><%= extended_auto_readiness[:consecutive_outside_tolerance_count].presence || 0 %>/<%= extended_auto_readiness[:consecutive_outside_tolerance_required].presence || 2 %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Drift / tolerance</span><span class="text-white"><%= extended_auto_readiness[:drift_to_tolerance_ratio].presence || "n/a" %></span></div>
+              <div class="flex justify-between gap-4"><span class="text-gray-500">Strong drift threshold</span><span class="text-white"><%= extended_auto_readiness[:strong_drift_threshold].presence || "n/a" %> ETH</span></div>
             <% end %>
           </div>
           <% if hedge_preview && !hedge_preview.supported %>

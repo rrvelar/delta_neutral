@@ -22,12 +22,16 @@ class ExtendedAutoAntiChurnPolicy
       consecutive_outside_tolerance_required: consecutive_required,
       consecutive_outside_tolerance_count: 0,
       strong_drift_bypass_multiplier: strong_drift_bypass_multiplier.to_s("F"),
+      strong_drift_threshold: nil,
+      drift_to_tolerance_ratio: nil,
       strong_drift_bypass_used: false
     }
     return base if action == "no_op"
     return base.merge(action_suppressed_reason: "target short could not be computed") unless drift && tolerance && order_size
 
-    strong = tolerance.positive? && drift.abs > (tolerance * strong_drift_bypass_multiplier)
+    threshold = tolerance.positive? ? tolerance * strong_drift_bypass_multiplier : nil
+    ratio = tolerance.positive? ? drift.abs / tolerance : nil
+    strong = threshold && drift.abs >= threshold
     count = outside_tolerance_count(position: position, action: action, readonly: readonly)
     remaining = cooldown_remaining_seconds(hedge)
     notional = mark_price ? order_size * mark_price : nil
@@ -37,7 +41,9 @@ class ExtendedAutoAntiChurnPolicy
       action_suppressed_reason: reason,
       cooldown_remaining_seconds: remaining,
       consecutive_outside_tolerance_count: count,
-      strong_drift_bypass_used: strong && count < consecutive_required
+      strong_drift_threshold: threshold&.to_s("F"),
+      drift_to_tolerance_ratio: ratio&.to_s("F"),
+      strong_drift_bypass_used: strong == true
     )
   end
 
@@ -49,7 +55,7 @@ class ExtendedAutoAntiChurnPolicy
       return "mark price unavailable for EXTENDED_AUTO_MIN_REBALANCE_NOTIONAL_USD check"
     end
     return "order notional #{notional.round(2).to_s('F')} USD is below EXTENDED_AUTO_MIN_REBALANCE_NOTIONAL_USD #{min_rebalance_notional_usd.to_s('F')}" if notional < min_rebalance_notional_usd
-    return "last successful Extended rebalance is still in cooldown for #{cooldown_remaining}s" if cooldown_remaining.positive?
+    return "last successful Extended rebalance is still in cooldown for #{cooldown_remaining}s" if !strong && cooldown_remaining.positive?
     return "outside tolerance confirmation #{count}/#{consecutive_required}; waiting for repeated reading" if !strong && count < consecutive_required
 
     nil

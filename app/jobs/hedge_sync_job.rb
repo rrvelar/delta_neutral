@@ -333,8 +333,12 @@ class HedgeSyncJob < ApplicationJob
       "target_short_eth=#{readiness[:target_short_eth]} " \
       "current_short=#{readiness[:extended_current_short_eth]} " \
       "drift=#{readiness[:drift_eth]} tolerance=#{readiness[:tolerance_eth]} " \
+      "drift_to_tolerance_ratio=#{readiness[:drift_to_tolerance_ratio]} " \
+      "strong_drift_threshold=#{readiness[:strong_drift_threshold]} " \
+      "strong_drift_bypass_used=#{readiness[:strong_drift_bypass_used]} " \
       "planned_auto_action=#{readiness[:planned_auto_action]} " \
-      "suppressed=#{readiness[:action_suppressed_reason].presence || 'none'}"
+      "action_suppressed_reason=#{readiness[:action_suppressed_reason].presence || 'none'} " \
+      "cooldown_remaining_seconds=#{readiness[:cooldown_remaining_seconds]}"
     )
     unless readiness.fetch(:continuous_auto_ready)
       Rails.logger.warn("HedgeSyncJob: skipping Extended hedge #{hedge.id} — #{readiness.fetch(:blockers).join('; ')}")

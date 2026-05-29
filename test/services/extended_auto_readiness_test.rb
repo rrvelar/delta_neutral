@@ -41,6 +41,9 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
     assert_equal "increase_short", result.fetch(:planned_auto_action)
     assert_equal "0.06", result.fetch(:planned_auto_order_size_eth)
     assert_equal "0.1", result.fetch(:auto_max_rebalance_size_eth)
+    assert_equal "2.4", result.fetch(:drift_to_tolerance_ratio)
+    assert_equal "0.05", result.fetch(:strong_drift_threshold)
+    assert_equal true, result.fetch(:strong_drift_bypass_used)
     assert_equal false, result.fetch(:partial_auto_rebalance)
     assert_equal true, result.fetch(:auto_can_act)
   end
