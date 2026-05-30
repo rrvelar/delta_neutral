@@ -47,6 +47,15 @@ class MigrationLiveRouteCapability
       live_canary_confirmed: canary.fetch(:live_canary_confirmed),
       live_autopilot_eligible: blockers.empty? && live_autopilot_gates_open?(from, to),
       blockers: blockers.uniq,
+      missing_capabilities: missing_capabilities(from, to, live_path),
+      target_first_supported: true,
+      source_first_supported: false,
+      current_source_short_available: proof&.fetch(:current_source_short_available, false) || false,
+      target_open_preview_available: proof&.fetch(:target_open_preview_available, false) || false,
+      source_close_preview_available: proof&.fetch(:source_close_preview_available, false) || false,
+      open_orders_status: proof&.fetch(:open_orders_status, "unknown") || "unknown",
+      fresh_mellow_target_status: proof&.fetch(:fresh_mellow_target_status, "unknown") || "unknown",
+      signer_status: proof&.fetch(:signer_status, "preflight_required") || "preflight_required",
       required_gates: required_gates(from, to),
       latest_canary_receipt_path: canary.fetch(:latest_canary_receipt_path),
       latest_canary_status: canary.fetch(:latest_canary_status),
@@ -67,6 +76,13 @@ class MigrationLiveRouteCapability
 
   def live_path_implemented?(from, to)
     [ from, to ].sort == %w[ethereal extended]
+  end
+
+  def missing_capabilities(from, to, live_path)
+    missing = []
+    missing << "live migration executor path for #{from}->#{to}" unless live_path
+    missing << "Nado live migration proof, readback, open-orders, signer and submit path" if [ from, to ].include?("nado")
+    missing
   end
 
   def live_autopilot_gates_open?(from, to)

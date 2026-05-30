@@ -1589,6 +1589,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
+    assert_match "Operations / Migration Safety", response.body
+    assert_match "OK_TO_OPERATE", response.body
     assert_match "In tolerance", response.body
     assert_no_match "Out of tolerance", response.body
     assert_match "No-op / inside tolerance", response.body
@@ -1606,6 +1608,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Waiting / suppressed: order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03", response.body
+    assert_match "Operations / Migration Safety", response.body
+    assert_match "WATCH", response.body
     assert_no_match "Auto should act", response.body
   end
 
@@ -1738,6 +1742,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
+    assert_match "Operations / Migration Safety", response.body
+    assert_match "ACTION PENDING", response.body
     assert_match "ACTION PENDING", response.body
     assert_match "Auto can act", response.body
   end

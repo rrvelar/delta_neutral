@@ -388,6 +388,61 @@ end %>
     <% live_autopilot_readiness = @live_autopilot_readiness || {} %>
     <% migration_from_default = migration_plan[:from_venue].presence || cached_snapshot[:production_venue].presence || selected_venue %>
     <% migration_to_default = migration_plan[:to_venue].presence || (migration_from_default == "extended" ? "ethereal" : "extended") %>
+    <% route_matrix_routes = Array((@migration_route_matrix || {})[:routes]) %>
+    <% next_canary_route = Array(live_autopilot_readiness[:live_autopilot_blocked_routes]).find { |route| route[:live_path_implemented] } || route_matrix_routes.find { |route| route[:live_path_implemented] } %>
+    <% nado_routes = route_matrix_routes.select { |route| [ route[:from_venue], route[:to_venue] ].include?("nado") } %>
+    <% ops_verdict = if health_status == "HEALTHY"
+      "OK_TO_OPERATE"
+    elsif health_status == "WATCH"
+      "WATCH"
+    elsif health_status == "ACTION PENDING"
+      "MANUAL_ACTION_REQUIRED"
+    else
+      "BLOCKED"
+    end %>
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-gray-500">Operations / Migration Safety</p>
+          <h2 class="mt-1 text-lg font-semibold text-white">Current production and migration gates</h2>
+          <p class="mt-1 text-sm text-gray-400">Read-only operator summary. Readiness panels do not submit orders or create signatures.</p>
+        </div>
+        <span class="rounded-full border <%= ops_verdict == 'OK_TO_OPERATE' ? 'border-green-800 bg-green-950/60 text-green-300' : (ops_verdict == 'WATCH' ? 'border-yellow-800 bg-yellow-950/50 text-yellow-100' : 'border-red-800 bg-red-950/50 text-red-100') %> px-3 py-1 text-xs font-semibold"><%= ops_verdict %></span>
+      </div>
+      <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-4">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Production hedge loop</p>
+          <p class="mt-1 text-white"><%= cached_snapshot[:production_venue_name] || selected_venue_name %> · <%= health_status %></p>
+          <p class="mt-1 break-words text-xs text-gray-500">Exposure <%= extended_auto_readiness[:exposure_source].presence || @position.mellow_metadata_hash["exposure_source"].presence || "unavailable" %> · <%= extended_auto_readiness[:target_source].presence || "target source unavailable" %></p>
+          <p class="mt-1 text-xs text-gray-500">Method <%= @position.mellow_metadata_hash["successful_method"].presence || extended_auto_readiness[:successful_method].presence || "unavailable" %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Target / drift</p>
+          <p class="mt-1 text-white">Target <%= format_venue_eth_amount(target_eth_short) %> · Extended <%= format_venue_eth_amount(current_short_eth) %> ETH</p>
+          <p class="mt-1 text-xs text-gray-500">Drift <%= format_venue_eth_amount(drift_eth) %> / tolerance <%= format_venue_eth_amount(tolerance_eth) %></p>
+          <p class="mt-1 text-xs text-gray-500">Planned <%= extended_action_label %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Anti-churn / emergency</p>
+          <p class="mt-1 text-white"><%= extended_auto_readiness[:action_suppressed_reason].present? ? "WATCH" : (inside_tolerance == true ? "Not needed: inside tolerance" : "Manual recovery only") %></p>
+          <p class="mt-1 text-xs text-gray-500">Min <%= extended_auto_readiness[:min_rebalance_size_eth].presence || "0.03" %> ETH / $<%= extended_auto_readiness[:min_rebalance_notional_usd].presence || "50" %> · cooldown <%= extended_auto_readiness[:cooldown_remaining_seconds].presence || 0 %>s</p>
+          <p class="mt-1 text-xs text-gray-500">Confirmations <%= extended_auto_readiness[:consecutive_outside_tolerance_count].presence || 0 %>/<%= extended_auto_readiness[:consecutive_outside_tolerance_required].presence || 2 %> · strong drift <%= extended_auto_readiness[:strong_drift_bypass_used] ? "yes" : "no" %></p>
+        </div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <p class="text-xs text-gray-500">Migration / autopilot gates</p>
+          <p class="mt-1 text-white">Migration live <%= live_autopilot_readiness[:live_migration_enabled] ? "enabled" : "disabled" %> · random live <%= live_autopilot_readiness[:live_autopilot_enabled] ? "enabled" : "disabled" %></p>
+          <p class="mt-1 text-xs text-gray-500">Source-first locked by default · target-first recommended</p>
+          <p class="mt-1 text-xs text-gray-500">Next canary <%= next_canary_route ? "#{HedgeVenues.label(next_canary_route[:from_venue])}->#{HedgeVenues.label(next_canary_route[:to_venue])}" : "none" %></p>
+          <p class="mt-1 text-xs text-gray-500">Nado live <%= nado_routes.any? { |route| route[:live_path_implemented] } ? "implemented" : "blocked / unproven" %></p>
+        </div>
+      </div>
+      <% ops_blockers = (Array(health_reason) + Array(next_canary_route&.fetch(:blockers, [])) + Array(live_autopilot_readiness[:nado_live_blockers])).compact.uniq.first(6) %>
+      <% if ops_blockers.present? && ops_verdict != "OK_TO_OPERATE" %>
+        <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+          <% ops_blockers.each do |blocker| %><li class="break-words"><%= blocker %></li><% end %>
+        </ul>
+      <% end %>
+    </section>
     <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>

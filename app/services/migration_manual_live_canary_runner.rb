@@ -31,6 +31,7 @@ class MigrationManualLiveCanaryRunner
       migration_sequence: sequence
     )
     canary_receipt = receipt.merge(from_executor_result(result))
+    canary_receipt[:final_status] = normalized_final_status(canary_receipt, result)
     write_receipt(canary_receipt)
     Result.new(canary_receipt[:final_status], Array(canary_receipt[:blockers]), Array(canary_receipt[:warnings]), canary_receipt)
   end
@@ -46,7 +47,7 @@ class MigrationManualLiveCanaryRunner
   def hard_blockers(readiness:, confirmation:, sequence:)
     blockers = []
     blockers.concat(readiness.fetch(:blockers))
-    blockers << "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true" if sequence.to_s == "source_first" && (!bool_env("MIGRATION_SOURCE_FIRST_CANARY_ALLOWED") || readiness.fetch(:target_leg_blockers, []).present?)
+    blockers << "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true" if sequence.to_s == "source_first" && !ActiveModel::Type::Boolean.new.cast(readiness[:source_first_allowed])
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers << "MIGRATION_NADO_LIVE_MIGRATION_ENABLED must be true for Nado canary." if readiness.fetch(:route).include?("nado") && !bool_env("MIGRATION_NADO_LIVE_MIGRATION_ENABLED")
     blockers.uniq
@@ -90,6 +91,14 @@ class MigrationManualLiveCanaryRunner
       blockers: result.blockers,
       warnings: result.warnings
     }
+  end
+
+  def normalized_final_status(receipt, result)
+    return MigrationLiveCanaryChecker::CONFIRMED_STATUS if receipt[:final_status] == MigrationLiveCanaryChecker::CONFIRMED_STATUS
+    return "PARTIAL_OVERHEDGE_MANUAL_ACTION_REQUIRED" if receipt[:target_leg_readback_confirmed] && !receipt[:source_leg_readback_confirmed]
+    return "TARGET_LEG_FAILED_SOURCE_UNCHANGED" unless receipt[:target_leg_readback_confirmed]
+
+    result.status.to_s.upcase
   end
 
   def write_receipt(receipt)

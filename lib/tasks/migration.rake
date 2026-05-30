@@ -255,9 +255,8 @@ namespace :migration do
   end
 
   def computed_target_short(position)
-    return nil unless position.asset0_amount && position.hedge
-
-    position.asset0_amount * position.hedge.target
+    target = HedgeFreshTarget.new(position: position).resolve(refresh_if_stale: true)
+    target[:target_short_eth] if target[:status] == "ok"
   end
 
   def computed_combined_short(snapshot)

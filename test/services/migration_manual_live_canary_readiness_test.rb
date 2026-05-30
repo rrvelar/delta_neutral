@@ -28,6 +28,34 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "active hedge-ready Mellow position is required"
   end
 
+  test "readiness uses fresh HedgeFreshTarget and blocks when unavailable" do
+    target = Struct.new(:payload) do
+      def resolve(refresh_if_stale:)
+        payload.merge(refresh_if_stale: refresh_if_stale)
+      end
+    end.new({
+      status: "blocked",
+      target_short_eth: nil,
+      blockers: [ "fresh Mellow exposure required before hedge sizing" ],
+      orders_submitted: 0,
+      signatures_created: 0
+    })
+
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [] },
+      fresh_target: target
+    ).report
+
+    assert_equal "blocked", report.fetch(:fresh_target_status)
+    assert_nil report.fetch(:target_short)
+    assert_includes report.fetch(:blockers), "fresh Mellow exposure required before hedge sizing"
+    assert_includes report.fetch(:blockers), "fresh Mellow target is required before supervised canary."
+  end
+
   test "nado readiness reports live path blocker" do
     report = MigrationManualLiveCanaryReadiness.new(position: position, from: "extended", to: "nado", capability_registry: capability_registry).report
 

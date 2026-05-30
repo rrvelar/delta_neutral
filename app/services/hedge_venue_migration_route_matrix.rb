@@ -90,6 +90,18 @@ class HedgeVenueMigrationRouteMatrix
       required_gates: proof.fetch(:required_gates),
       supported_modes: proof.fetch(:supported_modes),
       supported_sequences: proof.fetch(:supported_sequences),
+      dry_run_ready: proof.fetch(:route_status) == "READY_FOR_DRY_RUN",
+      live_path_implemented: live_path_implemented?(from, to),
+      live_canary_confirmed: false,
+      live_autopilot_eligible: false,
+      target_first_supported: proof.fetch(:supported_sequences).include?("target_first"),
+      source_first_supported: false,
+      current_source_short_available: current_source_short_available?(from),
+      target_open_preview_available: proof.fetch(:preview_available),
+      source_close_preview_available: proof.fetch(:preview_available) && current_source_short_available?(from),
+      open_orders_status: open_orders_status(from, to, proof),
+      fresh_mellow_target_status: fresh_target_report[:status],
+      signer_status: signer_status_for(to),
       last_preview_receipt_path: last_proof&.fetch("receipt_path", nil),
       last_proof_time: last_proof&.fetch("timestamp", nil),
       nado_readiness: proof.dig(:planned_fields, :nado_readiness),
@@ -291,6 +303,39 @@ class HedgeVenueMigrationRouteMatrix
       "fresh PositionDashboardSnapshot",
       "Nado flat unless Nado migration support is explicitly proven"
     ]
+  end
+
+  def live_path_implemented?(from, to)
+    [ from, to ].sort == %w[ethereal extended]
+  end
+
+  def current_source_short_available?(from)
+    return false unless snapshot
+
+    BigDecimal(snapshot.public_send("#{from}_short_eth").to_s).positive?
+  rescue ArgumentError, NoMethodError
+    false
+  end
+
+  def open_orders_status(from, to, proof)
+    return "zero" unless [ from, to ].include?("nado") || [ from, to ].include?("extended")
+    return "nado_blocked" if [ from, to ].include?("nado") && proof.dig(:planned_fields, :nado_readiness, :nado_open_orders_count).nil?
+    return "zero" if snapshot&.open_orders_count_extended.to_i.zero?
+
+    "nonzero_or_unknown"
+  end
+
+  def signer_status_for(to)
+    case to
+    when "nado" then "blocked_unproven"
+    else "preflight_required"
+    end
+  end
+
+  def fresh_target_report
+    @fresh_target_report ||= position ? HedgeFreshTarget.new(position: position).resolve(refresh_if_stale: true) : { status: "blocked" }
+  rescue => e
+    { status: "blocked", blockers: [ "#{e.class}: #{e.message}" ] }
   end
 
   def last_proof_for(from, to)
