@@ -33,6 +33,23 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
 
+  test "Ethereal live one-shot blocks before submit when open orders readback is unavailable" do
+    service = FakeExecutionService.new
+    result = adapter(readiness: StaticReadiness.new("Ethereal open orders readback unavailable; live auto fails closed"), service: service).run(
+      position: position,
+      dry_run: false,
+      live: true,
+      confirmation: HedgeVenueAutoAdapters::Ethereal::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Ethereal open orders readback unavailable; live auto fails closed"
+    assert_equal 0, service.calls
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   test "Nado one-shot cannot submit while capabilities are missing" do
     result = HedgeVenueAutoRebalanceAdapters::Nado.new(readiness: StaticReadiness.new("nado blocker")).run(
       position: position("nado"),
@@ -49,8 +66,8 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
 
   private
 
-  def adapter(service: FakeExecutionService.new)
-    HedgeVenueAutoRebalanceAdapters::Ethereal.new(readiness: StaticReadiness.new, service: service)
+  def adapter(readiness: StaticReadiness.new, service: FakeExecutionService.new)
+    HedgeVenueAutoRebalanceAdapters::Ethereal.new(readiness: readiness, service: service)
   end
 
   def position(venue = "ethereal")

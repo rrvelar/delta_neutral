@@ -1,4 +1,25 @@
 namespace :nado do
+  desc "Read-only fail-closed Nado unified auto readiness diagnostics"
+  task auto_readiness: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:dex, :hedge, :position_dashboard_snapshot).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        action: "nado_auto_readiness",
+        status: "blocked",
+        position_id: position_id,
+        blockers: [ "Position #{position_id || '(missing)'} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    report = HedgeVenueAutoAdapters::Nado.new.readiness(position: position)
+    puts JSON.pretty_generate(report.merge(action: "nado_auto_readiness", orders_submitted: 0, signatures_created: 0))
+  end
+
   desc "Read-only reconciliation for pending Nado ShortRebalance records"
   task reconcile_pending_rebalances: :environment do
     scope = ShortRebalance.where(venue: "nado", status: ShortRebalance::STATUS_PENDING)

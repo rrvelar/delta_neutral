@@ -142,6 +142,38 @@ module HedgeBackends
       )
     end
 
+    def open_orders(asset = DEFAULT_ASSET, account: nil)
+      subaccount_id = account.presence || @env["ETHEREAL_SUBACCOUNT_ID"].presence
+      return unsupported_result("open_orders", "ETHEREAL_SUBACCOUNT_ID is required for Ethereal open orders readback") unless subaccount_id
+
+      product = product_for(asset)
+      return unsupported_result("open_orders", "Ethereal product not found for #{market_symbol}") unless product
+
+      response = get_json(
+        "/v1/order",
+        subaccountId: subaccount_id,
+        productIds: product.fetch("id"),
+        isWorking: true,
+        limit: 100
+      )
+      orders = Array(response["data"])
+      {
+        backend: BACKEND,
+        asset: asset,
+        market: product["displayTicker"] || market_symbol,
+        status: "ok",
+        subaccount: subaccount_id,
+        product_id: product.fetch("id"),
+        open_orders_count: orders.size,
+        raw: response,
+        orders: orders
+      }
+    rescue NetworkError, RateLimitError, ParseError
+      raise
+    rescue => e
+      raise ParseError, "Ethereal open orders response could not be normalized: #{e.message}"
+    end
+
     def run_probe
       warnings = []
       errors = []
@@ -365,6 +397,8 @@ module HedgeBackends
         "/v1/position/active"
       when "account_health"
         "/v1/subaccount/balance"
+      when "open_orders"
+        "/v1/order"
       else
         "/v1/product"
       end

@@ -68,6 +68,28 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true"
   end
 
+  test "Ethereal blocks live auto when open orders readback is unavailable" do
+    report = ethereal_adapter(open_orders_count: nil).readiness(position: position("ethereal"))
+
+    assert_nil report[:open_orders_count]
+    assert_includes report.fetch(:blockers), "Ethereal open orders readback unavailable; live auto fails closed"
+  end
+
+  test "Ethereal zero open orders clears unavailable blocker" do
+    report = ethereal_adapter(open_orders_count: 0).readiness(position: position("ethereal"))
+
+    assert_equal 0, report.fetch(:open_orders_count)
+    assert_not_includes report.fetch(:blockers), "Ethereal open orders readback unavailable; live auto fails closed"
+    assert_not report.fetch(:blockers).any? { |blocker| blocker.include?("open_orders_count=0") }
+  end
+
+  test "Ethereal open orders count greater than zero blocks" do
+    report = ethereal_adapter(open_orders_count: 2).readiness(position: position("ethereal"))
+
+    assert_equal 2, report.fetch(:open_orders_count)
+    assert_includes report.fetch(:blockers), "Ethereal auto requires open_orders_count=0"
+  end
+
   test "Nado adapter fails closed with missing capabilities" do
     report = HedgeVenueAutoAdapters::Nado.new(
       env: ready_env,
@@ -83,10 +105,10 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
 
   private
 
-  def ethereal_adapter(env: ready_env, current_short: "1.0", target: "1.0", extended_short: "0", nado_short: "0")
+  def ethereal_adapter(env: ready_env, current_short: "1.0", target: "1.0", extended_short: "0", nado_short: "0", open_orders_count: 0)
     HedgeVenueAutoAdapters::Ethereal.new(
       env: env,
-      ethereal_service: FakeService.new(short: current_short),
+      ethereal_service: FakeService.new(short: current_short, open_orders_count: open_orders_count),
       extended_venue: FakeVenue.new(short: extended_short),
       nado_venue: FakeVenue.new(short: nado_short),
       fresh_target_factory: ->(_position) { FreshTarget.new(target) }
@@ -149,8 +171,8 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
   end
 
   class FakeService
-    def initialize(short:)
-      @venue = FakeVenue.new(short: short)
+    def initialize(short:, open_orders_count: 0)
+      @venue = FakeVenue.new(short: short, open_orders_count: open_orders_count)
     end
 
     def read_position
@@ -159,8 +181,9 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
   end
 
   class FakeVenue
-    def initialize(short:)
+    def initialize(short:, open_orders_count: 0)
       @short = BigDecimal(short)
+      @open_orders_count = open_orders_count
     end
 
     def read_position(symbol:)
@@ -170,7 +193,12 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
     end
 
     def account_state
-      { open_orders_count: 0 }
+      {
+        open_orders_read_attempted: true,
+        open_orders_read_status: @open_orders_count.nil? ? "unavailable" : "ok",
+        open_orders_count: @open_orders_count,
+        open_orders_diagnostics: { source: "test" }
+      }
     end
   end
 end

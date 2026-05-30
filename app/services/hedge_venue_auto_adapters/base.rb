@@ -70,6 +70,9 @@ module HedgeVenueAutoAdapters
         warnings: warnings,
         active_auto_warnings: warnings,
         open_orders_count: account_state[:open_orders_count],
+        open_orders_read_attempted: account_state[:open_orders_read_attempted],
+        open_orders_read_status: account_state[:open_orders_read_status],
+        open_orders_diagnostics: account_state[:open_orders_diagnostics],
         other_venue_shorts: other_positions.transform_values { |position_payload| decimal_string(short_size(position_payload)) },
         orders_submitted: 0,
         signatures_created: 0

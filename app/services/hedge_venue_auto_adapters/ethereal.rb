@@ -42,7 +42,7 @@ module HedgeVenueAutoAdapters
       blockers << "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true" unless bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
       blockers << "current Ethereal readback is unavailable" if current == :unavailable
       blockers << "current Ethereal position is long; manual action required" if current.is_a?(Hash) && current[:side].to_s == "long"
-      blockers << "Ethereal open orders readback unavailable; live auto fails closed" unless account_state.key?(:open_orders_count)
+      blockers << "Ethereal open orders readback unavailable; live auto fails closed" if account_state[:open_orders_count].nil?
       blockers
     end
 

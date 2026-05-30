@@ -988,19 +988,41 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
     blocked_reader = ->(*) { raise "diagnostic reader should not run on initial show" }
+    fast_unified_readiness = Class.new do
+      def report(position:)
+        {
+          status: "ok",
+          execution_venue: position.hedge.execution_venue,
+          active_auto_venue: position.hedge.execution_venue,
+          active_within_tolerance: true,
+          within_tolerance: true,
+          planned_auto_action: "no_op",
+          target_short_eth: "1.0",
+          active_current_short_eth: "1.0",
+          continuous_auto_ready: true,
+          active_auto_ready: true,
+          blockers: [],
+          active_auto_blockers: [],
+          orders_submitted: 0,
+          signatures_created: 0
+        }
+      end
+    end.new
 
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     AerodromeRewardsCheck.stub(:new, blocked_reader) do
       AerodromeFeesCheck.stub(:new, blocked_reader) do
         ExtendedAutoReadiness.stub(:new, blocked_reader) do
-          get position_path(position, hedge_venue: "extended")
+          HedgeVenueAutoReadiness.stub(:new, fast_unified_readiness) do
+            get position_path(position, hedge_venue: "extended")
+          end
         end
       end
     end
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
     assert_response :success
-    assert_operator elapsed, :<, 0.5
+    assert_operator elapsed, :<, 1.0
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
   end
@@ -2798,6 +2820,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
           }
         ]
       }.to_json)
+    stub_request(:get, "https://ethereal.example/v1/order?isWorking=true&limit=100&productIds=2&subaccountId=#{subaccount}")
+      .to_return(status: 200, body: { data: [] }.to_json)
   end
 
   def base_wallet

@@ -128,6 +128,19 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
     assert_equal BigDecimal("300"), health.margin_used_usd
   end
 
+  test "open orders readback counts working orders for product" do
+    stub_product
+    stub_request(:get, "#{API_BASE}/v1/order")
+      .with(query: { subaccountId: SUBACCOUNT_ID, productIds: PRODUCT_ID, isWorking: "true", limit: "100" })
+      .to_return(status: 200, body: { data: [ { id: "order-1" }, { id: "order-2" } ] }.to_json)
+
+    orders = enabled_probe.open_orders
+
+    assert_equal "ok", orders.fetch(:status)
+    assert_equal 2, orders.fetch(:open_orders_count)
+    assert_equal PRODUCT_ID, orders.fetch(:product_id)
+  end
+
   test "timeout raises typed network error" do
     stub_request(:get, "#{API_BASE}/v1/product")
       .with(query: { ticker: "ETHUSD", limit: "100" })

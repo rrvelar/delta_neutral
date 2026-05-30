@@ -46,12 +46,17 @@ module HedgeVenues
 
       health = normalize_account_state(probe.account_health)
       position = read_position(symbol: "ETH")
+      open_orders = ethereal_open_orders_state
       health.merge(
         raw_positions_count: position ? 1 : 0,
         normalized_positions_count: position ? 1 : 0,
         hedge_positions_count: position ? 1 : 0,
         current_short_eth: position&.dig(:short_size),
         current_side: position&.dig(:side),
+        open_orders_read_attempted: open_orders[:open_orders_read_attempted],
+        open_orders_read_status: open_orders[:open_orders_read_status],
+        open_orders_count: open_orders[:open_orders_count],
+        open_orders_diagnostics: open_orders[:open_orders_diagnostics],
         margin_mode: "cross",
         effective_leverage: position&.dig(:effective_leverage),
         warnings: (Array(health[:warnings]) + Array(position&.dig(:warnings))).uniq
@@ -183,6 +188,45 @@ module HedgeVenues
       state = state.reject { |_key, value| value.nil? }
       state[:live_enabled] = live_enabled?
       state
+    end
+
+    def ethereal_open_orders_state
+      result = probe.open_orders("ETH")
+      if result.is_a?(Hash) && result[:status].to_s == "ok"
+        return {
+          open_orders_read_attempted: true,
+          open_orders_read_status: "ok",
+          open_orders_count: result[:open_orders_count].to_i,
+          open_orders_diagnostics: {
+            endpoint: "GET /v1/order",
+            query: "subaccountId, productIds, isWorking=true, limit=100",
+            product_id: result[:product_id],
+            subaccount_configured: result[:subaccount].present?
+          }
+        }
+      end
+
+      {
+        open_orders_read_attempted: true,
+        open_orders_read_status: "unavailable",
+        open_orders_count: nil,
+        open_orders_diagnostics: {
+          endpoint: "GET /v1/order",
+          status: result.respond_to?(:[]) ? result[:status] : "unavailable",
+          message: result.respond_to?(:[]) ? result[:message] : "Ethereal open orders readback unavailable"
+        }.compact
+      }
+    rescue => e
+      {
+        open_orders_read_attempted: true,
+        open_orders_read_status: "unavailable",
+        open_orders_count: nil,
+        open_orders_diagnostics: {
+          endpoint: "GET /v1/order",
+          error_class: e.class.name,
+          message: e.message
+        }
+      }
     end
 
     def decimal_string_or_value(value)

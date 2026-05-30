@@ -67,7 +67,8 @@ module HedgeBackends
       "GET /v1/product",
       "GET /v1/product/market-price",
       "GET /v1/position/active",
-      "GET /v1/subaccount/balance"
+      "GET /v1/subaccount/balance",
+      "GET /v1/order"
     ].freeze
 
     def self.category(endpoint)
