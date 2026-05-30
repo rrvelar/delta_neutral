@@ -152,6 +152,16 @@ namespace :dashboard do
         action: "dashboard_production_smoke",
         status: "blocked",
         blocker: "position #{position_id || '(missing)'} not found in local DB",
+        current_mellow_exposure_source: nil,
+        current_target_short_eth: nil,
+        extended_current_short_eth: nil,
+        extended_auto_within_tolerance: nil,
+        extended_auto_planned_action: nil,
+        extended_auto_suppressed_reason: nil,
+        dashboard_header_status: "blocked",
+        production_health_status: "blocked",
+        hedge_control_action_label: "blocked",
+        mismatch_warnings: [ "position not found in local DB" ],
         tx_hash_onboarding_route_exists: route_exists,
         orders_submitted: 0,
         signatures_created: 0
@@ -169,13 +179,19 @@ namespace :dashboard do
       status: "ok",
       position_id: position.id,
       mellow_current_exposure_status: mellow[:status],
-      exposure_source: mellow[:exposure_source] || position.mellow_metadata_hash["exposure_source"],
+      current_mellow_exposure_source: mellow[:exposure_source] || position.mellow_metadata_hash["exposure_source"],
       successful_method: mellow[:successful_method] || position.mellow_metadata_hash["successful_method"],
       db_asset0_amount: position.asset0_amount&.to_s("F"),
       db_asset1_amount: position.asset1_amount&.to_s("F"),
+      current_target_short_eth: readiness[:target_short_eth],
       extended_current_short_eth: readiness[:extended_current_short_eth],
-      target_short_eth: readiness[:target_short_eth],
-      inside_tolerance: readiness[:within_tolerance],
+      extended_auto_within_tolerance: readiness[:within_tolerance],
+      extended_auto_planned_action: readiness[:planned_auto_action],
+      extended_auto_suppressed_reason: readiness[:action_suppressed_reason],
+      dashboard_header_status: dashboard_header_status(readiness),
+      production_health_status: dashboard_production_health_status(readiness),
+      hedge_control_action_label: dashboard_hedge_control_action_label(readiness),
+      mismatch_warnings: dashboard_mismatch_warnings(snapshot, readiness),
       extended_auto_readiness: {
         continuous_auto_ready: readiness[:continuous_auto_ready],
         planned_auto_action: readiness[:planned_auto_action],
@@ -211,5 +227,44 @@ namespace :dashboard do
     return true if snapshot.inside_tolerance == false
 
     snapshot.stale_now? || snapshot.target_short_eth.nil? || snapshot.combined_short_eth.nil?
+  end
+
+  def dashboard_header_status(readiness)
+    return "Unknown / diagnostics unavailable" if readiness[:within_tolerance].nil?
+
+    readiness[:within_tolerance] ? "In tolerance" : "Out of tolerance"
+  end
+
+  def dashboard_production_health_status(readiness)
+    return "WATCH" if readiness[:action_suppressed_reason].present?
+    return "HEALTHY" if readiness[:within_tolerance] == true && readiness[:planned_auto_action].to_s == "no_op" && Array(readiness[:blockers]).blank?
+    return "ACTION REQUIRED" if Array(readiness[:blockers]).present?
+
+    "WATCH"
+  end
+
+  def dashboard_hedge_control_action_label(readiness)
+    return "Suppressed: #{readiness[:action_suppressed_reason]}" if readiness[:action_suppressed_reason].present?
+
+    case readiness[:planned_auto_action].to_s
+    when "no_op" then "No-op / inside tolerance"
+    when "increase_short" then "SELL non-reduce-only / increase short"
+    when "decrease_short" then "BUY reduce-only / reduce short"
+    when "blocked" then "Blocked / fresh target required"
+    else readiness[:planned_auto_action].presence || "Unknown"
+    end
+  end
+
+  def dashboard_mismatch_warnings(snapshot, readiness)
+    warnings = []
+    if snapshot && !readiness[:within_tolerance].nil? && snapshot.inside_tolerance != readiness[:within_tolerance]
+      warnings << "snapshot inside_tolerance=#{snapshot.inside_tolerance} differs from current Extended readiness #{readiness[:within_tolerance]}"
+    end
+    if snapshot&.target_short_eth && readiness[:target_short_eth].present? && snapshot.target_short_eth.to_d != readiness[:target_short_eth].to_d
+      warnings << "snapshot target_short_eth=#{snapshot.target_short_eth.to_s('F')} differs from current target #{readiness[:target_short_eth]}"
+    end
+    warnings
+  rescue ArgumentError
+    warnings << "target comparison unavailable"
   end
 end

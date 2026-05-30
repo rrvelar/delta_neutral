@@ -57,6 +57,28 @@ end %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
 <% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
+<% extended_readback_blockers = Array(extended_auto_readiness[:blockers]).grep(/Extended account balance\/collateral unavailable|Extended market metadata unavailable/) %>
+<% canonical_extended_readiness = selected_venue == "extended" &&
+  extended_auto_readiness[:status].to_s != "unavailable" &&
+  extended_auto_readiness[:target_short_eth].present? &&
+  extended_auto_readiness[:extended_current_short_eth].present? &&
+  extended_readback_blockers.blank? %>
+<% if canonical_extended_readiness %>
+  <% target_eth_short = extended_auto_readiness[:target_short_eth] %>
+  <% current_short_eth = extended_auto_readiness[:extended_current_short_eth] %>
+  <% drift_eth = extended_auto_readiness[:drift_eth] %>
+  <% tolerance_eth = extended_auto_readiness[:tolerance_eth] %>
+  <% inside_tolerance = extended_auto_readiness[:within_tolerance] %>
+  <% rebalance_needed = inside_tolerance.nil? ? nil : !inside_tolerance %>
+  <% tolerance_label = inside_tolerance.nil? ? "Unknown / diagnostics unavailable" : (inside_tolerance ? "In tolerance" : "Out of tolerance") %>
+  <% next_action = case extended_auto_readiness[:planned_auto_action].to_s
+  when "increase_short", "decrease_short" then "rebalance"
+  when "no_op" then "no-op"
+  else next_action
+  end %>
+  <% recommended_action_key = next_action == "rebalance" ? :rebalance : :open %>
+  <% active_preflight = action_preflights[recommended_action_key] || venue_dashboard[:live_preflight] || {} %>
+<% end %>
 <% extended_readiness_planned_action = extended_auto_readiness[:status].to_s == "unavailable" ? nil : extended_auto_readiness[:planned_auto_action].presence %>
 <% extended_planned_action = extended_readiness_planned_action || cached_snapshot[:planned_auto_action].presence || (rebalance_needed ? next_action.to_s : "no_op") %>
 <% extended_action_label = case extended_planned_action.to_s
@@ -66,6 +88,9 @@ when "decrease_short" then "BUY reduce-only / reduce short"
 when "blocked" then "Blocked / fresh target required"
 else extended_planned_action.to_s.humanize
 end %>
+<% if extended_auto_readiness[:action_suppressed_reason].present? %>
+  <% extended_action_label = "Suppressed: #{extended_auto_readiness[:action_suppressed_reason]}" %>
+<% end %>
 <% hedge_accounting = @hedge_venue_accounting || {} %>
 <% accounting_components = hedge_accounting[:components] || {} %>
 <% snapshot_unrealized_pnl = selected_snapshot[:unrealized_pnl_usd] %>
@@ -213,7 +238,13 @@ end %>
       <% end %>
     </section>
 
-    <% health_status = production_health[:status].presence || "UNKNOWN" %>
+    <% health_status = if canonical_extended_readiness && extended_auto_readiness[:within_tolerance] == true && extended_auto_readiness[:planned_auto_action].to_s == "no_op" && Array(extended_auto_readiness[:blockers]).blank?
+      "HEALTHY"
+    elsif canonical_extended_readiness && extended_auto_readiness[:action_suppressed_reason].present?
+      "WATCH"
+    else
+      production_health[:status].presence || "UNKNOWN"
+    end %>
     <% health_class = case health_status
     when "HEALTHY" then "border-green-800 bg-green-950/50 text-green-200"
     when "WATCH" then "border-yellow-800 bg-yellow-950/50 text-yellow-100"
@@ -232,8 +263,8 @@ end %>
       <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs text-gray-500">Live venue exposure</p>
-          <p class="mt-1 text-white"><%= production_health[:production_venue_name].presence || cached_snapshot[:production_venue_name] || selected_venue_name %> · <%= format_venue_eth_amount(production_health.dig(:exposure, :extended_short_eth) || current_short_eth) %> ETH</p>
-          <p class="mt-1 text-xs text-gray-500">Target <%= format_venue_eth_amount(production_health.dig(:exposure, :target_short_eth) || target_eth_short) %> ETH</p>
+          <p class="mt-1 text-white"><%= production_health[:production_venue_name].presence || cached_snapshot[:production_venue_name] || selected_venue_name %> · <%= format_venue_eth_amount(canonical_extended_readiness ? current_short_eth : production_health.dig(:exposure, :extended_short_eth) || current_short_eth) %> ETH</p>
+          <p class="mt-1 text-xs text-gray-500">Target <%= format_venue_eth_amount(canonical_extended_readiness ? target_eth_short : production_health.dig(:exposure, :target_short_eth) || target_eth_short) %> ETH</p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs text-gray-500">Conflict checks</p>
@@ -265,11 +296,16 @@ end %>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs text-gray-500">Auto decision</p>
-          <p class="mt-1 text-white"><%= production_health[:auto_should_act] ? "Auto should act" : (production_health[:auto_should_be_waiting] ? "Auto should wait" : "Unknown") %></p>
-          <p class="mt-1 text-xs text-gray-500">Inside tolerance <%= production_health.dig(:exposure, :inside_tolerance).nil? ? "unknown" : production_health.dig(:exposure, :inside_tolerance) %></p>
+          <% canonical_auto_decision = if canonical_extended_readiness
+            extended_auto_readiness[:action_suppressed_reason].presence || extended_action_label
+          else
+            production_health[:auto_should_act] ? "Auto should act" : (production_health[:auto_should_be_waiting] ? "Auto should wait" : "Unknown")
+          end %>
+          <p class="mt-1 text-white"><%= canonical_auto_decision %></p>
+          <p class="mt-1 text-xs text-gray-500">Inside tolerance <%= canonical_extended_readiness ? extended_auto_readiness[:within_tolerance] : (production_health.dig(:exposure, :inside_tolerance).nil? ? "unknown" : production_health.dig(:exposure, :inside_tolerance)) %></p>
         </div>
       </div>
-      <% health_messages = (Array(production_health[:action_required]) + Array(production_health[:warnings])).uniq %>
+      <% health_messages = (Array(production_health[:action_required]) + Array(production_health[:warnings]) + Array(extended_auto_readiness[:action_suppressed_reason])).compact.uniq %>
       <% if health_messages.any? %>
         <div class="mt-4 rounded-xl border <%= production_health[:action_required].present? ? 'border-red-900 bg-red-950/20' : 'border-yellow-900 bg-yellow-950/20' %> p-4">
           <p class="text-sm font-semibold <%= production_health[:action_required].present? ? 'text-red-100' : 'text-yellow-100' %>"><%= production_health[:action_required].present? ? "Operator attention" : "Watch items" %></p>
@@ -336,7 +372,7 @@ end %>
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
           <h2 class="mt-1 text-lg font-semibold text-white">Manual hedge venue migration</h2>
-          <p class="mt-1 text-sm text-gray-400">Preview uses the persisted dashboard snapshot only. Live migration is manually gated and readback-confirmed leg by leg.</p>
+          <p class="mt-1 text-sm text-gray-400">Disabled unless manually gated. Preview uses persisted route data and does not override current Extended auto readiness.</p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-sm">
           <p class="text-gray-500">Active migration status</p>
@@ -634,7 +670,7 @@ end %>
       <div class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>
         <div class="flex flex-wrap items-center justify-end gap-2 text-xs">
-          <span class="text-gray-500">Initial render uses cached values; diagnostics load separately.</span>
+          <span class="text-gray-500"><%= canonical_extended_readiness ? "Current Extended readiness and fresh target are shown." : "Initial render uses cached values; diagnostics load separately." %></span>
           <%= link_to "Production diagnostics", production_diagnostics_position_path(@position, hedge_venue: selected_venue), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
           <%= link_to "Hedge accounting", hedge_accounting_diagnostics_position_path(@position, hedge_venue: selected_venue), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
           <%= link_to "Rewards / fees", rewards_fees_diagnostics_position_path(@position), class: "rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800" %>
@@ -649,7 +685,8 @@ end %>
           [ @position.mellow_autopilot? ? "Mellow USDC exposure" : "#{@position.asset1} amount", format_token_amount(position_valuation.usdc_exposure || @position.asset1_amount, decimals: 2), "USDC leg" ],
           [ position_valuation.current_value_label, valuation_value_display(position_valuation.current_value_usd), "Entry #{valuation_value_display(position_valuation.entry_value_usd)}" ],
           [ "Hedge venue", selected_venue_name, snapshot_margin_label ],
-          [ "Target hedge ETH", format_venue_eth_amount(target_eth_short), "Target short" ],
+          [ "Target hedge ETH", format_venue_eth_amount(target_eth_short), canonical_extended_readiness ? "Source #{extended_auto_readiness[:target_source].presence || extended_auto_readiness[:exposure_source].presence || 'fresh target'}" : "Target short" ],
+          [ "Target source", (canonical_extended_readiness ? (extended_auto_readiness[:exposure_source].presence || extended_auto_readiness[:target_source].presence) : cached_snapshot[:refresh_status]).presence || "Unavailable", canonical_extended_readiness ? "Refreshed #{extended_auto_readiness[:exposure_refreshed_at].presence || 'unavailable'}" : "Snapshot source" ],
           [ current_short_label, format_venue_eth_amount(current_short_eth), "Exchange readback" ],
           [ "Drift", format_venue_eth_amount(drift_eth), drift_usd.present? ? format_venue_usd_amount(drift_usd) : "USD unavailable" ],
           [ "Unrealized hedge PnL", format_venue_usd_amount(hedge_unrealized), "Snapshot venue readback" ],
@@ -707,7 +744,7 @@ end %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Strong drift threshold</span><span class="text-white"><%= extended_auto_readiness[:strong_drift_threshold].presence || "n/a" %> ETH</span></div>
             <% end %>
           </div>
-          <% if hedge_preview && !hedge_preview.supported %>
+          <% if hedge_preview && !hedge_preview.supported && !canonical_extended_readiness %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3">
               <p class="text-xs font-semibold text-yellow-100">Hedge preview unavailable</p>
               <p class="mt-1 break-words text-xs text-yellow-200"><%= hedge_preview.reason %></p>
@@ -763,25 +800,32 @@ end %>
         rescue ArgumentError, TypeError
           false
         end %>
-        <% emergency_restore_visible = cached_snapshot[:production_venue].to_s == "extended" && ((cached_snapshot[:inside_tolerance] == false && emergency_restore_outside) || cached_snapshot[:stale] || cached_snapshot[:target_short_eth].blank?) %>
+        <% emergency_restore_visible = (cached_snapshot[:production_venue].presence || @position.hedge&.execution_venue).to_s == "extended" %>
+        <% emergency_target_short_eth = canonical_extended_readiness ? target_eth_short : (cached_snapshot[:target_short_eth] || target_eth_short) %>
+        <% emergency_current_short_eth = canonical_extended_readiness ? current_short_eth : cached_snapshot[:combined_short_eth] %>
+        <% emergency_drift_eth = canonical_extended_readiness ? drift_eth : (cached_snapshot[:drift_eth] || drift_eth) %>
         <% if emergency_restore_visible %>
-          <div class="rounded-xl border border-red-900 bg-red-950/20 p-4 xl:col-span-2">
+          <div class="rounded-xl border <%= inside_tolerance == true ? 'border-gray-800 bg-gray-950/50' : 'border-red-900 bg-red-950/20' %> p-4 xl:col-span-2">
             <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <p class="text-xs uppercase tracking-wide text-red-300">Emergency Restore Hedge</p>
+                <p class="text-xs uppercase tracking-wide <%= inside_tolerance == true ? 'text-gray-500' : 'text-red-300' %>">Emergency Restore Hedge</p>
                 <h3 class="mt-1 text-lg font-semibold text-white">Refresh exposure and adjust Extended hedge</h3>
-                <p class="mt-1 text-sm text-red-100">Use only when the production hedge is overhedged, underhedged, or flat after a failed manual migration. This path refreshes Mellow/Aerodrome source exposure before sizing, bypasses stale proposal/history gates, and keeps Extended live gates, cap checks, open-order checks, signer health, and readback confirmation.</p>
+                <% if inside_tolerance == true %>
+                  <p class="mt-1 text-sm text-green-200">Not needed: inside tolerance. Normal Extended auto is the primary path and is currently a no-op.</p>
+                <% else %>
+                  <p class="mt-1 text-sm text-red-100">Use only when the production hedge is overhedged, underhedged, or flat after a failed manual migration. This path refreshes Mellow/Aerodrome source exposure before sizing, bypasses stale proposal/history gates, and keeps Extended live gates, cap checks, open-order checks, signer health, and readback confirmation.</p>
+                <% end %>
               </div>
-              <span class="rounded-full border border-red-800 bg-red-950 px-3 py-1 text-xs font-semibold text-red-100">Manual recovery</span>
+              <span class="rounded-full border <%= inside_tolerance == true ? 'border-gray-700 bg-gray-950 text-gray-300' : 'border-red-800 bg-red-950 text-red-100' %> px-3 py-1 text-xs font-semibold"><%= inside_tolerance == true ? "Not needed" : "Manual recovery" %></span>
             </div>
             <div class="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
               <div><span class="text-gray-500">Production venue</span><p class="text-white"><%= HedgeVenues.label(cached_snapshot[:production_venue]) %></p></div>
-              <div><span class="text-gray-500">Target short</span><p class="text-white"><%= format_venue_eth_amount(cached_snapshot[:target_short_eth] || target_eth_short) %> ETH</p></div>
-              <div><span class="text-gray-500">Combined short</span><p class="text-white"><%= format_venue_eth_amount(cached_snapshot[:combined_short_eth]) %> ETH</p></div>
-              <div><span class="text-gray-500">Drift</span><p class="text-white"><%= format_venue_eth_amount(cached_snapshot[:drift_eth] || drift_eth) %> ETH</p></div>
+              <div><span class="text-gray-500">Target short</span><p class="text-white"><%= format_venue_eth_amount(emergency_target_short_eth) %> ETH</p></div>
+              <div><span class="text-gray-500"><%= canonical_extended_readiness ? "Current short" : "Combined short" %></span><p class="text-white"><%= format_venue_eth_amount(emergency_current_short_eth) %> ETH</p></div>
+              <div><span class="text-gray-500">Drift</span><p class="text-white"><%= format_venue_eth_amount(emergency_drift_eth) %> ETH</p></div>
             </div>
             <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <%= button_to "Emergency Refresh & Adjust Dry Run", hedge_emergency_restore_position_path(@position), method: :post, params: { dry_run: true, emergency_action: "adjust" }, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+              <%= button_to "Emergency Refresh & Adjust Dry Run", hedge_emergency_restore_position_path(@position), method: :post, params: { dry_run: true, emergency_action: "adjust" }, disabled: inside_tolerance == true, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700 disabled:bg-gray-900 disabled:text-gray-600" %>
               <%= form_with url: hedge_emergency_restore_position_path(@position), method: :post, class: "space-y-2" do |form| %>
                 <%= form.hidden_field :live, value: "true" %>
                 <%= form.hidden_field :emergency_action, value: "adjust" %>

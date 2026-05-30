@@ -233,7 +233,19 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       inside_tolerance: false
     )
 
-    get position_path(position, hedge_venue: "extended")
+    readiness = extended_readiness(
+      position,
+      within_tolerance: false,
+      planned_auto_action: "increase_short",
+      target: "0.8",
+      current: "0.74",
+      drift: "0.06",
+      tolerance: "0.024"
+    )
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
 
     assert_response :success
     assert_match "Emergency Restore Hedge", response.body
@@ -540,7 +552,19 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       rebalanced_at: 1.minute.ago
     )
 
-    get position_path(position, hedge_venue: "extended")
+    readiness = extended_readiness(
+      position,
+      within_tolerance: false,
+      planned_auto_action: "increase_short",
+      target: "0.8",
+      current: "0.74",
+      drift: "0.06",
+      tolerance: "0.024"
+    )
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
 
     assert_response :success
     assert_match "Migration Control Center", response.body
@@ -1535,13 +1559,95 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       planned_auto_action: "increase_short"
     )
 
-    get position_path(position, hedge_venue: "extended")
+    readiness = extended_readiness(
+      position,
+      within_tolerance: false,
+      planned_auto_action: "increase_short",
+      target: "0.8",
+      current: "0.74",
+      drift: "0.06",
+      tolerance: "0.024"
+    )
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
 
     assert_response :success
     assert_match "current_share_token_resolver", response.body
     assert_match "previewMint(uint256)", response.body
     assert_match "SELL non-reduce-only / increase short", response.body
     assert_no_match "Mellow Autopilot pro-rata exposure is not hedge-ready", response.body
+  end
+
+  test "dashboard header uses Extended readiness inside tolerance over stale snapshot" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false, snapshot_target: "9.9")
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op", target: "0.8", current: "0.79", drift: "0.01", tolerance: "0.024")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "In tolerance", response.body
+    assert_no_match "Out of tolerance", response.body
+    assert_match "No-op / inside tolerance", response.body
+    assert_match "0.800000", response.body
+    assert_no_match "9.900000", response.body
+  end
+
+  test "dashboard does not say auto should act when anti churn suppresses" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "increase_short", suppressed: "order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "Suppressed: order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03", response.body
+    assert_no_match "Auto should act", response.body
+  end
+
+  test "hedge preview unavailable is hidden when Extended readiness has current no-op" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: true)
+    position.update!(asset0_price_usd: nil)
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "No-op / inside tolerance", response.body
+    assert_no_match "Hedge preview unavailable", response.body
+    assert_no_match "amount or USD price is missing", response.body
+  end
+
+  test "emergency section says not needed when current Extended readiness is inside tolerance" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "Not needed: inside tolerance", response.body
+  end
+
+  test "migration preview outside tolerance does not override production readiness" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "Disabled unless manually gated", response.body
+    assert_match "In tolerance", response.body
+    assert_no_match "Full migration correction", response.body
   end
 
   test "show displays Mellow rewards and LP fee estimates without parsing synthetic id as direct NFT" do
@@ -2209,6 +2315,95 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  ReadinessFactory = Struct.new(:payload) do
+    def report(position:)
+      payload
+    end
+  end
+
+  def extended_readiness(position, within_tolerance:, planned_auto_action:, suppressed: nil, target: "0.8", current: "0.79", drift: "0.01", tolerance: "0.024")
+    {
+      venue: "extended",
+      action: "auto_readiness",
+      position_id: position.id,
+      hedge_id: position.hedge.id,
+      execution_venue: "extended",
+      target_short_eth: target,
+      target_source: "current_share_token_fallback",
+      exposure_source: "current_share_token_fallback",
+      exposure_refreshed_at: Time.current.iso8601,
+      exposure_stale: false,
+      extended_current_short_eth: current,
+      drift_eth: drift,
+      tolerance_eth: tolerance,
+      within_tolerance: within_tolerance,
+      drift_outside_tolerance: !within_tolerance,
+      planned_auto_action: planned_auto_action,
+      action_suppressed_reason: suppressed,
+      min_rebalance_size_eth: "0.03",
+      min_rebalance_notional_usd: "50.0",
+      cooldown_remaining_seconds: 0,
+      consecutive_outside_tolerance_required: 2,
+      consecutive_outside_tolerance_count: 1,
+      strong_drift_threshold: "0.048",
+      drift_to_tolerance_ratio: "0.4166666667",
+      strong_drift_bypass_used: false,
+      planned_auto_order_size_eth: planned_auto_action == "no_op" ? nil : drift,
+      auto_max_rebalance_size_eth: "0.1",
+      partial_auto_rebalance: false,
+      auto_can_act: suppressed.blank? && planned_auto_action != "no_op",
+      ethereal_short_eth: "0",
+      ethereal_flat: true,
+      nado_short_eth: "0",
+      nado_flat: true,
+      continuous_auto_ready: suppressed.blank?,
+      blockers: [],
+      warnings: []
+    }
+  end
+
+  def mellow_extended_position_with_snapshot(snapshot_inside:, snapshot_target: "1.25")
+    position = create_aerodrome_position
+    position.update!(
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      external_id: "mellow:71261528",
+      asset0_amount: "0.8",
+      asset1_amount: "500",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      mellow_metadata: {
+        "hedge_ready" => true,
+        "exposure_source" => "current_share_token_fallback",
+        "last_current_exposure_at" => Time.current.iso8601,
+        "last_probe_confidence" => "current_share_token_fallback",
+        "user_weth_exposure" => "0.8",
+        "user_usdc_exposure" => "500",
+        "user_total_value_usd" => "2100"
+      }.to_json
+    )
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: 20.minutes.ago,
+      refresh_status: "ok",
+      stale: true,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: snapshot_target,
+      tolerance_abs_eth: "0.0375",
+      combined_short_eth: snapshot_inside ? snapshot_target : "0.1",
+      drift_eth: snapshot_inside ? "0" : "1.15",
+      inside_tolerance: snapshot_inside,
+      extended_short_eth: snapshot_inside ? snapshot_target : "0.1",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat",
+      planned_auto_action: snapshot_inside ? "no_op" : "increase_short"
+    )
+    position
+  end
 
   def create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), asset1_price_usd: BigDecimal("1"), external_id: "315985", pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", active: true)
     Position.create!(

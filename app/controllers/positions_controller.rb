@@ -106,7 +106,9 @@ class PositionsController < ApplicationController
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
+      @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_auto_readiness", timeout_seconds: diagnostic_timeout_seconds, fallback: unavailable_extended_auto_readiness) { ExtendedAutoReadiness.new.report(position: @position) } : nil
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard
+      @selected_hedge_venue_dashboard[:auto_readiness] = @current_extended_auto_readiness if @current_extended_auto_readiness
       @hedge_venue_accounting = cached_hedge_accounting_report || unavailable_hedge_accounting("Hedge accounting diagnostics are loaded separately.")
       @latest_aerodrome_weth_rebalance = safe_dashboard_section("latest_rebalance", fallback: nil) { @position.hedge&.short_rebalances&.where(asset: [ "ETH", "WETH" ])&.order(rebalanced_at: :desc)&.first }
       @aerodrome_hedge_proposals = safe_dashboard_section("hedge_proposals", fallback: []) { @position.aerodrome_hedge_proposals.latest_first.limit(10) }
