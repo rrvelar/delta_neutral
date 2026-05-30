@@ -107,7 +107,7 @@ class DashboardTaskTest < ActiveSupport::TestCase
     }
 
     MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
-      ExtendedAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
         with_position_id(position.id) do
           out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
           payload = JSON.parse(out)
@@ -130,6 +130,52 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
           assert_equal true, payload.fetch("tx_hash_onboarding_route_exists")
+        end
+      end
+    end
+  end
+
+  test "production smoke uses Ethereal active venue readiness after migration" do
+    position = aerodrome_position
+    position.hedge.update!(execution_venue: "ethereal")
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+    readiness = {
+      execution_venue: "ethereal",
+      active_auto_venue: "ethereal",
+      active_current_short_eth: "0.8829",
+      active_target_short_eth: "0.88",
+      active_drift_eth: "-0.0029",
+      active_tolerance_eth: "0.0264",
+      active_within_tolerance: true,
+      active_planned_auto_action: "no_op",
+      active_auto_enabled: false,
+      active_live_enabled: true,
+      active_auto_ready: false,
+      active_auto_blockers: [ "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" ],
+      active_auto_warnings: [ "Ethereal continuous auto is disabled; inside-tolerance production health should be stable but manual." ],
+      ethereal_current_short_eth: "0.8829",
+      target_short_eth: "0.88",
+      within_tolerance: true,
+      continuous_auto_ready: false,
+      planned_auto_action: "no_op",
+      blockers: [ "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" ],
+      warnings: []
+    }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "ethereal", payload.fetch("production_venue")
+          assert_equal "ethereal", payload.fetch("active_auto_venue")
+          assert_equal "0.8829", payload.fetch("active_current_short_eth")
+          assert_equal true, payload.fetch("active_within_tolerance")
+          assert_equal "HEALTHY", payload.fetch("production_health_status")
+          assert_not_includes payload.fetch("active_auto_blockers"), "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
         end
       end
     end

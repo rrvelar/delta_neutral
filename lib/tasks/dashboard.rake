@@ -177,7 +177,7 @@ namespace :dashboard do
     end
 
     mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
-    readiness = safe_smoke_section { ExtendedAutoReadiness.new.report(position: position) }
+    readiness = safe_smoke_section { HedgeVenueAutoReadiness.new.report(position: position) }
     rewards_snapshot = position.position_rewards_fees_snapshot
     snapshot = position.position_dashboard_snapshot
     last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
@@ -195,8 +195,23 @@ namespace :dashboard do
       legacy_rewards_error: legacy_rewards_error(position, rewards_snapshot),
       db_asset0_amount: position.asset0_amount&.to_s("F"),
       db_asset1_amount: position.asset1_amount&.to_s("F"),
+      production_venue: readiness[:execution_venue] || position.hedge&.execution_venue,
+      active_auto_venue: readiness[:active_auto_venue],
+      active_current_short_eth: readiness[:active_current_short_eth],
+      active_target_short_eth: readiness[:active_target_short_eth],
+      active_drift_eth: readiness[:active_drift_eth],
+      active_tolerance_eth: readiness[:active_tolerance_eth],
+      active_within_tolerance: readiness[:active_within_tolerance],
+      active_planned_auto_action: readiness[:active_planned_auto_action],
+      active_auto_enabled: readiness[:active_auto_enabled],
+      active_live_enabled: readiness[:active_live_enabled],
+      active_auto_ready: readiness[:active_auto_ready],
+      continuous_auto_ready: readiness[:continuous_auto_ready],
+      active_auto_blockers: readiness[:active_auto_blockers],
+      active_auto_warnings: readiness[:active_auto_warnings],
       current_target_short_eth: readiness[:target_short_eth],
       extended_current_short_eth: readiness[:extended_current_short_eth],
+      ethereal_current_short_eth: readiness[:ethereal_current_short_eth],
       extended_auto_within_tolerance: readiness[:within_tolerance],
       extended_auto_planned_action: readiness[:planned_auto_action],
       extended_auto_suppressed_reason: readiness[:action_suppressed_reason],
@@ -207,6 +222,18 @@ namespace :dashboard do
       hedge_control_uses_readiness_preview: dashboard_readiness_preview_available?(readiness),
       stale_preview_warning_present: !dashboard_readiness_preview_available?(readiness),
       mismatch_warnings: dashboard_mismatch_warnings(snapshot, readiness),
+      non_production_venue_diagnostics: {
+        extended: { short_eth: snapshot&.extended_short_eth&.to_s("F") },
+        ethereal: { short_eth: snapshot&.ethereal_short_eth&.to_s("F") },
+        nado: { short_eth: snapshot&.nado_short_eth&.to_s("F") }
+      },
+      combined_hedge: {
+        extended_short_eth: snapshot&.extended_short_eth&.to_s("F"),
+        ethereal_short_eth: snapshot&.ethereal_short_eth&.to_s("F"),
+        nado_short_eth: snapshot&.nado_short_eth&.to_s("F"),
+        combined_short_eth: snapshot&.combined_short_eth&.to_s("F"),
+        combined_inside_tolerance: snapshot&.inside_tolerance
+      },
       extended_auto_readiness: {
         continuous_auto_ready: readiness[:continuous_auto_ready],
         planned_auto_action: readiness[:planned_auto_action],
@@ -245,17 +272,18 @@ namespace :dashboard do
   end
 
   def dashboard_header_status(readiness)
-    return "Unknown / diagnostics unavailable" if readiness[:within_tolerance].nil?
+    within = readiness[:active_within_tolerance].nil? ? readiness[:within_tolerance] : readiness[:active_within_tolerance]
+    return "Unknown / diagnostics unavailable" if within.nil?
 
-    readiness[:within_tolerance] ? "In tolerance" : "Out of tolerance"
+    within ? "In tolerance" : "Out of tolerance"
   end
 
   def dashboard_production_health_status(readiness)
     return "WATCH" if readiness[:action_suppressed_reason].present?
-    return "HEALTHY" if readiness[:within_tolerance] == true
+    return "HEALTHY" if readiness[:active_within_tolerance] == true || readiness[:within_tolerance] == true
     return "ACTION PENDING" if readiness[:auto_can_act] == true
     return "BLOCKED" if readiness[:target_short_eth].blank?
-    return "BLOCKED" if Array(readiness[:blockers]).any? { |blocker| blocker.to_s.include?("EXTENDED_AUTO_REBALANCE_ENABLED") || blocker.to_s.include?("EXTENDED_LIVE_ENABLED") }
+    return "BLOCKED" if Array(readiness[:blockers]).any? { |blocker| blocker.to_s.include?("AUTO_REBALANCE_ENABLED") || blocker.to_s.include?("LIVE_ENABLED") }
     return "ACTION REQUIRED" if Array(readiness[:blockers]).present?
 
     "WATCH"
@@ -274,7 +302,7 @@ namespace :dashboard do
   end
 
   def dashboard_production_health_reason(readiness)
-    return "inside tolerance" if readiness[:within_tolerance] == true
+    return "inside tolerance" if readiness[:active_within_tolerance] == true || readiness[:within_tolerance] == true
     return readiness[:action_suppressed_reason] if readiness[:action_suppressed_reason].present?
     return "auto_can_act=true" if readiness[:auto_can_act] == true
     return "fresh exposure unavailable" if readiness[:target_short_eth].blank?
@@ -284,7 +312,7 @@ namespace :dashboard do
 
   def dashboard_readiness_preview_available?(readiness)
     readiness[:target_short_eth].present? &&
-      readiness[:extended_current_short_eth].present? &&
+      (readiness[:active_current_short_eth].present? || readiness[:extended_current_short_eth].present?) &&
       (readiness[:planned_auto_action].to_s.in?(%w[no_op decrease_short increase_short]) || readiness[:action_suppressed_reason].present?)
   end
 
@@ -301,7 +329,7 @@ namespace :dashboard do
   def dashboard_mismatch_warnings(snapshot, readiness)
     warnings = []
     if snapshot && !readiness[:within_tolerance].nil? && snapshot.inside_tolerance != readiness[:within_tolerance]
-      warnings << "snapshot inside_tolerance=#{snapshot.inside_tolerance} differs from current Extended readiness #{readiness[:within_tolerance]}"
+      warnings << "snapshot inside_tolerance=#{snapshot.inside_tolerance} differs from current active readiness #{readiness[:active_within_tolerance] || readiness[:within_tolerance]}"
     end
     if snapshot&.target_short_eth && readiness[:target_short_eth].present? && snapshot.target_short_eth.to_d != readiness[:target_short_eth].to_d
       warnings << "snapshot target_short_eth=#{snapshot.target_short_eth.to_s('F')} differs from current target #{readiness[:target_short_eth]}"

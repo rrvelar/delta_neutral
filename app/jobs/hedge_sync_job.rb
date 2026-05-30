@@ -245,64 +245,39 @@ class HedgeSyncJob < ApplicationJob
   end
 
   def sync_ethereal_aerodrome_hedge(hedge)
-    unless ethereal_auto_rebalance_enabled?
-      Rails.logger.warn("HedgeSyncJob: skipping hedge #{hedge.id} — AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true")
-      return
-    end
-
-    readiness_errors = aerodrome_readiness_errors(hedge)
-    if readiness_errors.any?
-      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — Aerodrome hedge data incomplete: #{readiness_errors.join(', ')}")
-      return
-    end
-
-    valuation = PositionValuation.current(hedge.position)
-    weth_exposure = valuation.weth_exposure
-    unless weth_exposure
-      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — Mellow WETH pro-rata exposure unavailable")
-      return
-    end
-
-    target_short = weth_exposure * hedge.target
-    price = nado_eth_price(hedge.position, valuation)
-    safety_errors = nado_safety_errors(target_short: target_short, price: price)
-    if safety_errors.any?
-      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — #{safety_errors.join(', ')}")
-      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: safety_errors.join("; "))
-      return
-    end
-
-    service = EtherealHedgeExecutionService.new
-    current_position = service.read_position
-    if current_position == :unavailable
-      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "Ethereal readback unavailable")
-      return
-    end
-
-    current_size = ethereal_position_size(current_position)
-    if current_size.positive?
-      record_ethereal_rebalance(hedge, old_short: BigDecimal("0"), new_short: BigDecimal("0"), status: ShortRebalance::STATUS_FAILED, message: "current Ethereal position is long; manual action required")
-      return
-    end
-
-    current_short = current_size.negative? ? current_size.abs : BigDecimal("0")
-    delta = target_short - current_short
-    tolerance = target_short * hedge.tolerance
-    if delta.abs <= tolerance
+    readiness = HedgeVenueAutoReadiness.new.report(position: hedge.position)
+    Rails.logger.info(
+      "HedgeSyncJob Ethereal target decision hedge=#{hedge.id} " \
+      "target_source=#{readiness[:target_source] || readiness[:exposure_source]} " \
+      "exposure_refreshed_at=#{readiness[:exposure_refreshed_at]} " \
+      "target_short_eth=#{readiness[:target_short_eth]} " \
+      "current_short=#{readiness[:active_current_short_eth]} " \
+      "drift=#{readiness[:active_drift_eth]} tolerance=#{readiness[:active_tolerance_eth]} " \
+      "planned_auto_action=#{readiness[:planned_auto_action]}"
+    )
+    if readiness[:active_within_tolerance] == true
       Rails.logger.debug { "[HedgeSyncJob] Ethereal hedge #{hedge.id}: within tolerance, no rebalance needed" }
       return
     end
 
-    preview = service.build_order_preview(position: hedge.position, action: "rebalance", size_eth: delta, max_slippage: nado_max_slippage, current_position: current_position)
-    rounded_size = BigDecimal(preview.dig(:summary, :rounded_size_eth).to_s)
-    if rounded_size.zero?
-      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — rounded order size is zero")
+    unless readiness.fetch(:continuous_auto_ready)
+      Rails.logger.warn("HedgeSyncJob: skipping Ethereal hedge #{hedge.id} — #{readiness.fetch(:blockers).join('; ')}")
       return
     end
 
-    result = service.auto_rebalance_short(position: hedge.position, delta_eth: delta, current_position: current_position, max_slippage: nado_max_slippage)
-    result = service.reconcile_pending_result(result)
+    result = HedgeVenueAutoRebalanceOnce.new.run(
+      position: hedge.position,
+      dry_run: false,
+      live: true,
+      confirmation: HedgeVenueAutoAdapters::Ethereal::CONFIRMATION,
+      max_slippage: nado_max_slippage,
+      one_shot: false
+    )
+    return if result.status == "no_op" || result.receipt[:planned_auto_action] == "no_op"
+
     receipt_path = write_ethereal_receipt(result.receipt)
+    old_short = BigDecimal(result.receipt.fetch(:current_short_eth, "0").to_s)
+    new_short = ethereal_readback_short(result.receipt[:execution_receipt]&.dig(:post_submit_readback), fallback: decimal_or_fallback(result.receipt[:expected_after_short_eth], old_short))
     status = if result.status == "submitted_and_confirmed"
       ShortRebalance::STATUS_SUCCESS
     elsif result.status.to_s.start_with?("submitted_but")
@@ -310,22 +285,21 @@ class HedgeSyncJob < ApplicationJob
     else
       ShortRebalance::STATUS_FAILED
     end
-    after_short = ethereal_readback_short(result.receipt[:post_submit_readback], fallback: current_short)
     record_ethereal_rebalance(
       hedge,
-      old_short: current_short,
-      new_short: after_short,
+      old_short: old_short,
+      new_short: new_short,
       status: status,
       message: ethereal_rebalance_message(result),
-      order_side: result.receipt.dig(:submitted_order_summary, :side),
-      reduce_only: result.receipt.dig(:submitted_order_summary, :reduce_only),
+      order_side: result.receipt[:side],
+      reduce_only: result.receipt[:reduce_only],
       exchange_order_id: result.receipt[:exchange_order_id],
       receipt_path: receipt_path
     )
   end
 
   def sync_extended_aerodrome_hedge(hedge)
-    readiness = ExtendedAutoReadiness.new.report(position: hedge.position)
+    readiness = HedgeVenueAutoReadiness.new.report(position: hedge.position)
     Rails.logger.info(
       "HedgeSyncJob Extended target decision hedge=#{hedge.id} " \
       "target_source=#{readiness[:target_source] || readiness[:exposure_source]} " \
@@ -345,7 +319,7 @@ class HedgeSyncJob < ApplicationJob
       return
     end
 
-    result = ExtendedAutoRebalanceOnce.new.run(position: hedge.position, dry_run: false, one_shot: false, max_slippage: nado_max_slippage)
+    result = HedgeVenueAutoRebalanceOnce.new.run(position: hedge.position, dry_run: false, live: true, max_slippage: nado_max_slippage, one_shot: false)
     return if result.status == "no_op"
 
     receipt_path = write_extended_receipt(result.receipt)

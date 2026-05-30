@@ -106,7 +106,8 @@ class PositionsController < ApplicationController
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
-      @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_auto_readiness", timeout_seconds: diagnostic_timeout_seconds, fallback: unavailable_extended_auto_readiness) { ExtendedAutoReadiness.new.report(position: @position) } : nil
+      @current_auto_readiness = safe_dashboard_section("hedge_venue_auto_readiness", timeout_seconds: diagnostic_timeout_seconds, fallback: unavailable_extended_auto_readiness) { HedgeVenueAutoReadiness.new.report(position: @position) }
+      @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? @current_auto_readiness : nil
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard
       @selected_hedge_venue_dashboard[:auto_readiness] = @current_extended_auto_readiness if @current_extended_auto_readiness
       @hedge_venue_accounting = cached_hedge_accounting_report || unavailable_hedge_accounting("Hedge accounting diagnostics are loaded separately.")
@@ -127,7 +128,7 @@ class PositionsController < ApplicationController
       @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
       @live_autopilot_readiness = MigrationLiveAutopilotReadiness.new(position: @position, route_matrix: @migration_route_matrix).report
-      @production_health = ExtendedAutoOperationalHealth.new(position: @position).report
+      @production_health = auto_readiness_production_health(@current_auto_readiness)
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
           position: @position,
@@ -384,7 +385,7 @@ class PositionsController < ApplicationController
       live_preflight: target ? safe_dashboard_section("selected_venue_live_preflight", fallback: unavailable_preflight) { selected_venue_live_preflight(target: target, current_short: current_short, drift: drift, current_position: current_position) } : nil,
       action_live_preflights: safe_dashboard_section("selected_venue_action_preflights", fallback: unavailable_action_preflights) { selected_venue_action_live_preflights(target: target, current_short: current_short, drift: drift, current_position: current_position) },
       migration_full_readiness: @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_migration_full_readiness", fallback: unavailable_migration_full_readiness) { extended_migration_full_readiness(target: target, extended_short: current_short) } : nil,
-      auto_readiness: @selected_hedge_venue == "extended" ? safe_dashboard_section("extended_auto_readiness", fallback: unavailable_extended_auto_readiness) { ExtendedAutoReadiness.new.report(position: @position) } : nil
+      auto_readiness: @selected_hedge_venue == @position.hedge&.execution_venue ? safe_dashboard_section("hedge_venue_auto_readiness", fallback: unavailable_extended_auto_readiness) { HedgeVenueAutoReadiness.new.report(position: @position) } : nil
     }
   rescue => e
     { warnings: [ "#{@selected_hedge_venue_adapter.venue_name} dashboard preview unavailable: #{e.class}: #{e.message}" ] }
@@ -1054,6 +1055,25 @@ class PositionsController < ApplicationController
       signer_health: { ok: false, reason: "unavailable" },
       blockers: [ "Extended auto readiness unavailable; refresh diagnostics" ],
       warnings: [ "Extended auto readiness unavailable; refresh diagnostics" ]
+    }
+  end
+
+  def auto_readiness_production_health(readiness)
+    status = if readiness[:within_tolerance] == true || readiness[:active_within_tolerance] == true
+      "HEALTHY"
+    elsif readiness[:auto_can_act] == true
+      "ACTION PENDING"
+    elsif Array(readiness[:blockers]).present?
+      "BLOCKED"
+    else
+      "WATCH"
+    end
+    {
+      status: status,
+      reason: readiness[:action_suppressed_reason].presence || Array(readiness[:blockers]).first || (status == "HEALTHY" ? "inside tolerance" : nil),
+      venue: readiness[:active_auto_venue] || readiness[:venue],
+      blockers: Array(readiness[:blockers]),
+      warnings: Array(readiness[:warnings])
     }
   end
 
