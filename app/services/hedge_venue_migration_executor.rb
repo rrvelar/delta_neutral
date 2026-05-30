@@ -91,6 +91,29 @@ class HedgeVenueMigrationExecutor
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
+  def run_precomputed_plan(position:, plan:, confirmation:)
+    receipt = plan.merge(
+      action: "hedge_venue_migration",
+      dry_run: false,
+      live: true,
+      confirmation_type: confirmation == CONFIRMATION ? "dashboard_migration_confirmation" : (confirmation.present? ? "invalid_confirmation" : "missing_confirmation"),
+      orders_placed: 0,
+      signatures_created: 0,
+      exchange_order_ids: [],
+      leg_readbacks: [],
+      manual_action_required: true,
+      final_status: "blocked_before_submit"
+    )
+    blockers = Array(plan[:blockers])
+    if blockers.any?
+      receipt[:blockers] = blockers.uniq
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+
+    execute_receipt(position: position, receipt: receipt, confirmation: confirmation)
+  end
+
   class FailClosedLegRunner
     def call(_leg, context: {})
       {
@@ -226,6 +249,48 @@ class HedgeVenueMigrationExecutor
       confirmation: confirmation,
       receipt: receipt
     }
+  end
+
+  def execute_receipt(position:, receipt:, confirmation:)
+    first_planned_leg = receipt.fetch(:planned_first_leg)
+    second_planned_leg = receipt.fetch(:planned_second_leg)
+    first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
+    receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
+    receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
+    receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
+    unless leg_confirmed?(first_leg)
+      receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
+      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
+      receipt[:manual_action_required] = true
+      receipt[:recovery_command] = recovery_command(receipt) if receipt[:final_status] == "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED"
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+
+    second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
+    receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
+    receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
+    receipt[:leg_readbacks] << second_leg[:readback] if second_leg[:readback]
+    receipt[:orders_placed] = leg_order_count(first_leg) + leg_order_count(second_leg)
+    receipt[:signatures_created] = leg_signature_count(first_leg) + leg_signature_count(second_leg)
+    receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id], second_leg[:exchange_order_id] ].compact
+    receipt[:submitted] = receipt[:orders_placed].positive?
+    if leg_confirmed?(second_leg)
+      final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
+      receipt.merge!(final)
+      finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
+    else
+      receipt[:final_status] = "partial_migration_manual_action_required"
+      receipt[:manual_action_required] = true
+      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
+      if receipt[:migration_sequence] == "source_first"
+        receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
+      end
+    end
+    write_receipt(receipt)
+    Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
   def live_blockers(position:, receipt:, dry_run:, confirmation:)

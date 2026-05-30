@@ -239,6 +239,9 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert_equal "manual_live_canary_readiness", payload.fetch("action")
     assert_equal "extended->ethereal", payload.fetch("route")
     assert_equal false, payload.fetch("ready_for_supervised_canary")
+    assert_equal "target_first", payload.fetch("recommended_sequence")
+    assert payload.key?("planned_first_leg")
+    assert_not_includes payload.fetch("blockers"), "Route proof is not READY_FOR_DRY_RUN."
     assert_equal 0, payload.fetch("orders_submitted")
     assert_equal 0, payload.fetch("signatures_created")
   ensure

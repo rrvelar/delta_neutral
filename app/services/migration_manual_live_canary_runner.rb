@@ -4,31 +4,28 @@ class MigrationManualLiveCanaryRunner
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
-  def initialize(env: ENV, now: -> { Time.current }, receipt_dir: RECEIPT_DIR, executor: nil)
+  def initialize(env: ENV, now: -> { Time.current }, receipt_dir: RECEIPT_DIR, executor: nil, target_preflight: nil, fresh_target: nil)
     @env = env
     @now = now
     @receipt_dir = Pathname(receipt_dir)
     @executor = executor
+    @target_preflight = target_preflight
+    @fresh_target = fresh_target
   end
 
   def run(position:, from:, to:, confirmation:, sequence: "target_first")
-    readiness = MigrationManualLiveCanaryReadiness.new(position: position, from: from, to: to, env: env).report
-    blockers = hard_blockers(readiness: readiness, confirmation: confirmation, sequence: sequence)
-    receipt = base_receipt(position: position, readiness: readiness, confirmation: confirmation, sequence: sequence, blockers: blockers)
+    plan = canonical_plan(position: position, from: from, to: to, sequence: sequence)
+    blockers = hard_blockers(plan: plan, confirmation: confirmation)
+    receipt = base_receipt(position: position, plan: plan, confirmation: confirmation, blockers: blockers)
     if blockers.any?
       write_receipt(receipt)
-      return Result.new("blocked_before_submit", blockers, readiness.fetch(:warnings), receipt)
+      return Result.new("blocked_before_submit", blockers, plan.fetch(:warnings), receipt)
     end
 
-    result = executor.run(
+    result = executor.run_precomputed_plan(
       position: position,
-      from_venue: readiness.fetch(:from_venue),
-      to_venue: readiness.fetch(:to_venue),
-      mode: "full",
-      dry_run: false,
+      plan: receipt,
       confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
-      full_migration_allowed: true,
-      migration_sequence: sequence
     )
     canary_receipt = receipt.merge(from_executor_result(result))
     canary_receipt[:final_status] = normalized_final_status(canary_receipt, result)
@@ -44,33 +41,40 @@ class MigrationManualLiveCanaryRunner
     @executor ||= HedgeVenueMigrationExecutor.new(env: env, receipt_writer: HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir))
   end
 
-  def hard_blockers(readiness:, confirmation:, sequence:)
+  def canonical_plan(position:, from:, to:, sequence:)
+    MigrationManualCanaryPlanner.new(
+      position: position,
+      from: from,
+      to: to,
+      env: env,
+      target_preflight: @target_preflight,
+      fresh_target: @fresh_target,
+      sequence: sequence,
+      now: now
+    ).report
+  end
+
+  def hard_blockers(plan:, confirmation:)
     blockers = []
-    blockers.concat(readiness.fetch(:blockers))
-    blockers << "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true" if sequence.to_s == "source_first" && !ActiveModel::Type::Boolean.new.cast(readiness[:source_first_allowed])
+    blockers.concat(plan.fetch(:blockers))
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
-    blockers << "MIGRATION_NADO_LIVE_MIGRATION_ENABLED must be true for Nado canary." if readiness.fetch(:route).include?("nado") && !bool_env("MIGRATION_NADO_LIVE_MIGRATION_ENABLED")
     blockers.uniq
   end
 
-  def base_receipt(position:, readiness:, confirmation:, sequence:, blockers:)
-    {
+  def base_receipt(position:, plan:, confirmation:, blockers:)
+    plan.merge(
       action: "manual_live_canary",
       timestamp: now.call.utc.iso8601,
       position_id: position.id,
-      from_venue: readiness.fetch(:from_venue),
-      to_venue: readiness.fetch(:to_venue),
-      mode: "full",
-      sequence: sequence,
       final_status: blockers.any? ? "blocked_before_submit" : "submitted_to_executor",
       confirmation_type: confirmation == CONFIRMATION ? "manual_live_canary_confirmation" : "missing_or_invalid_confirmation",
       blockers: blockers,
-      warnings: readiness.fetch(:warnings),
+      warnings: plan.fetch(:warnings),
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0,
       would_execute_live: false
-    }
+    )
   end
 
   def from_executor_result(result)
@@ -103,9 +107,5 @@ class MigrationManualLiveCanaryRunner
 
   def write_receipt(receipt)
     HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir).write(receipt)
-  end
-
-  def bool_env(key)
-    ActiveModel::Type::Boolean.new.cast(env[key])
   end
 end
