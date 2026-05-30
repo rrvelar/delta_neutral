@@ -12,6 +12,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:live_autopilot_readiness"].reenable if Rake::Task.task_defined?("migration:live_autopilot_readiness")
     Rake::Task["migration:manual_live_canary_readiness"].reenable if Rake::Task.task_defined?("migration:manual_live_canary_readiness")
     Rake::Task["migration:run_manual_live_canary"].reenable if Rake::Task.task_defined?("migration:run_manual_live_canary")
+    Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -265,6 +266,26 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("from")
     ENV.delete("to")
     ENV.delete("confirmation")
+  end
+
+  test "recover target first source close task outputs safe blocked counters" do
+    ENV["position_id"] = "999999"
+    ENV["from"] = "extended"
+    ENV["to"] = "ethereal"
+    ENV["dry_run"] = "true"
+
+    out, = capture_io { Rake::Task["migration:recover_target_first_source_close"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "recover_target_first_source_close", payload.fetch("action")
+    assert_equal [ "Position 999999 not found." ], payload.fetch("blockers")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("dry_run")
   end
 
   private

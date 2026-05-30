@@ -197,6 +197,35 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_no_match(/0xsig|private|cookie|auth/i, result.receipt.to_json)
   end
 
+  test "target leg readback confirms rounded expected short" do
+    reads = [ ethereal_short("1.0027") ]
+    venue = FakeVenue.new(position: nil)
+    venue.define_singleton_method(:round_order_size) { |value| (BigDecimal(value.to_s) / BigDecimal("0.0001")).floor * BigDecimal("0.0001") }
+    venue.define_singleton_method(:live_enabled?) { true }
+    venue.define_singleton_method(:read_position) { |symbol:| reads.shift }
+    service = build_service(
+      venue: venue,
+      env_extra: { "ETHEREAL_LOT_SIZE" => "0.0001" },
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, _payload) { { status: "SUBMITTED", id: "eth-target-1" } }
+    )
+
+    result = service.open_short(
+      position: fake_position(execution_venue: "extended"),
+      size_eth: "1.00275492301127",
+      current_position: nil,
+      confirmation: nil,
+      max_slippage: "0.01",
+      require_confirmation: false,
+      migration: true
+    )
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "1.0027", result.receipt.fetch(:expected_short_eth)
+    assert_equal "1.0027", result.receipt.dig(:post_submit_readback, :short_size)
+    assert_equal true, result.receipt.fetch(:readback_poll_attempts).first.fetch(:confirmed)
+  end
+
   test "delta probe dry-run decrease builds buy reduce-only delta order" do
     service = build_service
 

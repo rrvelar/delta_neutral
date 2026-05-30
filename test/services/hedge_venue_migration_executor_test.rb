@@ -93,6 +93,38 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal 1, calls.size
   end
 
+  test "target leg readback present but unconfirmed writes recovery command" do
+    position = migration_position
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      assert context.fetch(:position)
+      {
+        status: "submitted_but_readback_pending",
+        confirmed: false,
+        orders_placed: 1,
+        signatures_created: 1,
+        after_short_eth: "0.8",
+        readback: { current_short_eth: "0.8", confirmed: false }
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED", result.status
+    assert_equal 1, calls.size
+    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+    assert_match "from=extended to=ethereal", result.receipt.fetch(:recovery_command)
+  end
+
   test "second leg failure produces partial migration status" do
     position = migration_position
     calls = []

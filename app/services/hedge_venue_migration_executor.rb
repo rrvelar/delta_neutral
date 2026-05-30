@@ -58,9 +58,10 @@ class HedgeVenueMigrationExecutor
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     unless leg_confirmed?(first_leg)
-      receipt[:final_status] = "first_leg_not_confirmed"
+      receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
+      receipt[:recovery_command] = recovery_command(receipt) if receipt[:final_status] == "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED"
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
@@ -352,6 +353,27 @@ class HedgeVenueMigrationExecutor
 
   def leg_confirmed?(leg)
     ActiveModel::Type::Boolean.new.cast(leg[:confirmed]) || leg[:status] == "confirmed"
+  end
+
+  def target_leg_readback_present?(receipt, planned_leg, actual_leg)
+    return false unless planned_leg.fetch(:venue) == receipt[:to_venue]
+
+    decimal(actual_leg[:after_short_eth]).positive? || readback_short_present?(actual_leg[:readback])
+  end
+
+  def readback_short_present?(readback)
+    case readback
+    when Hash
+      decimal(readback[:short_size] || readback["short_size"] || readback[:current_short_eth] || readback["current_short_eth"]).positive?
+    when Array
+      readback.any? { |row| readback_short_present?(row) }
+    else
+      false
+    end
+  end
+
+  def recovery_command(receipt)
+    "bin/rails migration:recover_target_first_source_close position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} dry_run=true"
   end
 
   def leg_order_count(leg)

@@ -242,6 +242,13 @@ class EtherealHedgeExecutionService
       )
     end
     submit_payload = build_submit_payload(typed_data: typed_data, quantity: rounded_size, price: price, client_order_id: client_order_id, signature: "PENDING_EXTERNAL_SIGNER")
+    expected_size = if action == "close"
+      signed_size
+    elsif signed_size.negative?
+      -rounded_size
+    else
+      rounded_size
+    end
 
     {
       schema: "ethereal_eip712_trade_order",
@@ -262,7 +269,7 @@ class EtherealHedgeExecutionService
         margin_mode: "cross",
         account_value_usd: decimal_string(account_value),
         estimated_effective_leverage: decimal_string(effective),
-        expected_after_short_eth: decimal_string(expected_short_after(action: action, size_eth: signed_size, current_position: current_position)),
+        expected_after_short_eth: decimal_string(expected_short_after(action: action, size_eth: expected_size, current_position: current_position)),
         client_order_id: client_order_id,
         onchain_id: ethereal_onchain_id
       },
@@ -621,7 +628,13 @@ class EtherealHedgeExecutionService
     return position.nil? || short_size(position).zero? if action.to_s == "close" && BigDecimal(expected_short.to_s).zero?
     return false unless position.is_a?(Hash)
 
-    (short_size(position) - BigDecimal(expected_short.to_s)).abs <= BigDecimal("0.000001") && position[:margin_mode] == "cross"
+    (short_size(position) - BigDecimal(expected_short.to_s)).abs <= ethereal_readback_tolerance && position[:margin_mode] == "cross"
+  end
+
+  def ethereal_readback_tolerance
+    configured = decimal_or_nil(@env["AERODROME_ETHEREAL_READBACK_TOLERANCE_ETH"]) || BigDecimal("0")
+    increment = decimal_or_nil(@env["ETHEREAL_LOT_SIZE"]) || BigDecimal("0.0001")
+    [ configured, increment, BigDecimal("0.000001") ].max
   end
 
   def expected_short_after(action:, size_eth:, current_position:)

@@ -193,6 +193,27 @@ namespace :migration do
     puts JSON.pretty_generate(result.receipt)
   end
 
+  desc "Recover target-first partial overhedge by closing only the Extended source leg"
+  task recover_target_first_source_close: :environment do
+    position = migration_position_from_env(action: "recover_target_first_source_close")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    live = ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"])
+    dry_run = ENV["dry_run"].present? || ENV["DRY_RUN"].present? ? ActiveModel::Type::Boolean.new.cast(ENV["dry_run"].presence || ENV["DRY_RUN"]) : !live
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationTargetFirstSourceRecovery.new(
+      position: position,
+      from: from,
+      to: to,
+      dry_run: dry_run,
+      live: live,
+      confirmation: confirmation
+    ).run
+    puts JSON.pretty_generate(result.receipt)
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false, reason: "disabled" } unless refresh_snapshot_for_route_proof?
 
