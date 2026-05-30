@@ -33,6 +33,29 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "runner does not call executor when target preflight blockers are present" do
+    executor = Class.new do
+      def run(*)
+        raise "executor should not run when readiness target preflight is blocked"
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "active hedge-ready Mellow position is required"
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   private
 
   def position

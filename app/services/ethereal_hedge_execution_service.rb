@@ -39,9 +39,9 @@ class EtherealHedgeExecutionService
     :unavailable
   end
 
-  def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
+  def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, migration: false, migration_target_leg: false)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, current_position: current_position, max_slippage: max_slippage)
-    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order)
+    blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, migration: migration || migration_target_leg)
     {
       venue: "Ethereal",
       mode: @venue.live_mode_state,

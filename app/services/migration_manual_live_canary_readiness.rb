@@ -1,7 +1,7 @@
 class MigrationManualLiveCanaryReadiness
   CONFIRMATION = "I_UNDERSTAND_THIS_RUNS_A_LIVE_HEDGE_MIGRATION_CANARY".freeze
 
-  def initialize(position:, from:, to:, env: ENV, route_matrix: nil, capability_registry: nil, target_preflight: nil, fresh_target: nil)
+  def initialize(position:, from:, to:, env: ENV, route_matrix: nil, capability_registry: nil, target_preflight: nil, fresh_target: nil, sequence: "target_first")
     @position = position
     @from = HedgeVenues.normalize(from)
     @to = HedgeVenues.normalize(to)
@@ -10,6 +10,7 @@ class MigrationManualLiveCanaryReadiness
     @capability_registry = capability_registry || MigrationLiveRouteCapability.new(position: position, route_matrix: @route_matrix, env: env)
     @target_preflight = target_preflight
     @fresh_target = fresh_target
+    @sequence = sequence.to_s.presence || "target_first"
   end
 
   def report
@@ -35,6 +36,8 @@ class MigrationManualLiveCanaryReadiness
       mode: "full",
       supported_sequences: %w[target_first],
       recommended_sequence: "target_first",
+      requested_sequence: sequence,
+      source_first_supported: false,
       source_first_allowed: source_first_allowed?,
       expected_temporary_risk: "target_first avoids source-close-first unhedged failure; source_first is blocked until target open preflight is proven",
       target_leg_blockers: target_leg_blockers,
@@ -53,6 +56,7 @@ class MigrationManualLiveCanaryReadiness
   private
 
   attr_reader :position, :from, :to, :env, :route_matrix, :capability_registry
+  attr_reader :sequence
 
   def readiness_blockers(route)
     blockers = []
@@ -63,7 +67,7 @@ class MigrationManualLiveCanaryReadiness
     blockers << "source venue must have a real short before canary." unless source_short.positive?
     blockers.concat(Array(fresh_target_report[:blockers]))
     blockers << "fresh Mellow target is required before supervised canary." unless fresh_target_report[:status] == "ok"
-    blockers << "source_first locked by default; target_first is the only recommended live sequence."
+    blockers.concat(source_first_blockers(sequence))
     blockers << "Nado live migration path not implemented." if [ from, to ].include?("nado")
     blockers.concat(target_leg_blockers)
     blockers.concat(manual_canary_route_blockers(route)).uniq
@@ -96,7 +100,8 @@ class MigrationManualLiveCanaryReadiness
         size_eth: target_short,
         current_position: nil,
         confirmation: EtherealHedgeExecutionService::CONFIRMATION,
-        max_slippage: "0.01"
+        max_slippage: "0.01",
+        migration_target_leg: true
       )
     when "extended"
       ExtendedHedgeExecutionService.new.preflight(
@@ -151,7 +156,9 @@ class MigrationManualLiveCanaryReadiness
   end
 
   def source_first_allowed?
-    bool_env("MIGRATION_SOURCE_FIRST_CANARY_ALLOWED") && target_leg_blockers.empty? && fresh_target_report[:status] == "ok"
+    bool_env("MIGRATION_SOURCE_FIRST_CANARY_ALLOWED") == true &&
+      target_leg_blockers.empty? &&
+      fresh_target_report[:status] == "ok"
   end
 
   def bool_env(key)

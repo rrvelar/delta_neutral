@@ -176,7 +176,8 @@ namespace :migration do
 
     from = ENV["from"].presence || ENV["FROM"].presence
     to = ENV["to"].presence || ENV["TO"].presence
-    puts JSON.pretty_generate(MigrationManualLiveCanaryReadiness.new(position: position, from: from, to: to).report)
+    sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || "target_first"
+    puts JSON.pretty_generate(MigrationManualLiveCanaryReadiness.new(position: position, from: from, to: to, sequence: sequence).report)
   end
 
   desc "Run gated supervised manual live canary if all live gates are open"

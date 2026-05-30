@@ -9,10 +9,43 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_equal false, report.fetch(:ready_for_supervised_canary)
     assert_equal false, report.fetch(:canary_already_confirmed)
     assert_equal "target_first", report.fetch(:recommended_sequence)
+    assert_equal false, report.fetch(:source_first_supported)
+    assert_equal false, report.fetch(:source_first_allowed)
     assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be true for supervised live canary."
+    assert_not_includes report.fetch(:blockers), "source_first locked by default; target_first is the only recommended live sequence."
     assert_not_includes report.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal."
     assert_equal 0, report.fetch(:orders_submitted)
     assert_equal 0, report.fetch(:signatures_created)
+  end
+
+  test "source first requested explicitly remains blocked without source first gate" do
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [] },
+      sequence: "source_first"
+    ).report
+
+    assert_equal "source_first", report.fetch(:requested_sequence)
+    assert_includes report.fetch(:blockers), "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true"
+  end
+
+  test "Ethereal to Extended target leg preflight does not require production venue already extended" do
+    ethereal_position = position
+    ethereal_position.hedge.update!(execution_venue: "ethereal")
+    ethereal_position.position_dashboard_snapshot.update!(extended_short_eth: "0", ethereal_short_eth: "1.0", production_venue: "ethereal")
+    registry = Class.new do
+      def report
+        { routes: [ { from_venue: "ethereal", to_venue: "extended", live_path_implemented: true, live_canary_confirmed: false, blockers: [] } ] }
+      end
+    end.new
+
+    report = MigrationManualLiveCanaryReadiness.new(position: ethereal_position, from: "ethereal", to: "extended", capability_registry: registry).report
+
+    assert_equal "ethereal->extended", report.fetch(:route)
+    assert_not report.fetch(:target_leg_blockers).any? { |blocker| blocker.to_s.include?("execution_venue") || blocker.to_s.include?("selected hedge execution venue") }
   end
 
   test "manual canary readiness exposes target leg blocker before source close" do

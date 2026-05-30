@@ -89,6 +89,23 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "submitted confirmation must equal #{EtherealHedgeExecutionService::CONFIRMATION}"
   end
 
+  test "migration target leg preflight does not require production venue already ethereal" do
+    service = build_service
+    position = fake_position(execution_venue: "extended")
+    report = service.preflight(
+      position: position,
+      action: "open",
+      size_eth: "0.1",
+      current_position: nil,
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01",
+      migration_target_leg: true
+    )
+
+    assert_not_includes report.fetch(:blockers), "selected hedge execution venue must be ethereal"
+    assert_not report.fetch(:blockers).any? { |blocker| blocker.to_s.start_with?("Current active hedge venue is") }
+  end
+
   test "live preflight requires signer health to advertise Ethereal support" do
     service = build_service(
       http_get: ->(uri) {
