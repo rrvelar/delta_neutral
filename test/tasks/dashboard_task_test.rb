@@ -138,6 +138,30 @@ class DashboardTaskTest < ActiveSupport::TestCase
   test "production smoke uses Ethereal active venue readiness after migration" do
     position = aerodrome_position
     position.hedge.update!(execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "0.88",
+      tolerance_ratio: "0.03",
+      tolerance_abs_eth: "0.0264",
+      combined_short_eth: "0.8829",
+      drift_eth: "-0.0029",
+      inside_tolerance: true,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0.8829",
+      nado_short_eth: "0",
+      extended_status: "flat",
+      ethereal_status: "active",
+      nado_status: "flat",
+      extended_source_status: "ok",
+      ethereal_source_status: "ok",
+      nado_source_status: "ok",
+      signer_status: "ok",
+      signer_checked_at: Time.current
+    )
     mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
     readiness = {
       execution_venue: "ethereal",
@@ -153,6 +177,7 @@ class DashboardTaskTest < ActiveSupport::TestCase
       active_auto_ready: false,
       active_auto_blockers: [ "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" ],
       active_auto_warnings: [ "Ethereal continuous auto is disabled; inside-tolerance production health should be stable but manual." ],
+      current_short_eth: "0.8829",
       ethereal_current_short_eth: "0.8829",
       target_short_eth: "0.88",
       within_tolerance: true,
@@ -171,9 +196,90 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_equal "ethereal", payload.fetch("production_venue")
           assert_equal "ethereal", payload.fetch("active_auto_venue")
           assert_equal "0.8829", payload.fetch("active_current_short_eth")
+          assert_equal "0.8829", payload.fetch("ethereal_current_short_eth")
+          assert_equal true, payload.fetch("active_within_tolerance")
+          assert_equal "no_op", payload.fetch("active_planned_auto_action")
+          assert_equal "HEALTHY", payload.fetch("production_health_status")
+          assert_equal "inside tolerance", payload.fetch("production_health_reason")
+          assert_includes payload.fetch("active_auto_blockers"), "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true"
+          assert_not_includes payload.fetch("active_auto_blockers"), "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
+          assert_equal "0.8829", payload.dig("combined_hedge", "ethereal_short_eth")
+          assert_equal true, payload.dig("combined_hedge", "combined_inside_tolerance")
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
+        end
+      end
+    end
+  end
+
+  test "production smoke uses active readiness current short fallback when venue alias is omitted" do
+    position = aerodrome_position
+    position.hedge.update!(execution_venue: "ethereal")
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+    readiness = {
+      execution_venue: "ethereal",
+      active_auto_venue: "ethereal",
+      current_short_eth: "0.8829",
+      target_short_eth: "0.898",
+      drift_eth: "0.0151",
+      tolerance_eth: "0.02694",
+      within_tolerance: true,
+      planned_auto_action: "no_op",
+      active_auto_enabled: false,
+      active_live_enabled: true,
+      active_auto_ready: false,
+      blockers: [ "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" ],
+      warnings: []
+    }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "0.8829", payload.fetch("active_current_short_eth")
+          assert_equal "0.8829", payload.fetch("ethereal_current_short_eth")
           assert_equal true, payload.fetch("active_within_tolerance")
           assert_equal "HEALTHY", payload.fetch("production_health_status")
-          assert_not_includes payload.fetch("active_auto_blockers"), "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
+          assert_includes payload.fetch("active_auto_blockers"), "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true"
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
+        end
+      end
+    end
+  end
+
+  test "production smoke reports Nado production venue fail closed" do
+    position = aerodrome_position
+    position.hedge.update!(execution_venue: "nado")
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+    readiness = {
+      execution_venue: "nado",
+      active_auto_venue: "nado",
+      active_current_short_eth: "0",
+      active_target_short_eth: "0.9",
+      active_within_tolerance: false,
+      active_planned_auto_action: "increase_short",
+      active_auto_ready: false,
+      active_auto_blockers: [ "Nado isolated live auto open/increase submit path is not proven in delta_neutral." ],
+      target_short_eth: "0.9",
+      within_tolerance: false,
+      planned_auto_action: "increase_short",
+      blockers: [ "Nado isolated live auto open/increase submit path is not proven in delta_neutral." ],
+      warnings: []
+    }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "nado", payload.fetch("production_venue")
+          assert_equal "nado", payload.fetch("active_auto_venue")
+          assert_equal "ACTION REQUIRED", payload.fetch("production_health_status")
+          assert_includes payload.fetch("active_auto_blockers"), "Nado isolated live auto open/increase submit path is not proven in delta_neutral."
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
         end

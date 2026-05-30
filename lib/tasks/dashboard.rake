@@ -177,7 +177,7 @@ namespace :dashboard do
     end
 
     mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
-    readiness = safe_smoke_section { HedgeVenueAutoReadiness.new.report(position: position) }
+    readiness = canonical_auto_readiness_for_smoke(position)
     rewards_snapshot = position.position_rewards_fees_snapshot
     snapshot = position.position_dashboard_snapshot
     last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
@@ -195,23 +195,23 @@ namespace :dashboard do
       legacy_rewards_error: legacy_rewards_error(position, rewards_snapshot),
       db_asset0_amount: position.asset0_amount&.to_s("F"),
       db_asset1_amount: position.asset1_amount&.to_s("F"),
-      production_venue: readiness[:execution_venue] || position.hedge&.execution_venue,
-      active_auto_venue: readiness[:active_auto_venue],
-      active_current_short_eth: readiness[:active_current_short_eth],
-      active_target_short_eth: readiness[:active_target_short_eth],
-      active_drift_eth: readiness[:active_drift_eth],
-      active_tolerance_eth: readiness[:active_tolerance_eth],
-      active_within_tolerance: readiness[:active_within_tolerance],
-      active_planned_auto_action: readiness[:active_planned_auto_action],
-      active_auto_enabled: readiness[:active_auto_enabled],
-      active_live_enabled: readiness[:active_live_enabled],
-      active_auto_ready: readiness[:active_auto_ready],
+      production_venue: active_readiness_value(readiness, :execution_venue) || position.hedge&.execution_venue,
+      active_auto_venue: active_readiness_value(readiness, :active_auto_venue),
+      active_current_short_eth: active_readiness_value(readiness, :active_current_short_eth),
+      active_target_short_eth: active_readiness_value(readiness, :active_target_short_eth),
+      active_drift_eth: active_readiness_value(readiness, :active_drift_eth),
+      active_tolerance_eth: active_readiness_value(readiness, :active_tolerance_eth),
+      active_within_tolerance: active_readiness_value(readiness, :active_within_tolerance),
+      active_planned_auto_action: active_readiness_value(readiness, :active_planned_auto_action),
+      active_auto_enabled: active_readiness_value(readiness, :active_auto_enabled),
+      active_live_enabled: active_readiness_value(readiness, :active_live_enabled),
+      active_auto_ready: active_readiness_value(readiness, :active_auto_ready),
       continuous_auto_ready: readiness[:continuous_auto_ready],
-      active_auto_blockers: readiness[:active_auto_blockers],
-      active_auto_warnings: readiness[:active_auto_warnings],
+      active_auto_blockers: active_readiness_value(readiness, :active_auto_blockers),
+      active_auto_warnings: active_readiness_value(readiness, :active_auto_warnings),
       current_target_short_eth: readiness[:target_short_eth],
       extended_current_short_eth: readiness[:extended_current_short_eth],
-      ethereal_current_short_eth: readiness[:ethereal_current_short_eth],
+      ethereal_current_short_eth: active_readiness_value(readiness, :ethereal_current_short_eth),
       extended_auto_within_tolerance: readiness[:within_tolerance],
       extended_auto_planned_action: readiness[:planned_auto_action],
       extended_auto_suppressed_reason: readiness[:action_suppressed_reason],
@@ -262,6 +262,25 @@ namespace :dashboard do
     yield
   rescue => e
     { status: "blocked", blockers: [ "#{e.class}: #{e.message}" ], orders_submitted: 0, signatures_created: 0 }
+  end
+
+  def canonical_auto_readiness_for_smoke(position)
+    safe_smoke_section { HedgeVenueAutoReadiness.new.report(position: position) }.to_h.deep_symbolize_keys
+  end
+
+  def active_readiness_value(readiness, key)
+    active_venue = readiness[:active_auto_venue].presence || readiness[:venue].presence || readiness[:execution_venue].presence
+    return readiness[:current_short_eth] if key == :active_current_short_eth && readiness[:active_current_short_eth].blank?
+    return readiness[:target_short_eth] if key == :active_target_short_eth && readiness[:active_target_short_eth].blank?
+    return readiness[:drift_eth] if key == :active_drift_eth && readiness[:active_drift_eth].blank?
+    return readiness[:tolerance_eth] if key == :active_tolerance_eth && readiness[:active_tolerance_eth].blank?
+    return readiness[:within_tolerance] if key == :active_within_tolerance && readiness[:active_within_tolerance].nil?
+    return readiness[:planned_auto_action] if key == :active_planned_auto_action && readiness[:active_planned_auto_action].blank?
+    return readiness[:blockers] if key == :active_auto_blockers && readiness[:active_auto_blockers].blank?
+    return readiness[:warnings] if key == :active_auto_warnings && readiness[:active_auto_warnings].blank?
+    return readiness[:current_short_eth] if key == :ethereal_current_short_eth && active_venue == "ethereal" && readiness[:ethereal_current_short_eth].blank?
+
+    readiness[key]
   end
 
   def dashboard_emergency_visible?(snapshot)
