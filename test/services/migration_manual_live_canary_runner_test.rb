@@ -56,6 +56,40 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "runner blocks before execution if source auto is enabled" do
+    executor = Class.new do
+      def run(*)
+        raise "executor should not run while source auto is enabled"
+      end
+    end.new
+    ready_position = position
+    ready_position.update!(
+      mellow_metadata: {
+        "exposure_source" => "current_share_token_resolver",
+        "last_current_exposure_at" => Time.current.iso8601,
+        "user_weth_exposure" => "1",
+        "user_usdc_exposure" => "1000",
+        "user_total_value_usd" => "3000"
+      }.to_json
+    )
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: { "EXTENDED_AUTO_REBALANCE_ENABLED" => "true", "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false" },
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "ethereal",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "source venue auto must be disabled during migration canary: extended"
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   private
 
   def position

@@ -32,6 +32,71 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true"
   end
 
+  test "Extended to Ethereal readiness blocks when source Extended auto is enabled" do
+    env = {
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "true",
+      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false"
+    }
+
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      env: env,
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [] }
+    ).report
+
+    assert_includes report.fetch(:blockers), "source venue auto must be disabled during migration canary: extended"
+    assert_not_includes report.fetch(:blockers), "target venue auto must be disabled during migration canary: ethereal"
+    assert_not_includes report.fetch(:blockers), "source_first locked by default; target_first is the only recommended live sequence."
+  end
+
+  test "Extended to Ethereal readiness has no auto blocker when both autos are disabled" do
+    env = {
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false"
+    }
+
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      env: env,
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [] }
+    ).report
+
+    assert_not_includes report.fetch(:blockers), "source venue auto must be disabled during migration canary: extended"
+    assert_not_includes report.fetch(:blockers), "target venue auto must be disabled during migration canary: ethereal"
+  end
+
+  test "Ethereal to Extended readiness blocks when source Ethereal auto is enabled" do
+    ethereal_position = position
+    ethereal_position.hedge.update!(execution_venue: "ethereal")
+    ethereal_position.position_dashboard_snapshot.update!(extended_short_eth: "0", ethereal_short_eth: "1.0", production_venue: "ethereal")
+    registry = Class.new do
+      def report
+        { routes: [ { from_venue: "ethereal", to_venue: "extended", live_path_implemented: true, live_canary_confirmed: false, blockers: [] } ] }
+      end
+    end.new
+
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: ethereal_position,
+      from: "ethereal",
+      to: "extended",
+      env: {
+        "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "true",
+        "EXTENDED_AUTO_REBALANCE_ENABLED" => "false"
+      },
+      capability_registry: registry,
+      target_preflight: { blockers: [] }
+    ).report
+
+    assert_includes report.fetch(:blockers), "source venue auto must be disabled during migration canary: ethereal"
+    assert_not_includes report.fetch(:blockers), "target venue auto must be disabled during migration canary: extended"
+  end
+
   test "Ethereal to Extended target leg preflight does not require production venue already extended" do
     ethereal_position = position
     ethereal_position.hedge.update!(execution_venue: "ethereal")

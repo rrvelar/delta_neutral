@@ -64,6 +64,7 @@ class MigrationManualLiveCanaryReadiness
     blockers << "Live path is not implemented for #{from}->#{to}." unless route&.fetch(:live_path_implemented, false)
     blockers << "MIGRATION_LIVE_ENABLED must be true for supervised live canary." unless bool_env("MIGRATION_LIVE_ENABLED")
     blockers << "MIGRATION_MANUAL_LIVE_CANARY_ENABLED must be true." unless bool_env("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
+    blockers.concat(auto_enabled_blockers)
     blockers << "source venue must have a real short before canary." unless source_short.positive?
     blockers.concat(Array(fresh_target_report[:blockers]))
     blockers << "fresh Mellow target is required before supervised canary." unless fresh_target_report[:status] == "ok"
@@ -78,6 +79,26 @@ class MigrationManualLiveCanaryReadiness
     return [] if bool_env("MIGRATION_SOURCE_FIRST_CANARY_ALLOWED") && target_leg_blockers.empty?
 
     [ "source_first canary is blocked until target venue live-open preflight passes and MIGRATION_SOURCE_FIRST_CANARY_ALLOWED=true" ]
+  end
+
+  def auto_enabled_blockers
+    blockers = []
+    blockers << "source venue auto must be disabled during migration canary: #{from}" if venue_auto_enabled?(from)
+    blockers << "target venue auto must be disabled during migration canary: #{to}" if venue_auto_enabled?(to)
+    blockers
+  end
+
+  def venue_auto_enabled?(venue)
+    case venue
+    when "extended"
+      bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+    when "ethereal"
+      bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    when "nado"
+      bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    else
+      false
+    end
   end
 
   def target_leg_blockers
