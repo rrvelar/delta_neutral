@@ -112,7 +112,7 @@ class Position < ApplicationRecord
   end
 
   def current_share_token_resolver_ready?(metadata = mellow_metadata_hash)
-    metadata["exposure_source"].to_s == "current_share_token_resolver" &&
+    metadata["exposure_source"].to_s.in?(%w[current_share_token_resolver current_share_token_fallback]) &&
       metadata["last_current_exposure_at"].present? &&
       metadata["user_weth_exposure"].present?
   end

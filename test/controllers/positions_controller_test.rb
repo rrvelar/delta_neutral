@@ -709,7 +709,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Production Health", response.body
     assert_match "Extended hedge bot status", response.body
-    assert_match "Snapshot-backed health", response.body
+    assert_match "Current Extended auto readiness is the production truth", response.body
     assert_match "Last success", response.body
     assert_match "pending 0", response.body
   end
@@ -1605,7 +1605,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Suppressed: order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03", response.body
+    assert_match "Waiting / suppressed: order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03", response.body
     assert_no_match "Auto should act", response.body
   end
 
@@ -1648,6 +1648,98 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Disabled unless manually gated", response.body
     assert_match "In tolerance", response.body
     assert_no_match "Full migration correction", response.body
+  end
+
+  test "Extended readiness decrease short hides old preview unavailable warning" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    position.update!(asset0_price_usd: nil)
+    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "decrease_short", target: "0.8", current: "0.86", drift: "-0.06", tolerance: "0.024")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "BUY reduce-only / reduce short", response.body
+    assert_no_match "Hedge preview unavailable", response.body
+    assert_no_match "amount or USD price is missing", response.body
+  end
+
+  test "Extended readiness no-op hides old preview unavailable warning" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: true)
+    position.update!(asset0_price_usd: nil)
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "No-op / inside tolerance", response.body
+    assert_no_match "Hedge preview unavailable", response.body
+    assert_no_match "amount or USD price is missing", response.body
+  end
+
+  test "current resolver ok prevents stale Mellow pro rata warning in main PnL summary" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: true)
+    metadata = position.mellow_metadata_hash.merge(
+      "exposure_source" => "current_share_token_resolver",
+      "successful_method" => "previewMint(uint256)",
+      "user_total_value_usd" => nil
+    )
+    position.update!(mellow_metadata: metadata.to_json)
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "current_share_token_resolver", response.body
+    assert_match "previewMint(uint256)", response.body
+    assert_no_match "Mellow pro-rata value is stale or unavailable.", response.body
+  end
+
+  test "legacy rewards ERC721 nonexistent token is labeled as legacy rewards fees unavailable" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: true)
+    position.update!(
+      mellow_metadata: position.mellow_metadata_hash.merge(
+        "strategy_token_id" => "71261528",
+        "exposure_source" => "current_share_token_resolver",
+        "successful_method" => "previewMint(uint256)"
+      ).to_json
+    )
+    position.create_position_rewards_fees_snapshot!(
+      refresh_status: "failed",
+      refreshed_at: Time.current,
+      rewards_value_state: "unavailable",
+      fee_value_state: "unavailable",
+      rewards_stop_reason: "ERC721 owner query failed for nonexistent token 71261528",
+      warnings: [ "ERC721 owner query failed for nonexistent token 71261528" ].to_json
+    )
+    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "Legacy rewards/fees read unavailable for historical token 71261528", response.body
+    assert_match "Current hedge exposure uses current_share_token_resolver", response.body
+    assert_no_match "Mellow pro-rata value is stale or unavailable.", response.body
+  end
+
+  test "Production Health follows readiness auto can act" do
+    position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "increase_short", auto_can_act: true)
+
+    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+      get position_path(position, hedge_venue: "extended")
+    end
+
+    assert_response :success
+    assert_match "ACTION PENDING", response.body
+    assert_match "Auto can act", response.body
   end
 
   test "show displays Mellow rewards and LP fee estimates without parsing synthetic id as direct NFT" do
@@ -2322,7 +2414,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  def extended_readiness(position, within_tolerance:, planned_auto_action:, suppressed: nil, target: "0.8", current: "0.79", drift: "0.01", tolerance: "0.024")
+  def extended_readiness(position, within_tolerance:, planned_auto_action:, suppressed: nil, target: "0.8", current: "0.79", drift: "0.01", tolerance: "0.024", auto_can_act: nil)
     {
       venue: "extended",
       action: "auto_readiness",
@@ -2352,7 +2444,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       planned_auto_order_size_eth: planned_auto_action == "no_op" ? nil : drift,
       auto_max_rebalance_size_eth: "0.1",
       partial_auto_rebalance: false,
-      auto_can_act: suppressed.blank? && planned_auto_action != "no_op",
+      auto_can_act: auto_can_act.nil? ? suppressed.blank? && planned_auto_action != "no_op" : auto_can_act,
       ethereal_short_eth: "0",
       ethereal_flat: true,
       nado_short_eth: "0",

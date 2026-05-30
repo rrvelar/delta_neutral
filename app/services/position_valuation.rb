@@ -52,7 +52,7 @@ class PositionValuation
     current_value = @position.mellow_current_value_usd
     entry_value = @position.entry_value_usd
     warnings = []
-    warnings << "Mellow pro-rata value is stale or unavailable." if current_value.nil?
+    warnings << "Mellow pro-rata value is stale or unavailable." if current_value.nil? && !@position.current_share_token_resolver_ready?(metadata)
 
     Result.new(
       source: @position.position_source,

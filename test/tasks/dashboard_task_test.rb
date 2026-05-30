@@ -98,6 +98,7 @@ class DashboardTaskTest < ActiveSupport::TestCase
       continuous_auto_ready: true,
       planned_auto_action: "no_op",
       action_suppressed_reason: nil,
+      auto_can_act: false,
       min_rebalance_size_eth: "0.03",
       cooldown_remaining_seconds: 0,
       consecutive_outside_tolerance_count: 0,
@@ -114,12 +115,18 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_equal "ok", payload.fetch("mellow_current_exposure_status")
           assert_equal "current_share_token_resolver", payload.fetch("current_mellow_exposure_source")
           assert_equal "previewMint(uint256)", payload.fetch("successful_method")
+          assert_equal "ok", payload.fetch("current_resolver_status")
+          assert_equal "previewMint(uint256)", payload.fetch("current_resolver_successful_method")
           assert_equal "0.8", payload.fetch("current_target_short_eth")
           assert_equal true, payload.fetch("extended_auto_within_tolerance")
           assert_equal "no_op", payload.fetch("extended_auto_planned_action")
           assert_equal "In tolerance", payload.fetch("dashboard_header_status")
           assert_equal "HEALTHY", payload.fetch("production_health_status")
+          assert_equal "inside tolerance", payload.fetch("production_health_reason")
           assert_equal "No-op / inside tolerance", payload.fetch("hedge_control_action_label")
+          assert_equal true, payload.fetch("hedge_control_uses_readiness_preview")
+          assert_equal false, payload.fetch("stale_preview_warning_present")
+          assert_equal [], payload.fetch("mismatch_warnings")
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
           assert_equal true, payload.fetch("tx_hash_onboarding_route_exists")

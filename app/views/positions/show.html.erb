@@ -57,12 +57,12 @@ end %>
 <% open_preview = venue_dashboard[:open_preview] || {} %>
 <% migration_full_readiness = venue_dashboard[:migration_full_readiness] || {} %>
 <% extended_auto_readiness = venue_dashboard[:auto_readiness] || {} %>
+<% extended_readiness_loaded = selected_venue == "extended" && extended_auto_readiness[:status].to_s != "unavailable" %>
+<% extended_readiness_has_target_current = extended_readiness_loaded && extended_auto_readiness[:target_short_eth].present? && extended_auto_readiness[:extended_current_short_eth].present? %>
+<% readiness_planned_action = extended_auto_readiness[:planned_auto_action].to_s %>
+<% readiness_preview_available = extended_readiness_has_target_current && (readiness_planned_action.in?(%w[no_op decrease_short increase_short]) || extended_auto_readiness[:action_suppressed_reason].present?) %>
 <% extended_readback_blockers = Array(extended_auto_readiness[:blockers]).grep(/Extended account balance\/collateral unavailable|Extended market metadata unavailable/) %>
-<% canonical_extended_readiness = selected_venue == "extended" &&
-  extended_auto_readiness[:status].to_s != "unavailable" &&
-  extended_auto_readiness[:target_short_eth].present? &&
-  extended_auto_readiness[:extended_current_short_eth].present? &&
-  extended_readback_blockers.blank? %>
+<% canonical_extended_readiness = extended_readiness_has_target_current && extended_readback_blockers.blank? %>
 <% if canonical_extended_readiness %>
   <% target_eth_short = extended_auto_readiness[:target_short_eth] %>
   <% current_short_eth = extended_auto_readiness[:extended_current_short_eth] %>
@@ -89,7 +89,7 @@ when "blocked" then "Blocked / fresh target required"
 else extended_planned_action.to_s.humanize
 end %>
 <% if extended_auto_readiness[:action_suppressed_reason].present? %>
-  <% extended_action_label = "Suppressed: #{extended_auto_readiness[:action_suppressed_reason]}" %>
+  <% extended_action_label = "Waiting / suppressed: #{extended_auto_readiness[:action_suppressed_reason]}" %>
 <% end %>
 <% hedge_accounting = @hedge_venue_accounting || {} %>
 <% accounting_components = hedge_accounting[:components] || {} %>
@@ -102,6 +102,10 @@ end %>
 <% fee_value_state = fees_report[:value_state].presence || (fees_report[:total_fees_usd].present? ? (fees_report[:total_fees_usd].to_s == "0" ? "verified_zero" : "estimated") : "unavailable") %>
 <% rewards_usable = %w[estimated verified_zero detected].include?(reward_value_state) %>
 <% fees_usable = %w[estimated verified_zero detected].include?(fee_value_state) %>
+<% mellow_current_resolver_ok = @position.mellow_autopilot? && @position.current_share_token_resolver_ready? %>
+<% legacy_mellow_token_id = @position.mellow_metadata_hash["strategy_token_id"].presence || @position.external_id.to_s.delete_prefix("mellow:") %>
+<% legacy_rewards_error = [ rewards_report[:stop_reason], fees_report[:stop_reason], *Array(rewards_report[:warnings]), *Array(fees_report[:warnings]) ].compact.find { |message| message.to_s.match?(/erc721|owner|token|nonexistent|not found|missing/i) } %>
+<% legacy_rewards_unavailable = @position.mellow_autopilot? && legacy_mellow_token_id.present? && legacy_rewards_error.present? %>
 <% hedge_preview = aerodrome ? aerodrome_hedge_preview_for(@position) : nil %>
 <% latest_snap = @pnl_snapshots.first %>
 <% pool_unrealized = position_valuation.pool_delta_usd %>
@@ -238,17 +242,34 @@ end %>
       <% end %>
     </section>
 
-    <% health_status = if canonical_extended_readiness && extended_auto_readiness[:within_tolerance] == true && extended_auto_readiness[:planned_auto_action].to_s == "no_op" && Array(extended_auto_readiness[:blockers]).blank?
+    <% health_reason = nil %>
+    <% health_status = if extended_readiness_loaded && extended_auto_readiness[:target_short_eth].blank?
+      health_reason = "fresh exposure unavailable"
+      "BLOCKED"
+    elsif canonical_extended_readiness && extended_auto_readiness[:within_tolerance] == true
+      health_reason = "inside tolerance"
       "HEALTHY"
-    elsif canonical_extended_readiness && extended_auto_readiness[:action_suppressed_reason].present?
+    elsif extended_readiness_has_target_current && extended_auto_readiness[:action_suppressed_reason].present?
+      health_reason = extended_auto_readiness[:action_suppressed_reason]
       "WATCH"
+    elsif extended_readiness_has_target_current && extended_auto_readiness[:auto_can_act] == true
+      health_reason = "auto_can_act=true"
+      "ACTION PENDING"
+    elsif extended_readiness_loaded && Array(extended_auto_readiness[:blockers]).any? { |blocker| blocker.to_s.include?("EXTENDED_AUTO_REBALANCE_ENABLED") || blocker.to_s.include?("EXTENDED_LIVE_ENABLED") }
+      health_reason = Array(extended_auto_readiness[:blockers]).find { |blocker| blocker.to_s.include?("EXTENDED_AUTO_REBALANCE_ENABLED") || blocker.to_s.include?("EXTENDED_LIVE_ENABLED") }
+      "BLOCKED"
+    elsif extended_readiness_loaded && Array(extended_auto_readiness[:blockers]).present?
+      health_reason = Array(extended_auto_readiness[:blockers]).first
+      "BLOCKED"
     else
+      health_reason = production_health[:reason]
       production_health[:status].presence || "UNKNOWN"
     end %>
     <% health_class = case health_status
     when "HEALTHY" then "border-green-800 bg-green-950/50 text-green-200"
     when "WATCH" then "border-yellow-800 bg-yellow-950/50 text-yellow-100"
-    when "ACTION REQUIRED" then "border-red-800 bg-red-950/50 text-red-100"
+    when "ACTION PENDING" then "border-indigo-800 bg-indigo-950/50 text-indigo-100"
+    when "ACTION REQUIRED", "BLOCKED" then "border-red-800 bg-red-950/50 text-red-100"
     else "border-gray-700 bg-gray-950 text-gray-300"
     end %>
     <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
@@ -256,7 +277,7 @@ end %>
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Production Health</p>
           <h2 class="mt-1 text-lg font-semibold text-white">Extended hedge bot status</h2>
-          <p class="mt-1 text-sm text-gray-400">Snapshot-backed health. Rebalance rows are action history only, never current exposure.</p>
+          <p class="mt-1 text-sm text-gray-400">Current Extended auto readiness is the production truth. Rebalance rows and migration previews are history only.</p>
         </div>
         <span class="rounded-full border px-3 py-1 text-xs font-semibold <%= health_class %>"><%= health_status %></span>
       </div>
@@ -296,8 +317,8 @@ end %>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs text-gray-500">Auto decision</p>
-          <% canonical_auto_decision = if canonical_extended_readiness
-            extended_auto_readiness[:action_suppressed_reason].presence || extended_action_label
+          <% canonical_auto_decision = if extended_readiness_has_target_current
+            extended_auto_readiness[:auto_can_act] == true ? "Auto can act" : (extended_auto_readiness[:action_suppressed_reason].presence || extended_action_label)
           else
             production_health[:auto_should_act] ? "Auto should act" : (production_health[:auto_should_be_waiting] ? "Auto should wait" : "Unknown")
           end %>
@@ -305,7 +326,7 @@ end %>
           <p class="mt-1 text-xs text-gray-500">Inside tolerance <%= canonical_extended_readiness ? extended_auto_readiness[:within_tolerance] : (production_health.dig(:exposure, :inside_tolerance).nil? ? "unknown" : production_health.dig(:exposure, :inside_tolerance)) %></p>
         </div>
       </div>
-      <% health_messages = (Array(production_health[:action_required]) + Array(production_health[:warnings]) + Array(extended_auto_readiness[:action_suppressed_reason])).compact.uniq %>
+      <% health_messages = (Array(health_reason) + Array(production_health[:action_required]) + Array(production_health[:warnings]) + Array(extended_auto_readiness[:action_suppressed_reason])).compact.uniq %>
       <% if health_messages.any? %>
         <div class="mt-4 rounded-xl border <%= production_health[:action_required].present? ? 'border-red-900 bg-red-950/20' : 'border-yellow-900 bg-yellow-950/20' %> p-4">
           <p class="text-sm font-semibold <%= production_health[:action_required].present? ? 'text-red-100' : 'text-yellow-100' %>"><%= production_health[:action_required].present? ? "Operator attention" : "Watch items" %></p>
@@ -744,7 +765,7 @@ end %>
               <div class="flex justify-between gap-4"><span class="text-gray-500">Strong drift threshold</span><span class="text-white"><%= extended_auto_readiness[:strong_drift_threshold].presence || "n/a" %> ETH</span></div>
             <% end %>
           </div>
-          <% if hedge_preview && !hedge_preview.supported && !canonical_extended_readiness %>
+          <% if hedge_preview && !hedge_preview.supported && !readiness_preview_available %>
             <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/30 p-3">
               <p class="text-xs font-semibold text-yellow-100">Hedge preview unavailable</p>
               <p class="mt-1 break-words text-xs text-yellow-200"><%= hedge_preview.reason %></p>
@@ -1204,6 +1225,15 @@ end %>
                   <li><%= warning %></li>
                 <% end %>
               </ul>
+            <% end %>
+            <% if legacy_rewards_unavailable %>
+              <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3 text-xs text-yellow-100">
+                <p>Legacy rewards/fees read unavailable for historical token <%= legacy_mellow_token_id %>.</p>
+                <p class="mt-1 break-words text-yellow-200"><%= legacy_rewards_error %></p>
+                <% if mellow_current_resolver_ok %>
+                  <p class="mt-1 text-gray-300">Current hedge exposure uses <%= @position.mellow_metadata_hash["exposure_source"] %>, not this legacy ERC721 rewards path.</p>
+                <% end %>
+              </div>
             <% end %>
             <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/50 p-4">
               <summary class="cursor-pointer text-sm font-medium text-gray-200">Rewards and Fee Readback Details</summary>

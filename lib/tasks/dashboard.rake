@@ -158,8 +158,15 @@ namespace :dashboard do
         extended_auto_within_tolerance: nil,
         extended_auto_planned_action: nil,
         extended_auto_suppressed_reason: nil,
+        current_resolver_status: "blocked",
+        current_resolver_successful_method: nil,
+        legacy_rewards_status: "blocked",
+        legacy_rewards_error: "position not found in local DB",
+        hedge_control_uses_readiness_preview: false,
+        stale_preview_warning_present: false,
         dashboard_header_status: "blocked",
         production_health_status: "blocked",
+        production_health_reason: "position not found in local DB",
         hedge_control_action_label: "blocked",
         mismatch_warnings: [ "position not found in local DB" ],
         tx_hash_onboarding_route_exists: route_exists,
@@ -171,6 +178,7 @@ namespace :dashboard do
 
     mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
     readiness = safe_smoke_section { ExtendedAutoReadiness.new.report(position: position) }
+    rewards_snapshot = position.position_rewards_fees_snapshot
     snapshot = position.position_dashboard_snapshot
     last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
 
@@ -179,8 +187,12 @@ namespace :dashboard do
       status: "ok",
       position_id: position.id,
       mellow_current_exposure_status: mellow[:status],
+      current_resolver_status: mellow[:status],
       current_mellow_exposure_source: mellow[:exposure_source] || position.mellow_metadata_hash["exposure_source"],
+      current_resolver_successful_method: mellow[:successful_method] || position.mellow_metadata_hash["successful_method"],
       successful_method: mellow[:successful_method] || position.mellow_metadata_hash["successful_method"],
+      legacy_rewards_status: rewards_snapshot&.refresh_status || "not_loaded",
+      legacy_rewards_error: legacy_rewards_error(position, rewards_snapshot),
       db_asset0_amount: position.asset0_amount&.to_s("F"),
       db_asset1_amount: position.asset1_amount&.to_s("F"),
       current_target_short_eth: readiness[:target_short_eth],
@@ -190,7 +202,10 @@ namespace :dashboard do
       extended_auto_suppressed_reason: readiness[:action_suppressed_reason],
       dashboard_header_status: dashboard_header_status(readiness),
       production_health_status: dashboard_production_health_status(readiness),
+      production_health_reason: dashboard_production_health_reason(readiness),
       hedge_control_action_label: dashboard_hedge_control_action_label(readiness),
+      hedge_control_uses_readiness_preview: dashboard_readiness_preview_available?(readiness),
+      stale_preview_warning_present: !dashboard_readiness_preview_available?(readiness),
       mismatch_warnings: dashboard_mismatch_warnings(snapshot, readiness),
       extended_auto_readiness: {
         continuous_auto_ready: readiness[:continuous_auto_ready],
@@ -237,14 +252,17 @@ namespace :dashboard do
 
   def dashboard_production_health_status(readiness)
     return "WATCH" if readiness[:action_suppressed_reason].present?
-    return "HEALTHY" if readiness[:within_tolerance] == true && readiness[:planned_auto_action].to_s == "no_op" && Array(readiness[:blockers]).blank?
+    return "HEALTHY" if readiness[:within_tolerance] == true
+    return "ACTION PENDING" if readiness[:auto_can_act] == true
+    return "BLOCKED" if readiness[:target_short_eth].blank?
+    return "BLOCKED" if Array(readiness[:blockers]).any? { |blocker| blocker.to_s.include?("EXTENDED_AUTO_REBALANCE_ENABLED") || blocker.to_s.include?("EXTENDED_LIVE_ENABLED") }
     return "ACTION REQUIRED" if Array(readiness[:blockers]).present?
 
     "WATCH"
   end
 
   def dashboard_hedge_control_action_label(readiness)
-    return "Suppressed: #{readiness[:action_suppressed_reason]}" if readiness[:action_suppressed_reason].present?
+    return "Waiting / suppressed: #{readiness[:action_suppressed_reason]}" if readiness[:action_suppressed_reason].present?
 
     case readiness[:planned_auto_action].to_s
     when "no_op" then "No-op / inside tolerance"
@@ -253,6 +271,31 @@ namespace :dashboard do
     when "blocked" then "Blocked / fresh target required"
     else readiness[:planned_auto_action].presence || "Unknown"
     end
+  end
+
+  def dashboard_production_health_reason(readiness)
+    return "inside tolerance" if readiness[:within_tolerance] == true
+    return readiness[:action_suppressed_reason] if readiness[:action_suppressed_reason].present?
+    return "auto_can_act=true" if readiness[:auto_can_act] == true
+    return "fresh exposure unavailable" if readiness[:target_short_eth].blank?
+
+    Array(readiness[:blockers]).first
+  end
+
+  def dashboard_readiness_preview_available?(readiness)
+    readiness[:target_short_eth].present? &&
+      readiness[:extended_current_short_eth].present? &&
+      (readiness[:planned_auto_action].to_s.in?(%w[no_op decrease_short increase_short]) || readiness[:action_suppressed_reason].present?)
+  end
+
+  def legacy_rewards_error(position, snapshot)
+    return nil unless position.mellow_autopilot?
+
+    error = [ snapshot&.rewards_stop_reason, snapshot&.fee_stop_reason, *snapshot&.warnings_list ].compact.find { |message| message.to_s.match?(/erc721|owner|token|nonexistent|not found|missing/i) }
+    return nil unless error
+
+    token_id = position.mellow_metadata_hash["strategy_token_id"].presence || position.external_id.to_s.delete_prefix("mellow:")
+    "Legacy rewards/fees read unavailable for historical token #{token_id}: #{error}"
   end
 
   def dashboard_mismatch_warnings(snapshot, readiness)
