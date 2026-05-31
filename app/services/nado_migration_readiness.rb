@@ -1,7 +1,7 @@
 class NadoMigrationReadiness
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   DEFAULT_SYNTHETIC_PROOF_SHORT_ETH = BigDecimal("0.01")
-  LIVE_BLOCKER = "Nado live migration path not implemented.".freeze
+  LIVE_BLOCKER = "Nado live migration requires AERODROME_NADO_LIVE_MIGRATION_ENABLED=true and AERODROME_NADO_HEDGE_LIVE_ENABLED=true.".freeze
 
   def initialize(position: nil, position_id: nil, snapshot: nil, intended_role: "either", mode: "full", sequence: "target_first", env: ENV, nado_service: nil, synthetic_proof_short_eth: nil)
     @position = position || Position.find_by(id: position_id)
@@ -16,10 +16,10 @@ class NadoMigrationReadiness
 
   def report
     blockers = []
-    warnings = [ "Nado live migration remains disabled; this readiness check is dry-run proof only." ]
+    warnings = [ "Nado migration readiness is no-live unless explicit migration and Nado live gates are opened." ]
     blockers << "Nado migration readiness is not proven." unless nado_position_read_available? && nado_open_orders_read_available? && nado_market_read_available?
     blockers << "Position dashboard snapshot is missing; Nado migration proof requires snapshot exposure." unless snapshot
-    blockers << LIVE_BLOCKER
+    blockers << LIVE_BLOCKER unless bool_env("AERODROME_NADO_LIVE_MIGRATION_ENABLED") && bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")
     blockers << "Nado close/open readback proof required." unless nado_position_read_available?
     blockers << "Nado open orders readback is unavailable." unless nado_open_orders_read_available?
     blockers << nado_open_orders_unavailable_reason if !nado_open_orders_read_available? && nado_open_orders_unavailable_reason.present?
@@ -63,7 +63,7 @@ class NadoMigrationReadiness
       nado_leverage_margin_known: nado_market_read_available?,
       nado_live_enabled: bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED"),
       nado_auto_enabled: bool_env("AERODROME_NADO_AUTO_ENABLED"),
-      nado_live_migration_supported: false,
+      nado_live_migration_supported: true,
       target_leg_preview: target_preview,
       source_leg_preview: source_preview,
       nado_source_leg_preview_proof: source_proof,
@@ -345,7 +345,7 @@ class NadoMigrationReadiness
     missing << "Nado market metadata" unless nado_market_read_available?
     missing << "Nado open/increase short payload preview" if target_role? && !target_preview_available?(target_preview)
     missing << "Nado reduce-only close/reduce payload preview" if source_role? && !source_preview_available?(source_preview) && !source_preview_available?(source_proof)
-    missing << LIVE_BLOCKER
+    missing << LIVE_BLOCKER unless bool_env("AERODROME_NADO_LIVE_MIGRATION_ENABLED") && bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")
     missing
   end
 

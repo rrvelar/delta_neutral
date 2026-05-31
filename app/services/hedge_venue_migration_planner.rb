@@ -3,7 +3,11 @@ class HedgeVenueMigrationPlanner
 
   SUPPORTED_DIRECTIONS = [
     [ "ethereal", "extended" ],
-    [ "extended", "ethereal" ]
+    [ "extended", "ethereal" ],
+    [ "extended", "nado" ],
+    [ "nado", "extended" ],
+    [ "ethereal", "nado" ],
+    [ "nado", "ethereal" ]
   ].freeze
   DEFAULT_SEQUENCE = "target_first".freeze
 
@@ -19,7 +23,6 @@ class HedgeVenueMigrationPlanner
     snapshot = position.position_dashboard_snapshot
     blockers = snapshot_blockers(snapshot)
     blockers << "from_venue and to_venue must differ" if from == to
-    blockers << "Nado migration readiness is not implemented." if [ from, to ].include?("nado")
     blockers << "Migration direction #{from} -> #{to} is not supported yet." unless SUPPORTED_DIRECTIONS.include?([ from, to ])
 
     receipt = base_receipt(position: position, snapshot: snapshot, from_venue: from, to_venue: to, mode: mode, sequence: sequence)

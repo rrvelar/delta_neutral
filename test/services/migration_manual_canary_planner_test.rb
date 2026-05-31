@@ -37,12 +37,45 @@ class MigrationManualCanaryPlannerTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "source venue must have a real short before canary."
   end
 
-  test "nado routes remain fail closed" do
+  test "all directed target first routes are represented by canonical planner" do
+    routes = [
+      [ "extended", "ethereal" ],
+      [ "ethereal", "extended" ],
+      [ "extended", "nado" ],
+      [ "nado", "extended" ],
+      [ "ethereal", "nado" ],
+      [ "nado", "ethereal" ]
+    ]
+
+    routes.each do |from, to|
+      position_for_route(from)
+      report = planner(from: from, to: to).report
+
+      assert_equal "#{from}->#{to}", report.fetch(:route)
+      assert_equal true, report.fetch(:live_path_implemented)
+      assert_equal "target_first", report.fetch(:recommended_sequence)
+      assert_equal 0, report.fetch(:orders_submitted)
+      assert_equal 0, report.fetch(:signatures_created)
+    end
+  end
+
+  test "extended to nado can be ready when mocked Nado target preflight is clean" do
     report = planner(from: "extended", to: "nado").report
 
-    assert_equal false, report.fetch(:ready_for_supervised_canary)
-    assert_includes report.fetch(:blockers), "Nado live migration path not implemented."
-    assert_equal false, report.fetch(:live_path_implemented)
+    assert_equal true, report.fetch(:ready_for_supervised_canary), report.fetch(:blockers).inspect
+    assert_empty report.fetch(:blockers)
+    assert_equal "nado", report.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "extended", report.fetch(:planned_second_leg).fetch(:venue)
+  end
+
+  test "nado to ethereal can be ready when Nado source short exists" do
+    position_for_route("nado")
+    report = planner(from: "nado", to: "ethereal").report
+
+    assert_equal true, report.fetch(:ready_for_supervised_canary), report.fetch(:blockers).inspect
+    assert_empty report.fetch(:blockers)
+    assert_equal "ethereal", report.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "nado", report.fetch(:planned_second_leg).fetch(:venue)
   end
 
   private
@@ -88,8 +121,22 @@ class MigrationManualCanaryPlannerTest < ActiveSupport::TestCase
       "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false",
       "EXTENDED_LIVE_ENABLED" => "true",
       "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
-      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
     }
+  end
+
+  def position_for_route(source)
+    position.hedge.update!(execution_venue: source)
+    position.position_dashboard_snapshot.update!(
+      production_venue: source,
+      extended_short_eth: source == "extended" ? "0.977" : "0",
+      ethereal_short_eth: source == "ethereal" ? "0.977" : "0",
+      nado_short_eth: source == "nado" ? "0.977" : "0",
+      combined_short_eth: "0.977",
+      open_orders_count_extended: 0
+    )
   end
 
   def position

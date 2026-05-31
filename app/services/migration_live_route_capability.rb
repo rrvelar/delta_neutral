@@ -37,7 +37,6 @@ class MigrationLiveRouteCapability
     blockers << "Route proof is not READY_FOR_DRY_RUN." unless proof&.fetch(:route_status, nil) == "READY_FOR_DRY_RUN"
     blockers << "Live path is not implemented for #{from}->#{to}." unless live_path
     blockers.concat(canary.fetch(:blockers)) unless canary.fetch(:live_canary_confirmed)
-    blockers << "Nado live migration path not implemented." if [ from, to ].include?("nado")
     {
       from_venue: from,
       to_venue: to,
@@ -75,13 +74,12 @@ class MigrationLiveRouteCapability
   end
 
   def live_path_implemented?(from, to)
-    [ from, to ].sort == %w[ethereal extended]
+    ROUTES.include?([ from, to ])
   end
 
   def missing_capabilities(from, to, live_path)
     missing = []
     missing << "live migration executor path for #{from}->#{to}" unless live_path
-    missing << "Nado live migration proof, readback, open-orders, signer and submit path" if [ from, to ].include?("nado")
     missing
   end
 

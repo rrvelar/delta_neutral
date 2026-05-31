@@ -12,6 +12,8 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:live_autopilot_readiness"].reenable if Rake::Task.task_defined?("migration:live_autopilot_readiness")
     Rake::Task["migration:manual_live_canary_readiness"].reenable if Rake::Task.task_defined?("migration:manual_live_canary_readiness")
     Rake::Task["migration:run_manual_live_canary"].reenable if Rake::Task.task_defined?("migration:run_manual_live_canary")
+    Rake::Task["migration:route_matrix"].reenable if Rake::Task.task_defined?("migration:route_matrix")
+    Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
   end
 
@@ -248,6 +250,46 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("position_id")
     ENV.delete("from")
     ENV.delete("to")
+  end
+
+  test "route matrix task outputs all six routes and zero counters" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+
+    out, = capture_io { Rake::Task["migration:route_matrix"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_route_matrix", payload.fetch("action")
+    assert_equal 6, payload.fetch("routes").size
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "rehearse route writes no live receipt" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "extended"
+    ENV["to"] = "ethereal"
+    ENV["sequence"] = "target_first"
+
+    out, = capture_io { Rake::Task["migration:rehearse_route"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_rehearse_route", payload.fetch("action")
+    assert_equal true, payload.fetch("dry_run")
+    assert_equal false, payload.fetch("live")
+    assert payload.key?("readback_verification")
+    assert payload.key?("recovery_plan")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+    assert_match "storage/hedge_migration_route_rehearsals", payload.fetch("receipt_path")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("sequence")
   end
 
   test "run manual live canary task blocks without gates" do

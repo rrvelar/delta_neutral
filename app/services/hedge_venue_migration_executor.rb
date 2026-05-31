@@ -140,8 +140,10 @@ class HedgeVenueMigrationExecutor
         run_ethereal_leg(leg, context)
       when "extended"
         run_extended_leg(leg, context)
+      when "nado"
+        run_nado_leg(leg, context)
       else
-        blocked_leg(leg, [ "Nado migration live execution is not implemented." ])
+        blocked_leg(leg, [ "Migration live execution is not implemented for #{venue}." ])
       end
     rescue => e
       blocked_leg(leg, [ "#{e.class}: #{e.message}" ], status: "failed_before_submit")
@@ -187,6 +189,27 @@ class HedgeVenueMigrationExecutor
           service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
         else
           service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        end
+      end
+      normalize_service_result(result, leg)
+    end
+
+    def run_nado_leg(leg, context)
+      venue = @venue_builder.build("nado", env: @env)
+      service = NadoHedgeExecutionService.new(env: @env, venue: venue, sleeper: @sleeper)
+      current = venue.read_position(symbol: "ETH")
+      size = BigDecimal(leg.fetch(:size_eth).to_s)
+      result = if leg.fetch(:side) == "sell"
+        if short_size(current).positive?
+          service.rebalance_short(position: context.fetch(:position), delta_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        else
+          service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        end
+      else
+        if BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
+          service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
+        else
+          service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
         end
       end
       normalize_service_result(result, leg)
@@ -299,7 +322,7 @@ class HedgeVenueMigrationExecutor
     blockers = []
     blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
-    blockers << "Nado must be flat before dashboard migration." unless nado_flat?(position.position_dashboard_snapshot)
+    blockers << "Nado must be flat before dashboard migration." if ![ receipt[:from_venue], receipt[:to_venue] ].include?("nado") && !nado_flat?(position.position_dashboard_snapshot)
     blockers << "position hedge execution_venue must be #{receipt[:from_venue]} before migration" unless HedgeVenues.normalize(position.hedge&.execution_venue) == receipt[:from_venue]
     blockers << "#{HedgeVenues.label(receipt[:from_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:from_venue])
     blockers << "#{HedgeVenues.label(receipt[:to_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:to_venue])
@@ -316,6 +339,7 @@ class HedgeVenueMigrationExecutor
   def target_readiness_cached?(snapshot, venue)
     return false unless snapshot
     return true if venue == "ethereal"
+    return true if venue == "nado"
     return false unless venue == "extended"
 
     snapshot.open_orders_count_extended.to_i.zero? && snapshot.leverage_margin_gate_status.to_s.in?(%w[ok pass passed ready confirmed])
@@ -332,6 +356,7 @@ class HedgeVenueMigrationExecutor
     case venue
     when "extended" then bool_env("EXTENDED_LIVE_ENABLED")
     when "ethereal" then bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
+    when "nado" then bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED") && bool_env("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
     else false
     end
   end
@@ -342,6 +367,7 @@ class HedgeVenueMigrationExecutor
     case venue
     when "extended" then ActiveModel::Type::Boolean.new.cast(snapshot.extended_auto_enabled)
     when "ethereal" then ActiveModel::Type::Boolean.new.cast(snapshot.ethereal_auto_enabled)
+    when "nado" then bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     else true
     end
   end

@@ -22,7 +22,7 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     assert_equal true, route(matrix, "ethereal", "extended").fetch(:preview_available)
   end
 
-  test "Nado routes are visible but blocked" do
+  test "Nado routes are visible with explicit capability status" do
     matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position).report
 
     [
@@ -32,10 +32,15 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
       [ "nado", "ethereal" ]
     ].each do |from, to|
       item = route(matrix, from, to)
-      assert_equal false, item.fetch(:supported)
-      assert_equal false, item.fetch(:preview_available)
-      assert_includes %w[NOT_IMPLEMENTED PREVIEW_BLOCKED], item.fetch(:route_status)
-      assert_includes item.fetch(:blockers), "Nado migration readiness is not proven."
+      assert_equal true, item.fetch(:live_path_implemented)
+      assert item.key?(:open_orders_status_source)
+      assert item.key?(:open_orders_status_target)
+      assert item.key?(:market_metadata_status_source)
+      assert item.key?(:market_metadata_status_target)
+      assert item.key?(:signer_status_source)
+      assert item.key?(:signer_status_target)
+      assert_equal true, item.fetch(:recovery_available)
+      assert_equal true, item.fetch(:rollback_available)
     end
   end
 

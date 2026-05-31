@@ -154,10 +154,12 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "fresh Mellow target is required before supervised canary."
   end
 
-  test "nado readiness reports live path blocker" do
-    report = MigrationManualLiveCanaryReadiness.new(position: position, from: "extended", to: "nado", capability_registry: capability_registry).report
+  test "nado readiness uses canonical planner blockers instead of blanket not implemented" do
+    report = MigrationManualLiveCanaryReadiness.new(position: position, from: "extended", to: "nado", capability_registry: capability_registry, target_preflight: { blockers: [] }).report
 
-    assert_includes report.fetch(:blockers), "Nado live migration path not implemented."
+    assert_equal true, report.fetch(:live_path_implemented)
+    assert_not_includes report.fetch(:blockers), "Nado live migration path not implemented."
+    assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be true for supervised live canary."
   end
 
   private
@@ -168,7 +170,7 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
         {
           routes: [
             { from_venue: "extended", to_venue: "ethereal", live_path_implemented: true, live_canary_confirmed: false, blockers: [ "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal." ] },
-            { from_venue: "extended", to_venue: "nado", live_path_implemented: false, live_canary_confirmed: false, blockers: [ "Nado live migration path not implemented." ] }
+            { from_venue: "extended", to_venue: "nado", live_path_implemented: true, live_canary_confirmed: false, blockers: [ "LIVE_CANARY_CONFIRMED receipt is required for extended->nado." ] }
           ]
         }
       end

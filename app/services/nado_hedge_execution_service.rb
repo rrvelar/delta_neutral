@@ -73,16 +73,16 @@ class NadoHedgeExecutionService
     }
   end
 
-  def open_short(position:, size_eth:, current_position:, confirmation:, max_slippage:)
-    execute(position: position, action: "open", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def open_short(position:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute(position: position, action: "open", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation || !migration)
   end
 
-  def close_short(position:, size_eth:, current_position:, confirmation:, max_slippage:)
-    execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def close_short(position:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation || !migration)
   end
 
-  def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:)
-    execute_rebalance(position: position, delta_eth: BigDecimal(delta_eth.to_s), current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+  def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
+    execute_rebalance(position: position, delta_eth: BigDecimal(delta_eth.to_s), current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation || !migration)
   end
 
   def plan_rebalance(target_size_eth:, current_position:, tolerance_eth:)

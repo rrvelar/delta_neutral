@@ -166,14 +166,16 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
     assert_equal "underhedge/unhedged", result.receipt.fetch(:temporary_risk_type)
   end
 
-  test "Nado migration is unavailable" do
+  test "Nado migration preview is supported by generic planner" do
     position = migration_position(execution_venue: "extended")
     snapshot_for(position, extended_short: "0.8", ethereal_short: "0", nado_short: "0", target: "0.8")
 
-    result = HedgeVenueMigrationPlanner.new.plan(position: position, from_venue: "extended", to_venue: "nado")
+    result = HedgeVenueMigrationPlanner.new.plan(position: position, from_venue: "extended", to_venue: "nado", mode: "full", full_migration_allowed: true)
 
-    assert_equal "blocked", result.status
-    assert_includes result.blockers, "Nado migration readiness is not implemented."
+    assert_equal "preview", result.status
+    assert_empty result.blockers
+    assert_equal "nado", result.receipt.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "extended", result.receipt.fetch(:planned_second_leg).fetch(:venue)
   end
 
   private

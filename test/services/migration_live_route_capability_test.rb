@@ -28,12 +28,12 @@ class MigrationLiveRouteCapabilityTest < ActiveSupport::TestCase
     assert_equal true, route.fetch(:live_autopilot_eligible)
   end
 
-  test "nado routes are not live implemented by default" do
+  test "nado routes are implemented but not autopilot eligible without confirmed canary" do
     route = registry.report.fetch(:routes).find { |row| row[:from_venue] == "extended" && row[:to_venue] == "nado" }
 
-    assert_equal false, route.fetch(:live_path_implemented)
+    assert_equal true, route.fetch(:live_path_implemented)
     assert_equal false, route.fetch(:live_autopilot_eligible)
-    assert_includes route.fetch(:blockers), "Nado live migration path not implemented."
+    assert_includes route.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->nado."
   end
 
   private

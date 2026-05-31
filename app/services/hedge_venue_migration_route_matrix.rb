@@ -97,14 +97,24 @@ class HedgeVenueMigrationRouteMatrix
       target_first_supported: proof.fetch(:supported_sequences).include?("target_first"),
       source_first_supported: false,
       current_source_short_available: current_source_short_available?(from),
+      source_current_short_available: current_source_short_available?(from),
+      target_current_short_available: current_source_short_available?(to) || venue_short(to).zero?,
       target_open_preview_available: proof.fetch(:preview_available),
       source_close_preview_available: proof.fetch(:preview_available) && current_source_short_available?(from),
       open_orders_status: open_orders_status(from, to, proof),
+      open_orders_status_source: venue_open_orders_status(from, proof),
+      open_orders_status_target: venue_open_orders_status(to, proof),
+      market_metadata_status_source: venue_market_metadata_status(from, proof),
+      market_metadata_status_target: venue_market_metadata_status(to, proof),
       fresh_mellow_target_status: fresh_target_report[:status],
       signer_status: signer_status_for(to),
+      signer_status_source: signer_status_for(from),
+      signer_status_target: signer_status_for(to),
       last_preview_receipt_path: last_proof&.fetch("receipt_path", nil),
       last_proof_time: last_proof&.fetch("timestamp", nil),
       nado_readiness: proof.dig(:planned_fields, :nado_readiness),
+      recovery_available: true,
+      rollback_available: true,
       orders_submitted: 0,
       signatures_created: 0
     }
@@ -306,7 +316,7 @@ class HedgeVenueMigrationRouteMatrix
   end
 
   def live_path_implemented?(from, to)
-    [ from, to ].sort == %w[ethereal extended]
+    ROUTE_ORDER.include?([ from, to ])
   end
 
   def current_source_short_available?(from)
@@ -317,6 +327,14 @@ class HedgeVenueMigrationRouteMatrix
     false
   end
 
+  def venue_short(venue)
+    return BigDecimal("0") unless snapshot
+
+    BigDecimal(snapshot.public_send("#{venue}_short_eth").to_s)
+  rescue ArgumentError, NoMethodError
+    BigDecimal("0")
+  end
+
   def open_orders_status(from, to, proof)
     return "zero" unless [ from, to ].include?("nado") || [ from, to ].include?("extended")
     return "nado_blocked" if [ from, to ].include?("nado") && proof.dig(:planned_fields, :nado_readiness, :nado_open_orders_count).nil?
@@ -325,9 +343,28 @@ class HedgeVenueMigrationRouteMatrix
     "nonzero_or_unknown"
   end
 
+  def venue_open_orders_status(venue, proof)
+    case venue
+    when "extended"
+      snapshot&.open_orders_count_extended.to_i.zero? ? "zero" : "nonzero_or_unknown"
+    when "nado"
+      count = proof.dig(:planned_fields, :nado_readiness, :nado_open_orders_count)
+      count.nil? ? "unknown" : (count.to_i.zero? ? "zero" : "nonzero")
+    else
+      "preflight_required"
+    end
+  end
+
+  def venue_market_metadata_status(venue, proof)
+    return proof.dig(:planned_fields, :nado_readiness, :nado_market_read_available) ? "ok" : "blocked" if venue == "nado"
+    return snapshot&.leverage_margin_gate_status.to_s.in?(%w[ok pass passed ready confirmed]) ? "ok" : "preflight_required" if venue == "extended"
+
+    "preflight_required"
+  end
+
   def signer_status_for(to)
     case to
-    when "nado" then "blocked_unproven"
+    when "nado" then "preflight_required"
     else "preflight_required"
     end
   end

@@ -60,7 +60,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal false, receipt.fetch("would_migrate")
     nado_live_blocked = receipt.fetch("live_blocked_routes").find { |route| route.fetch("to_venue") == "nado" }
     assert nado_live_blocked
-    assert_includes nado_live_blocked.fetch("live_blockers"), "Nado live migration path not implemented."
+    assert_includes nado_live_blocked.fetch("live_blockers"), "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit"
   end
 
   test "first virtual dry run initializes state from production venue and advances selected target" do
@@ -186,7 +186,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
           receipt_paths: [ @receipt_dir.join("20260528.jsonl").to_s ],
           routes: [
             route("extended", "ethereal", []),
-            route("extended", "nado", [ "Nado live migration path not implemented." ]),
+            route("extended", "nado", [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ]),
             nado_source_route("nado", "extended"),
             nado_source_route("nado", "ethereal")
           ],
@@ -208,7 +208,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
       end
 
       def nado_source_route(from, to)
-        route(from, to, [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+        route(from, to, [ "source venue Nado has no current short to migrate.", "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ]).merge(
           route_status: "PREVIEW_BLOCKED",
           preview_available: false,
           nado_readiness: {
@@ -239,7 +239,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
               route_status: "PREVIEW_BLOCKED",
               preview_available: false,
               live_available: false,
-              blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ],
+              blockers: [ "source venue Nado has no current short to migrate.", "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ],
               nado_readiness: {
                 nado_reduce_only_close_preview_available: false
               },

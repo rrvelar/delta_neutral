@@ -4,7 +4,8 @@ class HedgeVenueAutoMigrationPlanner
   STRATEGY = "random_rotation".freeze
   RECEIPT_DIR = Rails.root.join("storage/hedge_migration_random_rotation")
   LIVE_DISABLED_BLOCKERS = [
-    "Nado live migration path not implemented."
+    "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit",
+    "AERODROME_NADO_LIVE_MIGRATION_ENABLED must be true for Nado live migration"
   ].freeze
 
   def initialize(env: ENV, now: -> { Time.current }, migration_events: nil, route_proof_events: nil, route_matrix: nil, random_seed: nil, receipt_dir: RECEIPT_DIR, current_venue_override: nil, virtual_mode: false)

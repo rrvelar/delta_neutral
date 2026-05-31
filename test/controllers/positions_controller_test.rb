@@ -570,6 +570,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Migration Control Center", response.body
     assert_match "Migration complete: production venue Extended.", response.body
     assert_match "Extended → Ethereal", response.body
+    assert_match "Ethereal → Extended", response.body
+    assert_match "Extended → Nado", response.body
+    assert_match "Nado → Extended", response.body
+    assert_match "Ethereal → Nado", response.body
+    assert_match "Nado → Ethereal", response.body
     assert_match "Production venue", response.body
     assert_match "Preview from", response.body
     assert_match "Preview to", response.body
@@ -594,8 +599,6 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Virtual dry-run state only. Production hedge venue was not changed.", response.body
     assert_match "Last Daily Dry-run", response.body
     assert_match "Decision-only. No migration executed.", response.body
-    assert_match "Extended → Nado", response.body
-    assert_match "Nado → Ethereal", response.body
     assert_match "Run dry-run route proof", response.body
   end
 

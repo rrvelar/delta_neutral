@@ -2,7 +2,11 @@ class MigrationManualCanaryPlanner
   CONFIRMATION = "I_UNDERSTAND_THIS_RUNS_A_LIVE_HEDGE_MIGRATION_CANARY".freeze
   SUPPORTED_LIVE_ROUTES = [
     [ "extended", "ethereal" ],
-    [ "ethereal", "extended" ]
+    [ "ethereal", "extended" ],
+    [ "extended", "nado" ],
+    [ "nado", "extended" ],
+    [ "ethereal", "nado" ],
+    [ "nado", "ethereal" ]
   ].freeze
   KNOWN_ROUTES = [
     [ "extended", "ethereal" ],
@@ -102,9 +106,8 @@ class MigrationManualCanaryPlanner
     blockers << "source venue must have a real short before canary." unless source_short.positive?
     blockers.concat(Array(target[:blockers]))
     blockers << "fresh Mellow target is required before supervised canary." unless target[:status] == "ok"
-    blockers << "Nado must be flat before supervised canary." unless nado_flat?
+    blockers << "Nado must be flat before supervised canary." if ![ from, to ].include?("nado") && !nado_flat?
     blockers.concat(source_first_blockers(target))
-    blockers << "Nado live migration path not implemented." if [ from, to ].include?("nado")
     blockers.concat(target_leg_blockers)
     blockers.concat(source_close_preflight_blockers)
     blockers << "target/source open orders must be zero." unless open_orders_clear?
@@ -145,6 +148,8 @@ class MigrationManualCanaryPlanner
     blockers << "EXTENDED_LIVE_ENABLED must be true" if [ from, to ].include?("extended") && !bool_env("EXTENDED_LIVE_ENABLED")
     blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" if [ from, to ].include?("extended") && !bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
     blockers << "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED must be true" if [ from, to ].include?("ethereal") && !bool_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED")
+    blockers << "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" if [ from, to ].include?("nado") && !bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    blockers << "AERODROME_NADO_LIVE_MIGRATION_ENABLED must be true" if [ from, to ].include?("nado") && !bool_env("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
     blockers
   end
 
@@ -170,7 +175,6 @@ class MigrationManualCanaryPlanner
 
   def target_leg_blockers
     @target_leg_blockers ||= begin
-      return [ "Nado live migration path not implemented." ] if to == "nado"
       return [ "target short is unavailable" ] unless target_short.positive?
 
       preflight = @target_preflight || target_preflight_for(to)
@@ -206,6 +210,15 @@ class MigrationManualCanaryPlanner
         size_eth: target_open_size,
         current_position: nil,
         confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+        max_slippage: max_slippage
+      )
+    when "nado"
+      NadoHedgeExecutionService.new(env: env).preflight(
+        position: position,
+        action: "open",
+        size_eth: target_open_size,
+        current_position: nil,
+        confirmation: env["AERODROME_NADO_HEDGE_CONFIRMATION"],
         max_slippage: max_slippage
       )
     else
@@ -374,9 +387,9 @@ class MigrationManualCanaryPlanner
   end
 
   def open_orders_clear?
-    return true unless [ from, to ].include?("extended")
+    return false if [ from, to ].include?("extended") && !snapshot&.open_orders_count_extended.to_i.zero?
 
-    snapshot&.open_orders_count_extended.to_i.zero?
+    true
   end
 
   def venue_auto_enabled?(venue)

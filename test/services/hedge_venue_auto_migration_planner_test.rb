@@ -269,7 +269,7 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
   def virtual_nado_route_matrix
     {
       routes: [
-        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ]).merge(
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: true,
@@ -277,7 +277,7 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
             nado_source_leg_preview_proof: { ok: true }
           }
         ),
-        route("nado", "ethereal", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+        route("nado", "ethereal", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ]).merge(
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: true,
@@ -292,7 +292,7 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
   def virtual_nado_route_without_proof_matrix
     {
       routes: [
-        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "Nado live migration path not implemented." ]).merge(
+        route("nado", "extended", "PREVIEW_BLOCKED", blockers: [ "source venue Nado has no current short to migrate.", "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit" ]).merge(
           preview_available: false,
           nado_readiness: {
             nado_reduce_only_close_preview_available: false,
@@ -305,8 +305,8 @@ class HedgeVenueAutoMigrationPlannerTest < ActiveSupport::TestCase
 
   def nado_live_blockers
     [
-      "Nado live migration path not implemented.",
-      "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit"
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true for Nado live submit",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED must be true for Nado live migration"
     ]
   end
 

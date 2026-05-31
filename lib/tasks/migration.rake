@@ -64,6 +64,14 @@ namespace :migration do
     puts JSON.pretty_generate(summary)
   end
 
+  desc "Print read-only canonical migration route matrix for a position"
+  task route_matrix: :environment do
+    position = migration_position_from_env(action: "migration_route_matrix")
+    next unless position
+
+    puts JSON.pretty_generate(HedgeVenueMigrationRouteMatrix.new(position: position).report.merge(action: "migration_route_matrix"))
+  end
+
   desc "Write a read-only random venue rotation decision receipt for a position"
   task random_rotation_decision: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
@@ -191,6 +199,37 @@ namespace :migration do
     sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || "target_first"
     result = MigrationManualLiveCanaryRunner.new.run(position: position, from: from, to: to, confirmation: confirmation, sequence: sequence)
     puts JSON.pretty_generate(result.receipt)
+  end
+
+  desc "Rehearse a migration route without signing or submitting"
+  task rehearse_route: :environment do
+    position = migration_position_from_env(action: "migration_rehearse_route")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || "target_first"
+    plan = MigrationManualCanaryPlanner.new(position: position, from: from, to: to, sequence: sequence).report
+    receipt = plan.merge(
+      action: "migration_rehearse_route",
+      dry_run: true,
+      live: false,
+      rehearsal_status: plan[:blockers].empty? ? "ready_no_live" : "blocked_no_live",
+      readback_verification: {
+        target_leg: "confirm #{plan[:to_venue]} short equals planned_target_leg.expected_after_short_eth within venue rounding tolerance",
+        source_leg: "confirm #{plan[:from_venue]} short equals planned_source_leg.expected_after_short_eth within venue rounding tolerance",
+        final: "confirm source flat, target holds fresh target, other venue flat, combined inside tolerance"
+      },
+      recovery_plan: {
+        target_first_second_leg_failed: "close source with reduce-only buy or rollback target with reduce-only buy after fresh readback and exact recovery confirmation",
+        first_leg_failed: "do not submit second leg; refresh readback before any retry"
+      },
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+    path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_route_rehearsals")).write(receipt)
+    puts JSON.pretty_generate(receipt.merge(receipt_path: path&.to_s))
   end
 
   desc "Recover target-first partial overhedge by closing only the Extended source leg"
