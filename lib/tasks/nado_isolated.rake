@@ -1,5 +1,5 @@
 namespace :nado do
-  desc "Read-only fail-closed Nado unified auto readiness diagnostics"
+  desc "Read-only Nado unified active-venue auto readiness diagnostics"
   task auto_readiness: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
     position = Position.includes(:dex, :hedge, :position_dashboard_snapshot).find_by(id: position_id)
@@ -18,6 +18,40 @@ namespace :nado do
 
     report = HedgeVenueAutoAdapters::Nado.new.readiness(position: position)
     puts JSON.pretty_generate(report.merge(action: "nado_auto_readiness", orders_submitted: 0, signatures_created: 0))
+  end
+
+  desc "Run Nado active-venue one-shot auto rebalance; dry-run by default"
+  task auto_rebalance_once: :environment do
+    position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
+    position = Position.includes(:dex, :hedge, :position_dashboard_snapshot).find_by(id: position_id)
+
+    unless position
+      puts JSON.pretty_generate(
+        action: "nado_auto_rebalance_once",
+        status: "blocked",
+        position_id: position_id,
+        blockers: [ "Position #{position_id || '(missing)'} not found." ],
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+      next
+    end
+
+    live = ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"])
+    dry_run = if ENV.key?("dry_run") || ENV.key?("DRY_RUN")
+      ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", ENV.fetch("DRY_RUN", "true")))
+    else
+      !live
+    end
+    result = HedgeVenueAutoRebalanceAdapters::Nado.new.run(
+      position: position,
+      dry_run: dry_run,
+      live: live,
+      confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
+      max_slippage: ENV["max_slippage"].presence || ENV["MAX_SLIPPAGE"].presence || "0.01"
+    )
+    puts JSON.pretty_generate(result.receipt.merge(action: "nado_auto_rebalance_once"))
+    abort("Nado auto rebalance blocked: #{result.blockers.join('; ')}") if live && !result.status.in?(%w[success submitted_and_confirmed no_op])
   end
 
   desc "Read-only Nado ETH-PERP market metadata diagnostics"

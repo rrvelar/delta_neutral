@@ -264,11 +264,11 @@ class DashboardTaskTest < ActiveSupport::TestCase
       active_within_tolerance: false,
       active_planned_auto_action: "increase_short",
       active_auto_ready: false,
-      active_auto_blockers: [ "Nado isolated live auto open/increase submit path is not proven in delta_neutral." ],
+      active_auto_blockers: [ "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" ],
       target_short_eth: "0.9",
       within_tolerance: false,
       planned_auto_action: "increase_short",
-      blockers: [ "Nado isolated live auto open/increase submit path is not proven in delta_neutral." ],
+      blockers: [ "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" ],
       warnings: []
     }
 
@@ -280,8 +280,8 @@ class DashboardTaskTest < ActiveSupport::TestCase
 
           assert_equal "nado", payload.fetch("production_venue")
           assert_equal "nado", payload.fetch("active_auto_venue")
-          assert_equal "ACTION REQUIRED", payload.fetch("production_health_status")
-          assert_includes payload.fetch("active_auto_blockers"), "Nado isolated live auto open/increase submit path is not proven in delta_neutral."
+          assert_equal "BLOCKED", payload.fetch("production_health_status")
+          assert_includes payload.fetch("active_auto_blockers"), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
         end

@@ -5,10 +5,11 @@ class NadoTaskTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks unless Rake::Task.task_defined?("nado:auto_readiness")
     Rake::Task["nado:auto_readiness"].reenable
+    Rake::Task["nado:auto_rebalance_once"].reenable if Rake::Task.task_defined?("nado:auto_rebalance_once")
     Rake::Task["nado:market_metadata"].reenable if Rake::Task.task_defined?("nado:market_metadata")
   end
 
-  test "nado auto readiness task exists and fails closed without live counters" do
+  test "nado auto readiness task exists and reports env-gated readiness without live counters" do
     position = Position.create!(
       user: users(:one),
       wallet: wallets(:one),
@@ -30,7 +31,7 @@ class NadoTaskTest < ActiveSupport::TestCase
         venue: "nado",
         position_id: position.id,
         continuous_auto_ready: false,
-        blockers: [ "Nado isolated live auto open/increase submit path is not proven in delta_neutral." ],
+        blockers: [ "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" ],
         orders_submitted: 0,
         signatures_created: 0
       }
@@ -43,7 +44,7 @@ class NadoTaskTest < ActiveSupport::TestCase
 
         assert_equal "nado_auto_readiness", payload.fetch("action")
         assert_equal false, payload.fetch("continuous_auto_ready")
-        assert payload.fetch("blockers").any? { |blocker| blocker.include?("Nado isolated live auto open/increase submit path") }
+        assert_includes payload.fetch("blockers"), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
         assert_equal 0, payload.fetch("orders_submitted")
         assert_equal 0, payload.fetch("signatures_created")
       end
