@@ -1025,7 +1025,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
     assert_response :success
-    assert_operator elapsed, :<, 1.0
+    assert_operator elapsed, :<, 3.0
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
   end

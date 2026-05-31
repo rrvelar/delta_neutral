@@ -126,15 +126,15 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
         params = Rack::Utils.parse_query(uri.query)
         case params["type"]
         when "symbols"
-          { "data" => [ { "product_id" => 4, "symbol" => "ETH-PERP", "type" => "perp" } ] }
+          { "data" => [ { "product_id" => 4, "symbol" => "ETH-PERP", "type" => "perp" } ] }.to_json
         when "all_products"
-          { "data" => [ { "product_id" => 4, "price_increment" => "1", "size_increment" => "0.001" } ] }
+          { "data" => [ { "product_id" => 4, "price_increment" => "1", "size_increment" => "0.001" } ] }.to_json
         when "market_price"
-          { "data" => { "product_id" => 4, "bid_x18" => "2299000000000000000000", "ask_x18" => "2301000000000000000000" } }
+          { "data" => { "product_id" => 4, "bid_x18" => "2299000000000000000000", "ask_x18" => "2301000000000000000000" } }.to_json
         when "contracts"
-          { "data" => { "chain_id" => 1 } }
+          { "data" => { "chain_id" => 1 } }.to_json
         else
-          { "data" => {} }
+          { "data" => {} }.to_json
         end
       }
     )
@@ -146,6 +146,48 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal "2300.0", metadata.fetch(:market_price)
     assert_equal "0.001", metadata.fetch(:size_increment)
     assert calls.any? { |query| query.include?("type=market_price") && query.include?("product_id=4") }
+  end
+
+  test "configured metadata with blank market price falls back to existing Nado query client" do
+    venue = FakeNadoQueryVenue.new(
+      "market_price" => { "data" => { "product_id" => 4, "bid_x18" => "2299000000000000000000", "ask_x18" => "2301000000000000000000" } }
+    )
+    service = NadoHedgeExecutionService.new(
+      env: nado_env_with_metadata(market_price: ""),
+      venue: venue
+    )
+
+    metadata = service.market_metadata(position: migration_position.tap { |item| item.update_column(:asset0_price_usd, nil) })
+
+    assert_equal "ok", metadata.fetch(:status)
+    assert_equal "2300.0", metadata.fetch(:market_price)
+    assert_equal "/query", metadata.dig(:diagnostics, :market_price_query, :endpoint)
+    assert_equal "market_price", metadata.dig(:diagnostics, :market_price_query, :query_params, :type)
+    assert_equal [ { type: "market_price", product_id: 4 } ], venue.queries
+  end
+
+  test "target route preview uses market price from existing Nado query client" do
+    venue = FakeNadoQueryVenue.new(
+      "market_price" => { "data" => { "product_id" => 4, "bid_x18" => "2299000000000000000000", "ask_x18" => "2301000000000000000000" } }
+    )
+    service = NadoHedgeExecutionService.new(
+      env: nado_env_with_metadata(market_price: "").merge("NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}"),
+      venue: venue
+    )
+    position = migration_position
+    position.update_column(:asset0_price_usd, nil)
+
+    report = NadoMigrationReadiness.new(position: position, intended_role: "target", nado_service: service).report
+    preview = report.fetch(:target_leg_preview)
+
+    assert_equal true, report.fetch(:nado_open_short_preview_available)
+    assert_equal "sell", preview.fetch(:side)
+    assert_equal false, preview.fetch(:reduce_only)
+    assert_equal "4", preview.dig(:payload_summary, :product_id).to_s
+    assert_equal "2277.0", preview.dig(:payload_summary, :rounded_price)
+    assert_empty preview.fetch(:blockers)
+    assert_equal 0, preview.fetch(:orders_submitted)
+    assert_equal 0, preview.fetch(:signatures_created)
   end
 
   test "real Nado market metadata blocks with precise blank fields" do
@@ -290,6 +332,20 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
         blockers: [],
         warnings: []
       }
+    end
+  end
+
+  class FakeNadoQueryVenue
+    attr_reader :queries
+
+    def initialize(responses)
+      @responses = responses
+      @queries = []
+    end
+
+    def query(params)
+      @queries << params
+      @responses.fetch(params[:type].to_s, {})
     end
   end
 

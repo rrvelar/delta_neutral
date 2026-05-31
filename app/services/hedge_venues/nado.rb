@@ -122,6 +122,14 @@ module HedgeVenues
       false
     end
 
+    def query(params)
+      get_json("/query", params)
+    end
+
+    def query_available?
+      query_base_url.present?
+    end
+
     private
 
     def payload(action:, symbol:, size_eth:, max_slippage:, reduce_only:)

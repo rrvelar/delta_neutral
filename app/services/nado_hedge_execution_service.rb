@@ -926,7 +926,8 @@ class NadoHedgeExecutionService
     return @product_metadata if defined?(@product_metadata)
 
     configured = configured_product_metadata
-    return @product_metadata = configured if configured
+    return @product_metadata = configured if configured && configured[:market_price].present?
+    return @product_metadata = configured_product_metadata_with_market_price(configured) if configured
 
     product = resolve_product_from_gateway
     domain = resolve_domain(product[:product_id])
@@ -970,8 +971,28 @@ class NadoHedgeExecutionService
     product_hash(source: "configured NADO_ETH_PERP_PRODUCT_METADATA_JSON", blockers: [ "NADO_ETH_PERP_PRODUCT_METADATA_JSON is invalid JSON" ])
   end
 
+  def configured_product_metadata_with_market_price(configured)
+    product_id = configured[:product_id] || ETH_PERP_PRODUCT_ID
+    queried_price = resolve_market_price(product_id)
+    blockers = configured.fetch(:blockers, [])
+    blockers = blockers - [ "Nado ETH-PERP product_id is unavailable" ] if configured[:product_id].present?
+    blockers << "Nado market_price response missing parseable bid_x18/ask_x18 or mark/oracle price fields." if queried_price.nil? && nado_query_available?
+    product_hash(
+      product_id: configured[:product_id],
+      chain_id: configured[:chain_id],
+      price_increment_x18: configured[:price_increment_x18],
+      size_increment_x18: configured[:size_increment_x18],
+      min_size_x18: configured[:min_size_x18],
+      trading_status: configured[:trading_status],
+      isolated_only: configured[:isolated_only],
+      market_price: queried_price,
+      source: "#{configured[:source]} + GET /query?type=market_price",
+      blockers: blockers.uniq
+    )
+  end
+
   def resolve_product_from_gateway
-    return product_hash(blockers: [ "NADO_GATEWAY_QUERY_BASE_URL or NADO_API_BASE_URL is required for Nado product metadata" ]) if query_base_url.blank?
+    return product_hash(blockers: [ "NADO_GATEWAY_QUERY_BASE_URL or NADO_API_BASE_URL is required for Nado product metadata" ]) unless nado_query_available?
 
     symbols = safe_get_query(type: "symbols", product_type: "perp")
     all_products = safe_get_query(type: "all_products")
@@ -1019,7 +1040,7 @@ class NadoHedgeExecutionService
 
   def resolve_domain(product_id)
     chain_id = positive_integer(@env["NADO_EIP712_CHAIN_ID"])
-    if chain_id.nil? && query_base_url.present?
+    if chain_id.nil? && nado_query_available?
       contracts = get_query(type: "contracts")
       data = contracts["data"].is_a?(Hash) ? contracts["data"] : contracts
       chain_id = positive_integer(data["chain_id"] || data["chainId"])
@@ -1385,8 +1406,27 @@ class NadoHedgeExecutionService
   end
 
   def get_query(params)
+    return @venue.query(params) if venue_query_available?
+
     uri = query_uri(params)
     @http_get.call(uri)
+  end
+
+  def nado_query_available?
+    query_base_url.present? || venue_query_available?
+  end
+
+  def venue_query_available?
+    return false unless @venue.respond_to?(:query)
+    return @venue.query_available? if @venue.respond_to?(:query_available?)
+
+    true
+  end
+
+  def nado_query_endpoint_path(params)
+    return "/query" if venue_query_available?
+
+    query_uri(params).path
   end
 
   def query_uri(params)
@@ -1453,7 +1493,7 @@ class NadoHedgeExecutionService
   end
 
   def resolve_market_price(product_id)
-    return nil unless product_id && query_base_url.present?
+    return nil unless product_id && nado_query_available?
 
     response = tracked_market_price_query(product_id)
     data = response["data"].is_a?(Hash) ? response["data"] : response
@@ -1477,7 +1517,7 @@ class NadoHedgeExecutionService
     selected
   rescue => e
     @market_price_query_diagnostics = {
-      endpoint: query_uri(type: "market_price", product_id: product_id).path,
+      endpoint: nado_query_endpoint_path(type: "market_price", product_id: product_id),
       query_params: { type: "market_price", product_id: product_id.to_s },
       status: "error",
       error: "#{e.class}: #{e.message}",
@@ -1489,7 +1529,7 @@ class NadoHedgeExecutionService
   def tracked_market_price_query(product_id)
     params = { type: "market_price", product_id: product_id }
     @market_price_query_diagnostics = {
-      endpoint: query_uri(params).path,
+      endpoint: nado_query_endpoint_path(params),
       query_params: params.transform_values(&:to_s),
       status: "attempted"
     }
