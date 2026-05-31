@@ -348,6 +348,7 @@ class NadoHedgeExecutionService
     product = product_metadata
     price = product[:market_price] || (position ? position_eth_price(position) : nil)
     blockers = product.fetch(:blockers).dup
+    blockers.concat(Array(@market_price_query_diagnostics&.fetch(:blockers, [])))
     blockers << "Nado market metadata missing mark_price and position asset0_price_usd is unavailable." unless price
     {
       status: blockers.empty? ? "ok" : "blocked",
@@ -364,6 +365,7 @@ class NadoHedgeExecutionService
       min_size_usd: decimal_string(x18_to_decimal(product[:min_size_x18])),
       trading_status: product[:trading_status],
       isolated_only: product[:isolated_only],
+      diagnostics: market_metadata_diagnostics,
       blockers: blockers,
       warnings: product.fetch(:warnings)
     }
@@ -372,6 +374,7 @@ class NadoHedgeExecutionService
       status: "blocked",
       product_id: nil,
       symbol: DEFAULT_SYMBOL,
+      diagnostics: market_metadata_diagnostics,
       blockers: [ "Nado market metadata unavailable: #{e.class}: #{e.message}" ],
       warnings: []
     }
@@ -1382,9 +1385,14 @@ class NadoHedgeExecutionService
   end
 
   def get_query(params)
+    uri = query_uri(params)
+    @http_get.call(uri)
+  end
+
+  def query_uri(params)
     uri = URI.join(query_base_url.end_with?("/") ? query_base_url : "#{query_base_url}/", "query")
     uri.query = URI.encode_www_form(params)
-    @http_get.call(uri)
+    uri
   end
 
   def http_get(uri)
@@ -1447,16 +1455,60 @@ class NadoHedgeExecutionService
   def resolve_market_price(product_id)
     return nil unless product_id && query_base_url.present?
 
-    response = get_query(type: "market_price", product_id: product_id)
+    response = tracked_market_price_query(product_id)
     data = response["data"].is_a?(Hash) ? response["data"] : response
-    bid = x18_to_decimal(data["bid_x18"] || data["bidX18"]) || decimal_or_nil(data["bid"])
-    ask = x18_to_decimal(data["ask_x18"] || data["askX18"]) || decimal_or_nil(data["ask"])
-    return (bid + ask) / 2 if bid && ask
-
-    x18_to_decimal(data["mark_price_x18"] || data["markPriceX18"] || data["oracle_price_x18"] || data["oraclePriceX18"] || data["price_x18"] || data["priceX18"]) ||
+    bid_x18 = data["bid_x18"] || data["bidX18"]
+    ask_x18 = data["ask_x18"] || data["askX18"]
+    bid = x18_to_decimal(bid_x18) || decimal_or_nil(data["bid"])
+    ask = x18_to_decimal(ask_x18) || decimal_or_nil(data["ask"])
+    selected = nil
+    selected = (bid + ask) / 2 if bid && ask
+    selected ||= x18_to_decimal(data["mark_price_x18"] || data["markPriceX18"] || data["oracle_price_x18"] || data["oraclePriceX18"] || data["price_x18"] || data["priceX18"]) ||
       decimal_or_nil(data["mark_price"] || data["markPrice"] || data["oracle_price"] || data["oraclePrice"] || data["price"])
-  rescue
+    @market_price_query_diagnostics.merge!(
+      response_keys: data.keys.map(&:to_s).sort,
+      bid_x18: bid_x18,
+      ask_x18: ask_x18,
+      parsed_bid: decimal_string(bid),
+      parsed_ask: decimal_string(ask),
+      selected_mark_price: decimal_string(selected),
+      blockers: selected ? [] : [ "Nado market_price response missing parseable bid_x18/ask_x18 or mark/oracle price fields." ]
+    )
+    selected
+  rescue => e
+    @market_price_query_diagnostics = {
+      endpoint: query_uri(type: "market_price", product_id: product_id).path,
+      query_params: { type: "market_price", product_id: product_id.to_s },
+      status: "error",
+      error: "#{e.class}: #{e.message}",
+      blockers: [ "Nado market_price query failed: #{e.class}: #{e.message}" ]
+    }
     nil
+  end
+
+  def tracked_market_price_query(product_id)
+    params = { type: "market_price", product_id: product_id }
+    @market_price_query_diagnostics = {
+      endpoint: query_uri(params).path,
+      query_params: params.transform_values(&:to_s),
+      status: "attempted"
+    }
+    response = get_query(params)
+    @market_price_query_diagnostics[:status] = "ok"
+    @market_price_query_diagnostics[:raw_response_class] = response.class.name
+    @market_price_query_diagnostics[:top_level_keys] = response.is_a?(Hash) ? response.keys.map(&:to_s).sort : []
+    response
+  end
+
+  def market_metadata_diagnostics
+    metadata = @product_metadata if defined?(@product_metadata)
+    {
+      product_metadata_source: metadata&.fetch(:source, nil),
+      market_price_query: @market_price_query_diagnostics,
+      price_increment: decimal_string(x18_to_decimal(metadata&.fetch(:price_increment_x18, nil))),
+      size_increment: decimal_string(x18_to_decimal(metadata&.fetch(:size_increment_x18, nil))),
+      blockers: Array(metadata&.fetch(:blockers, [])) + Array(@market_price_query_diagnostics&.fetch(:blockers, []))
+    }.compact
   end
 
   def market_price_from_product(product)

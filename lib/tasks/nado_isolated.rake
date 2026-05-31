@@ -20,6 +20,39 @@ namespace :nado do
     puts JSON.pretty_generate(report.merge(action: "nado_auto_readiness", orders_submitted: 0, signatures_created: 0))
   end
 
+  desc "Read-only Nado ETH-PERP market metadata diagnostics"
+  task market_metadata: :environment do
+    product_id = ENV["product_id"].presence || ENV["PRODUCT_ID"].presence || NadoHedgeExecutionService::ETH_PERP_PRODUCT_ID
+    position = Position.find_by(id: ENV["position_id"].presence || ENV["POSITION_ID"].presence) if ENV["position_id"].present? || ENV["POSITION_ID"].present?
+    service = NadoHedgeExecutionService.new(env: ENV)
+    metadata = service.market_metadata(position: position)
+    diagnostics = metadata[:diagnostics] || {}
+    market_query = diagnostics[:market_price_query] || {}
+    puts JSON.pretty_generate(
+      action: "nado_market_metadata",
+      product_id: product_id.to_s,
+      status: metadata[:status],
+      endpoint: market_query[:endpoint],
+      query_params: market_query[:query_params],
+      http_status: market_query[:http_status],
+      query_status: market_query[:status],
+      response_keys: market_query[:response_keys],
+      top_level_keys: market_query[:top_level_keys],
+      bid_x18: market_query[:bid_x18],
+      ask_x18: market_query[:ask_x18],
+      parsed_bid: market_query[:parsed_bid],
+      parsed_ask: market_query[:parsed_ask],
+      selected_mark_price: market_query[:selected_mark_price] || metadata[:market_price],
+      price_increment: metadata[:price_increment],
+      size_increment: metadata[:size_increment],
+      metadata_source: metadata[:source],
+      blockers: metadata[:blockers],
+      warnings: metadata[:warnings],
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+  end
+
   desc "Read-only reconciliation for pending Nado ShortRebalance records"
   task reconcile_pending_rebalances: :environment do
     scope = ShortRebalance.where(venue: "nado", status: ShortRebalance::STATUS_PENDING)
