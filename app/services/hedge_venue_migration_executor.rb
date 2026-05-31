@@ -38,6 +38,7 @@ class HedgeVenueMigrationExecutor
       signatures_created: 0,
       exchange_order_ids: [],
       leg_readbacks: [],
+      lifecycle_state: dry_run ? "READY_FOR_TARGET_FIRST" : "PRECHECK_BLOCKED",
       manual_action_required: true,
       final_status: dry_run ? plan.status : "blocked_before_submit"
     )
@@ -52,41 +53,57 @@ class HedgeVenueMigrationExecutor
 
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
+    receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
+    receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
+    receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
     unless leg_confirmed?(first_leg)
       receipt[:orders_placed] = leg_order_count(first_leg)
+      receipt[:orders_submitted] = receipt[:orders_placed]
       receipt[:signatures_created] = leg_signature_count(first_leg)
       receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
       receipt[:submitted] = receipt[:orders_placed].positive?
+      receipt[:would_execute_live] = receipt[:submitted]
+      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
-      receipt[:recovery_command] = recovery_command(receipt) if receipt[:final_status] == "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED"
+      receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
+    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : "TARGET_SUBMITTED_AND_CONFIRMED"
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << second_leg[:readback] if second_leg[:readback]
     receipt[:orders_placed] = leg_order_count(first_leg) + leg_order_count(second_leg)
+    receipt[:orders_submitted] = receipt[:orders_placed]
     receipt[:signatures_created] = leg_signature_count(first_leg) + leg_signature_count(second_leg)
     receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id], second_leg[:exchange_order_id] ].compact
     receipt[:submitted] = receipt[:orders_placed].positive?
+    receipt[:would_execute_live] = receipt[:submitted]
+    receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
+    receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
+    receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg)
       final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
       receipt.merge!(final)
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
+      receipt[:lifecycle_state] = receipt[:production_venue_finalized] ? "MIGRATION_FINALIZED" : "SOURCE_CLOSE_CONFIRMED"
     else
+      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
       receipt[:final_status] = "partial_migration_manual_action_required"
       receipt[:manual_action_required] = true
       receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
+      receipt[:recovery_command] = recovery_command(receipt) if receipt[:migration_sequence] == "target_first"
       if receipt[:migration_sequence] == "source_first"
         receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
       end
@@ -105,6 +122,7 @@ class HedgeVenueMigrationExecutor
       signatures_created: 0,
       exchange_order_ids: [],
       leg_readbacks: [],
+      lifecycle_state: "READY_FOR_TARGET_FIRST",
       manual_action_required: true,
       final_status: "blocked_before_submit"
     )
@@ -282,41 +300,57 @@ class HedgeVenueMigrationExecutor
   def execute_receipt(position:, receipt:, confirmation:)
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
+    receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
+    receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
+    receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
     unless leg_confirmed?(first_leg)
       receipt[:orders_placed] = leg_order_count(first_leg)
+      receipt[:orders_submitted] = receipt[:orders_placed]
       receipt[:signatures_created] = leg_signature_count(first_leg)
       receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
       receipt[:submitted] = receipt[:orders_placed].positive?
+      receipt[:would_execute_live] = receipt[:submitted]
+      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
-      receipt[:recovery_command] = recovery_command(receipt) if receipt[:final_status] == "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED"
+      receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
+    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : "TARGET_SUBMITTED_AND_CONFIRMED"
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << second_leg[:readback] if second_leg[:readback]
     receipt[:orders_placed] = leg_order_count(first_leg) + leg_order_count(second_leg)
+    receipt[:orders_submitted] = receipt[:orders_placed]
     receipt[:signatures_created] = leg_signature_count(first_leg) + leg_signature_count(second_leg)
     receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id], second_leg[:exchange_order_id] ].compact
     receipt[:submitted] = receipt[:orders_placed].positive?
+    receipt[:would_execute_live] = receipt[:submitted]
+    receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
+    receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
+    receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg)
       final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
       receipt.merge!(final)
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
+      receipt[:lifecycle_state] = receipt[:production_venue_finalized] ? "MIGRATION_FINALIZED" : "SOURCE_CLOSE_CONFIRMED"
     else
+      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
       receipt[:final_status] = "partial_migration_manual_action_required"
       receipt[:manual_action_required] = true
       receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
+      receipt[:recovery_command] = recovery_command(receipt) if receipt[:migration_sequence] == "target_first"
       if receipt[:migration_sequence] == "source_first"
         receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
       end
@@ -453,6 +487,18 @@ class HedgeVenueMigrationExecutor
 
   def leg_confirmed?(leg)
     ActiveModel::Type::Boolean.new.cast(leg[:confirmed]) || leg[:status] == "confirmed"
+  end
+
+  def late_reconciled?(leg)
+    ActiveModel::Type::Boolean.new.cast(leg.dig(:receipt, :reconciled_after_pending))
+  end
+
+  def leg_lifecycle_status(leg:, planned_leg: nil, role:)
+    return "#{role.upcase}_CONFIRMED_LATE_BY_RECONCILIATION" if leg_confirmed?(leg) && late_reconciled?(leg)
+    return role == "target" ? "TARGET_SUBMITTED_AND_CONFIRMED" : "SOURCE_CLOSE_CONFIRMED" if leg_confirmed?(leg)
+    return role == "target" ? "TARGET_SUBMITTED_PENDING_READBACK" : "SOURCE_CLOSE_PENDING_READBACK" if leg_order_count(leg).positive?
+
+    role == "target" ? "TARGET_REJECTED_OR_NOT_CONFIRMED" : "RECOVERY_REQUIRED"
   end
 
   def target_leg_readback_present?(receipt, planned_leg, actual_leg)

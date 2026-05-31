@@ -61,6 +61,139 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
 
+  test "source already flat live finalization updates execution venue without orders" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env
+    ).run
+
+    assert_equal "MIGRATION_FINALIZED", result.status, result.blockers.inspect
+    assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, result.receipt.fetch(:production_venue_finalized)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:would_execute_live)
+  end
+
+  test "live finalization blocks with wrong confirmation" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11",
+      live: true,
+      confirmation: "wrong",
+      env: recovery_env
+    ).run
+
+    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
+    assert_includes result.blockers, "submitted confirmation must equal #{MigrationTargetFirstSourceRecovery::CONFIRMATION}"
+    assert_equal "ethereal", position.hedge.reload.execution_venue
+  end
+
+  test "live finalization blocks without recovery gate" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env.merge("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED" => "false")
+    ).run
+
+    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
+    assert_includes result.blockers, "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true"
+    assert_equal "ethereal", position.hedge.reload.execution_venue
+  end
+
+  test "recovery blocks when target is missing" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "1.11",
+      nado_short: "0",
+      target: "1.11"
+    ).run
+
+    assert_equal "dry_run", result.status
+    assert_includes result.blockers, "Nado target short must be present"
+  end
+
+  test "recovery blocks when third venue is not flat" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      extended_short: "0.2",
+      ethereal_short: "1.11",
+      nado_short: "1.11",
+      target: "1.11"
+    ).run
+
+    assert_includes result.blockers, "unexpected third-venue short is present during source-close recovery"
+  end
+
+  test "source already flat does not finalize when combined is outside tolerance" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "0.9",
+      target: "1.11"
+    ).run
+
+    assert_equal "dry_run", result.status
+    assert_equal false, result.receipt.fetch(:finalization_recommended)
+    assert_includes result.blockers, "Nado short must be within tolerance of fresh target"
+  end
+
+  test "extended to ethereal legacy recovery route still builds source close" do
+    position = migration_position(execution_venue: "extended")
+
+    result = recovery(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      extended_short: "0.8",
+      ethereal_short: "0.8",
+      target: "0.8"
+    ).run
+
+    leg = result.receipt.fetch(:planned_source_close_leg)
+    assert_equal "extended", leg.fetch(:venue)
+    assert_equal "buy", leg.fetch(:side)
+    assert_equal true, leg.fetch(:reduce_only)
+    assert_equal "0.8", leg.fetch(:size_eth)
+  end
+
   test "nado to ethereal recovery builds Nado reduce only source close" do
     position = migration_position(execution_venue: "nado")
     result = recovery(
@@ -80,6 +213,39 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_equal "0.8", leg.fetch(:size_eth)
     assert_equal 0, result.receipt.fetch(:orders_submitted)
     assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
+  test "generic recovery builds source close for all target first route pairs" do
+    pairs = [
+      [ "extended", "ethereal" ],
+      [ "ethereal", "extended" ],
+      [ "extended", "nado" ],
+      [ "nado", "extended" ],
+      [ "ethereal", "nado" ],
+      [ "nado", "ethereal" ]
+    ]
+
+    pairs.each do |from, to|
+      position = migration_position(execution_venue: from)
+      shorts = { "extended" => "0", "ethereal" => "0", "nado" => "0" }
+      shorts[from] = "0.8"
+      shorts[to] = "0.8"
+      result = recovery(
+        position: position,
+        from: from,
+        to: to,
+        extended_short: shorts.fetch("extended"),
+        ethereal_short: shorts.fetch("ethereal"),
+        nado_short: shorts.fetch("nado"),
+        target: "0.8"
+      ).run
+
+      leg = result.receipt.fetch(:planned_source_close_leg)
+      assert_equal from, leg.fetch(:venue), "#{from}->#{to}"
+      assert_equal "buy", leg.fetch(:side), "#{from}->#{to}"
+      assert_equal true, leg.fetch(:reduce_only), "#{from}->#{to}"
+      assert_no_match(/from must be extended|to must be ethereal/, result.receipt.to_json)
+    end
   end
 
   private

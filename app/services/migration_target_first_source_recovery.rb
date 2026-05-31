@@ -128,12 +128,14 @@ class MigrationTargetFirstSourceRecovery
     end
   end
 
-  def live_gate_blockers(_context)
+  def live_gate_blockers(context)
     blockers = []
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation_valid?
     blockers << "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true" unless bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED")
-    blockers << "#{HedgeVenues.label(from)} live gate must be enabled" unless venue_live_enabled?(from)
-    blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" if from == "extended" && !bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
+    if context.fetch(:source_short).positive?
+      blockers << "#{HedgeVenues.label(from)} live gate must be enabled" unless venue_live_enabled?(from)
+      blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" if from == "extended" && !bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
+    end
     blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
     blockers << "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
     blockers << "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
@@ -190,6 +192,8 @@ class MigrationTargetFirstSourceRecovery
     safe_to_finalize = finalization_safe?(context)
     {
       action: "recover_target_first_source_close",
+      route: "#{from}->#{to}",
+      sequence: "target_first",
       timestamp: context.fetch(:timestamp),
       position_id: position.id,
       from_venue: from,
@@ -218,6 +222,7 @@ class MigrationTargetFirstSourceRecovery
       expected_final_combined: decimal_string(context.fetch(:expected_final_combined)),
       expected_inside_tolerance: context.fetch(:expected_final_inside_tolerance),
       source_already_flat: source_already_flat,
+      lifecycle_state: lifecycle_state(blockers: blockers, execution: execution, source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
       target_confirmed: target_confirmed?(context),
       other_venues_flat: other_venues_flat?(context),
       finalization_recommended: !live? && source_already_flat && safe_to_finalize && HedgeVenues.normalize(position.hedge&.execution_venue) != to,
@@ -229,6 +234,7 @@ class MigrationTargetFirstSourceRecovery
       orders_submitted: execution&.fetch(:orders_placed, 0).to_i,
       orders_placed: execution&.fetch(:orders_placed, 0).to_i,
       signatures_created: execution&.fetch(:signatures_created, 0).to_i,
+      would_execute_live: execution&.fetch(:orders_placed, 0).to_i.positive?,
       final_source_short_eth: decimal_string(final_source),
       final_combined_short_eth: decimal_string(final_combined),
       final_inside_tolerance: inside_tolerance?(final_combined, context),
@@ -249,6 +255,15 @@ class MigrationTargetFirstSourceRecovery
     return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize
 
     execution && recovery_confirmed?(context.merge(execution: execution)) ? "SOURCE_CLOSE_RECOVERY_CONFIRMED" : "SOURCE_CLOSE_RECOVERY_MANUAL_ACTION_REQUIRED"
+  end
+
+  def lifecycle_state(blockers:, execution:, source_already_flat:, safe_to_finalize:)
+    return "RECOVERY_BLOCKED" if blockers.any?
+    return "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE" if source_already_flat && safe_to_finalize && !live?
+    return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize && live?
+    return "SOURCE_CLOSE_CONFIRMED" if execution && (execution[:confirmed] || execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed]))
+
+    live? ? "RECOVERY_REQUIRED" : "READY_FOR_TARGET_FIRST"
   end
 
   def live_gates

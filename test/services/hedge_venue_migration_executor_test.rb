@@ -147,7 +147,8 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       orders_placed: 1,
       signatures_created: 1,
       exchange_order_id: "0x3845e7",
-      action_plan: { expected_after_short_eth: "0.8" }
+      action_plan: { expected_after_short_eth: "0.8" },
+      post_submit_readback_poll_attempts: Array.new(12) { |index| { attempt: index + 1, position_present: false, confirmed: false } }
     })
     confirmed = NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
       submitted: true,
@@ -155,6 +156,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       signatures_created: 1,
       exchange_order_id: "0x3845e7",
       post_submit_readback: { short_size: BigDecimal("0.8") },
+      post_submit_readback_poll_attempts: Array.new(12) { |index| { attempt: index + 1, position_present: false, confirmed: false } },
       reconciled_after_pending: true
     })
     fake_service = Class.new do
@@ -192,7 +194,46 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       assert_equal true, fake_service.reconciled
       assert_equal 2, calls
       assert_equal "nado", position.hedge.reload.execution_venue
+      assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal true, result.receipt.fetch(:target_late_reconciliation)
+      assert_equal "SOURCE_CLOSE_CONFIRMED", result.receipt.fetch(:source_leg_status)
+      assert_equal [ "0x3845e7", "ethereal-close" ], result.receipt.fetch(:exchange_order_ids)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+      assert_equal true, result.receipt.fetch(:would_execute_live)
     end
+  end
+
+  test "unconfirmed accepted target submit records pending state counts and generic recovery command" do
+    position = migration_position
+    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: ->(leg, context:) {
+      {
+        status: "submitted_but_readback_pending",
+        confirmed: false,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: "0xpending",
+        readback: Array.new(12) { |index| { attempt: index + 1, position_present: false, confirmed: false } }
+      }
+    }, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "first_leg_not_confirmed", result.status
+    assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:lifecycle_state)
+    assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal true, result.receipt.fetch(:would_execute_live)
+    assert_equal [ "0xpending" ], result.receipt.fetch(:exchange_order_ids)
+    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+    assert_match "from=extended to=ethereal", result.receipt.fetch(:recovery_command)
   end
 
   test "second leg failure produces partial migration status" do
