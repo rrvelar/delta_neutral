@@ -3,6 +3,7 @@ require "net/http"
 
 class NadoHedgeExecutionService
   DEFAULT_SYMBOL = "ETH-PERP".freeze
+  ETH_PERP_PRODUCT_ID = 4
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   DEFAULT_ORDER_TTL_SECONDS = 3600
   RECEIVE_TIME_BUFFER_SECONDS = 5
@@ -927,14 +928,19 @@ class NadoHedgeExecutionService
     product = resolve_product_from_gateway
     domain = resolve_domain(product[:product_id])
     @product_metadata = product.merge(domain).then do |merged|
+      inherited_blockers = product.fetch(:blockers, [])
+      inherited_blockers = inherited_blockers - [ "Nado EIP-712 chain_id is unavailable" ] if merged[:chain_id]
       product_hash(
         product_id: merged[:product_id],
         chain_id: merged[:chain_id],
         price_increment_x18: merged[:price_increment_x18],
         size_increment_x18: merged[:size_increment_x18],
+        min_size_x18: merged[:min_size_x18],
+        trading_status: merged[:trading_status],
+        isolated_only: merged[:isolated_only],
         market_price: merged[:market_price],
         source: merged[:source],
-        blockers: product.fetch(:blockers, [])
+        blockers: inherited_blockers
       )
     end
   end
@@ -946,8 +952,8 @@ class NadoHedgeExecutionService
     data = JSON.parse(raw).with_indifferent_access
     product_id = positive_integer(data[:product_id] || data[:productId])
     chain_id = positive_integer(data[:chain_id] || data[:chainId] || @env["NADO_EIP712_CHAIN_ID"])
-    price_increment_x18 = positive_integer(data[:price_increment_x18] || data[:priceIncrementX18])
-    size_increment_x18 = positive_integer(data[:size_increment] || data[:sizeIncrement] || data[:size_increment_x18])
+    price_increment_x18 = increment_x18_from_fields(x18: data[:price_increment_x18] || data[:priceIncrementX18], decimal: data[:price_increment] || data[:priceIncrement])
+    size_increment_x18 = increment_x18_from_fields(x18: data[:size_increment_x18] || data[:sizeIncrementX18], decimal: data[:size_increment] || data[:sizeIncrement])
     product_hash(
       product_id: product_id,
       chain_id: chain_id,
@@ -964,27 +970,48 @@ class NadoHedgeExecutionService
   def resolve_product_from_gateway
     return product_hash(blockers: [ "NADO_GATEWAY_QUERY_BASE_URL or NADO_API_BASE_URL is required for Nado product metadata" ]) if query_base_url.blank?
 
-    symbols = get_query(type: "symbols", product_type: "perp")
-    all_products = get_query(type: "all_products")
+    symbols = safe_get_query(type: "symbols", product_type: "perp")
+    all_products = safe_get_query(type: "all_products")
     candidates = response_rows(symbols).select { |row| nado_eth_perp_candidate?(row) }
-    return product_hash(blockers: [ "Nado ETH-PERP product metadata missing" ]) if candidates.empty?
     return product_hash(blockers: [ "Nado ETH-PERP product metadata ambiguous" ]) if candidates.size > 1
 
-    symbol_row = candidates.first
-    product_id = positive_integer(symbol_row["product_id"] || symbol_row["productId"])
-    product_row = response_rows(all_products).find { |row| positive_integer(row["product_id"] || row["productId"]) == product_id } || {}
+    symbol_row = candidates.first || {}
+    product_id = positive_integer(symbol_row["product_id"] || symbol_row["productId"]) || ETH_PERP_PRODUCT_ID
+    product_row = response_rows(all_products).find { |row| positive_integer(row["product_id"] || row["productId"] || row["id"]) == product_id } ||
+      product_row_from_account_state(product_id) ||
+      symbol_row
+    metadata_blockers = []
+    metadata_blockers << "Nado ETH-PERP product metadata missing from symbols/all_products; using documented product_id=4 fallback." if candidates.empty? && product_row.blank?
     product_hash(
       product_id: product_id,
-      price_increment_x18: positive_integer(product_row["price_increment_x18"] || product_row["priceIncrementX18"] || product_row.dig("book_info", "price_increment_x18")),
-      size_increment_x18: positive_integer(product_row["size_increment"] || product_row["sizeIncrement"] || product_row.dig("book_info", "size_increment")),
-      min_size_x18: positive_integer(product_row["min_size"] || product_row["minSize"] || product_row.dig("book_info", "min_size")),
+      price_increment_x18: increment_x18_from_fields(x18: product_row["price_increment_x18"] || product_row["priceIncrementX18"] || product_row.dig("book_info", "price_increment_x18"), decimal: product_row["price_increment"] || product_row["priceIncrement"] || product_row.dig("book_info", "price_increment")),
+      size_increment_x18: increment_x18_from_fields(x18: product_row["size_increment_x18"] || product_row["sizeIncrementX18"] || product_row.dig("book_info", "size_increment_x18"), decimal: product_row["size_increment"] || product_row["sizeIncrement"] || product_row.dig("book_info", "size_increment")),
+      min_size_x18: increment_x18_from_fields(x18: product_row["min_size_x18"] || product_row["minSizeX18"] || product_row.dig("book_info", "min_size_x18"), decimal: product_row["min_size"] || product_row["minSize"] || product_row.dig("book_info", "min_size")),
       trading_status: product_row["trading_status"] || product_row["tradingStatus"],
       isolated_only: product_row["isolated_only"] || product_row["isolatedOnly"],
-      market_price: resolve_market_price(product_id),
-      source: "GET /query?type=symbols + GET /query?type=all_products"
+      market_price: resolve_market_price(product_id) || market_price_from_product(product_row),
+      source: "GET /query?type=symbols + GET /query?type=all_products + GET /query?type=market_price",
+      blockers: metadata_blockers
     )
   rescue => e
     product_hash(blockers: [ "Nado product metadata unavailable: #{e.class}: #{e.message}" ])
+  end
+
+  def safe_get_query(params)
+    get_query(params)
+  rescue
+    {}
+  end
+
+  def product_row_from_account_state(product_id)
+    venue = @venue
+    return nil unless venue.respond_to?(:send)
+
+    state = venue.account_state
+    rows = Array(state[:raw_products] || state["raw_products"] || state[:products] || state["products"])
+    rows.find { |row| row.is_a?(Hash) && positive_integer(row["product_id"] || row["productId"] || row["id"]) == product_id }
+  rescue
+    nil
   end
 
   def resolve_domain(product_id)
@@ -1422,11 +1449,22 @@ class NadoHedgeExecutionService
 
     response = get_query(type: "market_price", product_id: product_id)
     data = response["data"].is_a?(Hash) ? response["data"] : response
-    bid = x18_to_decimal(data["bid_x18"])
-    ask = x18_to_decimal(data["ask_x18"])
-    bid && ask ? (bid + ask) / 2 : nil
+    bid = x18_to_decimal(data["bid_x18"] || data["bidX18"]) || decimal_or_nil(data["bid"])
+    ask = x18_to_decimal(data["ask_x18"] || data["askX18"]) || decimal_or_nil(data["ask"])
+    return (bid + ask) / 2 if bid && ask
+
+    x18_to_decimal(data["mark_price_x18"] || data["markPriceX18"] || data["oracle_price_x18"] || data["oraclePriceX18"] || data["price_x18"] || data["priceX18"]) ||
+      decimal_or_nil(data["mark_price"] || data["markPrice"] || data["oracle_price"] || data["oraclePrice"] || data["price"])
   rescue
     nil
+  end
+
+  def market_price_from_product(product)
+    return nil unless product.is_a?(Hash)
+
+    risk = product["risk"].is_a?(Hash) ? product["risk"] : {}
+    x18_to_decimal(risk["price_x18"] || risk["oracle_price_x18"] || product["price_x18"] || product["oracle_price_x18"]) ||
+      decimal_or_nil(product["mark_price"] || product["markPrice"] || product["oracle_price"] || product["oraclePrice"] || product["price"])
   end
 
   def build_appendix(reduce_only:, isolated_margin_x6:)
@@ -1496,7 +1534,7 @@ class NadoHedgeExecutionService
     notional = rounded_size * rounded_price
     margin = leverage&.positive? ? notional / leverage : nil
     margin_x6 = margin ? (margin * BigDecimal(1_000_000)).round(0).to_i : nil
-    blockers << "Nado isolated-margin order builder unavailable; refusing cross-margin submit." if mode == "isolated" && (!margin_x6 || margin_x6 <= 0)
+    blockers << "Nado isolated-margin order builder unavailable; refusing cross-margin submit." if mode == "isolated" && rounded_price.positive? && rounded_size.positive? && (!margin_x6 || margin_x6 <= 0)
     {
       margin_mode: mode,
       requested_leverage: leverage,
@@ -1572,6 +1610,22 @@ class NadoHedgeExecutionService
     BigDecimal((@env["AERODROME_NADO_REQUESTED_LEVERAGE"].presence || DEFAULT_REQUESTED_LEVERAGE).to_s)
   rescue ArgumentError
     nil
+  end
+
+  def increment_x18(value)
+    return nil if value.blank?
+    return positive_integer(value) if value.to_s !~ /\./
+
+    decimal = decimal_or_nil(value)
+    return nil unless decimal&.positive?
+
+    decimal_to_x18(decimal)
+  end
+
+  def increment_x18_from_fields(x18:, decimal:)
+    return positive_integer(x18) if x18.present?
+
+    increment_x18(decimal)
   end
 
   def decode_appendix(appendix)

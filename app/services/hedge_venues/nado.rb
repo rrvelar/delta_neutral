@@ -57,6 +57,7 @@ module HedgeVenues
         raw_positions_count: raw_position_like_rows.size,
         raw_slots_count: raw_slot_rows.size,
         raw_products_count: raw_product_rows.size,
+        raw_products: raw_product_rows,
         raw_position_like_count: raw_position_like_rows.size,
         unresolved_position_like_count: unresolved_position_like_rows.size,
         normalized_positions_count: positions.size,

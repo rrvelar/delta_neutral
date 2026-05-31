@@ -96,6 +96,7 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
 
     assert_equal false, preview.fetch(:ok)
     assert_includes preview.fetch(:blockers), "Nado market metadata missing mark_price and position asset0_price_usd is unavailable."
+    assert_not_includes preview.fetch(:blockers), "Nado isolated-margin order builder unavailable; refusing cross-margin submit."
     assert_no_match(/ArgumentError|BigDecimal/, report.to_json)
     assert_equal 0, preview.fetch(:orders_submitted)
     assert_equal 0, preview.fetch(:signatures_created)
@@ -110,6 +111,41 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal "2300.0", metadata.fetch(:market_price)
     assert_equal "0.001", metadata.fetch(:size_increment)
     assert_empty metadata.fetch(:blockers)
+  end
+
+  test "real Nado market metadata reads market price query for product id four" do
+    calls = []
+    service = NadoHedgeExecutionService.new(
+      env: {
+        "NADO_GATEWAY_QUERY_BASE_URL" => "https://nado.example",
+        "NADO_EIP712_CHAIN_ID" => "1",
+        "NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}"
+      },
+      http_get: ->(uri) {
+        calls << uri.query
+        params = Rack::Utils.parse_query(uri.query)
+        case params["type"]
+        when "symbols"
+          { "data" => [ { "product_id" => 4, "symbol" => "ETH-PERP", "type" => "perp" } ] }
+        when "all_products"
+          { "data" => [ { "product_id" => 4, "price_increment" => "1", "size_increment" => "0.001" } ] }
+        when "market_price"
+          { "data" => { "product_id" => 4, "bid_x18" => "2299000000000000000000", "ask_x18" => "2301000000000000000000" } }
+        when "contracts"
+          { "data" => { "chain_id" => 1 } }
+        else
+          { "data" => {} }
+        end
+      }
+    )
+
+    metadata = service.market_metadata(position: migration_position.tap { |item| item.update_column(:asset0_price_usd, nil) })
+
+    assert_equal "ok", metadata.fetch(:status)
+    assert_equal 4, metadata.fetch(:product_id)
+    assert_equal "2300.0", metadata.fetch(:market_price)
+    assert_equal "0.001", metadata.fetch(:size_increment)
+    assert calls.any? { |query| query.include?("type=market_price") && query.include?("product_id=4") }
   end
 
   test "real Nado market metadata blocks with precise blank fields" do
