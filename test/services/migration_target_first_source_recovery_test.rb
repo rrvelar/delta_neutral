@@ -1,122 +1,140 @@
 require "test_helper"
 
 class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
-  test "dry-run builds Extended buy reduce-only close when Ethereal target exists" do
-    result = recovery.run
+  test "ethereal to nado dry run recognizes source already manually closed and recommends finalization" do
+    position = migration_position(execution_venue: "ethereal")
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11"
+    ).run
 
-    assert_equal "dry_run", result.status
-    assert_empty result.blockers
-    assert_equal "buy", result.receipt.fetch(:planned_side)
-    assert_equal true, result.receipt.fetch(:reduce_only)
-    assert_equal "0.977", result.receipt.fetch(:size_eth)
-    assert_equal "1.0027", result.receipt.fetch(:expected_final_combined)
-    assert_equal true, result.receipt.fetch(:expected_inside_tolerance)
+    assert_equal "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE", result.status
+    assert_equal true, result.receipt.fetch(:source_already_flat)
+    assert_equal true, result.receipt.fetch(:finalization_recommended)
+    assert_match "from=ethereal to=nado", result.receipt.fetch(:finalization_command)
+    assert_equal "ethereal", position.hedge.reload.execution_venue
     assert_equal 0, result.receipt.fetch(:orders_submitted)
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
-  test "dry-run blocks if Ethereal target is missing" do
-    result = recovery(ethereal_short: "0").run
+  test "ethereal to nado recovery closes only Ethereal source and finalizes after safe readback" do
+    position = migration_position(execution_venue: "ethereal")
+    calls = []
+    leg_runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: "ethereal-close",
+        after_short_eth: "0",
+        receipt: { exchange_order_id: "ethereal-close", orders_placed: 1, signatures_created: 1 }
+      }
+    end
 
-    assert_equal "dry_run", result.status
-    assert_includes result.blockers, "Ethereal target short must be present"
-  end
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "1.11",
+      nado_short: "1.11",
+      target: "1.11",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env,
+      leg_runner: leg_runner
+    ).run
 
-  test "dry-run blocks if Nado is not flat" do
-    result = recovery(nado_short: "0.01").run
-
-    assert_includes result.blockers, "Nado must be flat before source-close recovery"
-  end
-
-  test "dry-run blocks if Extended source short is zero" do
-    result = recovery(extended_short: "0").run
-
-    assert_includes result.blockers, "Extended source short must be present"
-  end
-
-  test "live mocked close confirms source recovery" do
-    lifecycle = FakeLifecycle.new(final_short: "0")
-    result = recovery(live: true, confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION, env: live_env, lifecycle: lifecycle).run
-
-    assert_equal "SOURCE_CLOSE_RECOVERY_CONFIRMED", result.status
-    assert_equal 1, lifecycle.calls
-    assert_equal "close_only", lifecycle.last_args.fetch(:mode)
-    assert_equal BigDecimal("0.977"), lifecycle.last_args.fetch(:size_eth)
+    assert_equal "SOURCE_CLOSE_RECOVERY_CONFIRMED", result.status, result.blockers.inspect
+    assert_equal 1, calls.size
+    assert_equal "ethereal", calls.first.fetch(:venue)
+    assert_equal "buy", calls.first.fetch(:side)
+    assert_equal true, calls.first.fetch(:reduce_only)
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, result.receipt.fetch(:production_venue_finalized)
     assert_equal 1, result.receipt.fetch(:orders_submitted)
     assert_equal 1, result.receipt.fetch(:signatures_created)
-    assert_equal "extended", position.hedge.reload.execution_venue
   end
 
-  test "live blocks without exact confirmation and recovery gate" do
-    lifecycle = FakeLifecycle.new(final_short: "0")
-    result = recovery(live: true, confirmation: "wrong", env: live_env.except("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED"), lifecycle: lifecycle).run
+  test "nado to ethereal recovery builds Nado reduce only source close" do
+    position = migration_position(execution_venue: "nado")
+    result = recovery(
+      position: position,
+      from: "nado",
+      to: "ethereal",
+      nado_short: "0.8",
+      ethereal_short: "0.8",
+      target: "0.8"
+    ).run
 
-    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
-    assert_includes result.blockers, "submitted confirmation must equal #{MigrationTargetFirstSourceRecovery::CONFIRMATION}"
-    assert_includes result.blockers, "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true"
-    assert_equal 0, lifecycle.calls
+    leg = result.receipt.fetch(:planned_source_close_leg)
+    assert_equal "dry_run", result.status
+    assert_equal "nado", leg.fetch(:venue)
+    assert_equal "buy", leg.fetch(:side)
+    assert_equal true, leg.fetch(:reduce_only)
+    assert_equal "0.8", leg.fetch(:size_eth)
     assert_equal 0, result.receipt.fetch(:orders_submitted)
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
   private
 
-  def recovery(extended_short: "0.977", ethereal_short: "1.0027", nado_short: "0", live: false, confirmation: nil, env: {}, lifecycle: FakeLifecycle.new(final_short: "0"))
+  def recovery(position:, from:, to:, extended_short: "0", ethereal_short: "0", nado_short: "0", target:, live: false, confirmation: nil, env: {}, leg_runner: nil)
     MigrationTargetFirstSourceRecovery.new(
       position: position,
-      from: "extended",
-      to: "ethereal",
-      dry_run: !live,
+      from: from,
+      to: to,
       live: live,
       confirmation: confirmation,
       env: env,
-      extended_venue: FakeExtendedVenue.new(short: extended_short),
-      ethereal_venue: FakeReadOnlyVenue.new(short: ethereal_short, venue: "Ethereal"),
-      nado_venue: FakeReadOnlyVenue.new(short: nado_short, venue: "Nado"),
-      fresh_target: FakeFreshTarget.new(target: "1.003478960323181"),
-      lifecycle_factory: ->(_lifecycle_env, _venue) { lifecycle },
-      receipt_dir: Rails.root.join("tmp/test-target-first-source-recovery-#{SecureRandom.hex(4)}")
+      extended_venue: FakeVenue.new("extended", extended_short),
+      ethereal_venue: FakeVenue.new("ethereal", ethereal_short),
+      nado_venue: FakeVenue.new("nado", nado_short),
+      fresh_target: FreshTarget.new(target),
+      leg_runner: leg_runner,
+      receipt_dir: Rails.root.join("tmp/test-migration-recoveries-#{SecureRandom.hex(4)}")
     )
   end
 
-  def position
-    @position ||= begin
-      current = Position.create!(
-        user: users(:one),
-        wallet: wallets(:one),
-        dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
-        source: Position::SOURCE_MELLOW_AUTOPILOT,
-        mellow_metadata: JSON.generate({ "hedge_ready" => true }),
-        asset0: "WETH",
-        asset1: "USDC",
-        asset0_amount: "1.003478960323181",
-        asset1_amount: "1000",
-        asset0_price_usd: "2000",
-        asset1_price_usd: "1",
-        external_id: SecureRandom.hex(4),
-        active: true
-      )
-      current.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
-      current
-    end
-  end
-
-  def live_env
+  def recovery_env
     {
       "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED" => "true",
-      "EXTENDED_LIVE_ENABLED" => "true",
-      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+      "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
       "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
       "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false",
       "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false"
     }
   end
 
-  class FakeFreshTarget
-    def initialize(target:)
-      @target = target
-    end
+  def migration_position(execution_venue:)
+    position = Position.create!(
+      user: users(:one),
+      wallet: wallets(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      source: Position::SOURCE_MELLOW_AUTOPILOT,
+      mellow_metadata: JSON.generate({ "hedge_ready" => true }),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "1.11",
+      asset1_amount: "1000",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      external_id: SecureRandom.hex(4),
+      active: true
+    )
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: execution_venue)
+    position
+  end
 
+  class FreshTarget
+    def initialize(target) = @target = target
     def resolve(refresh_if_stale:)
       {
         status: "ok",
@@ -124,7 +142,6 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
         target_source: "current_share_token_resolver",
         exposure_source: "current_share_token_resolver",
         exposure_refreshed_at: Time.current.iso8601,
-        exposure_stale: false,
         blockers: [],
         orders_submitted: 0,
         signatures_created: 0
@@ -132,76 +149,22 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     end
   end
 
-  class FakeReadOnlyVenue
-    def initialize(short:, venue:)
+  class FakeVenue
+    def initialize(name, short)
+      @name = name
       @short = BigDecimal(short)
-      @venue = venue
     end
 
     def read_position(symbol:)
       return nil if @short.zero?
 
-      { venue: @venue, symbol: symbol, side: "short", short_size: @short.to_s("F") }
+      { venue: @name, short_size: @short, size: -@short, symbol: "ETH-PERP" }
     end
 
     def account_state
-      { open_orders_count: 0 }
-    end
-  end
-
-  class FakeExtendedVenue < FakeReadOnlyVenue
-    attr_reader :env
-
-    def initialize(short:)
-      super(short: short, venue: "Extended")
-      @env = {}
-    end
-
-    def close_preview(symbol:, size_eth:)
-      size = BigDecimal(size_eth.to_s)
-      {
-        payload: {
-          action: "close_short",
-          symbol: symbol,
-          side: "buy",
-          extended_side: "BUY",
-          reduce_only: true,
-          requested_size_eth: size.to_s("F"),
-          rounded_size_eth: size.to_s("F"),
-          estimated_notional_usd: (size * BigDecimal("2000")).to_s("F"),
-          validation_blockers: []
-        },
-        blockers: [],
-        warnings: []
-      }
+      { open_orders_count: 0, blockers: [], warnings: [] }
     end
 
     def live_enabled? = true
-  end
-
-  class FakeLifecycle
-    attr_reader :calls, :last_args
-
-    def initialize(final_short:)
-      @final_short = final_short
-      @calls = 0
-    end
-
-    def run(**kwargs)
-      @calls += 1
-      @last_args = kwargs
-      ExtendedMainnetLifecycleCheck::Result.new(
-        "success",
-        [],
-        [],
-        {
-          exchange_order_id: "extended-close-1",
-          orders_placed: 1,
-          signatures_created: 1,
-          readback_attempts: [ { attempt: 1, short_size: @final_short, confirmed: true } ],
-          final_status: "success"
-        }
-      )
-    end
   end
 end

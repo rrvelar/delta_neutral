@@ -92,6 +92,7 @@ class MigrationManualLiveCanaryRunner
       orders_submitted: receipt[:orders_placed].to_i,
       orders_placed: receipt[:orders_placed].to_i,
       signatures_created: receipt[:signatures_created].to_i,
+      would_execute_live: receipt[:orders_placed].to_i.positive?,
       blockers: result.blockers,
       warnings: result.warnings
     }

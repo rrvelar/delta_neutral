@@ -128,6 +128,45 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "runner receipt reflects live target submit when executor stops after first leg" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "first_leg_not_confirmed",
+          to_leg_execution: { confirmed: false },
+          from_leg_execution: nil,
+          final_inside_tolerance: false,
+          exchange_order_ids: [ "0x3845e7" ],
+          orders_placed: 1,
+          signatures_created: 1,
+          blockers: [ "First migration leg was not confirmed; second leg was not submitted." ],
+          warnings: plan.fetch(:warnings)
+        )
+        HedgeVenueMigrationExecutor::Result.new("first_leg_not_confirmed", receipt.fetch(:blockers), receipt.fetch(:warnings), receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "ethereal",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "TARGET_LEG_FAILED_SOURCE_UNCHANGED", result.status
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal true, result.receipt.fetch(:would_execute_live)
+    assert_equal [ "0x3845e7" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
   test "runner blocked result uses the same canonical planner blockers" do
     env = ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")
     plan = MigrationManualCanaryPlanner.new(

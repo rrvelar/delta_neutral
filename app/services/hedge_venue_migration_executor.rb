@@ -58,6 +58,10 @@ class HedgeVenueMigrationExecutor
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     unless leg_confirmed?(first_leg)
+      receipt[:orders_placed] = leg_order_count(first_leg)
+      receipt[:signatures_created] = leg_signature_count(first_leg)
+      receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
+      receipt[:submitted] = receipt[:orders_placed].positive?
       receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
@@ -212,6 +216,7 @@ class HedgeVenueMigrationExecutor
           service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
         end
       end
+      result = service.reconcile_pending_result(result)
       normalize_service_result(result, leg)
     end
 
@@ -283,6 +288,10 @@ class HedgeVenueMigrationExecutor
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     unless leg_confirmed?(first_leg)
+      receipt[:orders_placed] = leg_order_count(first_leg)
+      receipt[:signatures_created] = leg_signature_count(first_leg)
+      receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
+      receipt[:submitted] = receipt[:orders_placed].positive?
       receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true

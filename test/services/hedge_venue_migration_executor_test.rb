@@ -125,6 +125,76 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_match "from=extended to=ethereal", result.receipt.fetch(:recovery_command)
   end
 
+  test "Nado target leg pending submit is reconciled before executor stops" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      extended_short_eth: "0",
+      ethereal_short_eth: "0.8",
+      nado_short_eth: "0"
+    )
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0x3845e7",
+      action_plan: { expected_after_short_eth: "0.8" }
+    })
+    confirmed = NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0x3845e7",
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      reconciled_after_pending: true
+    })
+    fake_service = Class.new do
+      attr_reader :reconciled
+      def initialize(pending, confirmed)
+        @pending = pending
+        @confirmed = confirmed
+        @reconciled = false
+      end
+      def open_short(**_kwargs) = @pending
+      def reconcile_pending_result(result)
+        @reconciled = true
+        result.status == "submitted_but_readback_pending" ? @confirmed : result
+      end
+    end.new(pending, confirmed)
+    first_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), venue_builder: fake_builder)
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      calls == 1 ? first_runner.call(leg, context: context) : { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, after_short_eth: "0", exchange_order_id: "ethereal-close" }
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+        position: position,
+        from_venue: "ethereal",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "success", result.status, result.blockers.inspect
+      assert_equal true, fake_service.reconciled
+      assert_equal 2, calls
+      assert_equal "nado", position.hedge.reload.execution_venue
+    end
+  end
+
   test "second leg failure produces partial migration status" do
     position = migration_position
     calls = []
