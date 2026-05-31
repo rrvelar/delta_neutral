@@ -84,6 +84,34 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  class ActiveAutoReadinessStub
+    attr_reader :calls, :payload
+
+    def initialize(payload)
+      @payload = payload
+      @calls = []
+    end
+
+    def report(position:)
+      @calls << position
+      @payload
+    end
+  end
+
+  class ActiveAutoRebalanceStub
+    attr_reader :calls
+
+    def initialize(result)
+      @result = result
+      @calls = []
+    end
+
+    def run(position:, dry_run:, live:, max_slippage:, one_shot:, confirmation: nil)
+      @calls << { position: position, dry_run: dry_run, live: live, max_slippage: max_slippage, one_shot: one_shot, confirmation: confirmation }
+      @result
+    end
+  end
+
   def nado_mellow_hedge(weth_exposure: "1.2", target: "1.0", tolerance: "0.05")
     Position.update_all(active: false)
     position = aerodrome_position(
@@ -101,6 +129,67 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       }.to_json
     )
     Hedge.create!(position: position, target: target, tolerance: tolerance, active: true, execution_venue: "nado")
+  end
+
+  def nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2", blocker: nil)
+    drift = BigDecimal(target) - BigDecimal(current)
+    {
+      active_auto_venue: "nado",
+      target_source: "current_share_token_resolver",
+      exposure_refreshed_at: Time.current.iso8601,
+      target_short_eth: target,
+      active_current_short_eth: current,
+      current_short_eth: current,
+      active_drift_eth: drift.to_s("F"),
+      active_tolerance_eth: "0.036",
+      planned_auto_action: action,
+      active_planned_auto_action: action,
+      side: action == "decrease_short" ? "buy" : (action == "increase_short" ? "sell" : nil),
+      reduce_only: action == "decrease_short" ? true : (action == "increase_short" ? false : nil),
+      requested_size_eth: drift.abs.to_s("F"),
+      expected_after_short_eth: target,
+      active_within_tolerance: action == "no_op",
+      continuous_auto_ready: blocker.nil?,
+      blockers: [ blocker ].compact,
+      orders_submitted: 0,
+      signatures_created: 0
+    }
+  end
+
+  def nado_auto_result(status: "submitted_and_confirmed", action: "increase_short", current: "0.5", target: "1.2", exchange_order_id: "0x#{"ab" * 32}", message: nil)
+    side = action == "decrease_short" ? "buy" : "sell"
+    reduce_only = action == "decrease_short"
+    delta = (BigDecimal(target) - BigDecimal(current)).abs.to_s("F")
+    execution = {
+      final_status: status,
+      final_message: message || status,
+      submitted_order_summary: {
+        side: side,
+        reduce_only: reduce_only,
+        rounded_size_eth: delta,
+        estimated_notional_usd: "100"
+      },
+      exchange_order_id: exchange_order_id,
+      post_submit_readback: status == "submitted_and_confirmed" ? { size: -BigDecimal(target) } : nil,
+      submit_response_classification: { message: message }
+    }
+    HedgeVenueAutoRebalanceOnce::Result.new(status, [], [], {
+      venue: "nado",
+      active_auto_venue: "nado",
+      planned_auto_action: action,
+      current_short_eth: current,
+      target_short_eth: target,
+      requested_size_eth: delta,
+      side: side,
+      reduce_only: reduce_only,
+      expected_after_short_eth: target,
+      execution_receipt: execution,
+      exchange_order_id: exchange_order_id,
+      final_status: status,
+      orders_submitted: status.to_s.start_with?("submitted") ? 1 : 0,
+      signatures_created: status.to_s.start_with?("submitted") ? 1 : 0,
+      blockers: []
+    })
   end
 
   def build_mock_service(positions:, fills: [], fills_error: nil, subaccounts: [], subaccount_states: {},
@@ -202,14 +291,21 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   test "nado hedge sync does not instantiate Hyperliquid when auto gate disabled" do
     hedge = nado_mellow_hedge
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"))
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false") do
-      HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
-        assert_no_difference "ShortRebalance.count" do
-          HedgeSyncJob.perform_now(hedge.id)
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+          HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+            assert_no_difference "ShortRebalance.count" do
+              HedgeSyncJob.perform_now(hedge.id)
+            end
+          end
         end
       end
     end
+
+    assert_equal [ hedge.position ], readiness.calls
   end
 
   test "extended hedge sync skips without Hyperliquid or Extended order execution" do
@@ -284,19 +380,25 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   test "nado hedge sync increases short from Mellow target and readback" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" })
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2"))
+    runner = ActiveAutoRebalanceStub.new(nado_auto_result(action: "increase_short", current: "0.5", target: "1.2"))
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
-        HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
-          assert_difference "ShortRebalance.count", 1 do
-            HedgeSyncJob.perform_now(hedge.id)
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+            assert_difference "ShortRebalance.count", 1 do
+              HedgeSyncJob.perform_now(hedge.id)
+            end
           end
         end
       end
     end
 
-    assert_equal BigDecimal("0.7"), service.rebalance_calls.first.fetch(:delta_eth)
+    assert_equal 1, runner.calls.size
+    assert_equal false, runner.calls.first.fetch(:dry_run)
+    assert_equal true, runner.calls.first.fetch(:live)
+    assert_equal false, runner.calls.first.fetch(:one_shot)
     rebalance = hedge.short_rebalances.order(:id).last
     assert_equal "nado", rebalance.venue
     assert_equal "sell", rebalance.order_side
@@ -304,17 +406,91 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
   end
 
-  test "nado hedge sync reduces short with reduce only order" do
-    hedge = nado_mellow_hedge(weth_exposure: "1.0")
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-1.4"), symbol: "ETH-PERP" })
+  test "nado hedge sync uses canonical readiness when asset0 price is missing" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    hedge.position.update!(asset0_price_usd: nil)
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "no_op", current: "1.2", target: "1.2"))
 
-    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
-        HedgeSyncJob.perform_now(hedge.id)
+    HedgeVenueAutoReadiness.stub(:new, readiness) do
+      HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
       end
     end
 
-    assert_equal BigDecimal("-0.4"), service.rebalance_calls.first.fetch(:delta_eth)
+    assert_equal [ hedge.position ], readiness.calls
+  end
+
+  test "nado hedge sync blocks with canonical readiness blocker when auto disabled" do
+    hedge = nado_mellow_hedge
+    blocker = "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: blocker))
+
+    HedgeVenueAutoReadiness.stub(:new, readiness) do
+      HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal [ blocker ], readiness.payload.fetch(:blockers)
+  end
+
+  test "nado hedge sync blocks when Extended is not flat" do
+    hedge = nado_mellow_hedge
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: "Extended must be flat before Nado continuous auto"))
+
+    HedgeVenueAutoReadiness.stub(:new, readiness) do
+      HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  end
+
+  test "nado hedge sync blocks when Ethereal is not flat" do
+    hedge = nado_mellow_hedge
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: "Ethereal must be flat before Nado continuous auto"))
+
+    HedgeVenueAutoReadiness.stub(:new, readiness) do
+      HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  end
+
+  test "nado hedge sync blocks when Nado open orders exist" do
+    hedge = nado_mellow_hedge
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: "Nado auto requires open_orders_count=0"))
+
+    HedgeVenueAutoReadiness.stub(:new, readiness) do
+      HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+        assert_no_difference "ShortRebalance.count" do
+          HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+  end
+
+  test "nado hedge sync reduces short with reduce only order" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.0")
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "decrease_short", current: "1.4", target: "1.0"))
+    runner = ActiveAutoRebalanceStub.new(nado_auto_result(action: "decrease_short", current: "1.4", target: "1.0"))
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+        HedgeSyncJob.perform_now(hedge.id)
+        end
+      end
+    end
+
+    assert_equal 1, runner.calls.size
     rebalance = hedge.short_rebalances.order(:id).last
     assert_equal "buy", rebalance.order_side
     assert_equal true, rebalance.reduce_only
@@ -322,7 +498,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   test "nado hedge sync records isolated delta reduce strategy for target decrease" do
     hedge = nado_mellow_hedge(weth_exposure: "0.8")
-    result = NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
+    execution = {
       final_status: "submitted_and_confirmed",
       final_message: "Nado execute_place_orders accepted order.",
       action_plan: {
@@ -344,16 +520,32 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       },
       exchange_order_id: "0x#{"11" * 32}",
       post_submit_readback: { size: BigDecimal("-0.8") }
-    })
-    service = NadoAutoServiceStub.new(
-      current_position: { size: BigDecimal("-0.936"), symbol: "ETH-PERP", margin_mode: "isolated" },
-      result: result
+    }
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "decrease_short", current: "0.936", target: "0.8"))
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("submitted_and_confirmed", [], [], {
+        venue: "nado",
+        planned_auto_action: "decrease_short",
+        current_short_eth: "0.936",
+        target_short_eth: "0.8",
+        expected_after_short_eth: "0.8",
+        side: "buy",
+        reduce_only: true,
+        execution_receipt: execution,
+        exchange_order_id: "0x#{"11" * 32}",
+        final_status: "submitted_and_confirmed",
+        orders_submitted: 1,
+        signatures_created: 1,
+        blockers: []
+      })
     )
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
         assert_difference "ShortRebalance.count", 1 do
           HedgeSyncJob.perform_now(hedge.id)
+        end
         end
       end
     end
@@ -364,46 +556,48 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_equal true, rebalance.reduce_only
     assert_equal BigDecimal("0.8"), rebalance.new_short_size
     assert_equal "0x#{"11" * 32}", rebalance.exchange_order_id
-    assert_equal BigDecimal("-0.136"), service.rebalance_calls.first.fetch(:delta_eth)
+    assert_equal 1, runner.calls.size
   end
 
   test "nado hedge sync skips within tolerance" do
     hedge = nado_mellow_hedge(weth_exposure: "1.0", tolerance: "0.05")
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.98"), symbol: "ETH-PERP" })
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "no_op", current: "0.98", target: "1.0"))
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
         assert_no_difference "ShortRebalance.count" do
           HedgeSyncJob.perform_now(hedge.id)
+        end
         end
       end
     end
 
-    assert_empty service.rebalance_calls
+    assert_equal [ hedge.position ], readiness.calls
   end
 
   test "nado hedge sync blocks conflicting long readback" do
     hedge = nado_mellow_hedge
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("0.2"), symbol: "ETH-PERP" })
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(blocker: "current Nado position is long; manual action required"))
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
-        assert_difference "ShortRebalance.count", 1 do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called" }) do
+          assert_no_difference "ShortRebalance.count" do
           HedgeSyncJob.perform_now(hedge.id)
+          end
         end
       end
     end
 
-    rebalance = hedge.short_rebalances.order(:id).last
-    assert_equal ShortRebalance::STATUS_FAILED, rebalance.status
-    assert_match "current Nado position is long", rebalance.message
-    assert_empty service.rebalance_calls
+    assert_equal [ hedge.position ], readiness.calls
   end
 
   test "nado hedge sync records rejected recv_time exchange response message" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
-    result = NadoHedgeExecutionService::Result.new("failed_before_submit", [], [], {
+    execution = {
       final_status: "failed_before_submit",
+      final_message: "Nado execute_place_orders rejected order: error_code=2012 Request received more than 100 seconds before the 'recv_time'.",
       submitted_order_summary: {
         side: "sell",
         reduce_only: false,
@@ -425,13 +619,32 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
       },
       exchange_order_id: nil,
       post_submit_readback: nil
-    })
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" }, result: result)
+    }
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2"))
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("failed_before_submit", [], [], {
+        venue: "nado",
+        planned_auto_action: "increase_short",
+        current_short_eth: "0.5",
+        target_short_eth: "1.2",
+        expected_after_short_eth: "1.2",
+        side: "sell",
+        reduce_only: false,
+        execution_receipt: execution,
+        exchange_order_id: nil,
+        final_status: "failed_before_submit",
+        orders_submitted: 0,
+        signatures_created: 0,
+        blockers: []
+      })
+    )
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
         assert_difference "ShortRebalance.count", 1 do
           HedgeSyncJob.perform_now(hedge.id)
+        end
         end
       end
     end
@@ -447,7 +660,7 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
   test "nado hedge sync records accepted submit without confirmed readback as pending" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
-    result = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+    execution = {
       final_status: "submitted_but_readback_pending",
       final_message: "Nado submit accepted but readback did not confirm ETH-PERP position.",
       submitted_order_summary: {
@@ -468,13 +681,32 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
         { attempt: 3, position_present: false, confirmed: false }
       ],
       post_submit_readback: nil
-    })
-    service = NadoAutoServiceStub.new(current_position: { size: BigDecimal("-0.5"), symbol: "ETH-PERP" }, result: result)
+    }
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2"))
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("submitted_but_readback_pending", [], [], {
+        venue: "nado",
+        planned_auto_action: "increase_short",
+        current_short_eth: "0.5",
+        target_short_eth: "1.2",
+        expected_after_short_eth: "1.2",
+        side: "sell",
+        reduce_only: false,
+        execution_receipt: execution,
+        exchange_order_id: "0x#{"28" * 32}",
+        final_status: "submitted_but_readback_pending",
+        orders_submitted: 1,
+        signatures_created: 1,
+        blockers: []
+      })
+    )
 
     with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
-      NadoHedgeExecutionService.stub(:new, service) do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
         assert_difference "ShortRebalance.count", 1 do
           HedgeSyncJob.perform_now(hedge.id)
+        end
         end
       end
     end

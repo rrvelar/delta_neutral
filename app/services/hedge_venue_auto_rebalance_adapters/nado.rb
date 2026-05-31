@@ -21,7 +21,7 @@ module HedgeVenueAutoRebalanceAdapters
         current_position: @service.read_position,
         confirmation: confirmation,
         max_slippage: max_slippage,
-        require_confirmation: true
+        require_confirmation: one_shot
       )
       execution = @service.reconcile_pending_result(execution)
       result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, preview: preview, execution: execution.receipt)
