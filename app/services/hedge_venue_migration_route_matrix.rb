@@ -286,6 +286,8 @@ class HedgeVenueMigrationRouteMatrix
         :nado_open_orders_unavailable_reason,
         :nado_open_orders_read_diagnostics,
         :nado_market_read_available,
+        :nado_market_metadata_status,
+        :nado_market_metadata_blockers,
         :nado_open_short_preview_available,
         :nado_reduce_only_close_preview_available,
         :nado_reduce_only_close_preview_proof_mode,

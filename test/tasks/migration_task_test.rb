@@ -292,6 +292,51 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("sequence")
   end
 
+  test "rehearse Nado target route blocks cleanly without internal exception" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "extended"
+    ENV["to"] = "nado"
+    ENV["sequence"] = "target_first"
+
+    out, = capture_io { Rake::Task["migration:rehearse_route"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_rehearse_route", payload.fetch("action")
+    assert_equal true, payload.fetch("dry_run")
+    assert_no_match(/ArgumentError|BigDecimal|invalid value/, payload.to_json)
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("sequence")
+    Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
+  end
+
+  test "rehearse Nado source route blocks on flat source not internal exception" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "nado"
+    ENV["to"] = "ethereal"
+    ENV["sequence"] = "target_first"
+
+    out, = capture_io { Rake::Task["migration:rehearse_route"].invoke }
+    payload = JSON.parse(out)
+
+    assert_includes payload.fetch("blockers"), "source venue must have a real short before canary."
+    assert_no_match(/ArgumentError|BigDecimal|invalid value/, payload.to_json)
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("sequence")
+    Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
+  end
+
   test "run manual live canary task blocks without gates" do
     position = migration_position
     ENV["position_id"] = position.id.to_s

@@ -32,6 +32,8 @@ Relevant facts:
 Official sources:
 - https://docs.nado.xyz/developer-resources/api/gateway/queries/order
 - https://docs.nado.xyz/developer-resources/api/gateway/queries/orders
+- https://docs.nado.xyz/developer-resources/api/gateway/queries/market-prices
+- https://docs.nado.xyz/developer-resources/api/how-to/query-markets-and-products
 - https://docs.nado.xyz/developer-resources/api/gateway/queries/subaccount-info
 - https://docs.nado.xyz/developer-resources/api/order-appendix
 - https://nadohq.github.io/nado-python-sdk/api-reference.html
@@ -39,6 +41,7 @@ Official sources:
 Relevant facts:
 - Gateway order lookup uses `/query?type=order&product_id=...&digest=...`.
 - Gateway order-list lookup supports the `orders` query surface used by `HedgeVenues::Nado` for open-order readback.
+- Market metadata uses the product/symbol query plus market-price query. Nado documents `GET [GATEWAY_REST_ENDPOINT]/query?type=market_price&product_id=...`; response fields include `product_id`, `bid_x18`, and `ask_x18`, with prices scaled by 10^18.
 - Subaccount readback is available through gateway subaccount and isolated-position query surfaces.
 - The order appendix encodes isolated margin, order type, and reduce-only. The reduce-only bit prevents increasing exposure and is required for source close/reduce legs.
 - `NadoHedgeExecutionService` builds EIP-712 `Order` payloads, supports isolated open/increase, reduce-only delta decrease/close, submit response digest classification, and readback confirmation behind explicit live gates.

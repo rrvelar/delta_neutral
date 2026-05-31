@@ -25,6 +25,7 @@ class NadoMigrationReadiness
     blockers << nado_open_orders_unavailable_reason if !nado_open_orders_read_available? && nado_open_orders_unavailable_reason.present?
     blockers << "Nado open orders must be zero for migration proof." if nado_open_orders_count.to_i.positive?
     blockers << "Nado market metadata is unavailable." unless nado_market_read_available?
+    blockers.concat(nado_market_blockers)
     blockers.concat(account_blockers)
 
     target_preview = target_leg_preview
@@ -53,6 +54,9 @@ class NadoMigrationReadiness
       nado_open_orders_unavailable_reason: nado_open_orders_unavailable_reason,
       nado_open_orders_read_diagnostics: nado_open_orders_read_diagnostics,
       nado_market_read_available: nado_market_read_available?,
+      nado_market_metadata: nado_market_metadata,
+      nado_market_metadata_status: nado_market_metadata[:status],
+      nado_market_metadata_blockers: nado_market_blockers,
       nado_open_short_preview_available: target_preview_available?(target_preview),
       nado_reduce_only_close_preview_available: source_preview_available?(source_preview) || source_preview_available?(source_proof),
       nado_reduce_only_close_preview_proof_mode: nado_current_short&.positive? ? "current_position" : "synthetic",
@@ -161,7 +165,34 @@ class NadoMigrationReadiness
   end
 
   def nado_market_read_available?
-    [ target_leg_preview, source_leg_preview, source_leg_preview_proof ].compact.any? { |preview| preview.dig(:payload_summary, :product_id).present? || preview.dig(:payload_summary, :rounded_price).present? }
+    nado_market_metadata[:status] == "ok"
+  end
+
+  def nado_market_metadata
+    return @nado_market_metadata if defined?(@nado_market_metadata)
+
+    if nado_service.respond_to?(:market_metadata)
+      return @nado_market_metadata = nado_service.market_metadata(position: position)
+    end
+
+    preview = [ target_leg_preview, source_leg_preview, source_leg_preview_proof ].compact.find { |item| item.dig(:payload_summary, :product_id).present? || item.dig(:payload_summary, :rounded_price).present? }
+    @nado_market_metadata = {
+      status: preview ? "ok" : "blocked",
+      product_id: preview&.dig(:payload_summary, :product_id),
+      market_price: preview&.dig(:payload_summary, :rounded_price),
+      blockers: preview ? [] : [ "Nado market metadata is unavailable." ],
+      warnings: []
+    }
+  rescue => e
+    @nado_market_metadata = {
+      status: "blocked",
+      blockers: [ "Nado market metadata unavailable: #{e.class}: #{e.message}" ],
+      warnings: []
+    }
+  end
+
+  def nado_market_blockers
+    Array(nado_market_metadata[:blockers] || nado_market_metadata["blockers"])
   end
 
   def nado_current_short
@@ -342,7 +373,7 @@ class NadoMigrationReadiness
     missing = []
     missing << "Nado current position readback" unless nado_position_read_available?
     missing << "Nado open orders readback" unless nado_open_orders_read_available?
-    missing << "Nado market metadata" unless nado_market_read_available?
+    missing.concat(nado_market_read_available? ? [] : nado_market_blockers.presence || [ "Nado market metadata" ])
     missing << "Nado open/increase short payload preview" if target_role? && !target_preview_available?(target_preview)
     missing << "Nado reduce-only close/reduce payload preview" if source_role? && !source_preview_available?(source_preview) && !source_preview_available?(source_proof)
     missing << LIVE_BLOCKER unless bool_env("AERODROME_NADO_LIVE_MIGRATION_ENABLED") && bool_env("AERODROME_NADO_HEDGE_LIVE_ENABLED")

@@ -44,6 +44,13 @@ class HedgeVenueMigrationRouteMatrixTest < ActiveSupport::TestCase
     end
   end
 
+  test "Nado route blockers never expose internal BigDecimal exceptions" do
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position).report
+    nado_payload = matrix.fetch(:routes).select { |item| [ item.fetch(:from_venue), item.fetch(:to_venue) ].include?("nado") }.to_json
+
+    assert_no_match(/ArgumentError|BigDecimal|invalid value/, nado_payload)
+  end
+
   test "Extended to Nado route uses readiness and can expose dry run target leg preview" do
     service = FakeNadoService.new(current_position: nil)
     matrix = HedgeVenueMigrationRouteMatrix.new(position: migration_position, nado_service: service).report

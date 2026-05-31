@@ -31,8 +31,9 @@ class NadoHedgeExecutionService
 
   def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
     if action.to_s == "rebalance"
+      delta = signed_decimal(size_eth)
       plan = plan_rebalance(
-        target_size_eth: short_size(current_position) + BigDecimal(size_eth.to_s),
+        target_size_eth: short_size(current_position) + delta,
         current_position: current_position,
         tolerance_eth: BigDecimal("0")
       )
@@ -54,7 +55,7 @@ class NadoHedgeExecutionService
       live_supported: true,
       live_enabled: @venue.live_enabled?,
       action: action,
-      action_plan: action.to_s == "rebalance" ? plan_rebalance(target_size_eth: short_size(current_position) + BigDecimal(size_eth.to_s), current_position: current_position, tolerance_eth: BigDecimal("0")) : nil,
+      action_plan: action.to_s == "rebalance" ? plan_rebalance(target_size_eth: short_size(current_position) + signed_decimal(size_eth), current_position: current_position, tolerance_eth: BigDecimal("0")) : nil,
       target_hedge_size_eth: decimal_string(size_eth),
       rounded_order_size_eth: order.dig(:summary, :rounded_size_eth),
       estimated_notional_usd: order.dig(:summary, :estimated_notional_usd),
@@ -87,7 +88,7 @@ class NadoHedgeExecutionService
 
   def plan_rebalance(target_size_eth:, current_position:, tolerance_eth:)
     current_short = short_size(current_position)
-    target_short = BigDecimal(target_size_eth.to_s)
+    target_short = signed_decimal(target_size_eth)
     tolerance = BigDecimal(tolerance_eth.to_s)
     delta = target_short - current_short
     action = if current_position == :unavailable
@@ -137,7 +138,7 @@ class NadoHedgeExecutionService
       action: "resume_reopen_after_delayed_flat",
       current_size_eth: decimal_string(short_size(current_position)),
       target_size_eth: decimal_string(target_size_eth),
-      delta_eth: decimal_string(BigDecimal(target_size_eth.to_s) - short_size(current_position)),
+      delta_eth: decimal_string(signed_decimal(target_size_eth) - short_size(current_position)),
       tolerance_eth: "0",
       current_margin_mode: margin_mode(current_position),
       desired_margin_mode: desired_margin_mode,
@@ -271,6 +272,7 @@ class NadoHedgeExecutionService
     order_size = full_close ? short_size(current_position) : order_size(size_eth)
     product = product_metadata
     price = order_price(position: position, side: side, max_slippage: max_slippage, product: product)
+    price_blockers = price ? [] : [ "Nado market metadata missing mark_price and position asset0_price_usd is unavailable." ]
     rounded_price = round_price(price, side: side, product: product)
     rounded_size = round_size(order_size, product: product)
     amount_x18 = decimal_to_x18(rounded_size)
@@ -294,7 +296,7 @@ class NadoHedgeExecutionService
     timing = order_timing_summary(order_fields, local_time: now)
 
     {
-      ok: product.fetch(:blockers).empty? && timing.fetch(:blockers).empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
+      ok: product.fetch(:blockers).empty? && price_blockers.empty? && timing.fetch(:blockers).empty? && rounded_size.positive? && rounded_price.positive? && typed_data.present?,
       summary: {
         venue: "Nado",
         symbol: DEFAULT_SYMBOL,
@@ -308,6 +310,9 @@ class NadoHedgeExecutionService
         rounded_size_eth: decimal_string(rounded_size),
         rounded_price: decimal_string(rounded_price),
         estimated_notional_usd: decimal_string(rounded_size * rounded_price),
+        market_metadata_status: product.fetch(:blockers).empty? && price_blockers.empty? ? "ok" : "blocked",
+        market_metadata_source: product[:source],
+        market_price_source: product[:market_price] ? "nado_market_price" : "position_asset0_price_usd",
         amount_x18: amount_x18.to_s,
         sender: order_fields[:sender],
         current_position_subaccount: isolated_position_subaccount(current_position),
@@ -329,13 +334,46 @@ class NadoHedgeExecutionService
       typed_data: typed_data,
       order_fields: order_fields,
       product: product,
-      blockers: product.fetch(:blockers) + timing.fetch(:blockers) + margin.fetch(:blockers) + full_close_size_blockers(full_close: full_close, order_size: order_size, rounded_size: rounded_size),
+      blockers: product.fetch(:blockers) + price_blockers + timing.fetch(:blockers) + margin.fetch(:blockers) + full_close_size_blockers(full_close: full_close, order_size: order_size, rounded_size: rounded_size),
       warnings: product.fetch(:warnings)
     }
   end
 
   def read_position
     safe_read_position
+  end
+
+  def market_metadata(position: nil)
+    product = product_metadata
+    price = product[:market_price] || (position ? position_eth_price(position) : nil)
+    blockers = product.fetch(:blockers).dup
+    blockers << "Nado market metadata missing mark_price and position asset0_price_usd is unavailable." unless price
+    {
+      status: blockers.empty? ? "ok" : "blocked",
+      product_id: product[:product_id],
+      symbol: DEFAULT_SYMBOL,
+      source: product[:source],
+      market_price: decimal_string(price),
+      market_price_source: product[:market_price] ? "nado_market_price" : "position_asset0_price_usd",
+      price_increment_x18: product[:price_increment_x18],
+      price_increment: decimal_string(x18_to_decimal(product[:price_increment_x18])),
+      size_increment_x18: product[:size_increment_x18],
+      size_increment: decimal_string(x18_to_decimal(product[:size_increment_x18])),
+      min_size_x18: product[:min_size_x18],
+      min_size_usd: decimal_string(x18_to_decimal(product[:min_size_x18])),
+      trading_status: product[:trading_status],
+      isolated_only: product[:isolated_only],
+      blockers: blockers,
+      warnings: product.fetch(:warnings)
+    }
+  rescue => e
+    {
+      status: "blocked",
+      product_id: nil,
+      symbol: DEFAULT_SYMBOL,
+      blockers: [ "Nado market metadata unavailable: #{e.class}: #{e.message}" ],
+      warnings: []
+    }
   end
 
   private
@@ -360,6 +398,7 @@ class NadoHedgeExecutionService
     product = product_metadata
     order_size = order_size(size_eth)
     price = order_price(position: position, side: "buy", max_slippage: max_slippage, product: product)
+    price_blockers = price ? [] : [ "Nado market metadata missing mark_price and position asset0_price_usd is unavailable." ]
     rounded_price = round_price(price, side: "buy", product: product)
     rounded_size = round_size(order_size, product: product)
     amount_x18 = decimal_to_x18(rounded_size)
@@ -380,7 +419,7 @@ class NadoHedgeExecutionService
     timing = order_timing_summary(order_fields, local_time: now)
     before_short = short_size(current_position)
     expected_after = before_short - rounded_size
-    blockers = product.fetch(:blockers) + timing.fetch(:blockers) + delta_probe_position_blockers(direction: "decrease", current_position: current_position, rounded_size: rounded_size)
+    blockers = product.fetch(:blockers) + price_blockers + timing.fetch(:blockers) + delta_probe_position_blockers(direction: "decrease", current_position: current_position, rounded_size: rounded_size)
     warnings = product.fetch(:warnings) + [ delta_reduce_warning(probe: probe) ]
 
     {
@@ -401,6 +440,9 @@ class NadoHedgeExecutionService
         rounded_size_eth: decimal_string(rounded_size),
         rounded_price: decimal_string(rounded_price),
         estimated_notional_usd: decimal_string(rounded_size * rounded_price),
+        market_metadata_status: product.fetch(:blockers).empty? && price_blockers.empty? ? "ok" : "blocked",
+        market_metadata_source: product[:source],
+        market_price_source: product[:market_price] ? "nado_market_price" : "position_asset0_price_usd",
         amount_x18: amount_x18.to_s,
         amount_sign: "positive",
         sender: order_fields[:sender],
@@ -439,7 +481,7 @@ class NadoHedgeExecutionService
 
   def annotate_delta_probe_order(order:, direction:, current_position:)
     before_short = short_size(current_position)
-    rounded_size = BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)
+    rounded_size = signed_decimal(order.dig(:summary, :rounded_size_eth))
     expected_after = before_short + rounded_size
     summary = order.fetch(:summary).merge(
       action: "isolated_delta_probe",
@@ -483,7 +525,7 @@ class NadoHedgeExecutionService
     blockers << "Nado signer service is unavailable" if signer_url.present? && !signer_available?
     blockers << "Nado submit URL is not configured" if submit_base_url.blank?
     blockers << "NADO_ACCOUNT_SUBACCOUNT or derivable NADO_ACCOUNT_ADDRESS is required" if subaccount.blank?
-    blockers.concat(delta_probe_position_blockers(direction: order.dig(:summary, :probe_direction), current_position: current_position, rounded_size: BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)))
+    blockers.concat(delta_probe_position_blockers(direction: order.dig(:summary, :probe_direction), current_position: current_position, rounded_size: signed_decimal(order.dig(:summary, :rounded_size_eth))))
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
   end
@@ -599,7 +641,7 @@ class NadoHedgeExecutionService
     close_blockers = live_blockers(position: position, action: "close", size_eth: short_size(current_position), current_position: current_position, confirmation: confirmation, order: close_order)
     reopen_order = nil
     reopen_blockers = []
-    target_size = BigDecimal(plan.fetch(:target_size_eth))
+    target_size = signed_decimal(plan.fetch(:target_size_eth))
     if close_blockers.empty? && target_size.positive?
       reopen_order = build_order_preview(position: position, action: "open", size_eth: target_size, max_slippage: max_slippage, current_position: nil)
       reopen_blockers = live_blockers(position: position, action: "open", size_eth: target_size, current_position: nil, confirmation: confirmation, order: reopen_order)
@@ -806,7 +848,7 @@ class NadoHedgeExecutionService
     blockers << "Existing Nado position margin mode is unknown; close existing position before reopening isolated." if isolated_increase?(action, size_eth) && margin_mode(current_position) == "unknown"
     blockers << "current Nado position already exists; use close/readback before opening" if action.to_s == "open" && position_size(current_position).nonzero?
     blockers << "no current Nado short to close" if action.to_s == "close" && short_size(current_position).zero?
-    blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative? && short_size(current_position).zero?
+    blockers << "no current Nado short to reduce" if action.to_s == "rebalance" && signed_decimal(size_eth).negative? && short_size(current_position).zero?
     blockers << isolated_partial_reduce_blocker if isolated_partial_reduce?(action: action, size_eth: size_eth, order_size: preview_order_size, current_position: current_position) && !partial_isolated_reduce_supported?
     blockers.concat(order.fetch(:blockers, []))
     blockers.uniq
@@ -845,7 +887,7 @@ class NadoHedgeExecutionService
     return nil unless action.to_s == "rebalance"
 
     current_short = short_size(pre_position)
-    rounded_size = BigDecimal(order.dig(:summary, :rounded_size_eth).to_s)
+    rounded_size = signed_decimal(order.dig(:summary, :rounded_size_eth))
     delta = order.dig(:summary, :side).to_s == "buy" ? -rounded_size : rounded_size
     {
       action: delta.negative? ? "isolated_decrease" : "isolated_increase",
@@ -911,6 +953,7 @@ class NadoHedgeExecutionService
       chain_id: chain_id,
       price_increment_x18: price_increment_x18,
       size_increment_x18: size_increment_x18,
+      min_size_x18: positive_integer(data[:min_size] || data[:minSize] || data[:min_size_x18] || data[:minSizeX18]),
       market_price: decimal_or_nil(data[:market_price] || data[:marketPrice]),
       source: "configured NADO_ETH_PERP_PRODUCT_METADATA_JSON"
     )
@@ -934,6 +977,9 @@ class NadoHedgeExecutionService
       product_id: product_id,
       price_increment_x18: positive_integer(product_row["price_increment_x18"] || product_row["priceIncrementX18"] || product_row.dig("book_info", "price_increment_x18")),
       size_increment_x18: positive_integer(product_row["size_increment"] || product_row["sizeIncrement"] || product_row.dig("book_info", "size_increment")),
+      min_size_x18: positive_integer(product_row["min_size"] || product_row["minSize"] || product_row.dig("book_info", "min_size")),
+      trading_status: product_row["trading_status"] || product_row["tradingStatus"],
+      isolated_only: product_row["isolated_only"] || product_row["isolatedOnly"],
       market_price: resolve_market_price(product_id),
       source: "GET /query?type=symbols + GET /query?type=all_products"
     )
@@ -953,7 +999,7 @@ class NadoHedgeExecutionService
     { chain_id: nil, domain_source: nil }
   end
 
-  def product_hash(product_id: nil, chain_id: nil, price_increment_x18: nil, size_increment_x18: nil, market_price: nil, source: nil, blockers: [])
+  def product_hash(product_id: nil, chain_id: nil, price_increment_x18: nil, size_increment_x18: nil, min_size_x18: nil, trading_status: nil, isolated_only: nil, market_price: nil, source: nil, blockers: [])
     blockers = blockers.dup
     blockers << "Nado ETH-PERP product_id is unavailable" unless product_id
     blockers << "Nado EIP-712 chain_id is unavailable" unless chain_id
@@ -964,6 +1010,9 @@ class NadoHedgeExecutionService
       chain_id: chain_id,
       price_increment_x18: price_increment_x18 || 1_000_000_000_000_000,
       size_increment_x18: size_increment_x18 || fallback_size_increment_x18,
+      min_size_x18: min_size_x18,
+      trading_status: trading_status,
+      isolated_only: isolated_only,
       market_price: market_price,
       source: source,
       blockers: blockers,
@@ -973,7 +1022,9 @@ class NadoHedgeExecutionService
 
   def order_price(position:, side:, max_slippage:, product:)
     base = product[:market_price] || position_eth_price(position)
-    slippage = BigDecimal((max_slippage.presence || DEFAULT_MAX_SLIPPAGE).to_s)
+    return nil unless base
+
+    slippage = decimal_or_nil(max_slippage.presence || DEFAULT_MAX_SLIPPAGE) || DEFAULT_MAX_SLIPPAGE
     side == "buy" ? base * (1 + slippage) : base * (1 - slippage)
   end
 
@@ -983,12 +1034,15 @@ class NadoHedgeExecutionService
       return (position.mellow_current_value_usd - usdc) / position.mellow_weth_exposure
     end
 
-    BigDecimal(position.asset0_price_usd.to_s)
+    decimal_or_nil(position.asset0_price_usd)
   end
 
   def round_price(price, side:, product:)
-    increment = BigDecimal(product[:price_increment_x18].to_s) / BigDecimal(10**18)
-    ratio = BigDecimal(price.to_s) / increment
+    price_decimal = decimal_or_nil(price)
+    increment = x18_to_decimal(product[:price_increment_x18])
+    return BigDecimal("0") unless price_decimal&.positive? && increment&.positive?
+
+    ratio = price_decimal / increment
     ticks = side == "buy" ? ratio.ceil : ratio.floor
     ticks * increment
   end
@@ -1000,8 +1054,11 @@ class NadoHedgeExecutionService
   end
 
   def round_size(size_eth, product:)
-    increment = BigDecimal(product[:size_increment_x18].to_s) / BigDecimal(10**18)
-    (BigDecimal(size_eth.to_s) / increment).floor * increment
+    increment = x18_to_decimal(product[:size_increment_x18])
+    size = decimal_or_nil(size_eth)
+    return BigDecimal("0") unless size&.positive? && increment&.positive?
+
+    (size / increment).floor * increment
   end
 
   def product_size_increment
@@ -1182,7 +1239,7 @@ class NadoHedgeExecutionService
     when "open"
       order_size(size_eth)
     when "rebalance"
-      short_size(current_position) + BigDecimal(size_eth.to_s)
+      short_size(current_position) + signed_decimal(size_eth)
     else
       BigDecimal("0")
     end
@@ -1383,18 +1440,18 @@ class NadoHedgeExecutionService
 
   def order_side(action:, size_eth:)
     return "buy" if action.to_s == "close"
-    return BigDecimal(size_eth.to_s).negative? ? "buy" : "sell" if action.to_s == "rebalance"
+    return signed_decimal(size_eth).negative? ? "buy" : "sell" if action.to_s == "rebalance"
 
     "sell"
   end
 
   def reduce_only_order?(action:, size_eth:)
-    action.to_s == "close" || (action.to_s == "rebalance" && BigDecimal(size_eth.to_s).negative?)
+    action.to_s == "close" || (action.to_s == "rebalance" && signed_decimal(size_eth).negative?)
   end
 
   def isolated_partial_reduce?(action:, size_eth:, order_size:, current_position:)
     return false unless %w[close rebalance].include?(action.to_s)
-    return false if action.to_s == "rebalance" && !BigDecimal(size_eth.to_s).negative?
+    return false if action.to_s == "rebalance" && !signed_decimal(size_eth).negative?
     return false unless margin_mode(current_position) == "isolated"
     return false unless short_size(current_position).positive?
 
@@ -1407,7 +1464,7 @@ class NadoHedgeExecutionService
 
   def full_close_size_blockers(full_close:, order_size:, rounded_size:)
     return [] unless full_close
-    return [] if BigDecimal(rounded_size.to_s) == BigDecimal(order_size.to_s)
+    return [] if signed_decimal(rounded_size) == signed_decimal(order_size)
 
     [ "Nado isolated full close size is not divisible by size increment; refusing partial close." ]
   end
@@ -1417,7 +1474,7 @@ class NadoHedgeExecutionService
   end
 
   def order_size(size_eth)
-    BigDecimal(size_eth.to_s).abs
+    signed_decimal(size_eth).abs
   end
 
   def appendix_isolated?(appendix)
@@ -1505,7 +1562,7 @@ class NadoHedgeExecutionService
 
   def isolated_delta_reduce_order?(action:, size_eth:, current_position:)
     action.to_s == "rebalance" &&
-      BigDecimal(size_eth.to_s).negative? &&
+      signed_decimal(size_eth).negative? &&
       margin_mode(current_position) == "isolated" &&
       short_size(current_position).positive? &&
       partial_isolated_reduce_supported?
@@ -1564,7 +1621,7 @@ class NadoHedgeExecutionService
     return false unless desired_margin_mode == "isolated"
     return true if action.to_s == "open"
 
-    action.to_s == "rebalance" && BigDecimal(size_eth.to_s).positive?
+    action.to_s == "rebalance" && signed_decimal(size_eth).positive?
   end
 
   def margin_mode(position)
@@ -1640,11 +1697,11 @@ class NadoHedgeExecutionService
   end
 
   def decimal_to_x18(value)
-    (BigDecimal(value.to_s) * BigDecimal(10**18)).to_i
+    ((decimal_or_nil(value) || BigDecimal("0")) * BigDecimal(10**18)).to_i
   end
 
   def x18_to_decimal(value)
-    return nil unless value
+    return nil if value.blank?
 
     BigDecimal(value.to_s) / BigDecimal(10**18)
   rescue ArgumentError
@@ -1655,6 +1712,10 @@ class NadoHedgeExecutionService
     value.present? ? BigDecimal(value.to_s) : nil
   rescue ArgumentError
     nil
+  end
+
+  def signed_decimal(value)
+    decimal_or_nil(value) || BigDecimal("0")
   end
 
   def positive_integer(value)
@@ -1709,6 +1770,6 @@ class NadoHedgeExecutionService
   def decimal_string(value)
     return nil unless value
 
-    BigDecimal(value.to_s).to_s("F")
+    decimal_or_nil(value)&.to_s("F")
   end
 end

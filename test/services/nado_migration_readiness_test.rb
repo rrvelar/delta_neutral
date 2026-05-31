@@ -86,6 +86,71 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal "open", service.preview_calls.first.fetch(:action)
   end
 
+  test "real Nado preflight does not raise BigDecimal on blank price fields" do
+    position = migration_position
+    position.update_column(:asset0_price_usd, nil)
+    service = NadoHedgeExecutionService.new(env: nado_env_with_metadata(market_price: ""))
+
+    report = NadoMigrationReadiness.new(position: position, intended_role: "target", nado_service: service).report
+    preview = report.fetch(:target_leg_preview)
+
+    assert_equal false, preview.fetch(:ok)
+    assert_includes preview.fetch(:blockers), "Nado market metadata missing mark_price and position asset0_price_usd is unavailable."
+    assert_no_match(/ArgumentError|BigDecimal/, report.to_json)
+    assert_equal 0, preview.fetch(:orders_submitted)
+    assert_equal 0, preview.fetch(:signatures_created)
+  end
+
+  test "real Nado market metadata reports ok from configured metadata" do
+    service = NadoHedgeExecutionService.new(env: nado_env_with_metadata)
+    metadata = service.market_metadata(position: migration_position)
+
+    assert_equal "ok", metadata.fetch(:status)
+    assert_equal 4, metadata.fetch(:product_id)
+    assert_equal "2300.0", metadata.fetch(:market_price)
+    assert_equal "0.001", metadata.fetch(:size_increment)
+    assert_empty metadata.fetch(:blockers)
+  end
+
+  test "real Nado market metadata blocks with precise blank fields" do
+    service = NadoHedgeExecutionService.new(env: nado_env_with_metadata(product_id: "", price_increment_x18: "", size_increment: "", market_price: ""))
+    metadata = service.market_metadata(position: migration_position.tap { |item| item.update_column(:asset0_price_usd, nil) })
+
+    assert_equal "blocked", metadata.fetch(:status)
+    assert_includes metadata.fetch(:blockers), "Nado ETH-PERP product_id is unavailable"
+    assert_includes metadata.fetch(:blockers), "Nado price_increment_x18 is unavailable"
+    assert_includes metadata.fetch(:blockers), "Nado size_increment is unavailable"
+    assert_includes metadata.fetch(:blockers), "Nado market metadata missing mark_price and position asset0_price_usd is unavailable."
+    assert_no_match(/ArgumentError|BigDecimal/, metadata.to_json)
+  end
+
+  test "real Nado open preview builds no submit payload summary with valid metadata" do
+    service = NadoHedgeExecutionService.new(env: nado_env_with_metadata.merge("NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}"))
+    order = service.build_order_preview(position: migration_position, action: "open", size_eth: "0.8", max_slippage: "0.01", current_position: nil)
+
+    assert_equal true, order.fetch(:ok)
+    assert_equal "sell", order.dig(:summary, :side)
+    assert_equal false, order.dig(:summary, :reduce_only)
+    assert_equal "0.8", order.dig(:summary, :rounded_size_eth)
+    assert_equal 4, order.dig(:summary, :product_id)
+    assert_equal "ok", order.dig(:summary, :market_metadata_status)
+    assert_empty order.fetch(:blockers)
+  end
+
+  test "real Nado reduce only close preview builds no submit payload summary with valid metadata" do
+    service = NadoHedgeExecutionService.new(env: nado_env_with_metadata.merge("NADO_ACCOUNT_SUBACCOUNT" => "0x#{"01" * 32}"))
+    current = { size: BigDecimal("-0.4"), short_size: BigDecimal("0.4"), symbol: "ETH-PERP", margin_mode: "isolated", isolated_margin_usd: BigDecimal("920") }
+    order = service.build_order_preview(position: migration_position, action: "close", size_eth: "0.4", max_slippage: "0.01", current_position: current)
+
+    assert_equal true, order.fetch(:ok)
+    assert_equal "buy", order.dig(:summary, :side)
+    assert_equal true, order.dig(:summary, :reduce_only)
+    assert_equal "0.4", order.dig(:summary, :rounded_size_eth)
+    assert_equal 4, order.dig(:summary, :product_id)
+    assert_equal "ok", order.dig(:summary, :market_metadata_status)
+    assert_empty order.fetch(:blockers)
+  end
+
   test "source leg dry run preview can be built from Nado current short" do
     service = FakeNadoService.new(current_position: { short_size: BigDecimal("0.4"), size: BigDecimal("-0.4") })
     report = NadoMigrationReadiness.new(position: migration_position, intended_role: "source", nado_service: service).report
@@ -252,6 +317,19 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
         { product_id: "4", status: "ok", rows_count: 0 },
         { product_id: "9", status: "ok", rows_count: 1 }
       ]
+    }
+  end
+
+  def nado_env_with_metadata(product_id: 4, chain_id: 1, price_increment_x18: "1000000000000000000", size_increment: "1000000000000000", market_price: "2300.0")
+    {
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "false",
+      "NADO_ETH_PERP_PRODUCT_METADATA_JSON" => {
+        product_id: product_id,
+        chain_id: chain_id,
+        price_increment_x18: price_increment_x18,
+        size_increment: size_increment,
+        market_price: market_price
+      }.to_json
     }
   end
 end
