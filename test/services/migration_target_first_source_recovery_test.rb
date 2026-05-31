@@ -1,6 +1,34 @@
 require "test_helper"
 
 class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
+  test "ethereal to nado dry run recognizes already finalized production no op" do
+    position = migration_position(execution_venue: "nado")
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11"
+    ).run
+
+    assert_equal "ALREADY_FINALIZED", result.status
+    assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
+    assert_empty result.blockers
+    assert_equal "nado", result.receipt.fetch(:production_venue)
+    assert_equal true, result.receipt.fetch(:source_already_flat)
+    assert_equal true, result.receipt.fetch(:target_confirmed)
+    assert_equal true, result.receipt.fetch(:other_venues_flat)
+    assert_equal true, result.receipt.fetch(:final_inside_tolerance)
+    assert_equal true, result.receipt.fetch(:already_finalized)
+    assert_equal true, result.receipt.fetch(:production_venue_finalized)
+    assert_equal false, result.receipt.fetch(:finalization_recommended)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_includes result.warnings, "Migration already finalized; no recovery action required."
+  end
+
   test "ethereal to nado dry run recognizes source already manually closed and recommends finalization" do
     position = migration_position(execution_venue: "ethereal")
     result = recovery(
@@ -142,6 +170,31 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_includes result.blockers, "Nado target short must be present"
   end
 
+  test "source still open and target confirmed builds only source close leg" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "1.11",
+      nado_short: "1.11",
+      target: "1.11"
+    ).run
+
+    leg = result.receipt.fetch(:planned_source_close_leg)
+    assert_equal "dry_run", result.status
+    assert_empty result.blockers
+    assert_equal "ethereal", leg.fetch(:venue)
+    assert_equal "close_short", leg.fetch(:action)
+    assert_equal "buy", leg.fetch(:side)
+    assert_equal true, leg.fetch(:reduce_only)
+    assert_equal "1.11", leg.fetch(:size_eth)
+    assert_equal "0", leg.fetch(:expected_after_short_eth)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
   test "recovery blocks when third venue is not flat" do
     position = migration_position(execution_venue: "ethereal")
 
@@ -173,6 +226,45 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_equal "dry_run", result.status
     assert_equal false, result.receipt.fetch(:finalization_recommended)
     assert_includes result.blockers, "Nado short must be within tolerance of fresh target"
+  end
+
+  test "already finalized no op blocks when target is outside tolerance" do
+    position = migration_position(execution_venue: "nado")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "0",
+      nado_short: "0.9",
+      target: "1.11"
+    ).run
+
+    assert_equal "dry_run", result.status
+    assert_equal "RECOVERY_BLOCKED", result.receipt.fetch(:lifecycle_state)
+    assert_equal false, result.receipt.fetch(:already_finalized)
+    assert_equal false, result.receipt.fetch(:production_venue_finalized)
+    assert_equal false, result.receipt.fetch(:final_inside_tolerance)
+    assert_includes result.blockers, "Nado short must be within tolerance of fresh target"
+  end
+
+  test "already finalized no op blocks when third venue is not flat" do
+    position = migration_position(execution_venue: "nado")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      extended_short: "0.2",
+      ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11"
+    ).run
+
+    assert_equal "dry_run", result.status
+    assert_equal false, result.receipt.fetch(:already_finalized)
+    assert_equal false, result.receipt.fetch(:production_venue_finalized)
+    assert_includes result.blockers, "unexpected third-venue short is present during source-close recovery"
   end
 
   test "extended to ethereal legacy recovery route still builds source close" do

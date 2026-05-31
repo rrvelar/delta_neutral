@@ -178,6 +178,16 @@ namespace :dashboard do
 
     mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
     readiness = canonical_auto_readiness_for_smoke(position)
+    active_auto_readiness = {
+      continuous_auto_ready: readiness[:continuous_auto_ready],
+      planned_auto_action: readiness[:planned_auto_action],
+      action_suppressed_reason: readiness[:action_suppressed_reason],
+      min_rebalance_size_eth: readiness[:min_rebalance_size_eth],
+      cooldown_remaining_seconds: readiness[:cooldown_remaining_seconds],
+      consecutive_outside_tolerance_count: readiness[:consecutive_outside_tolerance_count],
+      strong_drift_bypass_used: readiness[:strong_drift_bypass_used],
+      blockers: readiness[:blockers]
+    }
     rewards_snapshot = position.position_rewards_fees_snapshot
     snapshot = position.position_dashboard_snapshot
     last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
@@ -234,16 +244,8 @@ namespace :dashboard do
         combined_short_eth: snapshot&.combined_short_eth&.to_s("F"),
         combined_inside_tolerance: snapshot&.inside_tolerance
       },
-      extended_auto_readiness: {
-        continuous_auto_ready: readiness[:continuous_auto_ready],
-        planned_auto_action: readiness[:planned_auto_action],
-        action_suppressed_reason: readiness[:action_suppressed_reason],
-        min_rebalance_size_eth: readiness[:min_rebalance_size_eth],
-        cooldown_remaining_seconds: readiness[:cooldown_remaining_seconds],
-        consecutive_outside_tolerance_count: readiness[:consecutive_outside_tolerance_count],
-        strong_drift_bypass_used: readiness[:strong_drift_bypass_used],
-        blockers: readiness[:blockers]
-      },
+      active_auto_readiness: active_auto_readiness,
+      extended_auto_readiness: active_auto_readiness,
       last_successful_extended_rebalance: last_success && {
         id: last_success.id,
         old_short_size: last_success.old_short_size&.to_s("F"),

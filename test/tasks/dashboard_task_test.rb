@@ -127,6 +127,8 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_equal true, payload.fetch("hedge_control_uses_readiness_preview")
           assert_equal false, payload.fetch("stale_preview_warning_present")
           assert_equal [], payload.fetch("mismatch_warnings")
+          assert_equal "no_op", payload.dig("active_auto_readiness", "planned_auto_action")
+          assert_equal payload.fetch("active_auto_readiness"), payload.fetch("extended_auto_readiness")
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
           assert_equal true, payload.fetch("tx_hash_onboarding_route_exists")
@@ -280,6 +282,56 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_equal "nado", payload.fetch("active_auto_venue")
           assert_equal "ACTION REQUIRED", payload.fetch("production_health_status")
           assert_includes payload.fetch("active_auto_blockers"), "Nado isolated live auto open/increase submit path is not proven in delta_neutral."
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
+        end
+      end
+    end
+  end
+
+  test "production smoke reports Nado production venue healthy when inside tolerance while auto is disabled" do
+    position = aerodrome_position
+    position.hedge.update!(execution_venue: "nado")
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+    readiness = {
+      execution_venue: "nado",
+      active_auto_venue: "nado",
+      active_current_short_eth: "1.11",
+      active_target_short_eth: "1.11",
+      active_drift_eth: "0",
+      active_tolerance_eth: "0.0333",
+      active_within_tolerance: true,
+      active_planned_auto_action: "no_op",
+      active_auto_enabled: false,
+      active_live_enabled: false,
+      active_auto_ready: false,
+      active_auto_blockers: [ "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" ],
+      active_auto_warnings: [ "Nado continuous auto is disabled; inside-tolerance production health should be stable but manual." ],
+      current_short_eth: "1.11",
+      nado_current_short_eth: "1.11",
+      target_short_eth: "1.11",
+      within_tolerance: true,
+      continuous_auto_ready: false,
+      planned_auto_action: "no_op",
+      blockers: [ "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" ],
+      warnings: []
+    }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "nado", payload.fetch("production_venue")
+          assert_equal "nado", payload.fetch("active_auto_venue")
+          assert_equal "1.11", payload.fetch("active_current_short_eth")
+          assert_equal true, payload.fetch("active_within_tolerance")
+          assert_equal "HEALTHY", payload.fetch("production_health_status")
+          assert_equal "inside tolerance", payload.fetch("production_health_reason")
+          assert_includes payload.fetch("active_auto_blockers"), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
+          assert_equal "no_op", payload.dig("active_auto_readiness", "planned_auto_action")
+          assert_equal payload.fetch("active_auto_readiness"), payload.fetch("extended_auto_readiness")
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
         end

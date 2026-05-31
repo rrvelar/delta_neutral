@@ -102,7 +102,7 @@ class MigrationTargetFirstSourceRecovery
     blockers << "from and to venues must differ" if from == to
     blockers << "position must be active" unless position.active?
     blockers << "active hedge is required" unless position.hedge&.active?
-    blockers << "production venue must still be #{from} for source-close recovery" unless HedgeVenues.normalize(position.hedge&.execution_venue) == from
+    blockers.concat(production_venue_blockers(context))
     blockers.concat(Array(context.dig(:target_report, :blockers)))
     blockers << "fresh Mellow target is required before source-close recovery" unless context.dig(:target_report, :status) == "ok"
     blockers << "#{HedgeVenues.label(to)} target short must be present" unless context.fetch(:target_venue_short).positive?
@@ -239,7 +239,8 @@ class MigrationTargetFirstSourceRecovery
       final_combined_short_eth: decimal_string(final_combined),
       final_inside_tolerance: inside_tolerance?(final_combined, context),
       readback_confirmed: execution ? recovery_confirmed?(context.merge(final_source_short: final_source, execution: execution)) : source_already_flat && safe_to_finalize,
-      production_venue_finalized: context[:production_venue_finalized] == true,
+      production_venue_finalized: context[:production_venue_finalized] == true || already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
+      already_finalized: already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
       finalized_hedge_id: context[:finalized_hedge_id],
       final_status: final_status(blockers: blockers, execution: execution, context: context, source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
       blockers: blockers,
@@ -250,6 +251,7 @@ class MigrationTargetFirstSourceRecovery
 
   def final_status(blockers:, execution:, context:, source_already_flat:, safe_to_finalize:)
     return live? ? "SOURCE_CLOSE_RECOVERY_BLOCKED" : "dry_run" if blockers.any?
+    return "ALREADY_FINALIZED" if already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize)
     return "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE" if !live? && source_already_flat && safe_to_finalize && HedgeVenues.normalize(position.hedge&.execution_venue) != to
     return "dry_run" unless live?
     return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize
@@ -259,6 +261,7 @@ class MigrationTargetFirstSourceRecovery
 
   def lifecycle_state(blockers:, execution:, source_already_flat:, safe_to_finalize:)
     return "RECOVERY_BLOCKED" if blockers.any?
+    return "MIGRATION_FINALIZED" if already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize)
     return "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE" if source_already_flat && safe_to_finalize && !live?
     return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize && live?
     return "SOURCE_CLOSE_CONFIRMED" if execution && (execution[:confirmed] || execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed]))
@@ -279,8 +282,23 @@ class MigrationTargetFirstSourceRecovery
 
   def warnings(_context, source_already_flat:)
     base = [ "Recovery is target-first only: it never opens more target exposure and never closes the target venue." ]
-    base << "Source is already flat; no source-close order is needed. Finalize production venue if readbacks remain safe." if source_already_flat
+    if source_already_flat && HedgeVenues.normalize(position.hedge&.execution_venue) == to
+      base << "Migration already finalized; no recovery action required."
+    elsif source_already_flat
+      base << "Source is already flat; no source-close order is needed. Finalize production venue if readbacks remain safe."
+    end
     base
+  end
+
+  def production_venue_blockers(context)
+    production_venue = HedgeVenues.normalize(position.hedge&.execution_venue)
+    return [] if production_venue == from || production_venue == to
+
+    [ "production venue must be #{from} or #{to} for source-close recovery; current production venue is #{production_venue || 'unset'}" ]
+  end
+
+  def already_finalized?(source_already_flat:, safe_to_finalize:)
+    !live? && source_already_flat && safe_to_finalize && HedgeVenues.normalize(position.hedge&.execution_venue) == to
   end
 
   def fresh_target_report
