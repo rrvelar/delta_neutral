@@ -125,6 +125,81 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
+  test "old recovery receipt plus later clean live canary becomes ready for random" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(recovery_dir, recovery_event(position: position, from: "nado", to: "extended", timestamp: 20.minutes.ago))
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", timestamp: 5.minutes.ago, production_venue: "extended", orders_submitted: 2, signatures_created: 2))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal "extended", route.fetch(:final_venue)
+    assert_match(%r{test-canary-proofs}, route.fetch(:finalization_receipt))
+    assert_empty route.fetch(:blockers)
+    assert_equal 2, route.fetch(:orders_submitted)
+    assert_equal 2, route.fetch(:signatures_created)
+    assert_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "nado->extended"
+    assert_not report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "nado->extended" }
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "nado extended clean live canary fixture is ready and finalizes to extended" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", final_status: "LIVE_CANARY_CONFIRMED", production_venue: "extended", orders_submitted: 2, signatures_created: 2))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal "extended", route.fetch(:final_venue)
+    assert_match(%r{test-canary-proofs}, route.fetch(:live_canary_receipt))
+    assert_match(%r{test-canary-proofs}, route.fetch(:finalization_receipt))
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "recovery-only route remains recovery proven" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(recovery_dir, recovery_event(position: position, from: "nado", to: "extended"))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
+    assert_includes route.fetch(:blockers), "nado->extended recovery-proven; optional clean rerun required for READY_FOR_RANDOM."
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "failed live receipt after recovery does not override recovery proof" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(recovery_dir, recovery_event(position: position, from: "nado", to: "extended", timestamp: 20.minutes.ago))
+    write_event(canary_dir, partial_canary_event(position: position, from: "nado", to: "extended", timestamp: 5.minutes.ago))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
+    assert_match(%r{test-recovery-proofs}, route.fetch(:finalization_receipt))
+    assert_not_includes route.fetch(:blockers), "nado->extended latest proof failed and needs repair."
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
   test "manual exchange intervention recovery receipt does not mark route recovery proven" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
@@ -156,6 +231,25 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "RECOVERY_PROVEN", route.fetch(:status)
     assert report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "nado->extended" && entry[:status] == "RECOVERY_PROVEN" }
     assert_not_includes route.fetch(:blockers), "nado->extended latest proof failed and needs repair."
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "random readiness treats later clean canary as completed route proof" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(recovery_dir, recovery_event(position: position, from: "nado", to: "extended", timestamp: 20.minutes.ago))
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", timestamp: 5.minutes.ago, production_venue: "extended"))
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry).report
+    route = report.fetch(:route_proof_statuses).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert report.fetch(:completed_route_proofs).any? { |entry| entry[:route] == "nado->extended" }
+    assert_not report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "nado->extended" }
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
@@ -312,13 +406,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def live_canary_event(position:, from:, to:)
+  def live_canary_event(position:, from:, to:, timestamp: Time.current, final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS, production_venue: to, orders_submitted: 0, signatures_created: 0)
     {
       action: "manual_live_canary",
       position_id: position.id,
       from_venue: from,
       to_venue: to,
-      final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      production_venue: production_venue,
+      final_status: final_status,
       mode: "full",
       target_leg_readback_confirmed: true,
       source_leg_readback_confirmed: true,
@@ -326,7 +421,10 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       source_flat_after: true,
       target_holds_expected_short: true,
       open_orders_after: 0,
-      timestamp: Time.current.iso8601
+      orders_submitted: orders_submitted,
+      orders_placed: orders_submitted,
+      signatures_created: signatures_created,
+      timestamp: timestamp.iso8601
     }
   end
 

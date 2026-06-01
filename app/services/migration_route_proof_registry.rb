@@ -52,6 +52,7 @@ class MigrationRouteProofRegistry
     end
     latest = [ dry, live, recovery, failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
     status = status_for(dry: dry, live: live, recovery: recovery, failed: failed, latest: latest)
+    proof_event = proof_event_for(status: status, dry: dry, live: live, recovery: recovery, failed: failed, latest: latest)
 
     {
       route: route,
@@ -61,15 +62,15 @@ class MigrationRouteProofRegistry
       dry_run_receipt: receipt_ref(dry),
       live_canary_receipt: receipt_ref(live),
       recovery_receipt: receipt_ref(recovery),
-      finalization_receipt: receipt_ref(recovery || live),
-      proof_timestamp: latest&.fetch("timestamp", nil),
-      source_commit: latest&.fetch("source_commit", nil) || latest&.fetch("commit_sha", nil),
-      final_venue: latest&.fetch("production_venue", nil) || latest&.fetch("to_venue", nil),
-      final_readback_summary: final_readback_summary(latest),
-      orders_submitted: latest&.fetch("orders_submitted", 0).to_i,
-      orders_placed: latest&.fetch("orders_placed", 0).to_i,
-      signatures_created: latest&.fetch("signatures_created", 0).to_i,
-      manual_intervention: manual_intervention?(latest),
+      finalization_receipt: receipt_ref(proof_event),
+      proof_timestamp: proof_event&.fetch("timestamp", nil),
+      source_commit: proof_event&.fetch("source_commit", nil) || proof_event&.fetch("commit_sha", nil),
+      final_venue: final_venue_for(proof_event),
+      final_readback_summary: final_readback_summary(proof_event),
+      orders_submitted: proof_event&.fetch("orders_submitted", 0).to_i,
+      orders_placed: proof_event&.fetch("orders_placed", 0).to_i,
+      signatures_created: proof_event&.fetch("signatures_created", 0).to_i,
+      manual_intervention: manual_intervention?(proof_event),
       blockers: blockers_for(status, route)
     }
   end
@@ -80,15 +81,37 @@ class MigrationRouteProofRegistry
 
   def status_for(dry:, live:, recovery:, failed:, latest:)
     return STATUSES[:not_started] unless latest
-    return STATUSES[:stale] if stale?(latest)
-    return STATUSES[:recovery] if recovery_after_failed?(recovery: recovery, failed: failed)
-    return STATUSES[:failed] if failed && event_time(failed) == event_time(latest)
-    return STATUSES[:ready] if live && !manual_intervention?(live)
-    return STATUSES[:recovery] if recovery
+
+    if live && !manual_intervention?(live) && later_than?(live, recovery)
+      return stale?(live) ? STATUSES[:stale] : STATUSES[:ready]
+    end
+
+    return stale?(recovery) ? STATUSES[:stale] : STATUSES[:recovery] if recovery
+
+    if failed && event_time(failed) == event_time(latest)
+      return stale?(failed) ? STATUSES[:stale] : STATUSES[:failed]
+    end
+
+    return stale?(live) ? STATUSES[:stale] : STATUSES[:ready] if live && !manual_intervention?(live)
     return STATUSES[:live] if live
-    return STATUSES[:dry_run] if dry
+    return stale?(dry) ? STATUSES[:stale] : STATUSES[:dry_run] if dry
 
     STATUSES[:not_started]
+  end
+
+  def proof_event_for(status:, dry:, live:, recovery:, failed:, latest:)
+    case status
+    when STATUSES[:ready], STATUSES[:live]
+      live
+    when STATUSES[:recovery]
+      recovery
+    when STATUSES[:dry_run]
+      dry
+    when STATUSES[:failed]
+      failed
+    else
+      latest
+    end
   end
 
   def latest_event(position:, from:, to:, dirs:, &block)
@@ -118,13 +141,21 @@ class MigrationRouteProofRegistry
   end
 
   def live_canary_proof?(event)
-    event["final_status"] == MigrationLiveCanaryChecker::CONFIRMED_STATUS &&
+    clean_live_final_status?(event["final_status"]) &&
       event["target_leg_readback_confirmed"] == true &&
       event["source_leg_readback_confirmed"] == true &&
       event["final_inside_tolerance"] == true &&
       event["source_flat_after"] == true &&
       event["target_holds_expected_short"] == true &&
       event["open_orders_after"].to_i.zero?
+  end
+
+  def clean_live_final_status?(status)
+    status.to_s.in?([
+      MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      "MIGRATION_FINALIZED",
+      "MIGRATION_CONFIRMED_LATE"
+    ])
   end
 
   def recovery_proof?(event)
@@ -145,15 +176,14 @@ class MigrationRouteProofRegistry
       event["manual_action_required"] == true
   end
 
-  def recovery_after_failed?(recovery:, failed:)
-    return false unless recovery
-    return true unless failed
+  def later_than?(event, other)
+    return true unless other
 
-    recovery_time = event_time(recovery)
-    failed_time = event_time(failed)
-    return true unless recovery_time && failed_time
+    event_time_value = event_time(event)
+    other_time_value = event_time(other)
+    return true unless event_time_value && other_time_value
 
-    recovery_time >= failed_time
+    event_time_value >= other_time_value
   end
 
   def stale?(event)
@@ -196,6 +226,12 @@ class MigrationRouteProofRegistry
     return nil unless event
 
     event["receipt_path"]
+  end
+
+  def final_venue_for(event)
+    return nil unless event
+
+    event["final_venue"] || event["production_venue"] || event["to_venue"]
   end
 
   def final_readback_summary(event)
