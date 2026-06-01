@@ -2,13 +2,17 @@ class HedgeVenueMigrationExecutor
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_MIGRATES_HEDGE_BETWEEN_VENUES".freeze
 
-  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil, receipt_writer: nil)
+  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil, receipt_writer: nil, final_verifier_factory: nil, final_reconciliation_attempts: nil, final_reconciliation_interval: nil, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
     @planner = planner
     @leg_runner = leg_runner || DefaultLegRunner.new(env: env)
     @now = now
     @snapshot_refresher = snapshot_refresher || method(:refresh_dashboard_snapshot)
     @receipt_writer = receipt_writer || HedgeVenueMigrationReceiptWriter.new(now: now)
+    @final_verifier_factory = final_verifier_factory
+    @final_reconciliation_attempts = final_reconciliation_attempts || env.fetch("MIGRATION_FINAL_RECONCILIATION_ATTEMPTS", MigrationTargetFirstFinalVerifier::DEFAULT_ATTEMPTS)
+    @final_reconciliation_interval = final_reconciliation_interval || env.fetch("MIGRATION_FINAL_RECONCILIATION_INTERVAL_SECONDS", MigrationTargetFirstFinalVerifier::DEFAULT_INTERVAL_SECONDS)
+    @sleeper = sleeper
   end
 
   def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false, migration_sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE)
@@ -93,11 +97,16 @@ class HedgeVenueMigrationExecutor
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
-    if leg_confirmed?(second_leg)
-      final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
-      receipt.merge!(final)
+    if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
+      receipt.merge!(final_readback_status(position: position, receipt: receipt))
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
-      receipt[:lifecycle_state] = receipt[:production_venue_finalized] ? "MIGRATION_FINALIZED" : "SOURCE_CLOSE_CONFIRMED"
+      receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
+        "MIGRATION_FINALIZED"
+      elsif receipt[:final_status] == "success"
+        "SOURCE_CLOSE_CONFIRMED"
+      else
+        "FINAL_READBACK_RECHECK_REQUIRED"
+      end
     else
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
       receipt[:final_status] = "partial_migration_manual_action_required"
@@ -351,11 +360,16 @@ class HedgeVenueMigrationExecutor
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
-    if leg_confirmed?(second_leg)
-      final = final_readback_status(receipt: receipt, first_leg: first_leg, second_leg: second_leg)
-      receipt.merge!(final)
+    if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
+      receipt.merge!(final_readback_status(position: position, receipt: receipt))
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
-      receipt[:lifecycle_state] = receipt[:production_venue_finalized] ? "MIGRATION_FINALIZED" : "SOURCE_CLOSE_CONFIRMED"
+      receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
+        "MIGRATION_FINALIZED"
+      elsif receipt[:final_status] == "success"
+        "SOURCE_CLOSE_CONFIRMED"
+      else
+        "FINAL_READBACK_RECHECK_REQUIRED"
+      end
     else
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
       receipt[:final_status] = "partial_migration_manual_action_required"
@@ -444,38 +458,61 @@ class HedgeVenueMigrationExecutor
     false
   end
 
-  def final_readback_status(receipt:, first_leg:, second_leg:)
-    legs = [
-      [ receipt.fetch(:planned_first_leg), first_leg ],
-      [ receipt.fetch(:planned_second_leg), second_leg ]
-    ]
-    from_result = legs.find { |planned, _actual| planned.fetch(:venue) == receipt[:from_venue] }
-    to_result = legs.find { |planned, _actual| planned.fetch(:venue) == receipt[:to_venue] }
-    from_after = decimal(from_result&.last&.fetch(:after_short_eth, nil) || receipt.dig(:planned_source_leg, :expected_after_short_eth))
-    to_after = decimal(to_result&.last&.fetch(:after_short_eth, nil) || receipt.dig(:planned_target_leg, :expected_after_short_eth))
-    target = decimal(receipt[:target_short])
-    tolerance = decimal(receipt[:tolerance_abs_eth])
-    tolerance = decimal(receipt[:target_short]) * BigDecimal("0.03") unless tolerance.positive?
-    combined = from_after + to_after
+  def final_readback_status(position:, receipt:)
+    verification = final_verifier(position: position, receipt: receipt).verify
+    latest = verification.fetch(:latest_attempt)
+    from_after = decimal(latest[:source_short_eth])
+    to_after = decimal(latest[:target_venue_short_eth])
+    combined = decimal(latest[:combined_short_eth])
+    target = decimal(latest[:expected_target_short_eth])
     drift = target - combined
-    source_flat = from_after <= BigDecimal("0.001")
-    target_holds = (to_after - target).abs <= [ tolerance, BigDecimal("0.001") ].max
-    inside = drift.abs <= [ tolerance, BigDecimal("0.001") ].max
+    source_flat = verification.fetch(:source_flat)
+    target_holds = verification.fetch(:target_confirmed)
+    third_venue_flat = verification.fetch(:third_venue_flat)
+    open_orders_clear = verification.fetch(:open_orders_clear)
+    inside = verification.fetch(:combined_inside_tolerance)
     full = receipt[:mode].to_s == "full" || ActiveModel::Type::Boolean.new.cast(receipt[:full_migration_allowed])
-    success = !full || (source_flat && target_holds && inside)
+    success = !full || (source_flat && target_holds && third_venue_flat && inside && open_orders_clear)
     {
       from_short_after_readback: from_after.to_s("F"),
       to_short_after_readback: to_after.to_s("F"),
       final_combined: combined.to_s("F"),
       final_drift: drift.to_s("F"),
       source_flat_confirmed: source_flat,
+      source_flat_after: source_flat,
       target_holds_hedge_confirmed: target_holds,
+      target_holds_expected_short: target_holds,
+      third_venue_flat: third_venue_flat,
       final_inside_tolerance: inside,
+      open_orders_after: latest[:open_orders_count].to_i,
+      open_orders_clear_after: open_orders_clear,
+      final_reconciliation: verification,
+      final_reconciliation_status: success ? (verification.fetch(:attempts).size > 1 ? "MIGRATION_CONFIRMED_LATE" : "MIGRATION_CONFIRMED") : "FINAL_READBACK_RECHECK_REQUIRED",
       finalize_available: success && full,
-      final_status: success ? "success" : "combined_outside_tolerance_manual_action_required",
+      final_status: success ? "success" : "FINAL_READBACK_RECHECK_REQUIRED",
       manual_action_required: !success,
-      blockers: success ? [] : [ "Final migration readback did not confirm source flat, target hedge, and combined exposure inside tolerance." ]
+      recovery_command: success ? nil : recovery_command(receipt),
+      blockers: success ? [] : Array(verification[:blockers]).presence || [ "Final migration readback did not confirm source flat, target hedge, third venue flat, zero open orders, and combined exposure inside tolerance." ]
     }
+  end
+
+  def final_verifier(position:, receipt:)
+    if @final_verifier_factory
+      return @final_verifier_factory.call(position: position, receipt: receipt)
+    end
+
+    MigrationTargetFirstFinalVerifier.new(
+      position: position,
+      from: receipt.fetch(:from_venue),
+      to: receipt.fetch(:to_venue),
+      expected_target_short: receipt[:target_short],
+      tolerance_eth: receipt[:tolerance_abs_eth],
+      env: @env,
+      attempts: @final_reconciliation_attempts,
+      interval_seconds: @final_reconciliation_interval,
+      sleeper: @sleeper,
+      now: @now
+    )
   end
 
   def finalize_production_venue(position, receipt)

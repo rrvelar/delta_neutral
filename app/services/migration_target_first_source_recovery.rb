@@ -168,12 +168,7 @@ class MigrationTargetFirstSourceRecovery
   end
 
   def finalization_safe?(context)
-    final_source = context[:final_source_short] || context.fetch(:source_short)
-    final_combined = final_source + context.fetch(:target_venue_short) + context.fetch(:other_venue_shorts).values.sum(BigDecimal("0"))
-    final_source <= BigDecimal("0.001") &&
-      target_confirmed?(context) &&
-      other_venues_flat?(context) &&
-      inside_tolerance?(final_combined, context)
+    final_state_verification(context).fetch(:status) == "confirmed"
   end
 
   def finalize_production_venue(context)
@@ -225,6 +220,9 @@ class MigrationTargetFirstSourceRecovery
       lifecycle_state: lifecycle_state(blockers: blockers, execution: execution, source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
       target_confirmed: target_confirmed?(context),
       other_venues_flat: other_venues_flat?(context),
+      third_venue_flat: final_state_verification(context).fetch(:third_venue_flat),
+      open_orders_clear_after: final_state_verification(context).fetch(:open_orders_clear),
+      final_state_verification: final_state_verification(context),
       finalization_recommended: !live? && source_already_flat && safe_to_finalize && HedgeVenues.normalize(position.hedge&.execution_venue) != to,
       finalization_command: "bin/rails migration:recover_target_first_source_close position_id=#{position.id} from=#{from} to=#{to} live=true confirmation=#{CONFIRMATION}",
       live_gates: live_gates,
@@ -335,6 +333,23 @@ class MigrationTargetFirstSourceRecovery
     return nil unless target && tolerance
 
     (target - combined).abs <= tolerance
+  end
+
+  def final_state_verification(context)
+    final_source = context[:final_source_short] || context.fetch(:source_short)
+    final_shorts = context.fetch(:shorts).merge(from => final_source)
+    open_order_counts = context.fetch(:account_states, {}).transform_values do |state|
+      state[:open_orders_count] || state["open_orders_count"]
+    end
+    MigrationTargetFirstFinalVerifier.evaluate(
+      from: from,
+      to: to,
+      target_short: context.fetch(:target_short_eth),
+      tolerance_eth: context.fetch(:tolerance_eth),
+      shorts: final_shorts,
+      open_order_counts: open_order_counts,
+      readback_source: "recovery_readback"
+    )
   end
 
   def venue_for(venue)

@@ -181,7 +181,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
 
     NadoHedgeExecutionService.stub(:new, fake_service) do
-      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }, final_verifier_factory: final_verifier_factory(from: "ethereal", to: "nado")).run(
         position: position,
         from_venue: "ethereal",
         to_venue: "nado",
@@ -259,7 +259,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
 
     NadoHedgeExecutionService.stub(:new, fake_service) do
-      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }, final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")).run(
         position: position,
         from_venue: "extended",
         to_venue: "nado",
@@ -337,7 +337,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "partial_migration_manual_action_required", result.status
+    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
     assert_equal 2, calls.size
     assert_equal 2, result.receipt.fetch(:orders_placed)
     assert_equal 1, result.receipt.fetch(:signatures_created)
@@ -367,11 +367,11 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       migration_sequence: "source_first"
     )
 
-    assert_equal "partial_migration_manual_action_required", result.status
+    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
     assert_equal true, result.receipt.fetch(:manual_action_required)
     assert_equal "extended", calls.first.fetch(:venue)
     assert_equal "ethereal", calls.second.fetch(:venue)
-    assert result.receipt.fetch(:warnings).any? { |warning| warning.include?("temporarily unhedged") }
+    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
   end
 
   test "live execution blocks when source auto is enabled" do
@@ -406,7 +406,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       }
     end
 
-    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }, final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal")).run(
       position: position,
       from_venue: "extended",
       to_venue: "ethereal",
@@ -420,6 +420,93 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal "ethereal", position.hedge.reload.execution_venue
     assert_equal true, result.receipt.fetch(:production_venue_finalized)
     assert_equal [ "order-1", "order-2" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
+  test "shared final reconciliation finalizes all six target first routes after stale first final readback" do
+    routes = [
+      [ "extended", "ethereal" ],
+      [ "ethereal", "extended" ],
+      [ "extended", "nado" ],
+      [ "nado", "extended" ],
+      [ "ethereal", "nado" ],
+      [ "nado", "ethereal" ]
+    ]
+
+    routes.each do |from, to|
+      position = migration_position_for(from)
+      calls = []
+      runner = ->(leg, context:) do
+        calls << [ leg, context ]
+        {
+          status: "confirmed",
+          confirmed: true,
+          orders_placed: 1,
+          signatures_created: 1,
+          after_short_eth: leg.fetch(:expected_after_short_eth),
+          exchange_order_id: "order-#{from}-#{to}-#{calls.size}"
+        }
+      end
+
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        final_verifier_factory: final_verifier_factory(from: from, to: to, safe_on_attempt: 2)
+      ).run(
+        position: position,
+        from_venue: from,
+        to_venue: to,
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "success", result.status, "#{from}->#{to}: #{result.blockers.inspect}"
+      assert_equal to, position.hedge.reload.execution_venue
+      assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
+      assert_equal "MIGRATION_CONFIRMED_LATE", result.receipt.fetch(:final_reconciliation_status)
+      assert_equal 2, result.receipt.dig(:final_reconciliation, :attempts).size
+      assert_equal true, result.receipt.fetch(:source_flat_after)
+      assert_equal true, result.receipt.fetch(:target_holds_expected_short)
+      assert_equal true, result.receipt.fetch(:third_venue_flat)
+      assert_equal true, result.receipt.fetch(:final_inside_tolerance)
+      assert_equal 0, result.receipt.fetch(:open_orders_after)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+      assert_equal 2, result.receipt.fetch(:signatures_created)
+    end
+  end
+
+  test "final reconciliation failure preserves submit counts and recovery command" do
+    position = migration_position
+    runner = ->(leg, context:) do
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        after_short_eth: leg.fetch(:expected_after_short_eth),
+        exchange_order_id: "order-#{leg.fetch(:venue)}"
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }, final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal", safe: false)).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
+    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.receipt.fetch(:lifecycle_state)
+    assert_equal 2, result.receipt.fetch(:orders_submitted)
+    assert_equal 2, result.receipt.fetch(:signatures_created)
+    assert_equal [ "order-ethereal", "order-extended" ], result.receipt.fetch(:exchange_order_ids)
+    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+    assert_equal "extended", position.hedge.reload.execution_venue
   end
 
   test "receipt redacts sensitive fields" do
@@ -455,6 +542,61 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
   end
 
   private
+
+  FakeFinalVerifier = Struct.new(:from, :to, :safe, :safe_on_attempt, keyword_init: true) do
+    def verify
+      attempts = []
+      (1..safe_on_attempt).each do |attempt|
+        confirmed = safe && attempt >= safe_on_attempt
+        attempts << attempt_payload(attempt: attempt, confirmed: confirmed)
+      end
+      latest = attempts.last
+      {
+        status: latest[:status] == "confirmed" ? "confirmed" : "recheck_required",
+        confirmed: latest[:status] == "confirmed",
+        attempts_configured: safe_on_attempt,
+        interval_seconds: "0",
+        attempts: attempts,
+        latest_attempt: latest,
+        source_flat: latest[:source_flat],
+        target_confirmed: latest[:target_confirmed],
+        third_venue_flat: latest[:third_venue_flat],
+        combined_inside_tolerance: latest[:combined_inside_tolerance],
+        open_orders_clear: latest[:open_orders_clear],
+        blockers: latest[:blockers],
+        warnings: []
+      }
+    end
+
+    def attempt_payload(attempt:, confirmed:)
+      {
+        attempt: attempt,
+        status: confirmed ? "confirmed" : "recheck",
+        readback_source: "test",
+        source_venue: from,
+        target_venue: to,
+        source_short_eth: confirmed ? "0" : "0.8",
+        target_venue_short_eth: confirmed ? "0.8" : "0",
+        third_venue_shorts: { (%w[extended ethereal nado] - [ from, to ]).first => "0" },
+        combined_short_eth: confirmed ? "0.8" : "0.8",
+        expected_target_short_eth: "0.8",
+        tolerance_eth: "0.024",
+        source_flat: confirmed,
+        target_confirmed: confirmed,
+        third_venue_flat: true,
+        combined_inside_tolerance: confirmed,
+        open_order_counts: { from => 0, to => 0 },
+        open_orders_count: 0,
+        open_orders_clear: true,
+        blockers: confirmed ? [] : [ "final readback stale" ]
+      }
+    end
+  end
+
+  def final_verifier_factory(from:, to:, safe: true, safe_on_attempt: 1)
+    verifier = FakeFinalVerifier.new(from: from, to: to, safe: safe, safe_on_attempt: safe_on_attempt)
+    ->(position:, receipt:) { verifier }
+  end
 
   def live_env
     {
@@ -504,6 +646,24 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       leverage_margin_gate_status: "pass",
       extended_auto_enabled: extended_auto_enabled,
       ethereal_auto_enabled: ethereal_auto_enabled
+    )
+    position
+  end
+
+  def migration_position_for(source)
+    position = migration_position
+    position.hedge.update!(execution_venue: source)
+    position.position_dashboard_snapshot.update!(
+      production_venue: source,
+      selected_venue: source,
+      extended_short_eth: source == "extended" ? "0.8" : "0",
+      ethereal_short_eth: source == "ethereal" ? "0.8" : "0",
+      nado_short_eth: source == "nado" ? "0.8" : "0",
+      extended_status: source == "extended" ? "active" : "flat",
+      ethereal_status: source == "ethereal" ? "active" : "flat",
+      nado_status: source == "nado" ? "active" : "flat",
+      extended_auto_enabled: false,
+      ethereal_auto_enabled: false
     )
     position
   end
