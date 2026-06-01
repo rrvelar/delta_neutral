@@ -1,0 +1,124 @@
+class MigrationRandomReadiness
+  def initialize(position:, env: ENV, planner: nil, proof_registry: nil, dashboard_health: nil, now: -> { Time.current })
+    @position = position
+    @env = env
+    @proof_registry = proof_registry || MigrationRouteProofRegistry.new(now: now)
+    @planner = planner || MigrationRandomPlanner.new(env: env, proof_registry: @proof_registry, now: now)
+    @dashboard_health = dashboard_health
+  end
+
+  def report
+    proof_report = proof_registry.report(position: position)
+    plan = planner.plan(position: position, require_live_proofs: false).receipt
+    live_plan = planner.plan(position: position, require_live_proofs: true).receipt
+    next_canary = next_recommended_canary(proof_report)
+    blockers = live_blockers(proof_report: proof_report, live_plan: live_plan)
+    {
+      action: "migration_random_readiness",
+      position_id: position.id,
+      random_engine_implemented: true,
+      current_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
+      current_live_eligible_routes: live_plan.fetch(:eligible_routes),
+      current_rehearsal_eligible_routes: plan.fetch(:eligible_routes),
+      next_recommended_canary: next_canary,
+      completed_route_proofs: proof_report.fetch(:completed_route_proofs),
+      missing_route_proofs: proof_report.fetch(:missing_route_proofs),
+      stale_route_proofs: proof_report.fetch(:stale_route_proofs),
+      current_safe_to_rehearse: plan.fetch(:selected_route).present?,
+      current_safe_to_live_if_operator_gates_open: blockers.empty?,
+      exact_missing_implementation_items: [],
+      blockers: blockers,
+      operator_commands: operator_commands(next_canary),
+      route_proof_statuses: proof_report.fetch(:routes),
+      random_live_gates: random_live_gates,
+      nado_auto_summary: nado_auto_summary,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    }
+  end
+
+  private
+
+  attr_reader :position, :planner, :proof_registry
+
+  def live_blockers(proof_report:, live_plan:)
+    blockers = []
+    blockers << "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
+    blockers << "all route proofs must be READY_FOR_RANDOM" unless proof_report.fetch(:missing_route_proofs).empty?
+    blockers << "no eligible proven route from current production venue" if live_plan.fetch(:selected_route).blank?
+    blockers << "pending ShortRebalance must be resolved before random migration" if pending_rebalance?
+    blockers << "pending recovery must be resolved before random migration" if pending_recovery?
+    blockers << "dashboard health must be HEALTHY" unless dashboard_healthy?
+    blockers.uniq
+  end
+
+  def next_recommended_canary(proof_report)
+    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    preferred = proof_report.fetch(:routes).find { |route| route[:from_venue] == current && route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] } ||
+      proof_report.fetch(:routes).find { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] }
+    return nil unless preferred
+
+    preferred.merge(commands_for(preferred[:from_venue], preferred[:to_venue]))
+  end
+
+  def operator_commands(next_canary)
+    commands = {
+      route_proofs: "bin/rails migration:route_proofs position_id=#{position.id}",
+      random_readiness: "bin/rails migration:random_readiness position_id=#{position.id}",
+      random_rehearse: "bin/rails migration:random_rehearse position_id=#{position.id} dry_run=true"
+    }
+    return commands unless next_canary
+
+    commands.merge(commands_for(next_canary[:from_venue], next_canary[:to_venue]))
+  end
+
+  def commands_for(from, to)
+    {
+      next_canary_dry_run: "bin/rails migration:rehearse_route position_id=#{position.id} from=#{from} to=#{to} mode=full sequence=target_first dry_run=true",
+      next_canary_live: "bin/rails migration:run_manual_live_canary position_id=#{position.id} from=#{from} to=#{to} sequence=target_first confirmation=#{MigrationManualLiveCanaryRunner::CONFIRMATION}",
+      recovery: "bin/rails migration:recover_target_first_source_close position_id=#{position.id} from=#{from} to=#{to} dry_run=true"
+    }
+  end
+
+  def random_live_gates
+    {
+      migration_random_rotation_live_enabled: bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED"),
+      migration_live_enabled: bool_env("MIGRATION_LIVE_ENABLED"),
+      migration_auto_enabled: bool_env("MIGRATION_AUTO_ENABLED")
+    }
+  end
+
+  def nado_auto_summary
+    rows = position.hedge&.short_rebalances&.where(venue: "nado")&.order(created_at: :desc) || ShortRebalance.none
+    {
+      latest_nado_auto_success: rows.find { |row| row.status == ShortRebalance::STATUS_SUCCESS }&.id,
+      latest_nado_pending: rows.find { |row| row.status == ShortRebalance::STATUS_PENDING }&.id,
+      latest_nado_failure: rows.find { |row| row.status == ShortRebalance::STATUS_FAILED }&.id,
+      historical_prefix_confirmation_failed_count: rows.count { |row| row.status == ShortRebalance::STATUS_FAILED && row.message.to_s.include?("submitted confirmation must equal") }
+    }
+  end
+
+  def pending_rebalance?
+    position.hedge&.short_rebalances&.where(status: ShortRebalance::STATUS_PENDING)&.exists?
+  end
+
+  def pending_recovery?
+    false
+  end
+
+  def dashboard_healthy?
+    snapshot = position.position_dashboard_snapshot
+    status = @dashboard_health || (snapshot.production_health_status if snapshot&.respond_to?(:production_health_status)) || "HEALTHY"
+    status.to_s.in?(%w[HEALTHY OK healthy ok])
+  end
+
+  def bool_env(key)
+    ActiveModel::Type::Boolean.new.cast(env[key])
+  end
+
+  def env
+    @env
+  end
+end

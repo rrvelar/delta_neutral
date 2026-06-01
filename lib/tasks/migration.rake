@@ -72,6 +72,75 @@ namespace :migration do
     puts JSON.pretty_generate(HedgeVenueMigrationRouteMatrix.new(position: position).report.merge(action: "migration_route_matrix"))
   end
 
+  desc "Print route proof registry status for all six migration routes"
+  task route_proofs: :environment do
+    position = migration_position_from_env(action: "migration_route_proofs")
+    next unless position
+
+    puts JSON.pretty_generate(MigrationRouteProofRegistry.new.report(position: position))
+  end
+
+  desc "Show actionable random migration readiness and next operator commands"
+  task random_readiness: :environment do
+    position = migration_position_from_env(action: "migration_random_readiness")
+    next unless position
+
+    puts JSON.pretty_generate(MigrationRandomReadiness.new(position: position).report)
+  end
+
+  desc "Rehearse one random eligible target-first migration route without live actions"
+  task random_rehearse: :environment do
+    position = migration_position_from_env(action: "migration_random_rehearse")
+    next unless position
+
+    dry_run = ENV["dry_run"].present? || ENV["DRY_RUN"].present? ? ActiveModel::Type::Boolean.new.cast(ENV["dry_run"].presence || ENV["DRY_RUN"]) : true
+    result = MigrationRandomRehearsal.new.run(position: position, dry_run: dry_run)
+    puts JSON.pretty_generate(result.receipt.merge(action: "migration_random_rehearse"))
+  end
+
+  desc "Show canary ladder status and next route to prove"
+  task canary_ladder: :environment do
+    position = migration_position_from_env(action: "migration_canary_ladder")
+    next unless position
+
+    readiness = MigrationRandomReadiness.new(position: position).report
+    puts JSON.pretty_generate(readiness.merge(action: "migration_canary_ladder"))
+  end
+
+  desc "Show the next supervised canary route and exact commands"
+  task next_canary: :environment do
+    position = migration_position_from_env(action: "migration_next_canary")
+    next unless position
+
+    readiness = MigrationRandomReadiness.new(position: position).report
+    puts JSON.pretty_generate(
+      action: "migration_next_canary",
+      position_id: position.id,
+      next_recommended_canary: readiness[:next_recommended_canary],
+      operator_commands: readiness[:operator_commands],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+  end
+
+  desc "Rehearse the next supervised canary route without live actions"
+  task rehearse_next_canary: :environment do
+    position = migration_position_from_env(action: "migration_rehearse_next_canary")
+    next unless position
+
+    next_canary = MigrationRandomReadiness.new(position: position).report[:next_recommended_canary]
+    unless next_canary
+      puts JSON.pretty_generate(action: "migration_rehearse_next_canary", position_id: position.id, blockers: [ "No next canary route found." ], orders_submitted: 0, signatures_created: 0)
+      next
+    end
+
+    plan = MigrationManualCanaryPlanner.new(position: position, from: next_canary[:from_venue], to: next_canary[:to_venue], sequence: "target_first").report
+    receipt = plan.merge(action: "migration_rehearse_next_canary", dry_run: true, live: false, orders_submitted: 0, orders_placed: 0, signatures_created: 0)
+    path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_route_rehearsals")).write(receipt)
+    puts JSON.pretty_generate(receipt.merge(receipt_path: path&.to_s))
+  end
+
   desc "Write a read-only random venue rotation decision receipt for a position"
   task random_rotation_decision: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence

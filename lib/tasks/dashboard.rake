@@ -178,6 +178,7 @@ namespace :dashboard do
 
     mellow = safe_smoke_section { MellowCurrentExposureResolver.new(position: position).resolve }
     readiness = canonical_auto_readiness_for_smoke(position)
+    random_migration = safe_smoke_section { MigrationRandomReadiness.new(position: position).report }
     active_auto_readiness = {
       continuous_auto_ready: readiness[:continuous_auto_ready],
       planned_auto_action: readiness[:planned_auto_action],
@@ -246,6 +247,11 @@ namespace :dashboard do
       },
       active_auto_readiness: active_auto_readiness,
       extended_auto_readiness: active_auto_readiness,
+      random_migration_status: random_migration[:current_safe_to_live_if_operator_gates_open] ? "ready" : "not_ready",
+      random_migration_next_canary: random_migration[:next_recommended_canary],
+      random_migration_route_proofs: random_migration[:route_proof_statuses],
+      random_migration_missing_proofs: random_migration[:missing_route_proofs],
+      random_migration_enabled: random_migration.dig(:random_live_gates, :migration_random_rotation_live_enabled),
       last_successful_extended_rebalance: last_success && {
         id: last_success.id,
         old_short_size: last_success.old_short_size&.to_s("F"),

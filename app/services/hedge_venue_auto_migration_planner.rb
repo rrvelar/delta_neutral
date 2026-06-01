@@ -161,7 +161,7 @@ class HedgeVenueAutoMigrationPlanner
 
   def live_disabled_blocker?(blocker)
     LIVE_DISABLED_BLOCKERS.include?(blocker.to_s) ||
-      blocker.to_s.match?(/live .*not implemented|live .*disabled|live migration.*unavailable|live submit|live execution|live path/i)
+      blocker.to_s.match?(/live .*unavailable|live .*disabled|live migration.*unavailable|live submit|live execution|live path/i)
   end
 
   def route_payload(route)

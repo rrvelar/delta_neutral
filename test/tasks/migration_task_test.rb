@@ -13,6 +13,12 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:manual_live_canary_readiness"].reenable if Rake::Task.task_defined?("migration:manual_live_canary_readiness")
     Rake::Task["migration:run_manual_live_canary"].reenable if Rake::Task.task_defined?("migration:run_manual_live_canary")
     Rake::Task["migration:route_matrix"].reenable if Rake::Task.task_defined?("migration:route_matrix")
+    Rake::Task["migration:route_proofs"].reenable if Rake::Task.task_defined?("migration:route_proofs")
+    Rake::Task["migration:random_readiness"].reenable if Rake::Task.task_defined?("migration:random_readiness")
+    Rake::Task["migration:random_rehearse"].reenable if Rake::Task.task_defined?("migration:random_rehearse")
+    Rake::Task["migration:canary_ladder"].reenable if Rake::Task.task_defined?("migration:canary_ladder")
+    Rake::Task["migration:next_canary"].reenable if Rake::Task.task_defined?("migration:next_canary")
+    Rake::Task["migration:rehearse_next_canary"].reenable if Rake::Task.task_defined?("migration:rehearse_next_canary")
     Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
   end
@@ -265,6 +271,82 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert_equal 0, payload.fetch("signatures_created")
   ensure
     ENV.delete("position_id")
+  end
+
+  test "route proofs task tracks all six route proof states" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+
+    out, = capture_io { Rake::Task["migration:route_proofs"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_route_proofs", payload.fetch("action")
+    assert_equal 6, payload.fetch("routes").size
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "random readiness and canary ladder expose next commands with zero counters" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+
+    out, = capture_io { Rake::Task["migration:random_readiness"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_random_readiness", payload.fetch("action")
+    assert_equal true, payload.fetch("random_engine_implemented")
+    assert payload.fetch("operator_commands").fetch("random_rehearse").include?("migration:random_rehearse")
+    assert payload.fetch("next_recommended_canary")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+
+    Rake::Task["migration:canary_ladder"].reenable
+    out, = capture_io { Rake::Task["migration:canary_ladder"].invoke }
+    ladder = JSON.parse(out)
+    assert_equal "migration_canary_ladder", ladder.fetch("action")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "next canary task gives exact dry run and live commands" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+
+    out, = capture_io { Rake::Task["migration:next_canary"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_next_canary", payload.fetch("action")
+    assert_match(/migration:rehearse_route/, payload.fetch("operator_commands").fetch("next_canary_dry_run"))
+    assert_match(/migration:run_manual_live_canary/, payload.fetch("operator_commands").fetch("next_canary_live"))
+    assert_equal 0, payload.fetch("orders_submitted")
+  ensure
+    ENV.delete("position_id")
+  end
+
+  test "random rehearse task writes no-live receipt" do
+    position = migration_position
+    ENV["position_id"] = position.id.to_s
+    ENV["dry_run"] = "true"
+    ENV["MIGRATION_REQUIRE_ROUTE_PROOF"] = "false"
+    ENV["MIGRATION_MIN_COOLDOWN_HOURS"] = "0"
+
+    out, = capture_io { Rake::Task["migration:random_rehearse"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "migration_random_rehearse", payload.fetch("action")
+    assert_equal true, payload.fetch("dry_run")
+    assert payload.key?("target_leg_preview")
+    assert payload.key?("source_close_preview")
+    assert_match "storage/hedge_migration_random_rehearsals", payload.fetch("receipt_path")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("dry_run")
+    ENV.delete("MIGRATION_REQUIRE_ROUTE_PROOF")
+    ENV.delete("MIGRATION_MIN_COOLDOWN_HOURS")
   end
 
   test "rehearse route writes no live receipt" do

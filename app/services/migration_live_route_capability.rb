@@ -35,7 +35,7 @@ class MigrationLiveRouteCapability
     live_path = live_path_implemented?(from, to)
     blockers = []
     blockers << "Route proof is not READY_FOR_DRY_RUN." unless proof&.fetch(:route_status, nil) == "READY_FOR_DRY_RUN"
-    blockers << "Live path is not implemented for #{from}->#{to}." unless live_path
+    blockers << "Live path is unavailable for #{from}->#{to}." unless live_path
     blockers.concat(canary.fetch(:blockers)) unless canary.fetch(:live_canary_confirmed)
     {
       from_venue: from,

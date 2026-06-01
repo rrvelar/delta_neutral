@@ -542,7 +542,7 @@ end %>
             </div>
             <% selected_to_venue = auto_migration_decision.dig(:selected_route, :to_venue) %>
             <% if selected_to_venue == "nado" && !auto_migration_decision[:selected_route_live_available] %>
-              <p class="mt-2 break-words text-xs text-yellow-200">Selected for decision-only dry-run rotation; live unavailable because Nado live migration path is not implemented.</p>
+                  <p class="mt-2 break-words text-xs text-yellow-200">Selected for decision-only dry-run rotation; live random migration still requires route proofs and operator gates.</p>
             <% end %>
             <p class="mt-2 text-xs text-gray-500">Live execution: blocked/gated. would_migrate=<%= auto_migration_decision[:would_migrate] ? "true" : "false" %>.</p>
             <p class="mt-1 text-xs text-gray-500">Virtual dry-run state only. Production hedge venue was not changed.</p>

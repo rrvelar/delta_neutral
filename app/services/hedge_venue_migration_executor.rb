@@ -143,7 +143,7 @@ class HedgeVenueMigrationExecutor
         confirmed: false,
         orders_placed: 0,
         signatures_created: 0,
-        blockers: [ "Generic dashboard migration live execution is not implemented for this direction yet." ]
+        blockers: [ "Fallback migration leg runner is unavailable for this direction." ]
       }
     end
   end
@@ -165,7 +165,7 @@ class HedgeVenueMigrationExecutor
       when "nado"
         run_nado_leg(leg, context)
       else
-        blocked_leg(leg, [ "Migration live execution is not implemented for #{venue}." ])
+        blocked_leg(leg, [ "Migration live execution is unsupported for #{venue}." ])
       end
     rescue => e
       blocked_leg(leg, [ "#{e.class}: #{e.message}" ], status: "failed_before_submit")

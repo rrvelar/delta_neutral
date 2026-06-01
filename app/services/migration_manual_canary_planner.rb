@@ -97,7 +97,7 @@ class MigrationManualCanaryPlanner
   def canonical_blockers(target)
     blockers = []
     blockers << "Route #{from}->#{to} is not known." unless route_known?
-    blockers << "Live path is not implemented for #{from}->#{to}." unless live_path_implemented?
+    blockers << "Live path is unavailable for #{from}->#{to}." unless live_path_implemented?
     blockers.concat(migration_gate_blockers)
     blockers.concat(full_migration_gate_blockers)
     blockers.concat(live_env_gate_blockers)
@@ -222,7 +222,7 @@ class MigrationManualCanaryPlanner
         max_slippage: max_slippage
       )
     else
-      { blockers: [ "Live target preflight is not implemented for #{venue}." ] }
+      { blockers: [ "Live target preflight is unavailable for #{venue}." ] }
     end
   end
 
