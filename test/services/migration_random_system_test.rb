@@ -152,7 +152,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
-    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", final_status: "LIVE_CANARY_CONFIRMED", production_venue: "extended", orders_submitted: 2, signatures_created: 2))
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", final_status: "LIVE_CANARY_CONFIRMED", production_venue: "nado", orders_submitted: 2, signatures_created: 2))
 
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
@@ -161,6 +161,26 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "extended", route.fetch(:final_venue)
     assert_match(%r{test-canary-proofs}, route.fetch(:live_canary_receipt))
     assert_match(%r{test-canary-proofs}, route.fetch(:finalization_receipt))
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "clean live canary final venue is route target for every route" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    MigrationLiveRouteCapability::ROUTES.each do |from, to|
+      write_event(canary_dir, live_canary_event(position: position, from: from, to: to, production_venue: from))
+    end
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+
+    MigrationLiveRouteCapability::ROUTES.each do |from, to|
+      route = report.fetch(:routes).find { |entry| entry[:route] == "#{from}->#{to}" }
+      assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+      assert_equal to, route.fetch(:final_venue), "#{from}->#{to} final venue should be route target"
+    end
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir

@@ -65,7 +65,7 @@ class MigrationRouteProofRegistry
       finalization_receipt: receipt_ref(proof_event),
       proof_timestamp: proof_event&.fetch("timestamp", nil),
       source_commit: proof_event&.fetch("source_commit", nil) || proof_event&.fetch("commit_sha", nil),
-      final_venue: final_venue_for(proof_event),
+      final_venue: final_venue_for(event: proof_event, status: status, to: to),
       final_readback_summary: final_readback_summary(proof_event),
       orders_submitted: proof_event&.fetch("orders_submitted", 0).to_i,
       orders_placed: proof_event&.fetch("orders_placed", 0).to_i,
@@ -228,8 +228,9 @@ class MigrationRouteProofRegistry
     event["receipt_path"]
   end
 
-  def final_venue_for(event)
+  def final_venue_for(event:, status:, to:)
     return nil unless event
+    return to if status.in?([ STATUSES[:ready], STATUSES[:live] ]) && live_canary_proof?(event)
 
     event["final_venue"] || event["production_venue"] || event["to_venue"]
   end
