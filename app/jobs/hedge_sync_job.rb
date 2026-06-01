@@ -180,6 +180,11 @@ class HedgeSyncJob < ApplicationJob
     return if result.status == "no_op" || result.receipt[:planned_auto_action] == "no_op"
 
     receipt_path = write_nado_receipt(result.receipt)
+    if active_auto_blocked_before_submit?(result)
+      Rails.logger.warn("HedgeSyncJob: Nado continuous auto blocked before submit for hedge #{hedge.id} — #{result.blockers.join('; ')} receipt=#{receipt_path}")
+      return
+    end
+
     status = if result.status == "submitted_and_confirmed"
       ShortRebalance::STATUS_SUCCESS
     elsif result.status.to_s.start_with?("submitted_but")
@@ -227,6 +232,11 @@ class HedgeSyncJob < ApplicationJob
     return if result.status == "no_op" || result.receipt[:planned_auto_action] == "no_op"
 
     receipt_path = write_ethereal_receipt(result.receipt)
+    if active_auto_blocked_before_submit?(result)
+      Rails.logger.warn("HedgeSyncJob: Ethereal continuous auto blocked before submit for hedge #{hedge.id} — #{result.blockers.join('; ')} receipt=#{receipt_path}")
+      return
+    end
+
     old_short = BigDecimal(result.receipt.fetch(:current_short_eth, "0").to_s)
     new_short = ethereal_readback_short(result.receipt[:execution_receipt]&.dig(:post_submit_readback), fallback: decimal_or_fallback(result.receipt[:expected_after_short_eth], old_short))
     status = if result.status == "submitted_and_confirmed"
@@ -275,6 +285,11 @@ class HedgeSyncJob < ApplicationJob
     return if result.status == "no_op"
 
     receipt_path = write_extended_receipt(result.receipt)
+    if active_auto_blocked_before_submit?(result)
+      Rails.logger.warn("HedgeSyncJob: Extended continuous auto blocked before submit for hedge #{hedge.id} — #{result.blockers.join('; ')} receipt=#{receipt_path}")
+      return
+    end
+
     status = if result.status == "success"
       ShortRebalance::STATUS_SUCCESS
     elsif result.status.to_s.start_with?("submitted_but")
@@ -679,6 +694,13 @@ class HedgeSyncJob < ApplicationJob
       result.receipt.dig(:submit_response_classification, :message).presence ||
       nado_execution_receipt(result.receipt)&.dig(:submit_response_classification, :message).presence ||
       result.receipt[:final_status]
+  end
+
+  def active_auto_blocked_before_submit?(result)
+    result.status == "blocked_before_submit" &&
+      result.receipt[:source] == "continuous_auto" &&
+      result.receipt[:orders_submitted].to_i.zero? &&
+      result.receipt[:signatures_created].to_i.zero?
   end
 
   def ethereal_rebalance_message(result)

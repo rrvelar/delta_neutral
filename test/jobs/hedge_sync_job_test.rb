@@ -658,6 +658,74 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_no_match(/signature|private/i, rebalance.message)
   end
 
+  test "nado continuous auto blocked before submit does not create failed rebalance spam" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2"))
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("blocked_before_submit", [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" ], [], {
+        venue: "nado",
+        source: "continuous_auto",
+        planned_auto_action: "increase_short",
+        current_short_eth: "0.5",
+        target_short_eth: "1.2",
+        expected_after_short_eth: "1.2",
+        side: "sell",
+        reduce_only: false,
+        final_status: "blocked_before_submit",
+        orders_submitted: 0,
+        signatures_created: 0,
+        blockers: [ "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" ]
+      })
+    )
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          assert_no_difference "ShortRebalance.count" do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+
+    assert_equal 1, runner.calls.size
+    assert_equal false, runner.calls.first.fetch(:one_shot)
+  end
+
+  test "nado continuous auto missing manual confirmation blocker is not recorded as failed rebalance" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "0.5", target: "1.2"))
+    blocker = "submitted confirmation must equal I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS"
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("blocked_before_submit", [ blocker ], [], {
+        venue: "nado",
+        source: "continuous_auto",
+        planned_auto_action: "increase_short",
+        current_short_eth: "0.5",
+        target_short_eth: "1.2",
+        expected_after_short_eth: "1.2",
+        side: "sell",
+        reduce_only: false,
+        final_status: "blocked_before_submit",
+        orders_submitted: 0,
+        signatures_created: 0,
+        blockers: [ blocker ]
+      })
+    )
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          assert_no_difference "ShortRebalance.count" do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+
+    assert_empty hedge.short_rebalances.where("message LIKE ?", "%submitted confirmation must equal%")
+  end
+
   test "nado hedge sync records accepted submit without confirmed readback as pending" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     execution = {

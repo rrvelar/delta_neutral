@@ -109,6 +109,46 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "Nado auto live one-shot without confirmation blocks before submit" do
+    service = FakeNadoExecutionService.new
+    result = nado_adapter(service: service).run(
+      position: position("nado"),
+      dry_run: false,
+      live: true,
+      confirmation: nil,
+      max_slippage: "0.01"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "submitted confirmation must equal I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_REBALANCE_ORDER"
+    assert_equal "manual_one_shot", result.receipt.fetch(:source)
+    assert_equal 0, service.submit_calls
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+  end
+
+  test "Nado continuous auto does not require manual one-shot confirmation" do
+    service = FakeNadoExecutionService.new
+    result = nado_adapter(service: service).run(
+      position: position("nado"),
+      dry_run: false,
+      live: true,
+      confirmation: nil,
+      max_slippage: "0.01",
+      one_shot: false
+    )
+
+    assert_equal "submitted_and_confirmed", result.status, result.blockers.inspect
+    assert_empty result.blockers.grep(/submitted confirmation/)
+    assert_equal "continuous_auto", result.receipt.fetch(:source)
+    assert_equal false, result.receipt.fetch(:one_shot)
+    assert_equal 1, service.submit_calls
+    assert_equal false, service.last_rebalance_call.fetch(:require_confirmation)
+    assert_nil service.last_rebalance_call.fetch(:confirmation)
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+  end
+
   test "Nado auto live one-shot uses delayed reconciliation after accepted digest" do
     service = FakeNadoExecutionService.new(status: "submitted_but_readback_pending")
     result = nado_adapter(service: service).run(
@@ -220,7 +260,7 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
   end
 
   class FakeNadoExecutionService
-    attr_reader :preview_call, :submit_calls
+    attr_reader :preview_call, :submit_calls, :last_rebalance_call
     attr_accessor :reconciled
 
     def initialize(status: "submitted_and_confirmed")
@@ -252,6 +292,14 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
 
     def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation:)
       @submit_calls += 1
+      @last_rebalance_call = {
+        position: position,
+        delta_eth: delta_eth,
+        current_position: current_position,
+        confirmation: confirmation,
+        max_slippage: max_slippage,
+        require_confirmation: require_confirmation
+      }
       NadoHedgeExecutionService::Result.new(
         @status,
         [],

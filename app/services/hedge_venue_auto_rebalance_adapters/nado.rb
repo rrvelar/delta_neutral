@@ -13,7 +13,7 @@ module HedgeVenueAutoRebalanceAdapters
       blockers << "submitted confirmation must equal #{nado_confirmation_phrase}" if live && one_shot && (nado_confirmation_phrase.blank? || confirmation.to_s != nado_confirmation_phrase)
       preview = order_preview(position: position, report: report, max_slippage: max_slippage)
       blockers.concat(Array(preview&.fetch(:blockers, [])))
-      return result(status: dry_run || !live ? "dry_run" : "blocked_before_submit", report: report, blockers: blockers, dry_run: dry_run || !live, preview: preview) if dry_run || !live || blockers.any? || report[:planned_auto_action] == "no_op"
+      return result(status: dry_run || !live ? "dry_run" : "blocked_before_submit", report: report, blockers: blockers, dry_run: dry_run || !live, one_shot: one_shot, preview: preview) if dry_run || !live || blockers.any? || report[:planned_auto_action] == "no_op"
 
       execution = @service.rebalance_short(
         position: position,
@@ -24,7 +24,7 @@ module HedgeVenueAutoRebalanceAdapters
         require_confirmation: one_shot
       )
       execution = @service.reconcile_pending_result(execution)
-      result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, preview: preview, execution: execution.receipt)
+      result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, one_shot: one_shot, preview: preview, execution: execution.receipt)
     end
 
     private
@@ -43,10 +43,12 @@ module HedgeVenueAutoRebalanceAdapters
       )
     end
 
-    def result(status:, report:, blockers:, dry_run:, preview:, execution: nil)
+    def result(status:, report:, blockers:, dry_run:, one_shot:, preview:, execution: nil)
       receipt = {
         venue: "nado",
         action: "auto_rebalance_once",
+        source: source_for(dry_run: dry_run, one_shot: one_shot),
+        one_shot: one_shot,
         dry_run: dry_run,
         live: !dry_run,
         timestamp: @now.call.utc.iso8601,
@@ -100,6 +102,12 @@ module HedgeVenueAutoRebalanceAdapters
 
     def nado_confirmation_phrase
       env["AERODROME_NADO_HEDGE_CONFIRMATION"].to_s
+    end
+
+    def source_for(dry_run:, one_shot:)
+      return "dry_run" if dry_run
+
+      one_shot ? "manual_one_shot" : "continuous_auto"
     end
   end
 end

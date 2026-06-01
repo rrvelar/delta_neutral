@@ -13,7 +13,7 @@ module HedgeVenueAutoRebalanceAdapters
       report = @readiness.readiness(position: position)
       blockers = Array(report[:blockers])
       blockers << "submitted confirmation must equal #{CONFIRMATION}" if live && one_shot && confirmation != CONFIRMATION
-      return result(status: dry_run || !live ? "dry_run" : "blocked_before_submit", report: report, blockers: blockers, dry_run: dry_run || !live) if dry_run || !live || blockers.any? || report[:planned_auto_action] == "no_op"
+      return result(status: dry_run || !live ? "dry_run" : "blocked_before_submit", report: report, blockers: blockers, dry_run: dry_run || !live, one_shot: one_shot) if dry_run || !live || blockers.any? || report[:planned_auto_action] == "no_op"
 
       execution = @service.rebalance_short(
         position: position,
@@ -23,15 +23,17 @@ module HedgeVenueAutoRebalanceAdapters
         max_slippage: max_slippage,
         require_confirmation: false
       )
-      result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, execution: execution.receipt)
+      result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, one_shot: one_shot, execution: execution.receipt)
     end
 
     private
 
-    def result(status:, report:, blockers:, dry_run:, execution: nil)
+    def result(status:, report:, blockers:, dry_run:, one_shot:, execution: nil)
       receipt = {
         venue: "ethereal",
         action: "auto_rebalance_once",
+        source: source_for(dry_run: dry_run, one_shot: one_shot),
+        one_shot: one_shot,
         dry_run: dry_run,
         live: !dry_run,
         timestamp: @now.call.utc.iso8601,
@@ -56,6 +58,12 @@ module HedgeVenueAutoRebalanceAdapters
         signatures_created: execution ? execution[:signatures_created].to_i : 0
       }.compact
       HedgeVenueAutoRebalanceOnce::Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
+    end
+
+    def source_for(dry_run:, one_shot:)
+      return "dry_run" if dry_run
+
+      one_shot ? "manual_one_shot" : "continuous_auto"
     end
   end
 end
