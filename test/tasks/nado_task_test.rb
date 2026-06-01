@@ -97,6 +97,71 @@ class NadoTaskTest < ActiveSupport::TestCase
     Rake::Task["nado:market_metadata"].reenable if Rake::Task.task_defined?("nado:market_metadata")
   end
 
+  test "nado auto rebalance once does not abort as blocked for confirmed late accepted submit" do
+    position = nado_position
+    runner = FakeNadoAutoRebalanceRunner.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("rebalance_confirmed_late", [], [], {
+        venue: "nado",
+        source: "manual_one_shot",
+        final_status: "REBALANCE_CONFIRMED_LATE",
+        lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
+        exchange_order_id: "0x#{"79" * 32}",
+        readback_confirmed: true,
+        orders_submitted: 1,
+        signatures_created: 1,
+        blockers: []
+      })
+    )
+
+    HedgeVenueAutoRebalanceAdapters::Nado.stub(:new, runner) do
+      with_position_id(position.id) do
+        with_live_env do
+          out, err = capture_io { Rake::Task["nado:auto_rebalance_once"].invoke }
+          payload = JSON.parse(out)
+
+          assert_empty err
+          assert_equal "confirmed_late", payload.fetch("cli_status")
+          assert_equal "REBALANCE_CONFIRMED_LATE", payload.fetch("final_status")
+          assert_equal "0x#{"79" * 32}", payload.fetch("exchange_order_id")
+          assert_equal 1, payload.fetch("orders_submitted")
+        end
+      end
+    end
+  end
+
+  test "nado auto rebalance once reports pending recheck without blocked prefix after accepted submit" do
+    position = nado_position
+    runner = FakeNadoAutoRebalanceRunner.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("submitted_pending_readback", [], [], {
+        venue: "nado",
+        source: "manual_one_shot",
+        final_status: "REBALANCE_REQUIRES_RECHECK",
+        lifecycle_state: "SUBMITTED_PENDING_READBACK",
+        exchange_order_id: "0x#{"45" * 32}",
+        readback_confirmed: false,
+        manual_action_required: true,
+        orders_submitted: 1,
+        signatures_created: 1,
+        blockers: []
+      })
+    )
+
+    HedgeVenueAutoRebalanceAdapters::Nado.stub(:new, runner) do
+      with_position_id(position.id) do
+        with_live_env do
+          out, err = capture_io { Rake::Task["nado:auto_rebalance_once"].invoke }
+          payload = JSON.parse(out)
+
+          assert_empty err
+          assert_equal "pending_recheck", payload.fetch("cli_status")
+          assert_equal "REBALANCE_REQUIRES_RECHECK", payload.fetch("final_status")
+          assert_equal "0x#{"45" * 32}", payload.fetch("exchange_order_id")
+          assert_equal 1, payload.fetch("orders_submitted")
+        end
+      end
+    end
+  end
+
   private
 
   def with_position_id(position_id)
@@ -106,5 +171,46 @@ class NadoTaskTest < ActiveSupport::TestCase
   ensure
     ENV["position_id"] = previous
     Rake::Task["nado:auto_readiness"].reenable
+    Rake::Task["nado:auto_rebalance_once"].reenable if Rake::Task.task_defined?("nado:auto_rebalance_once")
+  end
+
+  def with_live_env
+    previous = {
+      "live" => ENV["live"],
+      "confirmation" => ENV["confirmation"]
+    }
+    ENV["live"] = "true"
+    ENV["confirmation"] = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS"
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def nado_position
+    Position.create!(
+      user: users(:one),
+      wallet: wallets(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "1",
+      asset1_amount: "1000",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      external_id: SecureRandom.hex(4),
+      active: true
+    ).tap do |position|
+      position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "nado")
+    end
+  end
+
+  class FakeNadoAutoRebalanceRunner
+    def initialize(result)
+      @result = result
+    end
+
+    def run(position:, dry_run:, live:, confirmation:, max_slippage:)
+      @result
+    end
   end
 end

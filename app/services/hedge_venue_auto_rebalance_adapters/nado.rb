@@ -23,7 +23,12 @@ module HedgeVenueAutoRebalanceAdapters
         max_slippage: max_slippage,
         require_confirmation: one_shot
       )
-      execution = @service.reconcile_pending_result(execution)
+      execution = @service.reconcile_pending_result(
+        execution,
+        expected_short: report[:expected_after_short_eth],
+        target_short: report[:target_short_eth],
+        tolerance_eth: report[:tolerance_eth]
+      )
       result(status: execution.status, report: report, blockers: execution.blockers, dry_run: false, one_shot: one_shot, preview: preview, execution: execution.receipt)
     end
 
@@ -66,9 +71,11 @@ module HedgeVenueAutoRebalanceAdapters
         blockers: blockers.uniq,
         warnings: report[:warnings],
         exchange_order_id: execution&.fetch(:exchange_order_id, nil),
-        readback_confirmed: execution&.dig(:post_submit_readback).present? && status == "submitted_and_confirmed",
+        readback_confirmed: readback_confirmed?(execution, status),
         execution_receipt: execution,
-        final_status: status,
+        final_status: final_status_for(status, execution),
+        lifecycle_state: lifecycle_state_for(status, execution),
+        manual_action_required: manual_action_required?(status, execution),
         orders_submitted: submitted_count(execution, status),
         orders_placed: submitted_count(execution, status),
         signatures_created: signature_count(execution, status)
@@ -87,8 +94,9 @@ module HedgeVenueAutoRebalanceAdapters
 
       explicit = execution[:orders_placed] || execution[:orders_submitted]
       return explicit.to_i unless explicit.nil?
+      return 1 if execution[:exchange_order_id].present?
 
-      status.to_s.start_with?("submitted") ? 1 : 0
+      status.to_s.start_with?("submitted") || status.to_s.start_with?("rebalance_confirmed") ? 1 : 0
     end
 
     def signature_count(execution, status)
@@ -96,8 +104,9 @@ module HedgeVenueAutoRebalanceAdapters
 
       explicit = execution[:signatures_created]
       return explicit.to_i unless explicit.nil?
+      return 1 if execution[:exchange_order_id].present?
 
-      status.to_s.start_with?("submitted") ? 1 : 0
+      status.to_s.start_with?("submitted") || status.to_s.start_with?("rebalance_confirmed") ? 1 : 0
     end
 
     def nado_confirmation_phrase
@@ -108,6 +117,43 @@ module HedgeVenueAutoRebalanceAdapters
       return "dry_run" if dry_run
 
       one_shot ? "manual_one_shot" : "continuous_auto"
+    end
+
+    def readback_confirmed?(execution, status)
+      return false unless execution
+      return true if execution[:readback_confirmed] == true
+
+      execution.dig(:post_submit_readback).present? && status.to_s.in?(%w[submitted_and_confirmed rebalance_confirmed_late])
+    end
+
+    def final_status_for(status, execution)
+      execution_status = execution&.fetch(:final_status, nil).presence
+      return "REBALANCE_CONFIRMED" if execution_status == "submitted_and_confirmed"
+      return "REBALANCE_REQUIRES_RECHECK" if execution_status.to_s.start_with?("submitted_but")
+
+      execution_status || status
+    end
+
+    def lifecycle_state_for(status, execution)
+      execution&.fetch(:lifecycle_state, nil).presence ||
+        case status.to_s
+        when "submitted_and_confirmed"
+          "REBALANCE_CONFIRMED"
+        when "rebalance_confirmed_late"
+          "CONFIRMED_LATE_BY_RECONCILIATION"
+        when "submitted_pending_readback", "submitted_but_readback_pending", "submitted_but_not_confirmed"
+          "SUBMITTED_PENDING_READBACK"
+        when "blocked_before_submit"
+          "REJECTED_OR_NOT_SUBMITTED"
+        else
+          status.to_s.upcase
+        end
+    end
+
+    def manual_action_required?(status, execution)
+      return execution[:manual_action_required] if execution&.key?(:manual_action_required)
+
+      status.to_s.in?(%w[submitted_pending_readback submitted_but_readback_pending submitted_but_not_confirmed failed_before_submit blocked_before_submit])
     end
   end
 end

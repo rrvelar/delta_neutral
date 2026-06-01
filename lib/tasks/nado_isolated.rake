@@ -50,8 +50,9 @@ namespace :nado do
       confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
       max_slippage: ENV["max_slippage"].presence || ENV["MAX_SLIPPAGE"].presence || "0.01"
     )
-    puts JSON.pretty_generate(result.receipt.merge(action: "nado_auto_rebalance_once"))
-    abort("Nado auto rebalance blocked: #{result.blockers.join('; ')}") if live && !result.status.in?(%w[success submitted_and_confirmed no_op])
+    payload = result.receipt.merge(action: "nado_auto_rebalance_once", cli_status: nado_auto_cli_status(result))
+    puts JSON.pretty_generate(payload)
+    abort("Nado auto rebalance #{payload[:cli_status]}: #{result.blockers.join('; ')}") if live && nado_auto_cli_failure?(result)
   end
 
   desc "Read-only Nado ETH-PERP market metadata diagnostics"
@@ -214,6 +215,20 @@ namespace :nado do
     return nado_delta_probe_mock_position if ActiveModel::Type::Boolean.new.cast(ENV["MOCK_NADO_READBACK"])
 
     Position.find(ENV["position_id"] || ENV["POSITION_ID"] || 3)
+  end
+
+  def nado_auto_cli_status(result)
+    final_status = result.receipt[:final_status].to_s
+    return "confirmed_late" if result.status.to_s == "rebalance_confirmed_late" || final_status == "REBALANCE_CONFIRMED_LATE"
+    return "confirmed" if result.status.to_s.in?(%w[success submitted_and_confirmed no_op]) || final_status == "REBALANCE_CONFIRMED"
+    return "pending_recheck" if result.status.to_s.in?(%w[submitted_pending_readback submitted_but_readback_pending submitted_but_not_confirmed]) || final_status == "REBALANCE_REQUIRES_RECHECK"
+    return "blocked_before_submit" if result.status.to_s == "blocked_before_submit"
+
+    "failed_after_submit"
+  end
+
+  def nado_auto_cli_failure?(result)
+    nado_auto_cli_status(result).in?(%w[blocked_before_submit failed_after_submit])
   end
 
   def nado_delta_probe_mock_position

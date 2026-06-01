@@ -61,11 +61,14 @@ class NadoPendingRebalanceReconciler
     receipt = receipt_for(rebalance)
     raw = receipt["expected_after_short_eth"] ||
       receipt.dig("action_plan", "expected_after_short_eth") ||
-      receipt.dig("submitted_order_summary", "expected_after_short_eth")
+      receipt.dig("submitted_order_summary", "expected_after_short_eth") ||
+      receipt.dig("execution_receipt", "expected_after_short_eth") ||
+      receipt.dig("execution_receipt", "action_plan", "expected_after_short_eth") ||
+      receipt.dig("execution_receipt", "submitted_order_summary", "expected_after_short_eth")
     return BigDecimal(raw.to_s) if raw.present?
 
-    pre = receipt["pre_submit_readback"] || receipt["before_readback"]
-    delta = receipt.dig("action_plan", "delta_eth")
+    pre = receipt["pre_submit_readback"] || receipt["before_readback"] || receipt.dig("execution_receipt", "pre_submit_readback")
+    delta = receipt.dig("action_plan", "delta_eth") || receipt.dig("execution_receipt", "action_plan", "delta_eth")
     return unless pre && delta
 
     short_size_from_hash(pre) + BigDecimal(delta.to_s)

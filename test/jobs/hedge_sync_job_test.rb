@@ -726,6 +726,82 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     assert_empty hedge.short_rebalances.where("message LIKE ?", "%submitted confirmation must equal%")
   end
 
+  test "nado hedge sync records confirmed late accepted digest as success" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "1.11", target: "1.180225"))
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("rebalance_confirmed_late", [], [], {
+        venue: "nado",
+        source: "continuous_auto",
+        planned_auto_action: "increase_short",
+        current_short_eth: "1.11",
+        target_short_eth: "1.180225",
+        expected_after_short_eth: "1.180225",
+        side: "sell",
+        reduce_only: false,
+        execution_receipt: {
+          final_status: "REBALANCE_CONFIRMED_LATE",
+          lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
+          exchange_order_id: "0x#{"79" * 32}",
+          post_submit_readback: { size: BigDecimal("-1.18") },
+          submitted_order_summary: { side: "sell", reduce_only: false, rounded_size_eth: "0.070225" }
+        },
+        exchange_order_id: "0x#{"79" * 32}",
+        final_status: "REBALANCE_CONFIRMED_LATE",
+        lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
+        readback_confirmed: true,
+        orders_submitted: 1,
+        signatures_created: 1,
+        blockers: []
+      })
+    )
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          assert_difference "ShortRebalance.count", 1 do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+
+    rebalance = hedge.short_rebalances.order(:id).last
+    assert_equal ShortRebalance::STATUS_SUCCESS, rebalance.status
+    assert_equal BigDecimal("1.18"), rebalance.new_short_size
+    assert_equal "0x#{"79" * 32}", rebalance.exchange_order_id
+    assert_equal "sell", rebalance.order_side
+    assert_equal false, rebalance.reduce_only
+  end
+
+  test "nado hedge sync pending accepted digest prevents immediate duplicate submit" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "1.11",
+      new_short_size: "1.11",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_PENDING,
+      message: "Nado submit accepted but readback did not confirm ETH-PERP position.",
+      rebalanced_at: Time.current,
+      venue: "nado",
+      order_side: "sell",
+      reduce_only: false,
+      exchange_order_id: "0x#{"45" * 32}"
+    )
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "1.11", target: "1.180225"))
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, ->(*) { raise "HedgeVenueAutoRebalanceOnce should not be called while pending Nado digest exists" }) do
+          assert_no_difference "ShortRebalance.count" do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+  end
+
   test "nado hedge sync records accepted submit without confirmed readback as pending" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     execution = {

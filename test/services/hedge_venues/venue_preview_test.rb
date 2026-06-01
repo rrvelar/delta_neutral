@@ -1538,9 +1538,11 @@ module HedgeVenues
 
       result = service.reconcile_pending_result(pending)
 
-      assert_equal "submitted_and_confirmed", result.status
+      assert_equal "rebalance_confirmed_late", result.status
+      assert_equal "REBALANCE_CONFIRMED_LATE", result.receipt.fetch(:final_status)
+      assert_equal "CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:lifecycle_state)
       assert_equal true, result.receipt.fetch(:reconciled_after_pending)
-      assert_equal "Nado submit confirmed by later readback.", result.receipt.fetch(:final_message)
+      assert_equal "Nado auto rebalance confirmed by later readback.", result.receipt.fetch(:final_message)
       assert_equal BigDecimal("0.814"), result.receipt.fetch(:post_submit_readback).fetch(:short_size)
     end
 

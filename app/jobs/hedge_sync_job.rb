@@ -165,6 +165,11 @@ class HedgeSyncJob < ApplicationJob
       return
     end
 
+    if nado_pending_rebalance?(hedge)
+      Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — pending accepted Nado rebalance must reconcile before another submit")
+      return
+    end
+
     unless readiness.fetch(:continuous_auto_ready)
       Rails.logger.warn("HedgeSyncJob: skipping Nado hedge #{hedge.id} — #{readiness.fetch(:blockers).join('; ')}")
       return
@@ -185,9 +190,9 @@ class HedgeSyncJob < ApplicationJob
       return
     end
 
-    status = if result.status == "submitted_and_confirmed"
+    status = if nado_result_confirmed?(result)
       ShortRebalance::STATUS_SUCCESS
-    elsif result.status.to_s.start_with?("submitted_but")
+    elsif nado_result_pending?(result)
       ShortRebalance::STATUS_PENDING
     else
       ShortRebalance::STATUS_FAILED
@@ -701,6 +706,22 @@ class HedgeSyncJob < ApplicationJob
       result.receipt[:source] == "continuous_auto" &&
       result.receipt[:orders_submitted].to_i.zero? &&
       result.receipt[:signatures_created].to_i.zero?
+  end
+
+  def nado_result_confirmed?(result)
+    result.status.to_s.in?(%w[submitted_and_confirmed rebalance_confirmed_late]) ||
+      result.receipt[:final_status].to_s.in?(%w[REBALANCE_CONFIRMED REBALANCE_CONFIRMED_LATE]) ||
+      result.receipt[:readback_confirmed] == true
+  end
+
+  def nado_result_pending?(result)
+    result.status.to_s.start_with?("submitted_but") ||
+      result.status.to_s == "submitted_pending_readback" ||
+      result.receipt[:final_status].to_s.in?(%w[REBALANCE_REQUIRES_RECHECK SUBMITTED_BUT_NOT_CONFIRMED])
+  end
+
+  def nado_pending_rebalance?(hedge)
+    hedge.short_rebalances.where(venue: "nado", status: ShortRebalance::STATUS_PENDING).exists?
   end
 
   def ethereal_rebalance_message(result)

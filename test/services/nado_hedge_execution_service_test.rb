@@ -32,6 +32,62 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal 0, service.sign_calls
   end
 
+  test "accepted digest stale readback confirms late when final readback is inside tolerance" do
+    service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-1.18"), short_size: BigDecimal("1.18"), margin_mode: "isolated" })
+    result = service.reconcile_pending_result(
+      NadoHedgeExecutionService::Result.new(
+        "submitted_but_readback_pending",
+        [],
+        [],
+        {
+          exchange_order_id: "0x79ac4726d931064c75c606055ed54eacc6944d3f059d098aecc99920c72ad55e",
+          pre_submit_readback: { size: "-1.11" },
+          action_plan: { expected_after_short_eth: "1.180225", delta_eth: "0.070225" },
+          post_submit_readback_poll_attempts: [ { attempt: 1, readback: { size: "-1.11" }, confirmed: false } ],
+          final_status: "submitted_but_readback_pending",
+          manual_action_required: true
+        }
+      ),
+      expected_short: "1.180225",
+      target_short: "1.157",
+      tolerance_eth: "0.0347"
+    )
+
+    assert_equal "rebalance_confirmed_late", result.status
+    assert_equal "REBALANCE_CONFIRMED_LATE", result.receipt.fetch(:final_status)
+    assert_equal "CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:lifecycle_state)
+    assert_equal true, result.receipt.fetch(:readback_confirmed)
+    assert_equal false, result.receipt.fetch(:manual_action_required)
+    assert_equal "0x79ac4726d931064c75c606055ed54eacc6944d3f059d098aecc99920c72ad55e", result.receipt.fetch(:exchange_order_id)
+    assert_empty result.blockers
+  end
+
+  test "accepted digest stays pending when later readback is outside tolerance" do
+    service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-1.11"), short_size: BigDecimal("1.11"), margin_mode: "isolated" })
+    result = service.reconcile_pending_result(
+      NadoHedgeExecutionService::Result.new(
+        "submitted_but_readback_pending",
+        [],
+        [],
+        {
+          exchange_order_id: "0x#{"34" * 32}",
+          action_plan: { expected_after_short_eth: "1.180225", delta_eth: "0.070225" },
+          final_status: "submitted_but_readback_pending"
+        }
+      ),
+      expected_short: "1.180225",
+      target_short: "1.157",
+      tolerance_eth: "0.0347"
+    )
+
+    assert_equal "submitted_pending_readback", result.status
+    assert_equal "REBALANCE_REQUIRES_RECHECK", result.receipt.fetch(:final_status)
+    assert_equal "SUBMITTED_PENDING_READBACK", result.receipt.fetch(:lifecycle_state)
+    assert_equal false, result.receipt.fetch(:readback_confirmed)
+    assert_equal true, result.receipt.fetch(:manual_action_required)
+    assert_equal "0x#{"34" * 32}", result.receipt.fetch(:exchange_order_id)
+  end
+
   private
 
   def mellow_position
@@ -79,11 +135,12 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
   class ConfirmationBypassNadoService < NadoHedgeExecutionService
     attr_reader :sign_calls
 
-    def initialize
+    def initialize(late_position: nil)
       @env = {}
       @venue = ConfirmationVenue.new
       @now = -> { Time.zone.parse("2026-06-01 12:00:00 UTC") }
       @sign_calls = 0
+      @late_position = late_position
     end
 
     def build_order_preview(position:, action:, size_eth:, max_slippage:, current_position: nil)
@@ -125,6 +182,10 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
         position: { size: -expected_short, short_size: expected_short, margin_mode: "isolated" },
         confirmed: true
       }
+    end
+
+    def read_position
+      @late_position || { size: BigDecimal("-1.0"), short_size: BigDecimal("1.0"), margin_mode: "isolated" }
     end
 
     def signer_url

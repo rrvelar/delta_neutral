@@ -149,7 +149,7 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
 
-  test "Nado auto live one-shot uses delayed reconciliation after accepted digest" do
+  test "Nado auto live one-shot accepted digest with stale readback confirms late" do
     service = FakeNadoExecutionService.new(status: "submitted_but_readback_pending")
     result = nado_adapter(service: service).run(
       position: position("nado"),
@@ -159,11 +159,35 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
       max_slippage: "0.01"
     )
 
-    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "rebalance_confirmed_late", result.status
     assert_equal 1, service.submit_calls
     assert_equal true, service.reconciled
     assert_equal "nado-digest-1", result.receipt.fetch(:exchange_order_id)
     assert_equal true, result.receipt.fetch(:readback_confirmed)
+    assert_equal "REBALANCE_CONFIRMED_LATE", result.receipt.fetch(:final_status)
+    assert_equal "CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:lifecycle_state)
+    assert_equal false, result.receipt.fetch(:manual_action_required)
+    assert_empty result.blockers
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+  end
+
+  test "Nado auto accepted digest remains pending recheck when late readback does not confirm" do
+    service = FakeNadoExecutionService.new(status: "submitted_but_readback_pending", reconcile: :pending)
+    result = nado_adapter(service: service).run(
+      position: position("nado"),
+      dry_run: false,
+      live: true,
+      confirmation: "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_REBALANCE_ORDER",
+      max_slippage: "0.01"
+    )
+
+    assert_equal "submitted_pending_readback", result.status
+    assert_equal "REBALANCE_REQUIRES_RECHECK", result.receipt.fetch(:final_status)
+    assert_equal "SUBMITTED_PENDING_READBACK", result.receipt.fetch(:lifecycle_state)
+    assert_equal false, result.receipt.fetch(:readback_confirmed)
+    assert_equal true, result.receipt.fetch(:manual_action_required)
+    assert_equal "nado-digest-1", result.receipt.fetch(:exchange_order_id)
     assert_equal 1, result.receipt.fetch(:orders_submitted)
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
@@ -263,8 +287,9 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
     attr_reader :preview_call, :submit_calls, :last_rebalance_call
     attr_accessor :reconciled
 
-    def initialize(status: "submitted_and_confirmed")
+    def initialize(status: "submitted_and_confirmed", reconcile: :confirmed_late)
       @status = status
+      @reconcile = reconcile
       @submit_calls = 0
       @reconciled = false
     end
@@ -315,18 +340,35 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
       )
     end
 
-    def reconcile_pending_result(result)
+    def reconcile_pending_result(result, expected_short: nil, target_short: nil, tolerance_eth: nil)
       return result unless result.status.to_s.start_with?("submitted_but")
 
       @reconciled = true
+      if @reconcile == :pending
+        return NadoHedgeExecutionService::Result.new(
+          "submitted_pending_readback",
+          result.blockers,
+          result.warnings,
+          result.receipt.merge(
+            final_status: "REBALANCE_REQUIRES_RECHECK",
+            lifecycle_state: "SUBMITTED_PENDING_READBACK",
+            readback_confirmed: false,
+            manual_action_required: true
+          )
+        )
+      end
+
       NadoHedgeExecutionService::Result.new(
-        "submitted_and_confirmed",
+        "rebalance_confirmed_late",
         [],
         result.warnings,
         result.receipt.merge(
           post_submit_readback: { short_size: "1.0", side: "short" },
-          final_status: "submitted_and_confirmed",
-          reconciled_after_pending: true
+          final_status: "REBALANCE_CONFIRMED_LATE",
+          lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
+          reconciled_after_pending: true,
+          readback_confirmed: true,
+          manual_action_required: false
         )
       )
     end

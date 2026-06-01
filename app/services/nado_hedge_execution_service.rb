@@ -805,28 +805,32 @@ class NadoHedgeExecutionService
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
   end
 
-  def reconcile_pending_result(result)
+  def reconcile_pending_result(result, expected_short: nil, target_short: nil, tolerance_eth: nil)
     return result unless result.status.to_s.start_with?("submitted_but")
 
     receipt = result.receipt
-    expected_short = pending_expected_short(receipt)
-    return result unless expected_short
+    expected = decimal_or_nil(expected_short) || pending_expected_short(receipt)
+    target = decimal_or_nil(target_short)
+    tolerance = decimal_or_nil(tolerance_eth)
+    return pending_recheck_result(result) unless expected
 
     current_position = read_position
-    return result unless expected_short_confirmed?(current_short: short_size(current_position), expected_short: expected_short)
+    return pending_recheck_result(result) unless auto_rebalance_confirmed?(current_short: short_size(current_position), expected_short: expected, target_short: target, tolerance_eth: tolerance)
 
     updated_receipt = receipt.merge(
       post_submit_readback: serialize_position(current_position),
       after_readback: serialize_position(current_position),
-      final_status: "submitted_and_confirmed",
-      final_message: "Nado submit confirmed by later readback.",
+      final_status: "REBALANCE_CONFIRMED_LATE",
+      lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
+      final_message: "Nado auto rebalance confirmed by later readback.",
       reconciled_after_pending: true,
+      readback_confirmed: true,
       manual_action_required: false,
       next_manual_instruction: nil
     )
-    Result.new("submitted_and_confirmed", [], result.warnings, updated_receipt)
+    Result.new("rebalance_confirmed_late", [], result.warnings, updated_receipt)
   rescue
-    result
+    pending_recheck_result(result)
   end
   public :reconcile_pending_result
 
@@ -881,6 +885,9 @@ class NadoHedgeExecutionService
       final_message: final_message(status, submit_result),
       manual_action_required: manual_action_required?(status),
       next_manual_instruction: manual_instruction(status),
+      orders_submitted: submit_result&.dig(:status) == "submitted" ? 1 : 0,
+      orders_placed: submit_result&.dig(:status) == "submitted" ? 1 : 0,
+      signatures_created: submit_result.present? ? 1 : 0,
       blockers: blockers,
       warnings: order.fetch(:warnings, [])
     }
@@ -920,6 +927,26 @@ class NadoHedgeExecutionService
     short_size(pre) + BigDecimal(delta.to_s)
   rescue ArgumentError
     nil
+  end
+
+  def pending_recheck_result(result)
+    return result unless result.status.to_s.start_with?("submitted_but")
+
+    receipt = result.receipt.merge(
+      final_status: "REBALANCE_REQUIRES_RECHECK",
+      lifecycle_state: "SUBMITTED_PENDING_READBACK",
+      readback_confirmed: false,
+      manual_action_required: true,
+      next_manual_instruction: "Run bin/rails nado:reconcile_pending_rebalances or refresh Nado read-only data before submitting another hedge action."
+    )
+    Result.new("submitted_pending_readback", result.blockers, result.warnings, receipt)
+  end
+
+  def auto_rebalance_confirmed?(current_short:, expected_short:, target_short:, tolerance_eth:)
+    return true if expected_short_confirmed?(current_short: current_short, expected_short: expected_short)
+    return false unless target_short && tolerance_eth
+
+    (current_short - target_short).abs <= tolerance_eth
   end
 
   def product_metadata
