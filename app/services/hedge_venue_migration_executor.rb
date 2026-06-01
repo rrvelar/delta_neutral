@@ -70,7 +70,7 @@ class HedgeVenueMigrationExecutor
       receipt[:submitted] = receipt[:orders_placed].positive?
       receipt[:would_execute_live] = receipt[:submitted]
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
+      receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
       receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
@@ -234,7 +234,12 @@ class HedgeVenueMigrationExecutor
           service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
         end
       end
-      result = service.reconcile_pending_result(result)
+      result = service.reconcile_pending_result(
+        result,
+        expected_short: leg[:expected_after_short_eth],
+        target_short: context.dig(:receipt, :target_short),
+        tolerance_eth: context.dig(:receipt, :tolerance_abs_eth)
+      )
       normalize_service_result(result, leg)
     end
 
@@ -242,7 +247,7 @@ class HedgeVenueMigrationExecutor
       receipt = result.receipt
       {
         status: result.status,
-        confirmed: result.status.in?(%w[success submitted_and_confirmed]),
+        confirmed: service_result_confirmed?(result),
         orders_placed: receipt[:orders_placed] || receipt[:orders_submitted] || (receipt[:submitted] ? 1 : 0),
         signatures_created: receipt[:signatures_created].to_i,
         exchange_order_id: receipt[:exchange_order_id],
@@ -252,6 +257,12 @@ class HedgeVenueMigrationExecutor
         warnings: result.warnings,
         receipt: receipt
       }
+    end
+
+    def service_result_confirmed?(result)
+      return true if result.status.to_s.in?(%w[success submitted_and_confirmed rebalance_confirmed_late])
+
+      ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed])
     end
 
     def confirmed_short_from_receipt(receipt, leg)
@@ -317,7 +328,7 @@ class HedgeVenueMigrationExecutor
       receipt[:submitted] = receipt[:orders_placed].positive?
       receipt[:would_execute_live] = receipt[:submitted]
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      receipt[:final_status] = target_leg_readback_present?(receipt, first_planned_leg, first_leg) ? "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED" : "first_leg_not_confirmed"
+      receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
       receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
@@ -499,23 +510,6 @@ class HedgeVenueMigrationExecutor
     return role == "target" ? "TARGET_SUBMITTED_PENDING_READBACK" : "SOURCE_CLOSE_PENDING_READBACK" if leg_order_count(leg).positive?
 
     role == "target" ? "TARGET_REJECTED_OR_NOT_CONFIRMED" : "RECOVERY_REQUIRED"
-  end
-
-  def target_leg_readback_present?(receipt, planned_leg, actual_leg)
-    return false unless planned_leg.fetch(:venue) == receipt[:to_venue]
-
-    decimal(actual_leg[:after_short_eth]).positive? || readback_short_present?(actual_leg[:readback])
-  end
-
-  def readback_short_present?(readback)
-    case readback
-    when Hash
-      decimal(readback[:short_size] || readback["short_size"] || readback[:current_short_eth] || readback["current_short_eth"]).positive?
-    when Array
-      readback.any? { |row| readback_short_present?(row) }
-    else
-      false
-    end
   end
 
   def recovery_command(receipt)

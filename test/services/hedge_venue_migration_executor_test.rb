@@ -89,7 +89,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "first_leg_not_confirmed", result.status
+    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
     assert_equal 1, calls.size
   end
 
@@ -119,7 +119,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "TARGET_LEG_READBACK_PRESENT_NOT_CONFIRMED", result.status
+    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
     assert_equal 1, calls.size
     assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
     assert_match "from=extended to=ethereal", result.receipt.fetch(:recovery_command)
@@ -150,7 +150,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       action_plan: { expected_after_short_eth: "0.8" },
       post_submit_readback_poll_attempts: Array.new(12) { |index| { attempt: index + 1, position_present: false, confirmed: false } }
     })
-    confirmed = NadoHedgeExecutionService::Result.new("submitted_and_confirmed", [], [], {
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], {
       submitted: true,
       orders_placed: 1,
       signatures_created: 1,
@@ -160,15 +160,16 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       reconciled_after_pending: true
     })
     fake_service = Class.new do
-      attr_reader :reconciled
+      attr_reader :reconciled, :reconcile_kwargs
       def initialize(pending, confirmed)
         @pending = pending
         @confirmed = confirmed
         @reconciled = false
       end
       def open_short(**_kwargs) = @pending
-      def reconcile_pending_result(result)
+      def reconcile_pending_result(result, **kwargs)
         @reconciled = true
+        @reconcile_kwargs = kwargs
         result.status == "submitted_but_readback_pending" ? @confirmed : result
       end
     end.new(pending, confirmed)
@@ -192,6 +193,9 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
 
       assert_equal "success", result.status, result.blockers.inspect
       assert_equal true, fake_service.reconciled
+      assert_equal "0.8", fake_service.reconcile_kwargs.fetch(:expected_short)
+      assert_equal "0.8", fake_service.reconcile_kwargs.fetch(:target_short)
+      assert_equal "0.024", fake_service.reconcile_kwargs.fetch(:tolerance_eth)
       assert_equal 2, calls
       assert_equal "nado", position.hedge.reload.execution_venue
       assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
@@ -201,6 +205,80 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       assert_equal [ "0x3845e7", "ethereal-close" ], result.receipt.fetch(:exchange_order_ids)
       assert_equal 2, result.receipt.fetch(:orders_submitted)
       assert_equal true, result.receipt.fetch(:would_execute_live)
+    end
+  end
+
+  test "Extended to Nado target confirmed late continues to Extended source close" do
+    position = migration_position
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-target",
+      submitted_order_summary: { expected_after_short_eth: "0.8" },
+      post_submit_readback_poll_attempts: [ { attempt: 1, short_size: "0", confirmed: false } ]
+    })
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-target",
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    })
+    fake_service = Class.new do
+      attr_reader :submit_count, :reconcile_count
+      def initialize(pending, confirmed)
+        @pending = pending
+        @confirmed = confirmed
+        @submit_count = 0
+        @reconcile_count = 0
+      end
+      def open_short(**_kwargs)
+        @submit_count += 1
+        @pending
+      end
+      def reconcile_pending_result(_result, **_kwargs)
+        @reconcile_count += 1
+        @confirmed
+      end
+    end.new(pending, confirmed)
+    first_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), venue_builder: fake_builder)
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      calls == 1 ? first_runner.call(leg, context: context) : { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, after_short_eth: "0", exchange_order_id: "extended-close" }
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), leg_runner: runner, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+        position: position,
+        from_venue: "extended",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "success", result.status, result.blockers.inspect
+      assert_equal 1, fake_service.submit_count
+      assert_equal 1, fake_service.reconcile_count
+      assert_equal 2, calls
+      assert_equal "nado", position.hedge.reload.execution_venue
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal "SOURCE_CLOSE_CONFIRMED", result.receipt.fetch(:source_leg_status)
+      assert_equal [ "0xnado-target", "extended-close" ], result.receipt.fetch(:exchange_order_ids)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+      assert_equal 2, result.receipt.fetch(:signatures_created)
     end
   end
 
@@ -225,7 +303,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "first_leg_not_confirmed", result.status
+    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
     assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:lifecycle_state)
     assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
     assert_equal 1, result.receipt.fetch(:orders_submitted)
@@ -369,7 +447,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "first_leg_not_confirmed", result.status
+    assert_equal "TARGET_REJECTED_OR_NOT_CONFIRMED", result.status
     assert_equal "dashboard_migration_confirmation", result.receipt.fetch(:confirmation_type)
     assert_no_match HedgeVenueMigrationExecutor::CONFIRMATION, result.receipt.to_json
     assert_equal "<redacted>", result.receipt.dig(:to_leg_execution, :private_key)
