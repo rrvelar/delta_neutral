@@ -243,13 +243,50 @@ class HedgeVenueMigrationExecutor
           service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: nil, max_slippage: max_slippage, require_confirmation: false, migration: true)
         end
       end
-      result = service.reconcile_pending_result(
-        result,
-        expected_short: leg[:expected_after_short_eth],
-        target_short: context.dig(:receipt, :target_short),
-        tolerance_eth: context.dig(:receipt, :tolerance_abs_eth)
-      )
+      result = reconcile_nado_migration_leg(service: service, result: result, leg: leg, context: context)
       normalize_service_result(result, leg)
+    end
+
+    def reconcile_nado_migration_leg(service:, result:, leg:, context:)
+      attempts = []
+      attempts_limit = nado_target_reconciliation_attempts(context)
+      attempts_limit.times do |index|
+        result = service.reconcile_pending_result(
+          result,
+          expected_short: leg[:expected_after_short_eth],
+          target_short: context.dig(:receipt, :target_short),
+          tolerance_eth: context.dig(:receipt, :tolerance_abs_eth)
+        )
+        attempts << {
+          attempt: index + 1,
+          status: result.status,
+          readback_confirmed: ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed]),
+          exchange_order_id: result.receipt[:exchange_order_id],
+          short_size: result.receipt.dig(:post_submit_readback, :short_size)
+        }.compact
+        break if service_result_confirmed?(result)
+        break unless nado_pending_result?(result)
+
+        @sleeper.call(nado_target_reconciliation_interval(context)) if index < attempts_limit - 1
+      end
+      result.receipt[:migration_target_reconciliation_attempts] = attempts
+      result
+    end
+
+    def nado_pending_result?(result)
+      result.status.to_s.in?(%w[submitted_but_readback_pending submitted_but_not_confirmed submitted_pending_readback])
+    end
+
+    def nado_target_reconciliation_attempts(context)
+      value = context.dig(:receipt, :nado_target_reconciliation_attempts) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS"] || 4
+      [ value.to_i, 1 ].max
+    end
+
+    def nado_target_reconciliation_interval(context)
+      value = context.dig(:receipt, :nado_target_reconciliation_interval_seconds) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS"] || 0.25
+      BigDecimal(value.to_s).to_f
+    rescue ArgumentError
+      0.25
     end
 
     def normalize_service_result(result, leg)

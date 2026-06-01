@@ -282,6 +282,235 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "Extended to Nado accepted digest retries target reconciliation before source close" do
+    position = migration_position
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0x11c27ce8029bf779a4e2b7b916c259ef7bba06646d8e8d8a648c33b2b914f76a",
+      submitted_order_summary: { expected_after_short_eth: "1.25344725365047" },
+      post_submit_readback_poll_attempts: [ { attempt: 1, short_size: nil, confirmed: false } ]
+    })
+    still_pending = NadoHedgeExecutionService::Result.new("submitted_pending_readback", [], [], pending.receipt.merge(
+      lifecycle_state: "SUBMITTED_PENDING_READBACK",
+      readback_confirmed: false
+    ))
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], pending.receipt.merge(
+      post_submit_readback: { short_size: BigDecimal("1.253") },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    ))
+    fake_service = Class.new do
+      attr_reader :reconcile_count, :submit_count
+      def initialize(results)
+        @results = results
+        @reconcile_count = 0
+        @submit_count = 0
+      end
+      def open_short(**_kwargs)
+        @submit_count += 1
+        @results.first
+      end
+      def reconcile_pending_result(_result, **_kwargs)
+        @reconcile_count += 1
+        @results.fetch(@reconcile_count, @results.last)
+      end
+    end.new([ pending, still_pending, confirmed ])
+    first_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS" => "3",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS" => "0"
+      ),
+      venue_builder: fake_builder
+    )
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      calls == 1 ? first_runner.call(leg, context: context) : { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, after_short_eth: "0", exchange_order_id: "extended-close" }
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+      ).run(
+        position: position,
+        from_venue: "extended",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "success", result.status, result.blockers.inspect
+      assert_equal 1, fake_service.submit_count
+      assert_equal 2, fake_service.reconcile_count
+      assert_equal 2, calls
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal true, result.receipt.fetch(:target_late_reconciliation)
+      assert_equal true, result.receipt.dig(:to_leg_execution, :confirmed)
+      assert_equal 2, result.receipt.dig(:to_leg_execution, :receipt, :migration_target_reconciliation_attempts).size
+      assert_equal [ "0x11c27ce8029bf779a4e2b7b916c259ef7bba06646d8e8d8a648c33b2b914f76a", "extended-close" ], result.receipt.fetch(:exchange_order_ids)
+    end
+  end
+
+  test "Ethereal to Nado accepted digest retries target reconciliation before source close" do
+    position = migration_position_for("ethereal")
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-ethereal",
+      submitted_order_summary: { expected_after_short_eth: "0.8" }
+    })
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], pending.receipt.merge(
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    ))
+    fake_service = Class.new do
+      attr_reader :reconcile_count
+      def initialize(pending, confirmed)
+        @pending = pending
+        @confirmed = confirmed
+        @reconcile_count = 0
+      end
+      def open_short(**_kwargs) = @pending
+      def reconcile_pending_result(_result, **_kwargs)
+        @reconcile_count += 1
+        @confirmed
+      end
+    end.new(pending, confirmed)
+    first_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"), venue_builder: fake_builder)
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      calls == 1 ? first_runner.call(leg, context: context) : { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, after_short_eth: "0", exchange_order_id: "ethereal-close" }
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        final_verifier_factory: final_verifier_factory(from: "ethereal", to: "nado")
+      ).run(
+        position: position,
+        from_venue: "ethereal",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "success", result.status, result.blockers.inspect
+      assert_equal 1, fake_service.reconcile_count
+      assert_equal 2, calls
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal [ "0xnado-ethereal", "ethereal-close" ], result.receipt.fetch(:exchange_order_ids)
+    end
+  end
+
+  test "accepted Nado target remains pending without duplicate submit when reconciliation never confirms" do
+    position = migration_position
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xpendingnado",
+      submitted_order_summary: { expected_after_short_eth: "0.8" }
+    })
+    still_pending = NadoHedgeExecutionService::Result.new("submitted_pending_readback", [], [], pending.receipt.merge(
+      lifecycle_state: "SUBMITTED_PENDING_READBACK",
+      readback_confirmed: false
+    ))
+    fake_service = Class.new do
+      attr_reader :submit_count, :reconcile_count
+      def initialize(pending, still_pending)
+        @pending = pending
+        @still_pending = still_pending
+        @submit_count = 0
+        @reconcile_count = 0
+      end
+      def open_short(**_kwargs)
+        @submit_count += 1
+        @pending
+      end
+      def reconcile_pending_result(_result, **_kwargs)
+        @reconcile_count += 1
+        @still_pending
+      end
+    end.new(pending, still_pending)
+    first_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS" => "3",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS" => "0"
+      ),
+      venue_builder: fake_builder
+    )
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      first_runner.call(leg, context: context)
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot }
+      ).run(
+        position: position,
+        from_venue: "extended",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full"
+      )
+
+      assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
+      assert_equal 1, fake_service.submit_count
+      assert_equal 3, fake_service.reconcile_count
+      assert_equal 1, calls
+      assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
+      assert_equal 1, result.receipt.fetch(:orders_submitted)
+      assert_equal 1, result.receipt.fetch(:signatures_created)
+      assert_equal [ "0xpendingnado" ], result.receipt.fetch(:exchange_order_ids)
+      assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+    end
+  end
+
   test "unconfirmed accepted target submit records pending state counts and generic recovery command" do
     position = migration_position
     result = HedgeVenueMigrationExecutor.new(env: live_env, leg_runner: ->(leg, context:) {

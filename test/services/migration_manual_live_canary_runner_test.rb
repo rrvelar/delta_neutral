@@ -167,6 +167,47 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal [ "0x3845e7" ], result.receipt.fetch(:exchange_order_ids)
   end
 
+  test "runner preserves target submitted pending status instead of relabeling as failed" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "TARGET_SUBMITTED_BUT_NOT_CONFIRMED",
+          target_leg_status: "TARGET_SUBMITTED_PENDING_READBACK",
+          to_leg_execution: { confirmed: false, orders_placed: 1, signatures_created: 1, exchange_order_id: "0xpending" },
+          from_leg_execution: nil,
+          final_inside_tolerance: false,
+          exchange_order_ids: [ "0xpending" ],
+          orders_placed: 1,
+          orders_submitted: 1,
+          signatures_created: 1,
+          recovery_command: "bin/rails migration:recover_target_first_source_close position_id=3 from=extended to=nado dry_run=true",
+          blockers: [ "First migration leg was not confirmed; second leg was not submitted." ],
+          warnings: plan.fetch(:warnings)
+        )
+        HedgeVenueMigrationExecutor::Result.new("TARGET_SUBMITTED_BUT_NOT_CONFIRMED", receipt.fetch(:blockers), receipt.fetch(:warnings), receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "ethereal",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
+    assert_equal false, result.receipt.fetch(:target_leg_readback_confirmed)
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal [ "0xpending" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
   test "runner blocked result uses the same canonical planner blockers" do
     env = ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")
     plan = MigrationManualCanaryPlanner.new(

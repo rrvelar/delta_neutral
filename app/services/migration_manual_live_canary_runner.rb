@@ -100,6 +100,8 @@ class MigrationManualLiveCanaryRunner
 
   def normalized_final_status(receipt, result)
     return MigrationLiveCanaryChecker::CONFIRMED_STATUS if receipt[:final_status] == MigrationLiveCanaryChecker::CONFIRMED_STATUS
+    return "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" if result.status.to_s == "TARGET_SUBMITTED_BUT_NOT_CONFIRMED"
+    return "TARGET_REJECTED_OR_NOT_CONFIRMED" if result.status.to_s == "TARGET_REJECTED_OR_NOT_CONFIRMED"
     return "PARTIAL_OVERHEDGE_MANUAL_ACTION_REQUIRED" if receipt[:target_leg_readback_confirmed] && !receipt[:source_leg_readback_confirmed]
     return "TARGET_LEG_FAILED_SOURCE_UNCHANGED" unless receipt[:target_leg_readback_confirmed]
 

@@ -806,7 +806,7 @@ class NadoHedgeExecutionService
   end
 
   def reconcile_pending_result(result, expected_short: nil, target_short: nil, tolerance_eth: nil)
-    return result unless result.status.to_s.start_with?("submitted_but")
+    return result unless pending_reconciliation_status?(result.status)
 
     receipt = result.receipt
     expected = decimal_or_nil(expected_short) || pending_expected_short(receipt)
@@ -833,6 +833,10 @@ class NadoHedgeExecutionService
     pending_recheck_result(result)
   end
   public :reconcile_pending_result
+
+  def pending_reconciliation_status?(status)
+    status.to_s.start_with?("submitted_but") || status.to_s == "submitted_pending_readback"
+  end
 
   def live_blockers(position:, action:, size_eth:, current_position:, confirmation:, order:, require_confirmation: true)
     requested_order_size = order_size(size_eth)
