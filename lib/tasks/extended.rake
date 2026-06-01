@@ -110,7 +110,10 @@ namespace :extended do
   desc "Read-only Extended continuous auto readiness check"
   task auto_readiness: :environment do
     position = extended_probe_position
-    result = ExtendedAutoReadiness.new(env: extended_probe_env).report(position: position)
+    result = HedgeVenueAutoReadiness.new(
+      env: extended_probe_env,
+      adapters: { "extended" => HedgeVenueAutoAdapters::Extended.new(env: extended_probe_env) }
+    ).report(position: position)
 
     puts JSON.pretty_generate(result)
     abort("Extended continuous auto readiness blocked: #{result.fetch(:blockers).join('; ')}") if position.respond_to?(:persisted?) && position.persisted? && !result.fetch(:continuous_auto_ready)
