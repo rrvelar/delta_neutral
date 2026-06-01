@@ -10,10 +10,10 @@ class MigrationRouteProofRegistry
     failed: "FAILED_NEEDS_REPAIR"
   }.freeze
 
-  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: HedgeVenueMigrationReceiptWriter::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), now: -> { Time.current }, source_commit: nil, stale_after: 30.days)
+  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: MigrationTargetFirstSourceRecovery::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), now: -> { Time.current }, source_commit: nil, stale_after: 30.days)
     @route_proof_dir = Pathname(route_proof_dir)
     @canary_dir = Pathname(canary_dir)
-    @recovery_dir = Pathname(recovery_dir)
+    @recovery_dirs = Array(recovery_dir).map { |dir| Pathname(dir) }
     @random_dir = Pathname(random_dir)
     @now = now
     @source_commit = source_commit || current_commit
@@ -44,10 +44,10 @@ class MigrationRouteProofRegistry
     live = latest_event(position: position, from: from, to: to, dirs: [ canary_dir ]) do |event|
       live_canary_proof?(event)
     end
-    recovery = latest_event(position: position, from: from, to: to, dirs: [ recovery_dir ]) do |event|
+    recovery = latest_event(position: position, from: from, to: to, dirs: recovery_dirs) do |event|
       recovery_proof?(event)
     end
-    failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, recovery_dir, random_dir ]) do |event|
+    failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, *recovery_dirs, random_dir ]) do |event|
       failed_proof?(event)
     end
     latest = [ dry, live, recovery, failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
@@ -61,7 +61,7 @@ class MigrationRouteProofRegistry
       dry_run_receipt: receipt_ref(dry),
       live_canary_receipt: receipt_ref(live),
       recovery_receipt: receipt_ref(recovery),
-      finalization_receipt: receipt_ref(live),
+      finalization_receipt: receipt_ref(recovery || live),
       proof_timestamp: latest&.fetch("timestamp", nil),
       source_commit: latest&.fetch("source_commit", nil) || latest&.fetch("commit_sha", nil),
       final_venue: latest&.fetch("production_venue", nil) || latest&.fetch("to_venue", nil),
@@ -76,12 +76,13 @@ class MigrationRouteProofRegistry
 
   private
 
-  attr_reader :route_proof_dir, :canary_dir, :recovery_dir, :random_dir, :now, :source_commit, :stale_after
+  attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :random_dir, :now, :source_commit, :stale_after
 
   def status_for(dry:, live:, recovery:, failed:, latest:)
     return STATUSES[:not_started] unless latest
-    return STATUSES[:failed] if failed && event_time(failed) == event_time(latest)
     return STATUSES[:stale] if stale?(latest)
+    return STATUSES[:recovery] if recovery_after_failed?(recovery: recovery, failed: failed)
+    return STATUSES[:failed] if failed && event_time(failed) == event_time(latest)
     return STATUSES[:ready] if live && !manual_intervention?(live)
     return STATUSES[:recovery] if recovery
     return STATUSES[:live] if live
@@ -128,12 +129,31 @@ class MigrationRouteProofRegistry
 
   def recovery_proof?(event)
     event["action"] == "recover_target_first_source_close" &&
-      event["final_status"].to_s.in?(%w[MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE])
+      event["final_status"].to_s.in?(%w[MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE SOURCE_CLOSE_RECOVERY_CONFIRMED]) &&
+      event["target_confirmed"] == true &&
+      (event["source_already_flat"] == true || event["source_close_confirmed"] == true || event["readback_confirmed"] == true) &&
+      event["other_venues_flat"] == true &&
+      event["final_inside_tolerance"] == true &&
+      event["production_venue_finalized"] == true &&
+      !manual_exchange_intervention?(event)
   end
 
   def failed_proof?(event)
+    return false if recovery_proof?(event)
+
     event["final_status"].to_s.match?(/FAILED|BLOCKED|MANUAL_ACTION/i) ||
       event["manual_action_required"] == true
+  end
+
+  def recovery_after_failed?(recovery:, failed:)
+    return false unless recovery
+    return true unless failed
+
+    recovery_time = event_time(recovery)
+    failed_time = event_time(failed)
+    return true unless recovery_time && failed_time
+
+    recovery_time >= failed_time
   end
 
   def stale?(event)
@@ -146,10 +166,18 @@ class MigrationRouteProofRegistry
 
   def manual_intervention?(event)
     return false unless event
+    return false if recovery_proof?(event)
 
     event["manual_action_required"] == true ||
       event["final_status"].to_s.match?(/MANUAL_ACTION|PARTIAL/i) ||
       event["message"].to_s.match?(/manual close|manual action/i)
+  end
+
+  def manual_exchange_intervention?(event)
+    event["manual_exchange_intervention"] == true ||
+      event["manual_trade_performed"] == true ||
+      event["manual_user_exchange_intervention"] == true ||
+      event["message"].to_s.match?(/manual exchange trade|manually traded/i)
   end
 
   def blockers_for(status, route)
@@ -157,6 +185,7 @@ class MigrationRouteProofRegistry
     when STATUSES[:ready] then []
     when STATUSES[:not_started] then [ "#{route} route proof has not started." ]
     when STATUSES[:dry_run] then [ "#{route} supervised live canary is required." ]
+    when STATUSES[:recovery] then [ "#{route} recovery-proven; optional clean rerun required for READY_FOR_RANDOM." ]
     when STATUSES[:stale] then [ "#{route} proof is stale and must be repeated." ]
     when STATUSES[:failed] then [ "#{route} latest proof failed and needs repair." ]
     else [ "#{route} is not READY_FOR_RANDOM." ]
