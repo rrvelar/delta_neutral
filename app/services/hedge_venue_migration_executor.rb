@@ -95,6 +95,8 @@ class HedgeVenueMigrationExecutor
     receipt[:submitted] = receipt[:orders_placed].positive?
     receipt[:would_execute_live] = receipt[:submitted]
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
+    receipt[:source_leg_submitted] = leg_order_count(second_leg).positive?
+    receipt[:source_leg_exchange_order_id] = second_leg[:exchange_order_id]
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
@@ -204,6 +206,8 @@ class HedgeVenueMigrationExecutor
     end
 
     def run_extended_leg(leg, context)
+      return run_extended_source_close_leg(leg, context) if close_to_flat_leg?(leg)
+
       size = BigDecimal(leg.fetch(:size_eth).to_s)
       env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
       venue = @venue_builder.build("extended", env: env)
@@ -216,13 +220,23 @@ class HedgeVenueMigrationExecutor
           service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
         end
       else
-        if BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
-          service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
-        else
-          service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
-        end
+        service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
       end
       normalize_service_result(result, leg)
+    end
+
+    def run_extended_source_close_leg(leg, context)
+      size = BigDecimal(leg.fetch(:size_eth).to_s)
+      env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
+      venue = @venue_builder.build("extended", env: env)
+      service = ExtendedHedgeExecutionService.new(venue: venue)
+      current = venue.read_position(symbol: "ETH")
+      result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+      normalize_service_result(result, leg)
+    end
+
+    def close_to_flat_leg?(leg)
+      leg.fetch(:side) == "buy" && BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
     end
 
     def run_nado_leg(leg, context)
@@ -395,6 +409,8 @@ class HedgeVenueMigrationExecutor
     receipt[:submitted] = receipt[:orders_placed].positive?
     receipt[:would_execute_live] = receipt[:submitted]
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
+    receipt[:source_leg_submitted] = leg_order_count(second_leg).positive?
+    receipt[:source_leg_exchange_order_id] = second_leg[:exchange_order_id]
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?

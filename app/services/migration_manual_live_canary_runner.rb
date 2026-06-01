@@ -82,6 +82,10 @@ class MigrationManualLiveCanaryRunner
     confirmed = result.status == "success" && receipt[:source_flat_confirmed] && receipt[:target_holds_hedge_confirmed] && receipt[:final_inside_tolerance]
     {
       final_status: confirmed ? MigrationLiveCanaryChecker::CONFIRMED_STATUS : result.status,
+      target_leg_status: receipt[:target_leg_status],
+      source_leg_status: receipt[:source_leg_status],
+      source_leg_submitted: receipt[:source_leg_submitted],
+      source_leg_exchange_order_id: receipt[:source_leg_exchange_order_id],
       target_leg_readback_confirmed: receipt[:to_leg_execution]&.fetch(:confirmed, false) || receipt[:target_holds_hedge_confirmed] == true,
       source_leg_readback_confirmed: receipt[:from_leg_execution]&.fetch(:confirmed, false) || receipt[:source_flat_confirmed] == true,
       final_inside_tolerance: receipt[:final_inside_tolerance],

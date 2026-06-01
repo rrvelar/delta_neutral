@@ -208,6 +208,55 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal [ "0xpending" ], result.receipt.fetch(:exchange_order_ids)
   end
 
+  test "runner preserves source close execution metadata from executor" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "success",
+          target_leg_status: "TARGET_CONFIRMED_LATE_BY_RECONCILIATION",
+          source_leg_status: "SOURCE_CLOSE_CONFIRMED",
+          source_leg_submitted: true,
+          source_leg_exchange_order_id: "extended-close",
+          to_leg_execution: { confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "0xnado-target" },
+          from_leg_execution: { confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "extended-close", receipt: { mode: "close_only" } },
+          source_flat_confirmed: true,
+          target_holds_hedge_confirmed: true,
+          final_inside_tolerance: true,
+          open_orders_after: 0,
+          exchange_order_ids: [ "0xnado-target", "extended-close" ],
+          orders_placed: 2,
+          orders_submitted: 2,
+          signatures_created: 2,
+          blockers: [],
+          warnings: plan.fetch(:warnings)
+        )
+        HedgeVenueMigrationExecutor::Result.new("success", [], receipt.fetch(:warnings), receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "nado",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal MigrationLiveCanaryChecker::CONFIRMED_STATUS, result.status
+    assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+    assert_equal "SOURCE_CLOSE_CONFIRMED", result.receipt.fetch(:source_leg_status)
+    assert_equal true, result.receipt.fetch(:source_leg_submitted)
+    assert_equal "extended-close", result.receipt.fetch(:source_leg_exchange_order_id)
+    assert_equal true, result.receipt.fetch(:source_leg_readback_confirmed)
+    assert_equal 2, result.receipt.fetch(:orders_submitted)
+    assert_equal 2, result.receipt.fetch(:signatures_created)
+  end
+
   test "runner blocked result uses the same canonical planner blockers" do
     env = ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")
     plan = MigrationManualCanaryPlanner.new(

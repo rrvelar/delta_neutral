@@ -367,6 +367,141 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "Extended to Nado uses close-only Extended source close path after Nado target confirms late" do
+    position = migration_position
+    venues = FakeVenueBuilder.new(
+      "nado" => FakeVenue.new(nil),
+      "extended" => FakeVenue.new({ short_size: BigDecimal("0.8") })
+    )
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-target",
+      submitted_order_summary: { expected_after_short_eth: "0.8" }
+    })
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], pending.receipt.merge(
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    ))
+    nado_service = FakeNadoMigrationService.new(pending: pending, confirmed: confirmed)
+    extended_service = FakeExtendedMigrationService.new(
+      ExtendedHedgeExecutionService::Result.new("success", [], [], {
+        mode: "close_only",
+        submitted: true,
+        orders_placed: 1,
+        orders_submitted: 1,
+        signatures_created: 1,
+        exchange_order_id: "extended-close",
+        readback_attempts: [ { short_size: "0", confirmed: true } ],
+        final_status: "success"
+      })
+    )
+    runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      venue_builder: venues
+    )
+
+    NadoHedgeExecutionService.stub(:new, nado_service) do
+      ExtendedHedgeExecutionService.stub(:new, extended_service) do
+        result = HedgeVenueMigrationExecutor.new(
+          env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+          leg_runner: runner,
+          snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+          final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+        ).run(
+          position: position,
+          from_venue: "extended",
+          to_venue: "nado",
+          dry_run: false,
+          confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+          full_migration_allowed: true,
+          mode: "full"
+        )
+
+        assert_equal "success", result.status, result.blockers.inspect
+        assert_equal 1, nado_service.open_calls
+        assert_equal 1, nado_service.reconcile_calls
+        assert_equal 1, extended_service.close_calls.size
+        assert_equal 0, extended_service.rebalance_calls.size
+        assert_equal "0.8", extended_service.close_calls.first.fetch(:size_eth).to_s("F")
+        assert_equal "close_only", result.receipt.dig(:from_leg_execution, :receipt, :mode)
+        assert_equal "SOURCE_CLOSE_CONFIRMED", result.receipt.fetch(:source_leg_status)
+        assert_equal true, result.receipt.fetch(:source_leg_submitted)
+        assert_equal "extended-close", result.receipt.fetch(:source_leg_exchange_order_id)
+        assert_equal [ "0xnado-target", "extended-close" ], result.receipt.fetch(:exchange_order_ids)
+        assert_equal 2, result.receipt.fetch(:orders_submitted)
+        assert_equal 2, result.receipt.fetch(:signatures_created)
+        assert_equal "nado", position.hedge.reload.execution_venue
+      end
+    end
+  end
+
+  test "Extended to Nado reports explicit source close blocker when Extended close is blocked before submit" do
+    position = migration_position
+    venues = FakeVenueBuilder.new(
+      "nado" => FakeVenue.new(nil),
+      "extended" => FakeVenue.new({ short_size: BigDecimal("0.8") })
+    )
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-target",
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    })
+    nado_service = FakeNadoMigrationService.new(pending: confirmed, confirmed: confirmed)
+    extended_service = FakeExtendedMigrationService.new(
+      ExtendedHedgeExecutionService::Result.new("blocked_before_submit", [ "Extended source close blocked before submit" ], [], {
+        mode: "close_only",
+        submitted: false,
+        orders_placed: 0,
+        orders_submitted: 0,
+        signatures_created: 0,
+        exchange_order_id: nil,
+        final_status: "blocked_before_submit",
+        blockers: [ "Extended source close blocked before submit" ]
+      })
+    )
+    runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      venue_builder: venues
+    )
+
+    NadoHedgeExecutionService.stub(:new, nado_service) do
+      ExtendedHedgeExecutionService.stub(:new, extended_service) do
+        result = HedgeVenueMigrationExecutor.new(
+          env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+          leg_runner: runner,
+          snapshot_refresher: ->(item) { item.position_dashboard_snapshot }
+        ).run(
+          position: position,
+          from_venue: "extended",
+          to_venue: "nado",
+          dry_run: false,
+          confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+          full_migration_allowed: true,
+          mode: "full"
+        )
+
+        assert_equal "partial_migration_manual_action_required", result.status
+        assert_equal 1, extended_service.close_calls.size
+        assert_equal false, result.receipt.fetch(:source_leg_submitted)
+        assert_nil result.receipt.fetch(:source_leg_exchange_order_id)
+        assert_equal "RECOVERY_REQUIRED", result.receipt.fetch(:source_leg_status)
+        assert_includes result.blockers, "Extended source close blocked before submit"
+        assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+        assert_equal [ "0xnado-target" ], result.receipt.fetch(:exchange_order_ids)
+        assert_equal 1, result.receipt.fetch(:orders_submitted)
+        assert_equal 1, result.receipt.fetch(:signatures_created)
+        assert_equal "extended", position.hedge.reload.execution_venue
+      end
+    end
+  end
+
   test "Ethereal to Nado accepted digest retries target reconciliation before source close" do
     position = migration_position_for("ethereal")
     fake_venue = Class.new do
@@ -771,6 +906,61 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
   end
 
   private
+
+  FakeVenue = Struct.new(:position) do
+    def read_position(symbol:) = position
+  end
+
+  class FakeVenueBuilder
+    def initialize(venues)
+      @venues = venues
+    end
+
+    def build(name, **_kwargs)
+      @venues.fetch(name)
+    end
+  end
+
+  class FakeNadoMigrationService
+    attr_reader :open_calls, :reconcile_calls
+
+    def initialize(pending:, confirmed:)
+      @pending = pending
+      @confirmed = confirmed
+      @open_calls = 0
+      @reconcile_calls = 0
+    end
+
+    def open_short(**_kwargs)
+      @open_calls += 1
+      @pending
+    end
+
+    def reconcile_pending_result(result, **_kwargs)
+      @reconcile_calls += 1
+      result.status == "submitted_but_readback_pending" ? @confirmed : result
+    end
+  end
+
+  class FakeExtendedMigrationService
+    attr_reader :close_calls, :rebalance_calls
+
+    def initialize(close_result)
+      @close_result = close_result
+      @close_calls = []
+      @rebalance_calls = []
+    end
+
+    def close_short(**kwargs)
+      @close_calls << kwargs
+      @close_result
+    end
+
+    def rebalance_short(**kwargs)
+      @rebalance_calls << kwargs
+      ExtendedHedgeExecutionService::Result.new("blocked_before_submit", [ "rebalance should not be used for close-to-flat source leg" ], [], {})
+    end
+  end
 
   FakeFinalVerifier = Struct.new(:from, :to, :safe, :safe_on_attempt, keyword_init: true) do
     def verify
