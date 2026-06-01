@@ -248,6 +248,50 @@ module HedgeVenues
       (config_blockers + market_metadata_blockers).uniq
     end
 
+    def continuous_auto_ready?
+      continuous_auto_blockers.empty?
+    end
+
+    def migration_live_capable?
+      migration_live_blockers.empty?
+    end
+
+    def manual_one_shot_capable?
+      manual_one_shot_blockers.empty?
+    end
+
+    def continuous_auto_blockers
+      blockers = []
+      blockers.concat(config_blockers)
+      blockers.concat(market_metadata_blockers)
+      blockers << "EXTENDED_LIVE_ENABLED must be true" unless live_enabled?
+      blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must be true" unless bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      blockers.concat(margin_gate_diagnostics[:blockers])
+      blockers.uniq
+    end
+
+    def migration_live_blockers
+      blockers = []
+      blockers.concat(config_blockers)
+      blockers.concat(market_metadata_blockers)
+      blockers << "EXTENDED_LIVE_ENABLED must be true" unless live_enabled?
+      blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" unless bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
+      blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false during migration canary" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      blockers.concat(margin_gate_diagnostics[:blockers])
+      blockers.uniq
+    end
+
+    def manual_one_shot_blockers
+      blockers = []
+      blockers.concat(config_blockers)
+      blockers.concat(market_metadata_blockers)
+      blockers << "EXTENDED_LIVE_ENABLED must be true" unless live_enabled?
+      blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" unless bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
+      blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false for manual Extended mainnet probe" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      blockers.concat(margin_gate_diagnostics[:blockers])
+      blockers.uniq
+    end
+
     def submit_order(payload)
       api_client.submit_order(payload)
     end
@@ -267,10 +311,10 @@ module HedgeVenues
     end
 
     def blockers
-      (config_blockers + market_metadata_blockers + [
-        "Extended live disabled.",
-        "Extended auto-rebalance disabled."
-      ] + margin_gate_diagnostics[:blockers]).uniq
+      blockers = config_blockers + market_metadata_blockers + margin_gate_diagnostics[:blockers]
+      blockers << "Extended live disabled." unless live_enabled?
+      blockers << "Extended auto-rebalance disabled." unless bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      blockers.uniq
     end
 
     def warnings

@@ -78,14 +78,56 @@ class MigrationManualCanaryPlannerTest < ActiveSupport::TestCase
     assert_equal "nado", report.fetch(:planned_second_leg).fetch(:venue)
   end
 
+  test "nado to extended target leg does not require Extended continuous auto" do
+    position_for_route("nado")
+    report = planner(from: "nado", to: "extended").report
+
+    assert_equal true, report.fetch(:ready_for_supervised_canary), report.fetch(:blockers).inspect
+    assert_empty report.fetch(:target_leg_blockers)
+    assert_not_includes report.fetch(:blockers), "Extended auto-rebalance disabled."
+    assert_not_includes report.fetch(:blockers), "target venue auto must be disabled during migration canary: extended"
+    assert_equal "extended", report.fetch(:planned_first_leg).fetch(:venue)
+    assert_equal "open_short", report.fetch(:planned_first_leg).fetch(:action)
+    assert_equal "sell", report.fetch(:planned_first_leg).fetch(:side)
+    assert_equal false, report.fetch(:planned_first_leg).fetch(:reduce_only)
+    assert_equal "nado", report.fetch(:planned_second_leg).fetch(:venue)
+    assert_equal "close_short", report.fetch(:planned_second_leg).fetch(:action)
+    assert_equal "buy", report.fetch(:planned_second_leg).fetch(:side)
+    assert_equal true, report.fetch(:planned_second_leg).fetch(:reduce_only)
+  end
+
+  test "nado to extended blocks if Extended live gate is disabled" do
+    position_for_route("nado")
+    report = planner(from: "nado", to: "extended", env: ready_env.merge("EXTENDED_LIVE_ENABLED" => "false")).report
+
+    assert_equal false, report.fetch(:ready_for_supervised_canary)
+    assert_includes report.fetch(:blockers), "EXTENDED_LIVE_ENABLED must be true"
+  end
+
+  test "nado to extended blocks if Extended mainnet probe gate is disabled" do
+    position_for_route("nado")
+    report = planner(from: "nado", to: "extended", env: ready_env.merge("EXTENDED_MAINNET_PROBE_ENABLED" => "false")).report
+
+    assert_equal false, report.fetch(:ready_for_supervised_canary)
+    assert_includes report.fetch(:blockers), "EXTENDED_MAINNET_PROBE_ENABLED must be true"
+  end
+
+  test "nado to extended blocks if Extended auto is enabled during canary" do
+    position_for_route("nado")
+    report = planner(from: "nado", to: "extended", env: ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")).report
+
+    assert_equal false, report.fetch(:ready_for_supervised_canary)
+    assert_includes report.fetch(:blockers), "target venue auto must be disabled during migration canary: extended"
+  end
+
   private
 
-  def planner(from: "extended", to: "ethereal", sequence: "target_first")
+  def planner(from: "extended", to: "ethereal", sequence: "target_first", env: ready_env)
     MigrationManualCanaryPlanner.new(
       position: position,
       from: from,
       to: to,
-      env: ready_env,
+      env: env,
       target_preflight: { blockers: [] },
       fresh_target: fresh_target,
       sequence: sequence

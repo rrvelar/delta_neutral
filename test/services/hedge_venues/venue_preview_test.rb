@@ -64,6 +64,40 @@ module HedgeVenues
       assert_extended_intent(close, action: "close_short", side: "buy", reduce_only: true, rounded_size: "0.1234")
     end
 
+    test "extended separates continuous auto from migration live capability" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.merge(
+          "EXTENDED_LIVE_ENABLED" => "true",
+          "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+          "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+          "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true"
+        ),
+        api_client: extended_ready_api_client
+      )
+
+      assert_equal false, venue.continuous_auto_ready?
+      assert_includes venue.continuous_auto_blockers, "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
+      assert_equal true, venue.migration_live_capable?, venue.migration_live_blockers.inspect
+      assert_empty venue.migration_live_blockers
+      assert_equal true, venue.manual_one_shot_capable?, venue.manual_one_shot_blockers.inspect
+    end
+
+    test "extended migration live capability requires auto to remain disabled" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.merge(
+          "EXTENDED_LIVE_ENABLED" => "true",
+          "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+          "EXTENDED_AUTO_REBALANCE_ENABLED" => "true",
+          "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true"
+        ),
+        api_client: extended_ready_api_client
+      )
+
+      assert_equal false, venue.migration_live_capable?
+      assert_includes venue.migration_live_blockers, "EXTENDED_AUTO_REBALANCE_ENABLED must remain false during migration canary"
+      assert_equal true, venue.continuous_auto_ready?, venue.continuous_auto_blockers.inspect
+    end
+
     test "extended dry run preview reports unknown rounding when market metadata is missing" do
       venue = HedgeVenues::Extended.new(env: {})
       preview = venue.rebalance_preview(symbol: "ETH", delta_eth: BigDecimal("-0.02"), max_slippage: "0.01")
@@ -347,6 +381,43 @@ module HedgeVenues
       assert_equal false, report.fetch(:submitted)
     end
 
+    test "extended migration preflight does not require continuous auto gate" do
+      venue = HedgeVenues::Extended.new(
+        env: extended_config_env.merge(
+          "EXTENDED_LIVE_ENABLED" => "true",
+          "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+          "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+          "EXTENDED_ISOLATED_ACCOUNT_CONFIRMED" => "true"
+        ),
+        api_client: extended_ready_api_client
+      )
+      signer = Struct.new(:health, keyword_init: true).new(
+        health: {
+          ok: true,
+          reason: "ok",
+          supported_exchanges: [ "Extended" ],
+          supported_actions: [ "sign_extended_order" ],
+          verified_algorithm: true,
+          signing_enabled: true
+        }.with_indifferent_access
+      )
+      service = ExtendedHedgeExecutionService.new(venue: venue, signer_client: signer)
+      position = Struct.new(:id).new(3)
+
+      report = service.preflight(
+        position: position,
+        action: "open",
+        size_eth: "0.01",
+        current_position: nil,
+        confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+        max_slippage: "0.01",
+        capability: :migration_live
+      )
+
+      assert_empty report.fetch(:blockers)
+      assert_equal false, report.fetch(:submitted)
+    end
+
     def assert_extended_intent(preview, action:, side:, reduce_only:, rounded_size:)
       payload = preview.fetch(:payload)
       assert_equal "extended_dry_run_order_intent", payload.fetch(:schema)
@@ -512,6 +583,35 @@ module HedgeVenues
           @payload
         end
       end.new(market_payload)
+    end
+
+    def extended_ready_api_client
+      Class.new do
+        def positions(market:) = []
+        def balance = { "equity" => "5000", "balance" => "5000" }
+        def account_info = { "status" => "ACTIVE" }
+        def open_orders(market:) = []
+        def leverage(market:) = { "data" => { "market" => market, "leverage" => "1", "marginMode" => "isolated" } }
+        def market(market:)
+          {
+            "name" => market,
+            "active" => true,
+            "tradingConfig" => {
+              "minOrderSize" => "0.0001",
+              "minOrderSizeChange" => "0.0001",
+              "minPriceChange" => "0.1",
+              "minOrderValue" => "10"
+            },
+            "marketStats" => { "markPrice" => "2100.5" },
+            "l2Config" => {
+              "syntheticAssetId" => "0x455448",
+              "collateralAssetId" => "0x55534443",
+              "syntheticResolution" => "10000000000",
+              "collateralResolution" => "1000000"
+            }
+          }
+        end
+      end.new
     end
 
     test "ethereal preview is cross margin live gated and reports missing config blockers" do

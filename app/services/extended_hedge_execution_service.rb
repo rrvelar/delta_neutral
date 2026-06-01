@@ -10,8 +10,9 @@ class ExtendedHedgeExecutionService
     @signer_client = signer_client
   end
 
-  def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:)
+  def preflight(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, capability: :manual_one_shot)
     @last_confirmation = confirmation
+    @last_capability = capability.to_sym
     preview = dry_run_preview(action: action, size_eth: size_eth, max_slippage: max_slippage)
     {
       venue: "Extended",
@@ -32,7 +33,7 @@ class ExtendedHedgeExecutionService
       manual_action_required: true,
       next_action: "Extended manual live actions are gated by signer health, env flags, and exact confirmation.",
       signer_health: sanitized_signer_health,
-      blockers: preflight_blockers,
+      blockers: preflight_blockers(capability: @last_capability),
       warnings: @venue.warnings
     }
   end
@@ -136,17 +137,28 @@ class ExtendedHedgeExecutionService
     nil
   end
 
-  def preflight_blockers
-    blockers = (@venue.blockers + BLOCKERS).uniq
+  def preflight_blockers(capability:)
+    blockers = capability_blockers(capability)
     health = signer_health
-    blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" unless bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
-    blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must remain false for manual Extended mainnet probe" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
     blockers << "submitted confirmation must equal #{ExtendedMainnetLifecycleCheck::CONFIRMATION}" unless @last_confirmation.to_s == ExtendedMainnetLifecycleCheck::CONFIRMATION
     blockers << "EXTENDED_SIGNER_URL missing" if health[:reason] == "EXTENDED_SIGNER_URL missing"
     blockers << "Extended Stark signer unhealthy: #{health[:reason]}" unless ActiveModel::Type::Boolean.new.cast(health[:ok])
     blockers << "Extended Stark signer verified_algorithm=false" unless ActiveModel::Type::Boolean.new.cast(health[:verified_algorithm] || health[:signing_algorithm_verified])
     blockers << "Extended Stark signer signing_enabled=false" unless ActiveModel::Type::Boolean.new.cast(health[:signing_enabled])
     blockers.uniq
+  end
+
+  def capability_blockers(capability)
+    case capability
+    when :migration_live
+      @venue.migration_live_blockers
+    when :manual_one_shot
+      @venue.manual_one_shot_blockers
+    when :continuous_auto
+      @venue.continuous_auto_blockers
+    else
+      @venue.manual_one_shot_blockers
+    end
   end
 
   def signer_health

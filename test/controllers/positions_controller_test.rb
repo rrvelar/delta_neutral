@@ -1089,7 +1089,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to position_path(position, hedge_venue: "extended")
     assert_match "Open blocked on Extended", flash[:alert]
-    assert_match "Extended live disabled", flash[:alert]
+    assert_match "EXTENDED_LIVE_ENABLED must be true", flash[:alert]
     assert_no_match "Extended submit endpoint integration not implemented", flash[:alert]
   end
 

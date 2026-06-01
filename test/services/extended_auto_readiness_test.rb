@@ -76,6 +76,13 @@ class ExtendedAutoReadinessTest < ActiveSupport::TestCase
     assert_includes result.fetch(:blockers), "Position hedge execution_venue must be extended for Extended continuous auto"
   end
 
+  test "readiness still requires Extended continuous auto gate" do
+    result = build_service(env: readiness_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "false")).report(position: fake_position)
+
+    assert_equal false, result.fetch(:continuous_auto_ready)
+    assert_includes result.fetch(:blockers), "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
+  end
+
   private
 
   FakeSigner = Struct.new(:ok, :verified_algorithm, :signing_enabled, keyword_init: true) do

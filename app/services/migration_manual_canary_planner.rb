@@ -204,13 +204,14 @@ class MigrationManualCanaryPlanner
         migration_target_leg: true
       )
     when "extended"
-      ExtendedHedgeExecutionService.new.preflight(
+      ExtendedHedgeExecutionService.new(venue: HedgeVenues::Extended.new(env: env)).preflight(
         position: position,
         action: "open",
         size_eth: target_open_size,
         current_position: nil,
         confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
-        max_slippage: max_slippage
+        max_slippage: max_slippage,
+        capability: :migration_live
       )
     when "nado"
       NadoHedgeExecutionService.new(env: env).preflight(
