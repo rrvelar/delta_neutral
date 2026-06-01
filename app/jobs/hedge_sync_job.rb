@@ -721,7 +721,9 @@ class HedgeSyncJob < ApplicationJob
   end
 
   def nado_pending_rebalance?(hedge)
-    hedge.short_rebalances.where(venue: "nado", status: ShortRebalance::STATUS_PENDING).exists?
+    hedge.short_rebalances.where(venue: "nado", status: ShortRebalance::STATUS_PENDING).any? do |rebalance|
+      NadoStalePendingRebalanceResolver.new.active_pending?(rebalance, position: hedge.position)
+    end
   end
 
   def ethereal_rebalance_message(result)

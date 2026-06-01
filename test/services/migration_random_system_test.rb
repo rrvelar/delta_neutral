@@ -212,6 +212,26 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "pending ShortRebalance must be resolved before random migration"
   end
 
+  test "stale acknowledged Nado pending does not block random readiness" do
+    position = migration_position("nado")
+    position.hedge.short_rebalances.create!(
+      asset: "WETH",
+      venue: "nado",
+      old_short_size: "0.483",
+      new_short_size: "0.483",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_STALE_SUPERSEDED,
+      message: "Nado stale pending acknowledged",
+      rebalanced_at: 8.days.ago
+    )
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner).report
+
+    assert_not_includes report.fetch(:blockers), "pending ShortRebalance must be resolved before random migration"
+    assert_nil report.dig(:nado_auto_summary, :latest_nado_pending)
+    assert_equal 1, report.dig(:nado_auto_summary, :stale_acknowledged_nado_pending_count)
+  end
+
   private
 
   def random_planner(route_matrix: ready_matrix, selector: nil)

@@ -7,6 +7,14 @@ class ShortRebalance < ApplicationRecord
   STATUS_SUCCESS = "success"
   STATUS_FAILED = "failed"
   STATUS_PENDING = "pending"
+  STATUS_STALE_ACKNOWLEDGED = "stale_acknowledged"
+  STATUS_STALE_SUPERSEDED = "stale_superseded"
+  STATUS_OPERATOR_REVIEWED_STALE = "operator_reviewed_stale"
+  STALE_PENDING_STATUSES = [
+    STATUS_STALE_ACKNOWLEDGED,
+    STATUS_STALE_SUPERSEDED,
+    STATUS_OPERATOR_REVIEWED_STALE
+  ].freeze
 
   belongs_to :hedge
 

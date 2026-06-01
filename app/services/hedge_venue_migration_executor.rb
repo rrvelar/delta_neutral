@@ -481,7 +481,9 @@ class HedgeVenueMigrationExecutor
     return [] unless position.hedge
 
     venues = [ from, to ]
-    pending = position.hedge.short_rebalances.where(venue: venues, status: ShortRebalance::STATUS_PENDING).order(created_at: :desc).first
+    pending = position.hedge.short_rebalances.where(venue: venues, status: ShortRebalance::STATUS_PENDING).order(created_at: :desc).find do |rebalance|
+      rebalance.venue == "nado" ? NadoStalePendingRebalanceResolver.new.active_pending?(rebalance, position: position) : true
+    end
     blockers = []
     blockers << "pending #{HedgeVenues.label(pending.venue)} ShortRebalance ##{pending.id} must be resolved before migration." if pending
     recent = position.hedge.short_rebalances.where(venue: venues).where("created_at >= ?", 2.minutes.ago).order(created_at: :desc).first

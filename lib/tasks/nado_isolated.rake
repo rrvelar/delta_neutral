@@ -92,6 +92,8 @@ namespace :nado do
   task reconcile_pending_rebalances: :environment do
     scope = ShortRebalance.where(venue: "nado", status: ShortRebalance::STATUS_PENDING)
     scope = scope.where(hedge_id: ENV["HEDGE_ID"]) if ENV["HEDGE_ID"].present?
+    position = Position.find_by(id: ENV["position_id"] || ENV["POSITION_ID"])
+    resolver = NadoStalePendingRebalanceResolver.new
     reconciler = NadoPendingRebalanceReconciler.new
     results = scope.includes(:hedge).order(:rebalanced_at, :id).map do |rebalance|
       before = rebalance.status
@@ -107,7 +109,33 @@ namespace :nado do
         reconciled: reconciled.present? && rebalance.status == ShortRebalance::STATUS_SUCCESS
       }
     end
-    puts JSON.pretty_generate({ checked: results.size, results: results, orders_submitted: 0, signatures_created: 0 })
+    stale_report = position ? resolver.report(position: position, dry_run: true).receipt : nil
+    puts JSON.pretty_generate({
+      checked: results.size,
+      results: results,
+      stale_candidates: stale_report&.fetch(:candidates, [])&.select { |candidate| candidate[:stale_candidate] },
+      stale_candidates_count: stale_report&.fetch(:stale_candidates_count, 0),
+      blocking_pending_count: stale_report&.fetch(:blocking_pending_count, results.count { |row| row[:after_status] == ShortRebalance::STATUS_PENDING }),
+      ignored_stale_count: stale_report&.fetch(:ignored_stale_count, 0),
+      recommended_command: position ? stale_report.fetch(:recommended_command) : "pass position_id=... to evaluate stale pending candidates",
+      orders_submitted: 0,
+      signatures_created: 0
+    })
+  end
+
+  desc "Acknowledge stale/superseded Nado pending ShortRebalance rows without live exchange actions"
+  task acknowledge_stale_pending_rebalances: :environment do
+    position_id = ENV["position_id"] || ENV["POSITION_ID"]
+    abort("position_id is required") if position_id.blank?
+
+    dry_run = ActiveModel::Type::Boolean.new.cast(ENV.fetch("dry_run", "true"))
+    result = NadoStalePendingRebalanceResolver.new.report(
+      position: Position.find(position_id),
+      dry_run: dry_run,
+      confirmation: ENV["confirmation"]
+    )
+    puts JSON.pretty_generate(result.receipt)
+    abort("Nado stale pending acknowledgement blocked: #{result.blockers.join('; ')}") if result.blockers.any?
   end
 
   desc "No-live Nado isolated payload parity check"

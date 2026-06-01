@@ -92,16 +92,24 @@ class MigrationRandomReadiness
 
   def nado_auto_summary
     rows = position.hedge&.short_rebalances&.where(venue: "nado")&.order(created_at: :desc) || ShortRebalance.none
+    pending_rows = rows.select { |row| row.status == ShortRebalance::STATUS_PENDING }
+    active_pending = pending_rows.find { |row| NadoStalePendingRebalanceResolver.new.active_pending?(row, position: position) }
     {
       latest_nado_auto_success: rows.find { |row| row.status == ShortRebalance::STATUS_SUCCESS }&.id,
-      latest_nado_pending: rows.find { |row| row.status == ShortRebalance::STATUS_PENDING }&.id,
+      latest_nado_pending: active_pending&.id,
+      historical_nado_pending_count: pending_rows.size,
+      stale_acknowledged_nado_pending_count: rows.count { |row| row.status.in?(ShortRebalance::STALE_PENDING_STATUSES) },
       latest_nado_failure: rows.find { |row| row.status == ShortRebalance::STATUS_FAILED }&.id,
       historical_prefix_confirmation_failed_count: rows.count { |row| row.status == ShortRebalance::STATUS_FAILED && row.message.to_s.include?("submitted confirmation must equal") }
     }
   end
 
   def pending_rebalance?
-    position.hedge&.short_rebalances&.where(status: ShortRebalance::STATUS_PENDING)&.exists?
+    return false unless position.hedge
+
+    position.hedge.short_rebalances.where(status: ShortRebalance::STATUS_PENDING).any? do |rebalance|
+      rebalance.venue == "nado" ? NadoStalePendingRebalanceResolver.new.active_pending?(rebalance, position: position) : true
+    end
   end
 
   def pending_recovery?

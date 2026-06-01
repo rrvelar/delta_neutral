@@ -802,6 +802,35 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     end
   end
 
+  test "nado hedge sync ignores stale acknowledged pending rows" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: "0.483",
+      new_short_size: "0.483",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_STALE_SUPERSEDED,
+      message: "Nado stale pending acknowledged",
+      rebalanced_at: 8.days.ago,
+      venue: "nado",
+      order_side: "sell",
+      reduce_only: false,
+      exchange_order_id: "0x#{"75" * 32}"
+    )
+    readiness = ActiveAutoReadinessStub.new(nado_readiness_payload(action: "increase_short", current: "1.11", target: "1.180225"))
+    runner = ActiveAutoRebalanceStub.new(nado_auto_result(current: "1.11", target: "1.180225", exchange_order_id: "0x#{"88" * 32}"))
+
+    with_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          assert_difference "ShortRebalance.count", 1 do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+  end
+
   test "nado hedge sync records accepted submit without confirmed readback as pending" do
     hedge = nado_mellow_hedge(weth_exposure: "1.2")
     execution = {
