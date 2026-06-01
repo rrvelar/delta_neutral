@@ -815,11 +815,19 @@ class NadoHedgeExecutionService
     return pending_recheck_result(result) unless expected
 
     current_position = read_position
-    return pending_recheck_result(result) unless auto_rebalance_confirmed?(current_short: short_size(current_position), expected_short: expected, target_short: target, tolerance_eth: tolerance)
+    confirmation = auto_rebalance_confirmation(
+      current_short: short_size(current_position),
+      expected_short: expected,
+      target_short: target,
+      tolerance_eth: tolerance
+    )
+    return pending_recheck_result(result, readback: current_position, confirmation: confirmation) unless confirmation.fetch(:confirmed)
 
     updated_receipt = receipt.merge(
       post_submit_readback: serialize_position(current_position),
       after_readback: serialize_position(current_position),
+      pending_reconciliation_readback: serialize_position(current_position),
+      pending_reconciliation_confirmation: confirmation,
       final_status: "REBALANCE_CONFIRMED_LATE",
       lifecycle_state: "CONFIRMED_LATE_BY_RECONCILIATION",
       final_message: "Nado auto rebalance confirmed by later readback.",
@@ -933,10 +941,12 @@ class NadoHedgeExecutionService
     nil
   end
 
-  def pending_recheck_result(result)
-    return result unless result.status.to_s.start_with?("submitted_but")
+  def pending_recheck_result(result, readback: nil, confirmation: nil)
+    return result unless pending_reconciliation_status?(result.status)
 
     receipt = result.receipt.merge(
+      pending_reconciliation_readback: serialize_position(readback),
+      pending_reconciliation_confirmation: confirmation,
       final_status: "REBALANCE_REQUIRES_RECHECK",
       lifecycle_state: "SUBMITTED_PENDING_READBACK",
       readback_confirmed: false,
@@ -947,10 +957,33 @@ class NadoHedgeExecutionService
   end
 
   def auto_rebalance_confirmed?(current_short:, expected_short:, target_short:, tolerance_eth:)
-    return true if expected_short_confirmed?(current_short: current_short, expected_short: expected_short)
-    return false unless target_short && tolerance_eth
+    auto_rebalance_confirmation(
+      current_short: current_short,
+      expected_short: expected_short,
+      target_short: target_short,
+      tolerance_eth: tolerance_eth
+    ).fetch(:confirmed)
+  end
 
-    (current_short - target_short).abs <= tolerance_eth
+  def auto_rebalance_confirmation(current_short:, expected_short:, target_short:, tolerance_eth:)
+    expected_difference = (current_short - expected_short).abs
+    expected_tolerance = product_size_increment
+    target_difference = target_short && (current_short - target_short).abs
+    target_confirmed = target_short && tolerance_eth && target_difference <= tolerance_eth
+    expected_confirmed = expected_difference <= expected_tolerance
+
+    {
+      actual_short_eth: decimal_string(current_short),
+      expected_short_eth: decimal_string(expected_short),
+      expected_difference_eth: decimal_string(expected_difference),
+      expected_tolerance_eth: decimal_string(expected_tolerance),
+      target_short_eth: decimal_string(target_short),
+      target_difference_eth: decimal_string(target_difference),
+      route_tolerance_eth: decimal_string(tolerance_eth),
+      confirmed_by_size_increment: expected_confirmed,
+      confirmed_by_route_tolerance: target_confirmed == true,
+      confirmed: expected_confirmed || target_confirmed == true
+    }
   end
 
   def product_metadata

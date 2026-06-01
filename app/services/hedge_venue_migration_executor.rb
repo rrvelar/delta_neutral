@@ -271,13 +271,7 @@ class HedgeVenueMigrationExecutor
           target_short: context.dig(:receipt, :target_short),
           tolerance_eth: context.dig(:receipt, :tolerance_abs_eth)
         )
-        attempts << {
-          attempt: index + 1,
-          status: result.status,
-          readback_confirmed: ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed]),
-          exchange_order_id: result.receipt[:exchange_order_id],
-          short_size: result.receipt.dig(:post_submit_readback, :short_size)
-        }.compact
+        attempts << nado_reconciliation_attempt_payload(result: result, leg: leg, context: context, attempt: index + 1)
         break if service_result_confirmed?(result)
         break unless nado_pending_result?(result)
 
@@ -292,15 +286,49 @@ class HedgeVenueMigrationExecutor
     end
 
     def nado_target_reconciliation_attempts(context)
-      value = context.dig(:receipt, :nado_target_reconciliation_attempts) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS"] || 4
+      value = context.dig(:receipt, :nado_target_reconciliation_attempts) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS"] || 30
       [ value.to_i, 1 ].max
     end
 
     def nado_target_reconciliation_interval(context)
-      value = context.dig(:receipt, :nado_target_reconciliation_interval_seconds) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS"] || 0.25
+      value = context.dig(:receipt, :nado_target_reconciliation_interval_seconds) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS"] || 2
       BigDecimal(value.to_s).to_f
     rescue ArgumentError
-      0.25
+      2
+    end
+
+    def nado_reconciliation_attempt_payload(result:, leg:, context:, attempt:)
+      confirmation = result.receipt[:pending_reconciliation_confirmation] || {}
+      readback = result.receipt[:pending_reconciliation_readback] || result.receipt[:post_submit_readback] || result.receipt[:after_readback]
+      actual = confirmation[:actual_short_eth] || short_size(readback).to_s("F")
+      expected = confirmation[:expected_short_eth] || leg[:expected_after_short_eth]
+      expected_difference = confirmation[:expected_difference_eth] || decimal_difference(actual, expected)
+      expected_tolerance = confirmation[:expected_tolerance_eth]
+      route_tolerance = confirmation[:route_tolerance_eth] || context.dig(:receipt, :tolerance_abs_eth)
+      {
+        attempt: attempt,
+        status: result.status,
+        readback_confirmed: ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed]),
+        exchange_order_id: result.receipt[:exchange_order_id],
+        actual_nado_short_eth: actual,
+        expected_nado_short_eth: expected,
+        difference_eth: expected_difference,
+        size_increment_tolerance_eth: expected_tolerance,
+        route_target_short_eth: confirmation[:target_short_eth] || context.dig(:receipt, :target_short),
+        route_target_difference_eth: confirmation[:target_difference_eth],
+        route_tolerance_eth: route_tolerance,
+        confirmed_by_size_increment: confirmation[:confirmed_by_size_increment],
+        confirmed_by_route_tolerance: confirmation[:confirmed_by_route_tolerance],
+        confirmed: confirmation.fetch(:confirmed, ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed])),
+        readback_source: readback.present? ? "nado_position_readback" : "unavailable",
+        readback: readback
+      }.compact
+    end
+
+    def decimal_difference(left, right)
+      (BigDecimal(left.to_s) - BigDecimal(right.to_s)).abs.to_s("F")
+    rescue ArgumentError, TypeError
+      nil
     end
 
     def normalize_service_result(result, leg)

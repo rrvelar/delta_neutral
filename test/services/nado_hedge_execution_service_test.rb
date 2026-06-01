@@ -62,6 +62,35 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_empty result.blockers
   end
 
+  test "accepted digest confirms late when Nado readback differs from expected by size increment" do
+    service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-0.913"), short_size: BigDecimal("0.913"), margin_mode: "isolated" })
+    result = service.reconcile_pending_result(
+      NadoHedgeExecutionService::Result.new(
+        "submitted_but_readback_pending",
+        [],
+        [],
+        {
+          exchange_order_id: "0x#{"ab" * 32}",
+          action_plan: { expected_after_short_eth: "0.9134680515417161", delta_eth: "0.9134680515417161" },
+          final_status: "submitted_but_readback_pending",
+          manual_action_required: true
+        }
+      ),
+      expected_short: "0.9134680515417161",
+      target_short: "0.9134680515417161",
+      tolerance_eth: "0.027404041546251483"
+    )
+
+    assert_equal "rebalance_confirmed_late", result.status
+    assert_equal true, result.receipt.fetch(:readback_confirmed)
+    confirmation = result.receipt.fetch(:pending_reconciliation_confirmation)
+    assert_equal "0.913", confirmation.fetch(:actual_short_eth)
+    assert_equal "0.9134680515417161", confirmation.fetch(:expected_short_eth)
+    assert_equal "0.0004680515417161", confirmation.fetch(:expected_difference_eth)
+    assert_equal true, confirmation.fetch(:confirmed_by_size_increment)
+    assert_equal true, confirmation.fetch(:confirmed)
+  end
+
   test "accepted digest stays pending when later readback is outside tolerance" do
     service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-1.11"), short_size: BigDecimal("1.11"), margin_mode: "isolated" })
     result = service.reconcile_pending_result(
@@ -86,6 +115,7 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal false, result.receipt.fetch(:readback_confirmed)
     assert_equal true, result.receipt.fetch(:manual_action_required)
     assert_equal "0x#{"34" * 32}", result.receipt.fetch(:exchange_order_id)
+    assert_equal false, result.receipt.dig(:pending_reconciliation_confirmation, :confirmed)
   end
 
   private

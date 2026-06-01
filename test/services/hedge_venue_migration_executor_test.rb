@@ -438,6 +438,85 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "Extended to Nado confirms rounded Nado target readback before source close" do
+    position = migration_position
+    position.position_dashboard_snapshot.update!(
+      target_short_eth: "0.9134680515417161",
+      tolerance_abs_eth: "0.027404041546251483",
+      combined_short_eth: "0.903",
+      extended_short_eth: "0.903",
+      nado_short_eth: "0"
+    )
+    venues = FakeVenueBuilder.new(
+      "nado" => FakeVenue.new(nil),
+      "extended" => FakeVenue.new({ short_size: BigDecimal("0.903"), size: BigDecimal("-0.903"), margin_mode: "cross" })
+    )
+    nado_service = ReconcilingNadoMigrationService.new(
+      expected_short: "0.9134680515417161",
+      late_position: { size: BigDecimal("-0.913"), short_size: BigDecimal("0.913"), margin_mode: "isolated" }
+    )
+    extended_service = FakeExtendedMigrationService.new(
+      ExtendedHedgeExecutionService::Result.new("success", [], [], {
+        mode: "close_only",
+        submitted: true,
+        orders_placed: 1,
+        orders_submitted: 1,
+        signatures_created: 1,
+        exchange_order_id: "extended-close-0.903",
+        readback_attempts: [ { short_size: "0", confirmed: true } ],
+        final_status: "success"
+      })
+    )
+    runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS" => "3",
+        "MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS" => "0"
+      ),
+      venue_builder: venues
+    )
+
+    NadoHedgeExecutionService.stub(:new, nado_service) do
+      ExtendedHedgeExecutionService.stub(:new, extended_service) do
+        result = HedgeVenueMigrationExecutor.new(
+          env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+          leg_runner: runner,
+          snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+          final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+        ).run(
+          position: position,
+          from_venue: "extended",
+          to_venue: "nado",
+          dry_run: false,
+          confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+          full_migration_allowed: true,
+          step_size_eth: "0.9134680515417161",
+          mode: "full"
+        )
+
+        assert_equal "success", result.status, result.blockers.inspect
+        assert_equal 1, nado_service.open_calls
+        assert_equal 1, nado_service.reconcile_calls
+        assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+        attempts = result.receipt.dig(:to_leg_execution, :receipt, :migration_target_reconciliation_attempts)
+        assert_equal 1, attempts.size
+        assert_equal "0.913", attempts.first.fetch(:actual_nado_short_eth)
+        assert_equal "0.9134680515417161", attempts.first.fetch(:expected_nado_short_eth)
+        assert_equal "0.0004680515417161", attempts.first.fetch(:difference_eth)
+        assert_equal true, attempts.first.fetch(:confirmed_by_size_increment)
+        assert_equal true, attempts.first.fetch(:confirmed)
+        assert_equal 1, extended_service.close_calls.size
+        assert_equal true, result.receipt.fetch(:source_leg_submitted)
+        assert_equal "SOURCE_CLOSE_CONFIRMED", result.receipt.fetch(:source_leg_status)
+        assert_equal [ "0xnado-target", "extended-close-0.903" ], result.receipt.fetch(:exchange_order_ids)
+        assert_equal 2, result.receipt.fetch(:orders_submitted)
+        assert_equal 2, result.receipt.fetch(:signatures_created)
+        assert_equal "nado", position.hedge.reload.execution_venue
+      end
+    end
+  end
+
   test "Extended to Nado reports explicit source close blocker when Extended close is blocked before submit" do
     position = migration_position
     venues = FakeVenueBuilder.new(
@@ -939,6 +1018,46 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     def reconcile_pending_result(result, **_kwargs)
       @reconcile_calls += 1
       result.status == "submitted_but_readback_pending" ? @confirmed : result
+    end
+  end
+
+  class ReconcilingNadoMigrationService < NadoHedgeExecutionService
+    attr_reader :open_calls, :reconcile_calls
+
+    def initialize(expected_short:, late_position:)
+      @expected_short = expected_short
+      @late_position = late_position
+      @open_calls = 0
+      @reconcile_calls = 0
+    end
+
+    def open_short(**_kwargs)
+      @open_calls += 1
+      Result.new("submitted_but_readback_pending", [], [], {
+        submitted: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: "0xnado-target",
+        action_plan: {
+          expected_after_short_eth: @expected_short,
+          delta_eth: @expected_short
+        },
+        post_submit_readback_poll_attempts: [ { attempt: 1, short_size: "0", confirmed: false } ],
+        final_status: "submitted_but_readback_pending"
+      })
+    end
+
+    def reconcile_pending_result(result, **kwargs)
+      @reconcile_calls += 1
+      super
+    end
+
+    def read_position
+      @late_position
+    end
+
+    def product_size_increment
+      BigDecimal("0.001")
     end
   end
 
