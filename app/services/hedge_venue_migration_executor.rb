@@ -1,3 +1,5 @@
+require "digest"
+
 class HedgeVenueMigrationExecutor
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_MIGRATES_HEDGE_BETWEEN_VENUES".freeze
@@ -75,6 +77,7 @@ class HedgeVenueMigrationExecutor
       receipt[:would_execute_live] = receipt[:submitted]
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      apply_nado_target_continuation!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
       receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
@@ -417,6 +420,7 @@ class HedgeVenueMigrationExecutor
       receipt[:would_execute_live] = receipt[:submitted]
       receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      apply_nado_target_continuation!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
       receipt[:manual_action_required] = true
       receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
@@ -577,6 +581,22 @@ class HedgeVenueMigrationExecutor
       recovery_command: success ? nil : recovery_command(receipt),
       blockers: success ? [] : Array(verification[:blockers]).presence || [ "Final migration readback did not confirm source flat, target hedge, third venue flat, zero open orders, and combined exposure inside tolerance." ]
     }
+  end
+
+  def apply_nado_target_continuation!(receipt, first_leg:, first_planned_leg:)
+    return unless first_planned_leg.fetch(:venue) == "nado"
+    return unless first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    return unless leg_order_count(first_leg).positive?
+
+    receipt[:final_status] = "TARGET_ACCEPTED_AWAITING_CONTINUATION"
+    receipt[:lifecycle_state] = "TARGET_SUBMITTED_PENDING_READBACK"
+    receipt[:nado_target_digest] = first_leg[:exchange_order_id]
+    receipt[:nado_target_exchange_order_id] = first_leg[:exchange_order_id]
+    receipt[:target_confirmation_attempts] = first_leg.dig(:receipt, :migration_target_reconciliation_attempts) || []
+    receipt[:continuation_pending] = true
+    receipt[:pending_migration_id] = Digest::SHA256.hexdigest([ receipt[:position_id], receipt[:from_venue], receipt[:to_venue], first_leg[:exchange_order_id] ].join(":"))[0, 16]
+    receipt[:continuation_command] = "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} dry_run=true"
+    receipt[:source_close_plan] = receipt[:planned_second_leg]
   end
 
   def final_verifier(position:, receipt:)

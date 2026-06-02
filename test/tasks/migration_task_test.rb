@@ -21,6 +21,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:rehearse_next_canary"].reenable if Rake::Task.task_defined?("migration:rehearse_next_canary")
     Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
+    Rake::Task["migration:continue_target_first_after_nado_confirmed"].reenable if Rake::Task.task_defined?("migration:continue_target_first_after_nado_confirmed")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -450,6 +451,26 @@ class MigrationTaskTest < ActiveSupport::TestCase
     payload = JSON.parse(out)
 
     assert_equal "recover_target_first_source_close", payload.fetch("action")
+    assert_equal [ "Position 999999 not found." ], payload.fetch("blockers")
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("dry_run")
+  end
+
+  test "continue target first after Nado confirmed task outputs safe blocked counters" do
+    ENV["position_id"] = "999999"
+    ENV["from"] = "ethereal"
+    ENV["to"] = "nado"
+    ENV["dry_run"] = "true"
+
+    out, = capture_io { Rake::Task["migration:continue_target_first_after_nado_confirmed"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal "continue_target_first_after_nado_confirmed", payload.fetch("action")
     assert_equal [ "Position 999999 not found." ], payload.fetch("blockers")
     assert_equal 0, payload.fetch("orders_submitted")
     assert_equal 0, payload.fetch("signatures_created")

@@ -1,10 +1,11 @@
 class MigrationRandomReadiness
-  def initialize(position:, env: ENV, planner: nil, proof_registry: nil, dashboard_health: nil, now: -> { Time.current })
+  def initialize(position:, env: ENV, planner: nil, proof_registry: nil, dashboard_health: nil, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, now: -> { Time.current })
     @position = position
     @env = env
     @proof_registry = proof_registry || MigrationRouteProofRegistry.new(now: now)
     @planner = planner || MigrationRandomPlanner.new(env: env, proof_registry: @proof_registry, now: now)
     @dashboard_health = dashboard_health
+    @canary_dir = Pathname(canary_dir)
   end
 
   def report
@@ -31,6 +32,7 @@ class MigrationRandomReadiness
       operator_commands: operator_commands(next_canary),
       route_proof_statuses: proof_report.fetch(:routes),
       random_live_gates: random_live_gates,
+      pending_nado_target_continuation: pending_nado_target_continuation,
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
       orders_placed: 0,
@@ -50,6 +52,7 @@ class MigrationRandomReadiness
     blockers << "no eligible proven route from current production venue" if live_plan.fetch(:selected_route).blank?
     blockers << "pending ShortRebalance must be resolved before random migration" if pending_rebalance?
     blockers << "pending recovery must be resolved before random migration" if pending_recovery?
+    blockers << "pending target=Nado migration continuation must be completed before random migration" if pending_nado_target_continuation
     blockers << "dashboard health must be HEALTHY" unless dashboard_healthy?
     blockers.uniq
   end
@@ -78,8 +81,9 @@ class MigrationRandomReadiness
     {
       next_canary_dry_run: "bin/rails migration:rehearse_route position_id=#{position.id} from=#{from} to=#{to} mode=full sequence=target_first dry_run=true",
       next_canary_live: "bin/rails migration:run_manual_live_canary position_id=#{position.id} from=#{from} to=#{to} sequence=target_first confirmation=#{MigrationManualLiveCanaryRunner::CONFIRMATION}",
+      nado_target_continuation: to == "nado" ? "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{from} to=#{to} dry_run=true" : nil,
       recovery: "bin/rails migration:recover_target_first_source_close position_id=#{position.id} from=#{from} to=#{to} dry_run=true"
-    }
+    }.compact
   end
 
   def random_live_gates
@@ -114,6 +118,46 @@ class MigrationRandomReadiness
 
   def pending_recovery?
     false
+  end
+
+  def pending_nado_target_continuation
+    @pending_nado_target_continuation ||= begin
+      Dir.glob(@canary_dir.join("*.jsonl")).flat_map do |path|
+        File.readlines(path).filter_map do |line|
+          JSON.parse(line).merge("receipt_path" => path)
+        rescue JSON::ParserError
+          nil
+        end
+      rescue SystemCallError
+        []
+      end
+        .select { |event| pending_nado_target_event?(event) }
+        .max_by { |event| event_time(event) || Time.zone.at(0) }
+        &.then do |event|
+          {
+            route: "#{event['from_venue']}->#{event['to_venue']}",
+            from_venue: event["from_venue"],
+            to_venue: event["to_venue"],
+            nado_target_digest: event["nado_target_digest"] || Array(event["exchange_order_ids"]).first,
+            status: event["final_status"],
+            continuation_command: event["continuation_command"] || "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{event['from_venue']} to=#{event['to_venue']} dry_run=true",
+            receipt_path: event["receipt_path"]
+          }
+        end
+    end
+  end
+
+  def pending_nado_target_event?(event)
+    event["position_id"].to_s == position.id.to_s &&
+      event["to_venue"] == "nado" &&
+      event["final_status"].to_s == "TARGET_ACCEPTED_AWAITING_CONTINUATION" &&
+      event["continuation_pending"] == true
+  end
+
+  def event_time(event)
+    Time.zone.parse(event["timestamp"].to_s)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def dashboard_healthy?

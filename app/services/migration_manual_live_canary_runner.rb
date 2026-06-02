@@ -86,6 +86,12 @@ class MigrationManualLiveCanaryRunner
       source_leg_status: receipt[:source_leg_status],
       source_leg_submitted: receipt[:source_leg_submitted],
       source_leg_exchange_order_id: receipt[:source_leg_exchange_order_id],
+      nado_target_digest: receipt[:nado_target_digest],
+      target_confirmation_attempts: receipt[:target_confirmation_attempts],
+      continuation_command: receipt[:continuation_command],
+      pending_migration_id: receipt[:pending_migration_id],
+      source_close_plan: receipt[:source_close_plan],
+      continuation_pending: receipt[:continuation_pending],
       target_leg_readback_confirmed: receipt[:to_leg_execution]&.fetch(:confirmed, false) || receipt[:target_holds_hedge_confirmed] == true,
       source_leg_readback_confirmed: receipt[:from_leg_execution]&.fetch(:confirmed, false) || receipt[:source_flat_confirmed] == true,
       final_inside_tolerance: receipt[:final_inside_tolerance],
@@ -104,6 +110,7 @@ class MigrationManualLiveCanaryRunner
 
   def normalized_final_status(receipt, result)
     return MigrationLiveCanaryChecker::CONFIRMED_STATUS if receipt[:final_status] == MigrationLiveCanaryChecker::CONFIRMED_STATUS
+    return "TARGET_ACCEPTED_AWAITING_CONTINUATION" if result.status.to_s == "TARGET_ACCEPTED_AWAITING_CONTINUATION"
     return "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" if result.status.to_s == "TARGET_SUBMITTED_BUT_NOT_CONFIRMED"
     return "TARGET_REJECTED_OR_NOT_CONFIRMED" if result.status.to_s == "TARGET_REJECTED_OR_NOT_CONFIRMED"
     return "PARTIAL_OVERHEDGE_MANUAL_ACTION_REQUIRED" if receipt[:target_leg_readback_confirmed] && !receipt[:source_leg_readback_confirmed]

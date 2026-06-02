@@ -322,6 +322,27 @@ namespace :migration do
     puts JSON.pretty_generate(result.receipt)
   end
 
+  desc "Continue a target-first migration after accepted Nado target readback confirms"
+  task continue_target_first_after_nado_confirmed: :environment do
+    position = migration_position_from_env(action: "continue_target_first_after_nado_confirmed")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    live = ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"])
+    dry_run = ENV["dry_run"].present? || ENV["DRY_RUN"].present? ? ActiveModel::Type::Boolean.new.cast(ENV["dry_run"].presence || ENV["DRY_RUN"]) : !live
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationTargetNadoContinuation.new(
+      position: position,
+      from: from,
+      to: to,
+      dry_run: dry_run,
+      live: live,
+      confirmation: confirmation
+    ).run
+    puts JSON.pretty_generate(result.receipt)
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false, reason: "disabled" } unless refresh_snapshot_for_route_proof?
 

@@ -275,6 +275,42 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
+  test "route proof registry treats completed Nado target continuation as ready for random" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 10.minutes.ago))
+    write_event(continuation_dir, continuation_event(position: position, from: "ethereal", timestamp: 5.minutes.ago))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, continuation_dir: continuation_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "ethereal->nado" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_match(%r{test-continuation-proofs}, route.fetch(:finalization_receipt))
+    assert_equal "nado", route.fetch(:final_venue)
+    assert_empty route.fetch(:blockers)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+    FileUtils.rm_rf(continuation_dir) if continuation_dir
+  end
+
+  test "random readiness blocks while Nado target continuation is pending and shows command" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("ethereal")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal"))
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, canary_dir: canary_dir).report
+
+    assert_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+    pending = report.fetch(:pending_nado_target_continuation)
+    assert_equal "ethereal->nado", pending.fetch(:route)
+    assert_match "migration:continue_target_first_after_nado_confirmed", pending.fetch(:continuation_command)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
   test "random readiness is actionable and blocks live while proofs are missing" do
     report = MigrationRandomReadiness.new(position: migration_position("nado"), planner: random_planner).report
 
@@ -489,6 +525,44 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       orders_submitted: orders_submitted,
       orders_placed: orders_submitted,
       signatures_created: signatures_created,
+      timestamp: timestamp.iso8601
+    }
+  end
+
+  def partial_nado_target_canary_event(position:, from:, timestamp: Time.current)
+    {
+      action: "manual_live_canary",
+      position_id: position.id,
+      from_venue: from,
+      to_venue: "nado",
+      final_status: "TARGET_ACCEPTED_AWAITING_CONTINUATION",
+      target_leg_status: "TARGET_SUBMITTED_PENDING_READBACK",
+      continuation_pending: true,
+      nado_target_digest: "0xnado-target",
+      exchange_order_ids: [ "0xnado-target" ],
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1,
+      timestamp: timestamp.iso8601
+    }
+  end
+
+  def continuation_event(position:, from:, timestamp: Time.current)
+    {
+      action: "continue_target_first_after_nado_confirmed",
+      position_id: position.id,
+      from_venue: from,
+      to_venue: "nado",
+      final_status: "MIGRATION_FINALIZED",
+      continuation_of_accepted_nado_target: true,
+      nado_target_digest: "0xnado-target",
+      target_confirmed: true,
+      source_close_confirmed: true,
+      final_inside_tolerance: true,
+      production_venue_finalized: true,
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1,
       timestamp: timestamp.iso8601
     }
   end

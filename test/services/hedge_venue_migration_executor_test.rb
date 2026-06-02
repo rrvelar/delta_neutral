@@ -713,11 +713,15 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
         mode: "full"
       )
 
-      assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
+      assert_equal "TARGET_ACCEPTED_AWAITING_CONTINUATION", result.status
       assert_equal 1, fake_service.submit_count
       assert_equal 3, fake_service.reconcile_count
       assert_equal 1, calls
       assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
+      assert_equal true, result.receipt.fetch(:continuation_pending)
+      assert_equal false, result.receipt.key?(:source_leg_submitted)
+      assert_equal "0xpendingnado", result.receipt.fetch(:nado_target_digest)
+      assert_match "migration:continue_target_first_after_nado_confirmed", result.receipt.fetch(:continuation_command)
       assert_equal 1, result.receipt.fetch(:orders_submitted)
       assert_equal 1, result.receipt.fetch(:signatures_created)
       assert_equal [ "0xpendingnado" ], result.receipt.fetch(:exchange_order_ids)
