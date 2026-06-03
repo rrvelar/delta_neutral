@@ -20,6 +20,8 @@ namespace :positions do
         external_id: position.external_id,
         wallet_id: position.wallet_id,
         pool_address: position.pool_address,
+        updated_at: position.updated_at&.iso8601,
+        active_state_reason: position.active? ? "active production selection" : "inactive or archived app record",
         asset0_amount: position.asset0_amount&.to_s("F"),
         asset1_amount: position.asset1_amount&.to_s("F"),
         hedge_venue: position.hedge&.execution_venue,

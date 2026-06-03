@@ -175,8 +175,7 @@ class PositionSyncJob < ApplicationJob
       asset1_amount: amount_attributes.fetch(:asset1_amount),
       asset0_price_usd: price_attributes.fetch(:asset0_price_usd),
       asset1_price_usd: price_attributes.fetch(:asset1_price_usd),
-      pool_address: position_data.pool_address,
-      active: true
+      pool_address: position_data.pool_address
     )
     create_aerodrome_pnl_snapshot(position)
     Rails.logger.debug { "[PositionSyncJob] refreshed Aerodrome monitor-only position #{position.id}; hedge integration remains disabled" }

@@ -5,6 +5,7 @@ class DashboardTaskTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks unless Rake::Task.task_defined?("dashboard:refresh_all_position_snapshots")
     Rake::Task["dashboard:refresh_all_position_snapshots"].reenable
+    Rake::Task["dashboard:refresh_position_snapshot"].reenable if Rake::Task.task_defined?("dashboard:refresh_position_snapshot")
     Rake::Task["dashboard:production_health"].reenable if Rake::Task.task_defined?("dashboard:production_health")
     Rake::Task["dashboard:production_smoke"].reenable if Rake::Task.task_defined?("dashboard:production_smoke")
   end
@@ -45,6 +46,40 @@ class DashboardTaskTest < ActiveSupport::TestCase
         end
       end
     end
+  end
+
+  test "refresh position snapshot task does not deactivate active production position" do
+    position = aerodrome_position
+    snapshot = position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.6",
+      combined_short_eth: "1.6",
+      drift_eth: "0",
+      inside_tolerance: true,
+      ethereal_short_eth: "1.6",
+      extended_short_eth: "0",
+      nado_short_eth: "0"
+    )
+
+    DashboardSnapshotRefresh.stub(:new, ->(position:) { refresher([], :position, snapshot) }) do
+      original_position_id = ENV["position_id"]
+      ENV["position_id"] = position.id.to_s
+      begin
+        out, = capture_io { Rake::Task["dashboard:refresh_position_snapshot"].invoke }
+
+        assert_match '"orders_submitted": 0', out
+        assert_match '"signatures_created": 0', out
+      ensure
+        ENV["position_id"] = original_position_id
+      end
+    end
+
+    assert_predicate position.reload, :active?
+    assert_predicate position.hedge.reload, :active?
   end
 
   test "production health task outputs read-only counters" do

@@ -1498,6 +1498,39 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Make Active Production Position", response.body
   end
 
+  test "show tab navigation does not change active production selection" do
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    get position_path(position, hedge_venue: "ethereal", tab: "hedge")
+    assert_response :success
+    assert_predicate position.reload, :active?
+    assert_match "Active production position", response.body
+    assert_no_match "Archived app record", response.body
+    assert_no_match "Make Active Production Position", response.body
+
+    get position_path(position, hedge_venue: "ethereal", tab: "accounting")
+    assert_response :success
+    assert_predicate position.reload, :active?
+    assert_match "Active production position", response.body
+    assert_no_match "Archived app record", response.body
+  end
+
+  test "refresh read-only data action does not change active production selection" do
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    assert_enqueued_with(job: PositionSyncJob, args: [ position.id ]) do
+      assert_enqueued_with(job: DashboardSnapshotJob, args: [ position.id, { force: true } ]) do
+        post sync_now_position_path(position)
+      end
+    end
+
+    assert_redirected_to position_path(position)
+    assert_predicate position.reload, :active?
+    assert_predicate position.hedge.reload, :active?
+  end
+
   test "hedge venue selection persists to hedge" do
     position = create_aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)

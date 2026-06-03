@@ -392,6 +392,42 @@ class PositionSyncJobTest < ActiveSupport::TestCase
     assert_nil position.asset1_price_usd
   end
 
+  test "Aerodrome read-only position sync preserves active production selection" do
+    position = aerodrome_position
+    position.update!(active: true)
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          PositionSyncJob.perform_now(position.id)
+        end
+      end
+    end
+
+    service.verify
+    assert_predicate position.reload, :active?
+  end
+
+  test "Aerodrome read-only position sync does not reactivate inactive duplicate" do
+    position = aerodrome_position
+    position.update!(active: false)
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(position.wallet), [ position.external_id ])
+
+    with_env("AERODROME_READ_ONLY_ENABLED" => "true") do
+      HyperliquidService.stub(:new, -> { raise "HyperliquidService should not be called" }) do
+        AerodromeSlipstreamService.stub(:new, service) do
+          PositionSyncJob.perform_now(position.id)
+        end
+      end
+    end
+
+    service.verify
+    assert_not position.reload.active?
+  end
+
   private
 
   def aerodrome_position

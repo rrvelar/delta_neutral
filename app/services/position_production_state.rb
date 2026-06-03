@@ -8,6 +8,7 @@ class PositionProductionState
 
   def activate!
     ActiveRecord::Base.transaction do
+      Rails.logger.info("PositionProductionState activate position_id=#{position.id} user_id=#{position.user_id} old_active=#{position.active?} reason=explicit_operator_activation")
       sibling_scope.update_all(active: false, updated_at: Time.current)
       position.update!(active: true)
       hedge = ensure_hedge
@@ -24,6 +25,7 @@ class PositionProductionState
     return [ false, blockers ] if blockers.present?
 
     ActiveRecord::Base.transaction do
+      Rails.logger.info("PositionProductionState archive position_id=#{position.id} user_id=#{position.user_id} old_active=#{position.active?} reason=explicit_operator_archive")
       position.update!(active: false)
       position.hedge&.update!(active: false)
     end

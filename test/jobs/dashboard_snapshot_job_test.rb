@@ -58,6 +58,9 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     assert_includes calls, [ :position, active_direct.id ]
     refute_includes calls, [ :position, inactive_duplicate.id ]
     refute_includes calls, [ :position, inactive_mellow.id ]
+    assert_predicate active_direct.reload, :active?
+    assert_not inactive_duplicate.reload.active?
+    assert_not inactive_mellow.reload.active?
   end
 
   test "explicit position refreshes all three snapshot types" do

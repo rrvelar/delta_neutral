@@ -116,6 +116,7 @@ class WalletSyncJob < ApplicationJob
       amount_attributes = aerodrome_amount_attributes(position_data)
       price_attributes = aerodrome_price_attributes(position_data)
       position = wallet.positions.where(dex: aerodrome_dex, source: [ nil, Position::SOURCE_AERODROME_DIRECT ]).find_or_initialize_by(external_id: position_data.token_id)
+      was_new_record = position.new_record?
       position.assign_attributes(
         user: wallet.user,
         dex: aerodrome_dex,
@@ -127,12 +128,19 @@ class WalletSyncJob < ApplicationJob
         asset0_price_usd: price_attributes.fetch(:asset0_price_usd),
         asset1_price_usd: price_attributes.fetch(:asset1_price_usd),
         pool_address: position_data.pool_address,
-        active: true
+        active: was_new_record ? true : position.active?
       )
       position.save!
     end
 
-    wallet.positions.active.where(dex: aerodrome_dex, source: [ nil, Position::SOURCE_AERODROME_DIRECT ]).where.not(external_id: active_external_ids).update_all(active: false)
+    missing_active_positions = wallet.positions.active.where(dex: aerodrome_dex, source: [ nil, Position::SOURCE_AERODROME_DIRECT ]).where.not(external_id: active_external_ids)
+    missing_active_positions.find_each do |position|
+      Rails.logger.warn(
+        "WalletSyncJob: preserving active Aerodrome production position #{position.id}; " \
+        "token #{position.external_id} was not discovered in this read-only sync. " \
+        "Use positions:archive or the UI archive action to deactivate explicitly."
+      )
+    end
   end
 
   def aerodrome_read_only_enabled?

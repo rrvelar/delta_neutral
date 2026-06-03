@@ -19,6 +19,9 @@ class PositionsTaskTest < ActiveSupport::TestCase
     assert_equal true, row.fetch("active")
     assert_equal "71674988", row.fetch("external_id")
     assert_equal "nado", row.fetch("hedge_venue")
+    assert_equal true, row.fetch("hedge_active")
+    assert row.fetch("updated_at").present?
+    assert_equal "active production selection", row.fetch("active_state_reason")
     assert_equal 0, payload.fetch("orders_submitted")
     assert_equal 0, payload.fetch("signatures_created")
   end
@@ -42,6 +45,7 @@ class PositionsTaskTest < ActiveSupport::TestCase
 
     assert_not active.reload.active?
     assert_predicate inactive.reload, :active?
+    assert_predicate inactive.hedge.reload, :active?
   end
 
   test "positions archive deactivates safe flat position" do

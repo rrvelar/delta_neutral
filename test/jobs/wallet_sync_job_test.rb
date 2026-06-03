@@ -246,9 +246,53 @@ class WalletSyncJobTest < ActiveSupport::TestCase
       end
     end
 
-    assert_not stale.reload.active?
+    assert_predicate stale.reload, :active?
     assert_empty logger.errors
     assert_includes logger.warnings.join("\n"), "reason=nonexistent_token"
+    assert_includes logger.warnings.join("\n"), "preserving active Aerodrome production position #{stale.id}"
+  end
+
+  test "Aerodrome wallet sync preserves existing active and inactive direct selections" do
+    wallet = base_wallet
+    aerodrome_dex = Dex.find_or_create_by!(name: "aerodrome_slipstream")
+    active = wallet.positions.create!(
+      user: wallet.user,
+      dex: aerodrome_dex,
+      source: Position::SOURCE_AERODROME_DIRECT,
+      external_id: "5016",
+      pool_address: "0xold",
+      asset0: "WETH",
+      asset1: "USDC",
+      active: true
+    )
+    inactive_duplicate = wallet.positions.create!(
+      user: wallet.user,
+      dex: aerodrome_dex,
+      source: Position::SOURCE_AERODROME_DIRECT,
+      external_id: "5017",
+      pool_address: "0xinactive",
+      asset0: "WETH",
+      asset1: "USDC",
+      active: false
+    )
+
+    stub_uniswap_positions(wallet.address, [])
+    service = Minitest::Mock.new
+    service.expect(:fetch_position, aerodrome_position_data(wallet), [ "5016" ])
+    service.expect(:fetch_position, aerodrome_position_data(wallet).with(token_id: "5017", pool_address: "0xinactive"), [ "5017" ])
+
+    with_env(
+      "AERODROME_READ_ONLY_ENABLED" => "true",
+      "AERODROME_SLIPSTREAM_TOKEN_IDS" => "5016,5017"
+    ) do
+      AerodromeSlipstreamService.stub(:new, service) do
+        WalletSyncJob.perform_now(wallet.id)
+      end
+    end
+
+    service.verify
+    assert_predicate active.reload, :active?
+    assert_not inactive_duplicate.reload.active?
   end
 
   test "Aerodrome unrelated RPC errors still surface through wallet failure log" do
