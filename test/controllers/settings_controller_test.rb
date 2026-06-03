@@ -25,8 +25,8 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Current Production Hedge", response.body
     assert_match "Extended", response.body
     assert_match "Signer", response.body
-    assert_match "Hyperliquid Legacy Settings", response.body
-    assert_match "These settings do not indicate the current production venue.", response.body
+    assert_match "Legacy Hyperliquid settings", response.body
+    assert_match "Hyperliquid is not a supported current production venue", response.body
   end
 
   test "edit shows risk settings and updates supported cap with confirmation" do
@@ -34,8 +34,14 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Risk Limits", response.body
+    assert_match "Ethereal max short size, ETH", response.body
     assert_match "ETHEREAL_MAX_SHORT_ETH", response.body
-    assert_no_match "HYPERLIQUID_MAX_SHORT_ETH", response.body
+    assert_match "Global max short size, ETH", response.body
+    assert_match "(AERODROME_MAX_SHORT_ETH)", response.body
+    assert_match "Not configured. Live hedge is blocked until this cap or an applicable fallback is set.", response.body
+    assert_no_match "Hyperliquid max short size", response.body
+    assert_select "input[name='confirmation']", count: 1
+    assert_select "input[name^='risk_values']", minimum: 1
 
     assert_difference "RiskSetting.count", 1 do
       patch risk_settings_path, params: {
@@ -50,6 +56,52 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     setting = RiskSetting.find_by!(key: "ETHEREAL_MAX_SHORT_ETH")
     assert_equal "2.0", setting.value
     assert_equal users(:one), setting.updated_by
+  end
+
+  test "edit shows fallback explanation and current position cap recommendation" do
+    position = create_extended_position
+    position.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988")
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: BigDecimal("1.7"),
+      inside_tolerance: false
+    )
+    RiskSetting.create!(key: "AERODROME_MAX_SHORT_ETH", value: "1.5", updated_by: users(:one), reason: "test fallback")
+
+    get edit_settings_path
+
+    assert_response :success
+    assert_match "Current active position", response.body
+    assert_match "Position ##{position.id} WETH/USDC", response.body
+    assert_match "Target hedge: 1.700000 ETH", response.body
+    assert_match "Current blocker: target exceeds cap", response.body
+    assert_match "suggested cap is 2.200000 ETH", response.body
+    assert_match "Not configured. Currently using fallback AERODROME_MAX_SHORT_ETH=1.5 ETH.", response.body
+    assert_match "ETHEREAL_MAX_SHORT_ETH", response.body
+  end
+
+  test "risk setting update uses shared confirmation and rejects invalid confirmation" do
+    assert_difference "RiskSetting.count", 1 do
+      patch risk_settings_path, params: {
+        key: "ETHEREAL_MAX_SHORT_ETH",
+        risk_values: { "ETHEREAL_MAX_SHORT_ETH" => "2.0" },
+        risk_reasons: { "ETHEREAL_MAX_SHORT_ETH" => "shared confirmation test" },
+        confirmation: RiskSettings::INCREASE_CONFIRMATION
+      }
+    end
+
+    assert_redirected_to edit_settings_path(anchor: "risk-settings")
+
+    patch risk_settings_path, params: {
+      key: "NADO_MAX_SHORT_ETH",
+      risk_values: { "NADO_MAX_SHORT_ETH" => "2.0" },
+      confirmation: "wrong"
+    }
+
+    assert_response :unprocessable_entity
+    assert_match "confirmation must equal #{RiskSettings::INCREASE_CONFIRMATION}", response.body
   end
 
   test "risk setting update rejects invalid key and value without server error" do
@@ -157,5 +209,6 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
       inside_tolerance: true,
       signer_status: "ok"
     )
+    position
   end
 end

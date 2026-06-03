@@ -54,6 +54,31 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "No active positions found.", response.body
   end
 
+  test "index groups active duplicate historical and legacy positions with human labels" do
+    active = create_aerodrome_position(external_id: "71674988", pool_address: "0xdup")
+    active.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "ethereal")
+    duplicate = create_aerodrome_position(external_id: "71674988", pool_address: "0xdup", active: false)
+    duplicate.create_hedge!(target: "1.0", tolerance: "0.03", active: false, execution_venue: "hyperliquid")
+    active.touch
+    old_mellow = create_aerodrome_position(external_id: "mellow:71261528", active: false)
+    old_mellow.update!(source: Position::SOURCE_MELLOW_AUTOPILOT)
+    old_mellow.create_hedge!(target: "1.0", tolerance: "0.03", active: false, execution_venue: "extended")
+
+    get positions_path
+
+    assert_response :success
+    assert_match "Active production", response.body
+    assert_match "Inactive duplicates", response.body
+    assert_match "Historical positions", response.body
+    assert_match "Legacy unsupported venue positions", response.body
+    assert_match "WETH/USDC Aerodrome LP #71674988, Position ##{active.id}", response.body
+    assert_match "WETH/USDC Aerodrome LP #71674988, Position ##{duplicate.id}", response.body
+    assert_match "Duplicate inactive", response.body
+    assert_match "WETH/USDC Mellow Autopilot #mellow:71261528, Position ##{old_mellow.id}", response.body
+    assert_match "Historical inactive", response.body
+    assert_match "Unsupported legacy venue: hyperliquid", response.body
+  end
+
   test "index links to Aerodrome LP import form" do
     get positions_path
 

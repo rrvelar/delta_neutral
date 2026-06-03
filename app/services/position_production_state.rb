@@ -102,7 +102,7 @@ class PositionProductionState
   end
 
   def self.duplicate_group(positions)
-    ordered = positions.sort_by { |position| [ position.updated_at || Time.zone.at(0), position.id ] }
+    ordered = positions.sort_by { |position| [ position.active? ? 1 : 0, position.updated_at || Time.zone.at(0), position.id ] }
     canonical = ordered.last
     {
       key: duplicate_key(canonical),

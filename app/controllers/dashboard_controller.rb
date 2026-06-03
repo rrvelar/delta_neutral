@@ -13,6 +13,7 @@ class DashboardController < ApplicationController
     @positions = @visible_positions
     @inactive_positions = Current.user.positions.where(active: false).includes(:dex, :hedge).order(updated_at: :desc, id: :desc).limit(5).to_a
     @inactive_positions_exist = @inactive_positions.any?
+    @duplicate_position_ids = duplicate_position_ids(@positions + @inactive_positions)
     @total_value = @positions.sum { |position| PositionValuation.current(position).current_value_usd || 0 }
     @active_hedges = @positions.count { |p| p.hedge&.active? }
     Rails.logger.info(
@@ -20,5 +21,11 @@ class DashboardController < ApplicationController
       "email=#{Current.user.email_address} visible_count=#{@positions.size} " \
       "visible_position_ids=#{@positions.map(&:id).join(',')} active_hedge_count=#{@active_hedges}"
     )
+  end
+
+  private
+
+  def duplicate_position_ids(positions)
+    PositionProductionState.duplicates(Position.where(id: positions.map(&:id))).flat_map { |group| group.fetch(:duplicates).map(&:id) }.to_set
   end
 end

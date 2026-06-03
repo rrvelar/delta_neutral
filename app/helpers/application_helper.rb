@@ -1,3 +1,5 @@
+require "set"
+
 module ApplicationHelper
   def format_usd(value, precision: 2)
     n = number_with_delimiter(number_with_precision(value.to_f.abs, precision: precision))
@@ -85,6 +87,51 @@ module ApplicationHelper
 
   def valuation_value_display(value)
     value.nil? ? "Unavailable" : format_usd(value)
+  end
+
+  def operator_position_label(position)
+    source_label = if position.aerodrome_direct?
+      "Aerodrome LP"
+    elsif position.mellow_autopilot?
+      "Mellow Autopilot"
+    else
+      dex_display_name(position)
+    end
+    "#{position.asset0}/#{position.asset1} #{source_label} ##{position.external_id}, Position ##{position.id}"
+  end
+
+  def position_role_label(position, duplicate_ids = Set.new)
+    return "Current production" if position.active?
+    return "Duplicate inactive" if duplicate_ids.include?(position.id)
+    return "Historical inactive" if position.mellow_autopilot?
+
+    "Inactive historical"
+  end
+
+  def position_role_class(position, duplicate_ids = Set.new)
+    return "border-green-800 bg-green-950/40 text-green-200" if position.active?
+    return "border-yellow-800 bg-yellow-950/30 text-yellow-200" if duplicate_ids.include?(position.id)
+
+    "border-gray-800 bg-gray-950/60 text-gray-300"
+  end
+
+  def position_source_detail(position)
+    source = if position.aerodrome_direct?
+      "Aerodrome direct import"
+    elsif position.mellow_autopilot?
+      "Mellow Autopilot"
+    else
+      position.source.presence || dex_display_name(position)
+    end
+    "#{source} · external_id #{position.external_id}"
+  end
+
+  def hedge_venue_status_label(position)
+    venue = position.hedge&.execution_venue
+    return "No hedge record" if venue.blank?
+    return "Unsupported legacy venue: #{venue}" unless HedgeVenues.supported?(venue)
+
+    HedgeVenues.label(venue)
   end
 
   def optional_usd_display(value)

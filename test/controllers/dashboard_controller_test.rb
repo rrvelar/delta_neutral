@@ -52,6 +52,9 @@ class DashboardControllerTest < ActionDispatch::IntegrationTest
     assert_match "Mellow", response.body
     assert_match "Extended", response.body
     assert_match "In tolerance", response.body
+    assert_match "Active production position", response.body
+    assert_match "Current production", response.body
+    assert_match "Manage hedge", response.body
     assert_match %r{Active Positions.*?>[1-9]\d*<}m, response.body
     assert_match %r{Active Hedges.*?>[1-9]\d*<}m, response.body
     assert_no_match "No active positions.", response.body
@@ -85,7 +88,30 @@ class DashboardControllerTest < ActionDispatch::IntegrationTest
     assert_match "No active production position selected", response.body
     assert_match "Activate one from Positions", response.body
     assert_match "Activate", response.body
+    assert_match "WETH/USDC Aerodrome LP #71674988, Position #", response.body
     assert_no_match "Add a wallet</a> to get started", response.body
+  end
+
+  test "dashboard labels inactive duplicates and old mellow positions as secondary" do
+    active = create_mellow_extended_position(user: users(:one), wallet_user: users(:one))
+    active.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988", pool_address: "0xdup")
+    duplicate = create_mellow_extended_position(user: users(:one), wallet_user: users(:one))
+    duplicate.update!(wallet: active.wallet, source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988", pool_address: "0xdup", active: false)
+    duplicate.hedge.update!(active: false, execution_venue: "hyperliquid")
+    active.touch
+    old_mellow = create_mellow_extended_position(user: users(:one), wallet_user: users(:one))
+    old_mellow.update!(external_id: "mellow:71261528", active: false)
+    old_mellow.hedge.update!(active: false)
+
+    get root_path
+
+    assert_response :success
+    assert_match "Inactive / historical positions", response.body
+    assert_match "Duplicate inactive", response.body
+    assert_match "Historical inactive", response.body
+    assert_match "Unsupported legacy venue: hyperliquid", response.body
+    assert_match "WETH/USDC Aerodrome LP #71674988, Position ##{duplicate.id}", response.body
+    assert_match "WETH/USDC Mellow Autopilot #mellow:71261528, Position ##{old_mellow.id}", response.body
   end
 
   test "redirects to login when not authenticated" do

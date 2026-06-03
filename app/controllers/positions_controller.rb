@@ -24,6 +24,7 @@ class PositionsController < ApplicationController
       .distinct
       .order(active: :desc, updated_at: :desc, id: :desc)
       .to_a
+    @duplicate_position_ids = duplicate_position_ids(@positions)
     Rails.logger.info(
       "PositionsController#index visible_positions user_id=#{Current.user.id} " \
       "email=#{Current.user.email_address} visible_count=#{@visible_positions.size} " \
@@ -1283,5 +1284,9 @@ class PositionsController < ApplicationController
       source: Position::SOURCE_AERODROME_DIRECT,
       deactivate_existing_aerodrome_positions: "1"
     }
+  end
+
+  def duplicate_position_ids(positions)
+    PositionProductionState.duplicates(Position.where(id: positions.map(&:id))).flat_map { |group| group.fetch(:duplicates).map(&:id) }.to_set
   end
 end
