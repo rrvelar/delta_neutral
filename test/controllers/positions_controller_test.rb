@@ -1498,6 +1498,105 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Make Active Production Position", response.body
   end
 
+  test "show active Ethereal position exposes enable auto control when auto is off" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.6",
+      tolerance_abs_eth: "0.048",
+      combined_short_eth: "1.6",
+      drift_eth: "0",
+      inside_tolerance: true,
+      ethereal_short_eth: "1.6",
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      signer_status: "ok"
+    )
+
+    with_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true") do
+      get position_path(position, hedge_venue: "ethereal", tab: "accounting")
+    end
+
+    assert_response :success
+    assert_match "Auto-Rebalance Controls", response.body
+    assert_match "Enable Ethereal Auto", response.body
+    assert_match OperationalSettings::ENABLE_CONFIRMATIONS.fetch("ethereal"), response.body
+    assert_match "This only changes the auto loop setting. It does not submit an order.", response.body
+  end
+
+  test "show active Ethereal position exposes disable auto control when auto is on" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.6",
+      combined_short_eth: "1.6",
+      drift_eth: "0",
+      inside_tolerance: true,
+      ethereal_short_eth: "1.6",
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      signer_status: "ok"
+    )
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+
+    with_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true") do
+      get position_path(position, hedge_venue: "ethereal", tab: "accounting")
+    end
+
+    assert_response :success
+    assert_match "Auto On", response.body
+    assert_match "Disable Ethereal Auto", response.body
+    assert_match OperationalSettings::DISABLE_CONFIRMATIONS.fetch("ethereal"), response.body
+  end
+
+  test "auto rebalance toggle sets DB overrides without orders" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.6",
+      combined_short_eth: "1.6",
+      drift_eth: "0",
+      inside_tolerance: true,
+      ethereal_short_eth: "1.6",
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      signer_status: "ok"
+    )
+
+    with_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true") do
+      post auto_rebalance_position_path(position), params: {
+        venue: "ethereal",
+        enabled: "true",
+        auto_confirmation: OperationalSettings::ENABLE_CONFIRMATIONS.fetch("ethereal")
+      }
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal", tab: "accounting")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+  end
+
   test "show tab navigation does not change active production selection" do
     position = create_aerodrome_position(active: true)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")

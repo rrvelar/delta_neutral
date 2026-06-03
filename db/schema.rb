@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_03_000200) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -60,6 +60,29 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
     t.datetime "updated_at", null: false
     t.index ["chain_id"], name: "index_networks_on_chain_id", unique: true
     t.index ["name"], name: "index_networks_on_name", unique: true
+  end
+
+  create_table "operational_setting_audits", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.string "new_value", null: false
+    t.string "old_value"
+    t.text "reason"
+    t.datetime "updated_at", null: false
+    t.integer "updated_by_id"
+    t.index ["key"], name: "index_operational_setting_audits_on_key"
+    t.index ["updated_by_id"], name: "index_operational_setting_audits_on_updated_by_id"
+  end
+
+  create_table "operational_settings", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.text "reason"
+    t.datetime "updated_at", null: false
+    t.integer "updated_by_id"
+    t.string "value", null: false
+    t.index ["key"], name: "index_operational_settings_on_key", unique: true
+    t.index ["updated_by_id"], name: "index_operational_settings_on_updated_by_id"
   end
 
   create_table "pnl_snapshots", force: :cascade do |t|
@@ -217,24 +240,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
     t.index ["wallet_id"], name: "index_positions_on_wallet_id"
   end
 
-  create_table "sessions", force: :cascade do |t|
-    t.datetime "created_at", null: false
-    t.string "ip_address"
-    t.datetime "updated_at", null: false
-    t.string "user_agent"
-    t.integer "user_id", null: false
-    t.index ["user_id"], name: "index_sessions_on_user_id"
-  end
-
-  create_table "settings", force: :cascade do |t|
-    t.datetime "created_at", null: false
-    t.boolean "hyperliquid_cross_margin", default: true, null: false
-    t.integer "hyperliquid_leverage", default: 3, null: false
-    t.datetime "updated_at", null: false
-    t.integer "user_id", null: false
-    t.index ["user_id"], name: "index_settings_on_user_id", unique: true
-  end
-
   create_table "risk_setting_audits", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "key", null: false
@@ -256,6 +261,24 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
     t.string "value", null: false
     t.index ["key"], name: "index_risk_settings_on_key", unique: true
     t.index ["updated_by_id"], name: "index_risk_settings_on_updated_by_id"
+  end
+
+  create_table "sessions", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "ip_address"
+    t.datetime "updated_at", null: false
+    t.string "user_agent"
+    t.integer "user_id", null: false
+    t.index ["user_id"], name: "index_sessions_on_user_id"
+  end
+
+  create_table "settings", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.boolean "hyperliquid_cross_margin", default: true, null: false
+    t.integer "hyperliquid_leverage", default: 3, null: false
+    t.datetime "updated_at", null: false
+    t.integer "user_id", null: false
+    t.index ["user_id"], name: "index_settings_on_user_id", unique: true
   end
 
   create_table "short_rebalances", force: :cascade do |t|
@@ -299,6 +322,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
 
   add_foreign_key "aerodrome_hedge_proposals", "positions"
   add_foreign_key "hedges", "positions"
+  add_foreign_key "operational_setting_audits", "users", column: "updated_by_id"
+  add_foreign_key "operational_settings", "users", column: "updated_by_id"
   add_foreign_key "pnl_snapshots", "positions"
   add_foreign_key "position_dashboard_snapshots", "positions"
   add_foreign_key "position_hedge_accounting_snapshots", "positions"

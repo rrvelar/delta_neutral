@@ -9,6 +9,7 @@
 <% tab_class = ->(*tabs) { tabs.map(&:to_s).include?(position_tab) ? "" : " hidden" } %>
 <% selected_adapter = @selected_hedge_venue_adapter || (aerodrome ? HedgeVenues.build(selected_venue) : nil) %>
 <% selected_venue_name = selected_adapter&.venue_name || HedgeVenues.label(selected_venue) %>
+<% auto_control_status = @auto_control_status || (aerodrome ? AutoRebalanceControl.new(position: @position, venue: selected_venue).status : {}) %>
 <% venue_dashboard = @selected_hedge_venue_dashboard || {} %>
 <% selected_account_state = venue_dashboard[:account_state] || {} %>
 <% selected_read_only_diagnostics = selected_account_state[:read_only_diagnostics] || {} %>
@@ -33,11 +34,11 @@
 <% selected_live_supported = selected_adapter&.live_supported? %>
 <% live_status_label = selected_live_enabled ? "Live Enabled" : (selected_live_supported ? "Live Gated" : "Read-only") %>
 <% auto_gate_enabled = if selected_venue == "nado"
-  ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", "false"))
+  OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
 elsif selected_venue == "ethereal"
-  ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", "false"))
+  OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
 elsif selected_venue == "extended"
-  ActiveModel::Type::Boolean.new.cast(ENV.fetch("EXTENDED_AUTO_REBALANCE_ENABLED", "false"))
+  OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
 else
   ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false")) && !ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
 end %>
@@ -1227,6 +1228,47 @@ end %>
         <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-yellow-100">
           <% auto_messages.each do |message| %><li><%= message %></li><% end %>
         </ul>
+      <% end %>
+      <% if aerodrome && auto_control_status.present? && OperationalSettings.auto_key_for(selected_venue) %>
+        <% auto_enabled = auto_control_status[:selected_auto_enabled] %>
+        <% auto_phrase = auto_enabled ? auto_control_status[:disable_confirmation] : auto_control_status[:enable_confirmation] %>
+        <% auto_button_label = auto_enabled ? "Disable #{selected_venue_name} Auto" : "Enable #{selected_venue_name} Auto" %>
+        <% auto_blockers = auto_enabled ? [] : auto_control_status[:blockers] %>
+        <div id="auto-settings" class="mt-5 rounded-xl border <%= auto_blockers.present? ? 'border-yellow-800 bg-yellow-950/20' : 'border-gray-800 bg-gray-950/60' %> p-4">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p class="text-xs uppercase tracking-wide text-gray-500">Auto-Rebalance Controls</p>
+              <h3 class="mt-1 text-lg font-semibold text-white"><%= auto_enabled ? "Auto On" : "Auto Off" %></h3>
+              <p class="mt-1 text-sm text-gray-400">Selected active venue: <%= selected_venue_name %>. This only changes the auto loop setting. It does not submit an order.</p>
+              <p class="mt-2 text-sm text-gray-300">
+                <% if auto_enabled %>
+                  Disables automatic <%= selected_venue_name %> rebalances. Manual hedge controls remain available.
+                <% else %>
+                  Enables the <%= selected_venue_name %> auto-rebalance loop for the active production position. It will only act when drift exceeds tolerance and all safety gates pass.
+                <% end %>
+              </p>
+              <% if auto_blockers.present? %>
+                <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+                  <% auto_blockers.each do |blocker| %><li><%= blocker %></li><% end %>
+                </ul>
+              <% elsif !auto_enabled && inside_tolerance == false %>
+                <p class="mt-3 text-sm text-yellow-100">Hedge is outside tolerance; enabling auto may allow a rebalance on the next sync once all safety gates pass.</p>
+              <% end %>
+              <details class="mt-3 text-xs text-gray-500">
+                <summary class="cursor-pointer">Technical keys</summary>
+                <p class="mt-1 font-mono"><%= auto_control_status[:selected_auto_key] %> · source <%= auto_control_status[:selected_auto_source] %></p>
+                <p class="font-mono">Migration/random remain disabled through DB overrides.</p>
+              </details>
+            </div>
+            <%= form_with url: auto_rebalance_position_path(@position), method: :post, class: "min-w-full space-y-2 lg:min-w-80" do |form| %>
+              <%= form.hidden_field :venue, value: selected_venue %>
+              <%= form.hidden_field :enabled, value: (!auto_enabled).to_s %>
+              <%= form.text_field :auto_confirmation, placeholder: auto_phrase, autocomplete: "off", class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600" %>
+              <%= form.submit auto_button_label, disabled: auto_blockers.present?, class: "w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:bg-gray-900 disabled:text-gray-600" %>
+              <p class="text-xs text-gray-500">Required confirmation: <%= auto_phrase %></p>
+            <% end %>
+          </div>
+        </div>
       <% end %>
     </section>
 

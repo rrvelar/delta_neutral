@@ -130,6 +130,7 @@ class PositionsController < ApplicationController
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
       @position_tab = selected_position_tab
       @risk_recommendation = RiskLimitRecommendation.new(position: @position, venue: @selected_hedge_venue).report
+      @auto_control_status = AutoRebalanceControl.new(position: @position, venue: @selected_hedge_venue).status
       @current_auto_readiness = unavailable_extended_auto_readiness("Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.")
       @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? @current_auto_readiness : nil
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard
@@ -260,6 +261,22 @@ class PositionsController < ApplicationController
       redirect_to positions_path, notice: "Position ##{position.id} archived and hedge deactivated. This did not close the on-chain LP or any perps."
     else
       redirect_to position_path(position), alert: "Archive blocked: #{blockers.join('; ')}"
+    end
+  end
+
+  def auto_rebalance
+    position = Current.user.positions.includes(:hedge, :position_dashboard_snapshot).find(params[:id])
+    control = AutoRebalanceControl.new(position: position, venue: params[:venue] || params[:hedge_venue], updated_by: Current.user)
+    result = control.set!(enabled: params[:enabled], confirmation: params[:auto_confirmation])
+    redirect_params = {
+      hedge_venue: control.status.fetch(:selected_venue),
+      tab: "accounting"
+    }
+    if result.ok
+      state = ActiveModel::Type::Boolean.new.cast(params[:enabled]) ? "enabled" : "disabled"
+      redirect_to position_path(position, redirect_params), notice: "#{control.status.fetch(:selected_venue_name)} auto #{state}. No orders or signatures were created."
+    else
+      redirect_to position_path(position, redirect_params), alert: "Auto setting blocked: #{result.errors.join('; ')}"
     end
   end
 

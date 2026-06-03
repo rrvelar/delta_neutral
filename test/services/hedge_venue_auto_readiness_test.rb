@@ -1,6 +1,10 @@
 require "test_helper"
 
 class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
+  setup do
+    OperationalSetting.delete_all
+  end
+
   test "chooses Extended adapter when execution venue is extended" do
     readiness = HedgeVenueAutoReadiness.new(adapters: { "extended" => StaticAdapter.new("extended") }).report(position: position("extended"))
 
@@ -66,6 +70,15 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
 
     assert_equal true, report.fetch(:within_tolerance)
     assert_includes report.fetch(:blockers), "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true"
+  end
+
+  test "Ethereal readiness uses DB auto override over env" do
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+    report = ethereal_adapter(env: ready_env.merge("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false"), current_short: "1.0").readiness(position: position("ethereal"))
+
+    assert_equal true, report.fetch(:active_auto_enabled)
+    assert_equal true, report.fetch(:continuous_auto_ready)
+    assert_empty report.fetch(:blockers)
   end
 
   test "Ethereal blocks live auto when open orders readback is unavailable" do

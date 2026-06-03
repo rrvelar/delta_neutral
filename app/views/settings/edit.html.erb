@@ -41,6 +41,45 @@
   </div>
 </div>
 
+<% if @auto_control_status.present? %>
+  <% auto_status = @auto_control_status %>
+  <% auto_enabled = auto_status[:selected_auto_enabled] %>
+  <% auto_phrase = auto_enabled ? auto_status[:disable_confirmation] : auto_status[:enable_confirmation] %>
+  <div id="auto-settings" class="mb-6 max-w-5xl rounded-xl border border-gray-800 bg-gray-900 p-6">
+    <div class="flex flex-wrap items-start justify-between gap-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-200">Auto-Rebalance Controls</h2>
+        <p class="mt-1 text-sm text-gray-400">Controls the selected active production venue only. Toggling auto does not submit orders, create signatures, or cancel orders.</p>
+      </div>
+      <span class="rounded-full border <%= auto_enabled ? 'border-green-800 bg-green-950/50 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_enabled ? "Auto On" : "Auto Off" %></span>
+    </div>
+    <div class="mt-4 grid gap-3 text-sm md:grid-cols-4">
+      <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active position</p><p class="text-white">#<%= auto_status[:position_id] %></p></div>
+      <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Selected active venue</p><p class="text-white"><%= auto_status[:selected_venue_name] %></p></div>
+      <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Live</p><p class="<%= auto_status[:selected_live_enabled] ? 'text-green-300' : 'text-gray-300' %>"><%= auto_status[:selected_live_enabled] ? "Enabled" : "Disabled" %></p></div>
+      <div class="rounded-lg border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Signer</p><p class="<%= auto_status[:signer_ok] ? 'text-green-300' : 'text-gray-300' %>"><%= auto_status[:signer_ok] ? "OK" : "Needs review" %></p></div>
+    </div>
+    <% if @auto_setting_errors.present? %>
+      <div class="mt-4 rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
+        <% @auto_setting_errors.each do |error| %><p><%= error %></p><% end %>
+      </div>
+    <% elsif auto_status[:blockers].present? && !auto_enabled %>
+      <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-yellow-100">
+        <% auto_status[:blockers].each do |blocker| %><li><%= blocker %></li><% end %>
+      </ul>
+    <% end %>
+    <%= form_with url: auto_settings_path, method: :patch, class: "mt-5 grid gap-3 lg:grid-cols-[minmax(12rem,1fr)_minmax(16rem,1fr)_auto]" do |form| %>
+      <%= form.hidden_field :position_id, value: auto_status[:position_id] %>
+      <%= form.hidden_field :venue, value: auto_status[:selected_venue] %>
+      <%= form.hidden_field :enabled, value: (!auto_enabled).to_s %>
+      <%= form.text_field :auto_confirmation, placeholder: auto_phrase, autocomplete: "off", class: "rounded border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" %>
+      <%= form.submit(auto_enabled ? "Disable #{auto_status[:selected_venue_name]} Auto" : "Enable #{auto_status[:selected_venue_name]} Auto", disabled: auto_status[:blockers].present? && !auto_enabled, class: "rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:bg-gray-900 disabled:text-gray-600") %>
+      <button name="disable_all" value="1" class="rounded border border-gray-700 px-4 py-2 text-sm text-gray-200 hover:bg-gray-800">Disable all auto</button>
+      <p class="lg:col-span-3 text-xs text-gray-500">Enable/disable phrase: <%= auto_phrase %>. Disable all phrase: <%= OperationalSettings::DISABLE_ALL_CONFIRMATION %>.</p>
+    <% end %>
+  </div>
+<% end %>
+
 <div id="risk-settings" class="mb-6 max-w-5xl rounded-xl border border-gray-800 bg-gray-900 p-6">
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div>

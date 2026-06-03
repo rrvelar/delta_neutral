@@ -31,6 +31,25 @@ class SettingsController < ApplicationController
     end
   end
 
+  def update_auto
+    position = Current.user.positions.includes(:hedge, :position_dashboard_snapshot).find(params[:position_id])
+    control = AutoRebalanceControl.new(position: position, venue: params[:venue], updated_by: Current.user)
+    if params[:disable_all].present?
+      result = control.disable_all!(confirmation: params[:auto_confirmation])
+    else
+      result = control.set!(enabled: params[:enabled], confirmation: params[:auto_confirmation])
+    end
+
+    if result.ok
+      redirect_to edit_settings_path(anchor: "auto-settings"), notice: "Auto-rebalance setting updated. No orders or signatures were created."
+    else
+      @setting = Current.user.setting || Current.user.build_setting
+      load_risk_settings
+      @auto_setting_errors = result.errors
+      render :edit, status: :unprocessable_entity
+    end
+  end
+
   # PATCH /settings
   def update
     @setting = Current.user.setting || Current.user.build_setting
@@ -101,12 +120,13 @@ class SettingsController < ApplicationController
     @risk_settings_by_key = @risk_settings.index_by(&:key)
     @risk_setting_groups = risk_setting_groups
     @risk_recommendation = risk_recommendation
+    @auto_control_status = @production_position ? AutoRebalanceControl.new(position: @production_position).status : nil
     @venue_runtime_summary = {
       production_venue: @production_position&.hedge ? HedgeVenues.label(@production_position.hedge.execution_venue) : "Unknown",
       extended_live_enabled: env_enabled?("EXTENDED_LIVE_ENABLED"),
-      extended_auto_enabled: env_enabled?("EXTENDED_AUTO_REBALANCE_ENABLED"),
-      ethereal_auto_enabled: env_enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"),
-      nado_auto_enabled: env_enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED"),
+      extended_auto_enabled: OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED"),
+      ethereal_auto_enabled: OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"),
+      nado_auto_enabled: OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED"),
       signer_status: @production_snapshot&.signer_status.presence || "unknown"
     }
   end

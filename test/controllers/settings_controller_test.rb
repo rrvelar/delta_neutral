@@ -5,6 +5,8 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     sign_in_as(users(:one))
     RiskSetting.delete_all
     RiskSettingAudit.delete_all
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
   end
 
   test "should get edit" do
@@ -130,6 +132,44 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :unprocessable_entity
     assert_match "invalid risk setting value", response.body
+  end
+
+  test "settings page shows auto controls and updates active venue auto" do
+    position = create_extended_position
+    position.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988")
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      ethereal_short_eth: "0.727",
+      extended_short_eth: "0",
+      combined_short_eth: "0.727",
+      signer_status: "ok"
+    )
+    old_live = ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"]
+    ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = "true"
+
+    get edit_settings_path
+
+    assert_response :success
+    assert_match "Auto-Rebalance Controls", response.body
+    assert_match "Enable Ethereal Auto", response.body
+    assert_match OperationalSettings::ENABLE_CONFIRMATIONS.fetch("ethereal"), response.body
+    assert_match "Risk Limits", response.body
+
+    patch auto_settings_path, params: {
+      position_id: position.id,
+      venue: "ethereal",
+      enabled: "true",
+      auto_confirmation: OperationalSettings::ENABLE_CONFIRMATIONS.fetch("ethereal")
+    }
+
+    assert_redirected_to edit_settings_path(anchor: "auto-settings")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+  ensure
+    old_live.nil? ? ENV.delete("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED") : ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = old_live
   end
 
   test "navbar settings link points to valid settings route" do
