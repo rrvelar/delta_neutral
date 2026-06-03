@@ -30,7 +30,7 @@ class AerodromeProductionDashboardStatus
       current_position_label: current_position_label,
       current_short_label: current_short_label,
       current_venue_position: serialize_position(eth_position),
-      current_hyperliquid_eth_position: execution_venue == HedgeVenues::DEFAULT ? serialize_position(eth_position) : nil,
+      current_hyperliquid_eth_position: HedgeVenues.legacy?(execution_venue) ? serialize_position(eth_position) : nil,
       current_aerodrome_lp_weth_amount: weth_amount&.to_s("F"),
       target_hedge_eth: target&.to_s("F"),
       target_hedge_notional_usd: target && eth_price ? (target * eth_price).to_s("F") : nil,
@@ -130,7 +130,7 @@ class AerodromeProductionDashboardStatus
   end
 
   def current_venue_position
-    return current_eth_position if execution_venue == HedgeVenues::DEFAULT
+    return current_eth_position if HedgeVenues.legacy?(execution_venue)
 
     venue_adapter.read_position(symbol: "ETH")
   rescue => e
@@ -243,11 +243,11 @@ class AerodromeProductionDashboardStatus
   end
 
   def current_position_label
-    execution_venue == HedgeVenues::DEFAULT ? "Current Hyperliquid ETH position" : "Current #{HedgeVenues.label(execution_venue)} ETH-PERP position"
+    HedgeVenues.legacy?(execution_venue) ? "Current Hyperliquid ETH position" : "Current #{HedgeVenues.label(execution_venue)} ETH-PERP position"
   end
 
   def current_short_label
-    execution_venue == HedgeVenues::DEFAULT ? "Current ETH short" : "Current #{HedgeVenues.label(execution_venue)} ETH short"
+    HedgeVenues.legacy?(execution_venue) ? "Current ETH short" : "Current #{HedgeVenues.label(execution_venue)} ETH short"
   end
 
   def max_short_eth

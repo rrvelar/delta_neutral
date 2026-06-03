@@ -99,7 +99,13 @@
       <% end %>
       <% if @positions.empty? %>
         <tr>
-          <td colspan="7" class="p-8 text-center text-gray-500">No active positions. <%= link_to "Add a wallet", new_wallet_path, class: "text-blue-400 hover:text-blue-300" %> to get started.</td>
+          <td colspan="7" class="p-8 text-center text-gray-500">
+            <% if @inactive_positions_exist %>
+              No active position selected. <%= link_to "Activate a position from Positions", positions_path, class: "text-blue-400 hover:text-blue-300" %>.
+            <% else %>
+              No active positions. <%= link_to "Add a wallet", new_wallet_path, class: "text-blue-400 hover:text-blue-300" %> or <%= link_to "import an Aerodrome LP", new_position_path, class: "text-blue-400 hover:text-blue-300" %> to get started.
+            <% end %>
+          </td>
         </tr>
       <% end %>
     </tbody>

@@ -23,6 +23,8 @@ Rails.application.routes.draw do
     post :migration_route_proof, on: :member
     post :migration_random_rotation_decision, on: :member
     post :hedge_emergency_restore, on: :member
+    post :activate, on: :member
+    post :archive, on: :member
     patch :hedge_venue, on: :member
     get :extended_diagnostics, on: :member
     get :hedge_accounting_diagnostics, on: :member

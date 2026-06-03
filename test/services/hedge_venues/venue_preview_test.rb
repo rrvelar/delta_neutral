@@ -2,9 +2,14 @@ require "test_helper"
 
 module HedgeVenues
   class VenuePreviewTest < ActiveSupport::TestCase
-    test "hyperliquid is the default venue" do
-      assert_equal "hyperliquid", HedgeVenues.normalize(nil)
-      assert_instance_of HedgeVenues::Hyperliquid, HedgeVenues.build(nil)
+    test "default venue is supported and hyperliquid is legacy only" do
+      assert_equal "nado", HedgeVenues.normalize(nil)
+      assert_equal %w[nado ethereal extended], HedgeVenues::SUPPORTED_KEYS
+      assert_equal [ [ "Nado", "nado" ], [ "Ethereal", "ethereal" ], [ "Extended", "extended" ] ], HedgeVenues.options
+      assert_equal false, HedgeVenues.supported?("hyperliquid")
+      assert_equal true, HedgeVenues.legacy?("hyperliquid")
+      assert_equal "ethereal", HedgeVenues.default_supported(env: { "DEFAULT_HEDGE_EXECUTION_VENUE" => "ethereal" })
+      assert_equal "nado", HedgeVenues.default_supported(env: { "DEFAULT_HEDGE_EXECUTION_VENUE" => "hyperliquid" })
     end
 
     test "extended venue is manual live capable and disabled by default" do

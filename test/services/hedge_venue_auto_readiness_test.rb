@@ -23,7 +23,7 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
     readiness = HedgeVenueAutoReadiness.new(adapters: {}).report(position: position("unknown"))
 
     assert_equal false, readiness.fetch(:continuous_auto_ready)
-    assert_includes readiness.fetch(:blockers), "Unsupported hedge execution_venue \"hyperliquid\""
+    assert_includes readiness.fetch(:blockers), "Unsupported hedge execution_venue \"unknown\""
   end
 
   test "Ethereal adapter computes no-op inside tolerance" do

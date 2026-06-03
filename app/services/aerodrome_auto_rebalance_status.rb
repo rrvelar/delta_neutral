@@ -176,7 +176,7 @@ class AerodromeAutoRebalanceStatus
   end
 
   def current_short_label
-    execution_venue == HedgeVenues::DEFAULT ? "Current Hyperliquid ETH short" : "Current #{HedgeVenues.label(execution_venue)} ETH short"
+    HedgeVenues.legacy?(execution_venue) ? "Current Hyperliquid ETH short" : "Current #{HedgeVenues.label(execution_venue)} ETH short"
   end
 
   def nado_status_blockers(blockers, rebalance_needed:)

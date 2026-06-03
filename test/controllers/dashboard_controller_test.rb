@@ -57,6 +57,36 @@ class DashboardControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "No active positions.", response.body
   end
 
+  test "dashboard with inactive positions prompts activation instead of only add wallet" do
+    users(:one).positions.update_all(active: false, updated_at: Time.current)
+    Position.create!(
+      user: users(:one),
+      wallet: Wallet.find_or_create_by!(
+        user: users(:one),
+        network: networks(:base),
+        address: "0x23cb5f48fa3f4502232f3442637f90e8e3355702"
+      ),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      source: Position::SOURCE_AERODROME_DIRECT,
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: BigDecimal("1.25"),
+      asset1_amount: BigDecimal("500"),
+      asset0_price_usd: BigDecimal("2000"),
+      asset1_price_usd: BigDecimal("1"),
+      external_id: "71674988",
+      pool_address: "0xpool",
+      active: false
+    )
+
+    get root_path
+
+    assert_response :success
+    assert_match "No active position selected", response.body
+    assert_match "Activate a position from Positions", response.body
+    assert_no_match "Add a wallet</a> to get started", response.body
+  end
+
   test "redirects to login when not authenticated" do
     sign_out
     get root_path

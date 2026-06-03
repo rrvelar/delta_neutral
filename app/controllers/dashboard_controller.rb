@@ -11,6 +11,7 @@ class DashboardController < ApplicationController
   def index
     @visible_positions = DashboardVisiblePositions.new(user: Current.user).call.to_a
     @positions = @visible_positions
+    @inactive_positions_exist = Current.user.positions.where(active: false).exists?
     @total_value = @positions.sum { |position| PositionValuation.current(position).current_value_usd || 0 }
     @active_hedges = @positions.count { |p| p.hedge&.active? }
     Rails.logger.info(

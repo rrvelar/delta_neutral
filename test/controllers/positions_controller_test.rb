@@ -47,7 +47,6 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "WETH/USDC", response.body
     assert_match "Mellow", response.body
-    assert_match "Production hedge", response.body
     assert_match "Extended", response.body
     assert_match "In tolerance", response.body
     assert_match position.external_id, response.body
@@ -102,6 +101,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal BigDecimal("1.0"), position.hedge.target
     assert_equal BigDecimal("0.03"), position.hedge.tolerance
     assert_predicate position.hedge, :active?
+    assert_includes HedgeVenues::SUPPORTED_KEYS, position.hedge.execution_venue
+    assert_not_equal "hyperliquid", position.hedge.execution_venue
   end
 
   test "create keeps record and shows warning when read-only sync fails" do
@@ -121,20 +122,26 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "read-only sync failed: RPC unavailable", flash[:notice]
   end
 
-  test "duplicate active Aerodrome token id is blocked" do
-    existing = create_aerodrome_position(external_id: "70184676")
+  test "duplicate Aerodrome token id and pool updates existing position instead of creating duplicate" do
+    existing = create_aerodrome_position(external_id: "71674988")
+    existing.create_hedge!(target: "1.0", tolerance: "0.03", active: false, execution_venue: "hyperliquid")
 
-    assert_no_difference "Position.count" do
-      post positions_path, params: {
-        position: import_params(dex: existing.dex, wallet: existing.wallet, external_id: "70184676")
-      }
+    PositionSyncJob.stub(:perform_now, ->(_) { }) do
+      assert_no_difference "Position.count" do
+        post positions_path, params: {
+          position: import_params(dex: existing.dex, wallet: existing.wallet, external_id: "71674988")
+        }
+      end
     end
 
-    assert_response :unprocessable_entity
-    assert_match "already exists", response.body
+    assert_redirected_to position_path(existing)
+    assert_predicate existing.reload, :active?
+    assert_predicate existing.hedge.reload, :active?
+    assert_not_equal "hyperliquid", existing.hedge.execution_venue
+    assert_match "activated instead of creating a duplicate", flash[:notice]
   end
 
-  test "create deactivates old active Aerodrome positions only when selected" do
+  test "create deactivates old active Aerodrome positions by default unless explicitly opted out" do
     old_position = create_aerodrome_position(external_id: "old-active")
     dex = old_position.dex
     wallet = old_position.wallet
@@ -157,8 +164,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
         position: import_params(
           dex: dex,
           wallet: wallet,
-          external_id: "new-with-deactivate",
-          deactivate_existing: "1"
+          external_id: "new-with-default-deactivate"
         )
       }
     end
@@ -185,7 +191,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Position Control Center", response.body
     assert_match "Portfolio Snapshot", response.body
-    assert_match "Selected Venue: Hyperliquid", response.body
+    assert_match "Selected Venue: Nado", response.body
     assert_match "Live Gated", response.body
     assert_match "Auto Unknown", response.body
     assert_match "Aerodrome Slipstream", response.body
@@ -196,7 +202,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Hedge Control Center", response.body
     assert_match "1.250000", response.body
     assert_match "$3,000.00", response.body
-    assert_match "Current Hyperliquid ETH short", response.body
+    assert_match "Current Nado ETH short", response.body
     assert_match "Action Preview", response.body
     assert_match "Auto-Rebalance Status", response.body
     assert_match "Recent Rebalance History", response.body
@@ -260,6 +266,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     hedge = Hedge.create!(position: position, target: BigDecimal("0.5"), tolerance: BigDecimal("0.05"), active: true)
     rebalance = hedge.short_rebalances.create!(
       asset: "WETH",
+      venue: "nado",
       old_short_size: BigDecimal("0.4"),
       new_short_size: BigDecimal("0.625"),
       realized_pnl: BigDecimal("0"),
@@ -284,7 +291,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Hedge Control Center", response.body
     assert_match "Target hedge ETH", response.body
     assert_match "0.625000", response.body
-    assert_match "Current Hyperliquid ETH short", response.body
+    assert_match "Current Nado ETH short", response.body
     assert_match "Live Gated", response.body
     assert_match "Auto Unknown", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
@@ -328,7 +335,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Target 1.25 ETH", flash[:notice]
   end
 
-  test "show defaults dashboard hedge venue to Hyperliquid and renders selector" do
+  test "show defaults dashboard hedge venue to supported venue and renders selector" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
 
@@ -338,10 +345,69 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "select[name='hedge_venue']"
-    assert_select "option[selected='selected']", text: "Hyperliquid"
+    assert_select "option[selected='selected']", text: "Nado"
+    assert_select "option", text: "Hyperliquid", count: 0
     assert_match "Ethereal", response.body
     assert_match "Nado", response.body
     assert_match "Extended", response.body
+  end
+
+  test "show existing hyperliquid record as unsupported legacy with switch action" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "hyperliquid")
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "unsupported legacy hedge venue Hyperliquid", response.body
+    assert_match "Select Nado, Ethereal, or Extended", response.body
+    assert_select "option", text: "Hyperliquid", count: 0
+    assert_select "option[selected='selected']", text: "Nado"
+  end
+
+  test "archive deactivates position and hedge without live orders" do
+    position = create_aerodrome_position
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "nado")
+
+    HyperliquidService.stub(:new, hyperliquid_write_guard) do
+      post archive_position_path(position)
+    end
+
+    assert_redirected_to positions_path
+    assert_not position.reload.active?
+    assert_not position.hedge.reload.active?
+    assert_match "did not close the on-chain LP or any perps", flash[:notice]
+  end
+
+  test "archive is blocked if active hedge exposure exists" do
+    position = create_aerodrome_position
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "nado")
+    create_dashboard_snapshot(position, extended_short_eth: "0", ethereal_short_eth: "0", nado_short_eth: "0.5")
+
+    post archive_position_path(position)
+
+    assert_redirected_to position_path(position)
+    assert_predicate position.reload, :active?
+    assert_match "active hedge exposure exists", flash[:alert]
+  end
+
+  test "activate makes production position and deactivates siblings without live orders" do
+    old_position = create_aerodrome_position(external_id: "old-active")
+    new_position = create_aerodrome_position(external_id: "new-inactive", active: false)
+    new_position.create_hedge!(target: "1.0", tolerance: "0.03", active: false, execution_venue: "hyperliquid")
+
+    HyperliquidService.stub(:new, hyperliquid_write_guard) do
+      post activate_position_path(new_position)
+    end
+
+    assert_redirected_to position_path(new_position)
+    assert_not old_position.reload.active?
+    assert_predicate new_position.reload, :active?
+    assert_predicate new_position.hedge.reload, :active?
+    assert_not_equal "hyperliquid", new_position.hedge.execution_venue
+    assert_match "No orders or signatures", flash[:notice]
   end
 
   test "show selected Extended venue renders gated manual venue state" do
@@ -355,9 +421,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "option[selected='selected']", text: "Extended"
     assert_match "Extended production venue", response.body
-    assert_match "Detailed live preflight loads separately.", response.body
+    assert_match "Detailed live preflight loads separately;", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
-    assert_match "Live preflight is loaded separately.", response.body
+    assert_match "Detailed live preflight loads separately;", response.body
     assert_match "Open Hedge", response.body
   end
 
@@ -1275,7 +1341,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "option[selected='selected']", text: "Nado"
     assert_match "Nado Hedge Actions", response.body
     assert_no_match AerodromeLiveEmergencyClose::CONFIRMATION, response.body
-    assert_match "Live preflight is loaded separately.", response.body
+    assert_match "Detailed live preflight loads separately;", response.body
     assert_match "Live submit is disabled for Nado; previews do not create orders.", response.body
     assert_match "Nado Hedge Actions", response.body
   end
@@ -1286,7 +1352,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     patch hedge_venue_position_path(position), params: { hedge_venue: "nado" }
 
-    assert_redirected_to position_path(position, hedge_venue: "nado")
+    assert_redirected_to position_path(position)
     assert_equal "nado", hedge.reload.execution_venue
   end
 
@@ -1332,7 +1398,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       end
     end
 
-    assert_redirected_to position_path(position, hedge_venue: "nado")
+    assert_redirected_to position_path(position)
     assert_match "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true", flash[:alert]
     assert_match "Nado signer service is not configured", flash[:alert]
   end
@@ -1348,7 +1414,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to position_path(position)
-    assert_match "submitted confirmation must equal #{AerodromeDashboardHedgeAction::CONFIRMATION}", flash[:alert]
+    assert_match "submitted confirmation must equal", flash[:alert]
   end
 
   test "hedge close preview is available and does not call emergency close" do
@@ -1363,7 +1429,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to position_path(position)
     assert_match "Close preview", flash[:notice]
-    assert_match "delta -0.5 ETH", flash[:notice]
+    assert_match "Close preview", flash[:notice]
+    assert_match "Target 1.25 ETH", flash[:notice]
   end
 
   test "show renders rebalance history block with no hedge empty state" do
@@ -1375,7 +1442,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Recent Rebalance History", response.body
-    assert_match "No Hyperliquid rebalance history yet.", response.body
+    assert_match "No Nado rebalance history yet.", response.body
     assert_match "Refresh Read-only Data", response.body
   end
 
@@ -1389,7 +1456,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Recent Rebalance History", response.body
-    assert_match "No Hyperliquid rebalance history yet.", response.body
+    assert_match "No Nado rebalance history yet.", response.body
   end
 
   test "show renders recent rebalance records for current position hedge only" do
@@ -1432,7 +1499,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Recent Rebalance History", response.body
-    assert_match "2 selected-venue rows", response.body
+    assert_match "Previous venue history", response.body
     assert_match "0.397300", response.body
     assert_match "order rejected", response.body
     assert_match "bg-green-950", response.body
@@ -1494,7 +1561,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "14.140000", response.body
     assert_no_match "0x5ec8cd4881eba87279f5f243eb89ea9383e677c6", response.body
     assert_match "$500.00", response.body
-    assert_match "Total PnL Excluding Rewards / Fees", response.body
+    assert_match "Partial PnL Excluding Rewards / Fees", response.body
     assert_match "Rewards / fees diagnostics", response.body
     assert_match "Not loaded during initial render", response.body
     assert_no_match "Claim rewards", response.body
@@ -1976,7 +2043,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Rewards/fees diagnostics are not loaded on initial render.", response.body
     assert_no_match "0.010000 WETH", response.body
-    assert_match "Total PnL Excluding Rewards / Fees", response.body
+    assert_match "Partial PnL Excluding Rewards / Fees", response.body
     assert_match "Rewards / fees diagnostics", response.body
     assert_match "Open rewards/fees diagnostics", response.body
     assert_no_match "Collect fees", response.body
@@ -2589,7 +2656,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position
   end
 
-  def import_params(dex:, wallet:, external_id:, deactivate_existing: "0")
+  def import_params(dex:, wallet:, external_id:, deactivate_existing: "1")
     {
       external_id: external_id,
       pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5",

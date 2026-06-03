@@ -9,7 +9,7 @@
 # address; +nil+ means the short lives on the main account.
 class Hedge < ApplicationRecord
   EXECUTION_VENUES = %w[hyperliquid nado ethereal extended].freeze
-  DEFAULT_EXECUTION_VENUE = "hyperliquid".freeze
+  DEFAULT_EXECUTION_VENUE = HedgeVenues::DEFAULT.freeze
 
   belongs_to :position
 
@@ -19,6 +19,8 @@ class Hedge < ApplicationRecord
   validates :target, numericality: { greater_than: 0, less_than_or_equal_to: 1 }
   validates :tolerance, numericality: { greater_than: 0, less_than_or_equal_to: 1 }
   validates :execution_venue, inclusion: { in: EXECUTION_VENUES }
+
+  before_validation :assign_supported_execution_venue, on: :create
 
   # @!scope class
   # @!method active
@@ -40,6 +42,10 @@ class Hedge < ApplicationRecord
 
   def extended_execution?
     execution_venue == "extended"
+  end
+
+  def unsupported_legacy_execution_venue?
+    HedgeVenues.legacy?(execution_venue)
   end
 
   # Returns the Hyperliquid account address assigned for the given asset index.
@@ -108,4 +114,10 @@ class Hedge < ApplicationRecord
     syms
   end
   private_class_method :symbols_for
+
+  private
+
+  def assign_supported_execution_venue
+    self.execution_venue = HedgeVenues.default_supported if execution_venue.blank?
+  end
 end

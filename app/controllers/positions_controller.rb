@@ -12,11 +12,22 @@ class PositionsController < ApplicationController
   # @return [void]
   def index
     @visible_positions = DashboardVisiblePositions.new(user: Current.user).call.to_a
-    @positions = @visible_positions
+    @positions = Position
+      .left_outer_joins(:wallet)
+      .where("positions.user_id = :user_id OR wallets.user_id = :user_id", user_id: Current.user.id)
+      .includes(
+        :dex,
+        :hedge,
+        :position_dashboard_snapshot,
+        wallet: :network
+      )
+      .distinct
+      .order(active: :desc, updated_at: :desc, id: :desc)
+      .to_a
     Rails.logger.info(
       "PositionsController#index visible_positions user_id=#{Current.user.id} " \
-      "email=#{Current.user.email_address} visible_count=#{@positions.size} " \
-      "visible_position_ids=#{@positions.map(&:id).join(',')}"
+      "email=#{Current.user.email_address} visible_count=#{@visible_positions.size} " \
+      "visible_position_ids=#{@visible_positions.map(&:id).join(',')}"
     )
   end
 
@@ -35,38 +46,45 @@ class PositionsController < ApplicationController
     end
 
     dex = Dex.find(attrs[:dex_id])
-    if Position.active.where(dex: dex, external_id: token_id).exists?
-      flash.now[:alert] = "An active Aerodrome position with token ID #{token_id} already exists."
-      return render :new, status: :unprocessable_entity
-    end
-
+    user = Current.user
+    wallet = Current.user.wallets.find(attrs[:wallet_id])
     position = nil
     hedge = nil
+    duplicate = duplicate_aerodrome_position(user: user, wallet: wallet, dex: dex, external_id: token_id, pool_address: attrs[:pool_address])
     ActiveRecord::Base.transaction do
       if ActiveModel::Type::Boolean.new.cast(attrs[:deactivate_existing_aerodrome_positions])
-        Position.active.where(dex: dex).update_all(active: false, updated_at: Time.current)
+        sibling_positions = Position.active.where(user: user)
+        sibling_positions = sibling_positions.where.not(id: duplicate.id) if duplicate
+        sibling_positions.update_all(active: false, updated_at: Time.current)
       end
 
-      position = Position.create!(
-        user_id: attrs[:user_id],
-        wallet_id: attrs[:wallet_id],
+      position = duplicate || Position.new(
+        user: user,
+        wallet: wallet,
         dex: dex,
         source: Position::SOURCE_AERODROME_DIRECT,
         external_id: token_id,
-        pool_address: attrs[:pool_address],
         asset0: "WETH",
         asset1: "USDC",
         asset0_amount: BigDecimal("0"),
-        asset1_amount: BigDecimal("0"),
-        asset0_price_usd: nil,
-        asset1_price_usd: nil,
+        asset1_amount: BigDecimal("0")
+      )
+      position.assign_attributes(
+        pool_address: attrs[:pool_address],
         active: true
       )
-      hedge = position.create_hedge!(
+      position.save!
+      hedge = position.hedge || position.build_hedge(
+        target: attrs[:hedge_target],
+        tolerance: attrs[:hedge_tolerance]
+      )
+      hedge.assign_attributes(
         target: attrs[:hedge_target],
         tolerance: attrs[:hedge_tolerance],
-        active: true
+        active: true,
+        execution_venue: supported_import_hedge_venue(hedge.execution_venue)
       )
+      hedge.save!
     end
 
     sync_warning = nil
@@ -76,8 +94,10 @@ class PositionsController < ApplicationController
       Rails.logger.warn("Aerodrome import sync failed for position #{position.id}: #{e.class} #{e.message}")
       sync_warning = " Position was created with hedge ##{hedge.id}, but read-only sync failed: #{e.message}"
     end
+    DashboardSnapshotJob.perform_later(position.id, force: true)
 
-    redirect_to position_path(position), notice: "Aerodrome LP position imported.#{sync_warning}"
+    duplicate_message = duplicate ? " Existing position ##{position.id} was activated instead of creating a duplicate." : ""
+    redirect_to position_path(position), notice: "Aerodrome LP position imported.#{duplicate_message}#{sync_warning}"
   rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotFound, ArgumentError => e
     flash.now[:alert] = "Import failed: #{e.message}"
     render :new, status: :unprocessable_entity
@@ -102,7 +122,8 @@ class PositionsController < ApplicationController
     @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
     @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
     if @position.dex.name == "aerodrome_slipstream"
-      @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue].presence || @position.hedge&.execution_venue)
+      @unsupported_legacy_hedge_venue = @position.hedge&.unsupported_legacy_execution_venue?
+      @selected_hedge_venue = selected_supported_hedge_venue(@position)
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
@@ -215,8 +236,28 @@ class PositionsController < ApplicationController
     return redirect_to position_path(position), alert: "Create an active hedge before selecting a venue." unless hedge
 
     venue = HedgeVenues.normalize(params[:hedge_venue])
+    return redirect_to position_path(position), alert: "#{HedgeVenues.label(venue)} is an unsupported legacy venue." unless HedgeVenues.supported?(venue)
+
     hedge.update!(execution_venue: venue)
-    redirect_to position_path(position, hedge_venue: venue), notice: "Hedge venue set to #{HedgeVenues.label(venue)}."
+    path = venue == HedgeVenues.default_supported ? position_path(position) : position_path(position, hedge_venue: venue)
+    redirect_to path, notice: "Hedge venue set to #{HedgeVenues.label(venue)}."
+  end
+
+  def activate
+    position = Current.user.positions.includes(:hedge).find(params[:id])
+    PositionProductionState.new(position).activate!
+    DashboardSnapshotJob.perform_later(position.id, force: true) if position.dex.name == "aerodrome_slipstream"
+    redirect_to position_path(position), notice: "Position ##{position.id} is now the active production position. No orders or signatures were created."
+  end
+
+  def archive
+    position = Current.user.positions.includes(:hedge, :position_dashboard_snapshot).find(params[:id])
+    ok, blockers = PositionProductionState.new(position).archive!
+    if ok
+      redirect_to positions_path, notice: "Position ##{position.id} archived and hedge deactivated. This did not close the on-chain LP or any perps."
+    else
+      redirect_to position_path(position), alert: "Archive blocked: #{blockers.join('; ')}"
+    end
   end
 
   def migration_preview
@@ -331,7 +372,7 @@ class PositionsController < ApplicationController
   def load_aerodrome_position_for_diagnostics
     @position = Current.user.positions.includes(:dex, :hedge, wallet: :network).find(params[:id])
     @position_valuation = PositionValuation.current(@position)
-    @selected_hedge_venue = HedgeVenues.normalize(params[:hedge_venue].presence || @position.hedge&.execution_venue)
+    @selected_hedge_venue = selected_supported_hedge_venue(@position)
     @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
   end
 
@@ -342,7 +383,7 @@ class PositionsController < ApplicationController
       action: action,
       execute: execute,
       confirmation: params[:dashboard_hedge_confirmation],
-      venue: params[:hedge_venue].presence || position.hedge&.execution_venue
+      venue: supported_action_venue(params[:hedge_venue].presence || position.hedge&.execution_venue)
     ).report
     level = report.fetch(:status) == "blocked" || report.fetch(:status) == "failed" ? :alert : :notice
     redirect_params = report.fetch(:hedge_venue) == HedgeVenues::DEFAULT ? {} : { hedge_venue: report.fetch(:hedge_venue) }
@@ -364,8 +405,6 @@ class PositionsController < ApplicationController
   end
 
   def selected_hedge_venue_dashboard
-    return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
-
     current_position = @selected_hedge_venue_adapter.read_position(symbol: "ETH")
     current_short = selected_venue_short_size(current_position)
     target = @position_valuation.weth_exposure && @position.hedge ? @position_valuation.weth_exposure * @position.hedge.target : nil
@@ -392,8 +431,6 @@ class PositionsController < ApplicationController
   end
 
   def lightweight_selected_hedge_venue_dashboard
-    return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
-
     target = decimal_or_nil(@cached_hedge_dashboard_snapshot&.dig(:target_short_eth))
     current_short = @cached_hedge_dashboard_snapshot&.dig(:selected_venue, :short_size)
     drift = target && current_short ? target - current_short : nil
@@ -743,8 +780,6 @@ class PositionsController < ApplicationController
   end
 
   def hedge_venue_accounting
-    return nil if @selected_hedge_venue == HedgeVenues::DEFAULT
-
     current_position = @selected_hedge_venue_dashboard&.dig(:current_venue_position)
     account_state = @selected_hedge_venue_dashboard&.dig(:account_state)
     HedgeVenueAccounting.new(
@@ -1178,8 +1213,38 @@ class PositionsController < ApplicationController
       :wallet_id,
       :hedge_target,
       :hedge_tolerance,
-      :deactivate_existing_aerodrome_positions
+      :deactivate_existing_aerodrome_positions,
+      :active
     )
+  end
+
+  def duplicate_aerodrome_position(user:, wallet:, dex:, external_id:, pool_address:)
+    Position.where(
+      user: user,
+      wallet: wallet,
+      dex: dex,
+      external_id: external_id,
+      pool_address: pool_address
+    )
+      .where(source: [ nil, Position::SOURCE_AERODROME_DIRECT ])
+      .order(updated_at: :desc, id: :desc)
+      .first
+  end
+
+  def supported_import_hedge_venue(existing)
+    HedgeVenues.supported?(existing) ? HedgeVenues.normalize(existing) : HedgeVenues.default_supported
+  end
+
+  def selected_supported_hedge_venue(position)
+    requested = params[:hedge_venue].presence
+    return HedgeVenues.normalize(requested) if requested.present? && HedgeVenues.supported?(requested)
+
+    current = position.hedge&.execution_venue
+    HedgeVenues.supported?(current) ? HedgeVenues.normalize(current) : HedgeVenues.default_supported
+  end
+
+  def supported_action_venue(value)
+    HedgeVenues.supported?(value) ? HedgeVenues.normalize(value) : HedgeVenues.default_supported
   end
 
   def aerodrome_import_defaults

@@ -9,7 +9,7 @@ class HedgeVenueAutoReadiness
   end
 
   def report(position:)
-    venue = HedgeVenues.normalize(position.hedge&.execution_venue)
+    venue = HedgeVenues.known_key(position.hedge&.execution_venue) || position.hedge&.execution_venue.to_s
     adapter = @adapters[venue]
     return unknown_venue(position, venue) unless adapter
 
