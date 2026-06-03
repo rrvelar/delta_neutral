@@ -127,7 +127,8 @@ class PositionsController < ApplicationController
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
-      @current_auto_readiness = safe_dashboard_section("hedge_venue_auto_readiness", timeout_seconds: diagnostic_timeout_seconds, fallback: unavailable_extended_auto_readiness) { HedgeVenueAutoReadiness.new.report(position: @position) }
+      @position_tab = selected_position_tab
+      @current_auto_readiness = unavailable_extended_auto_readiness("Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.")
       @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? @current_auto_readiness : nil
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard
       @selected_hedge_venue_dashboard[:auto_readiness] = @current_extended_auto_readiness if @current_extended_auto_readiness
@@ -1076,7 +1077,7 @@ class PositionsController < ApplicationController
     { status: "unavailable", warning: "Fast migration readiness unavailable; refresh diagnostics." }
   end
 
-  def unavailable_extended_auto_readiness
+  def unavailable_extended_auto_readiness(message = "Extended auto readiness unavailable; refresh diagnostics")
     {
       status: "unavailable",
       continuous_auto_ready: false,
@@ -1088,8 +1089,8 @@ class PositionsController < ApplicationController
       ethereal_flat: nil,
       nado_flat: nil,
       signer_health: { ok: false, reason: "unavailable" },
-      blockers: [ "Extended auto readiness unavailable; refresh diagnostics" ],
-      warnings: [ "Extended auto readiness unavailable; refresh diagnostics" ]
+      blockers: [ message ],
+      warnings: [ message ]
     }
   end
 
@@ -1232,7 +1233,7 @@ class PositionsController < ApplicationController
   end
 
   def supported_import_hedge_venue(existing)
-    HedgeVenues.supported?(existing) ? HedgeVenues.normalize(existing) : HedgeVenues.default_supported
+    HedgeVenues.supported?(existing) ? HedgeVenues.normalize(existing) : RiskSettings.default_hedge_venue
   end
 
   def selected_supported_hedge_venue(position)
@@ -1240,11 +1241,31 @@ class PositionsController < ApplicationController
     return HedgeVenues.normalize(requested) if requested.present? && HedgeVenues.supported?(requested)
 
     current = position.hedge&.execution_venue
-    HedgeVenues.supported?(current) ? HedgeVenues.normalize(current) : HedgeVenues.default_supported
+    HedgeVenues.supported?(current) ? HedgeVenues.normalize(current) : RiskSettings.default_hedge_venue
   end
 
   def supported_action_venue(value)
-    HedgeVenues.supported?(value) ? HedgeVenues.normalize(value) : HedgeVenues.default_supported
+    HedgeVenues.supported?(value) ? HedgeVenues.normalize(value) : RiskSettings.default_hedge_venue
+  end
+
+  def selected_position_tab
+    requested = params[:tab].presence
+    return requested if %w[overview hedge migration routes accounting diagnostics settings].include?(requested)
+    return "hedge" if hedge_tab_default?
+
+    "overview"
+  end
+
+  def hedge_tab_default?
+    return false unless @position.hedge&.active?
+    snapshot = @cached_hedge_dashboard_snapshot || {}
+    return true if snapshot[:inside_tolerance] == false
+
+    current_short = decimal_or_nil(snapshot[:selected_venue]&.dig(:short_size))
+    target_short = decimal_or_nil(snapshot[:target_short_eth])
+    return true if target_short&.positive? && (current_short.nil? || current_short.zero?)
+
+    false
   end
 
   def aerodrome_import_defaults

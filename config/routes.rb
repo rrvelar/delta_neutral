@@ -42,6 +42,7 @@ Rails.application.routes.draw do
 
   get "settings", to: "settings#edit"
   resource :settings, only: [ :edit, :update ]
+  patch "settings/risk", to: "settings#update_risk", as: :risk_settings
   get "mellow_autopilot_probe", to: "mellow_autopilot_probes#index"
   post "mellow_autopilot_probe/create_position", to: "mellow_autopilot_probes#create_position", as: :create_mellow_autopilot_position
 

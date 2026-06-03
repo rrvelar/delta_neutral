@@ -52,6 +52,26 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     assert_equal users(:one), setting.updated_by
   end
 
+  test "risk setting update rejects invalid key and value without server error" do
+    patch risk_settings_path, params: {
+      key: "HYPERLIQUID_MAX_SHORT_ETH",
+      value: "2.0",
+      confirmation: RiskSettings::INCREASE_CONFIRMATION
+    }
+
+    assert_response :unprocessable_entity
+    assert_match "invalid risk setting key", response.body
+
+    patch risk_settings_path, params: {
+      key: "ETHEREAL_MAX_SHORT_ETH",
+      value: "0",
+      confirmation: RiskSettings::INCREASE_CONFIRMATION
+    }
+
+    assert_response :unprocessable_entity
+    assert_match "invalid risk setting value", response.body
+  end
+
   test "navbar settings link points to valid settings route" do
     get root_path
 

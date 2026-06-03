@@ -209,7 +209,7 @@ class AerodromeDashboardHedgeAction
     blockers << "cap not configured for #{order_cap.fetch(:cap_key)}" if cap_checked? && order_cap.fetch(:cap_value).blank?
     blockers << "cap not configured for #{notional_cap.fetch(:cap_key)}" if cap_checked? && eth_price && notional_cap.fetch(:cap_value).blank?
     if short_cap.fetch(:cap_blocked)
-      blockers << "target hedge exceeds #{short_cap.fetch(:cap_key)}: target=#{short_cap.fetch(:target_short_eth)} ETH requested=#{short_cap.fetch(:requested_size_eth)} ETH cap=#{short_cap.fetch(:cap_value)} ETH minimum_required=#{short_cap.fetch(:minimum_required_cap)} ETH"
+      blockers << "Blocked by risk limit. Target hedge: #{short_cap.fetch(:target_short_eth)} ETH. Current venue short: #{short_cap.fetch(:current_short_eth)} ETH. Requested action: #{short_cap.fetch(:requested_size_eth)} ETH. Current cap: #{short_cap.fetch(:cap_key)} = #{short_cap.fetch(:cap_value)} ETH. Cap source: #{short_cap.fetch(:cap_source)}. Minimum required cap: #{short_cap.fetch(:minimum_required_cap)} ETH. Options: raise cap intentionally, reduce LP size, or choose another supported venue."
     end
     if notional_cap.fetch(:cap_blocked)
       blockers << "target hedge notional exceeds #{notional_cap.fetch(:cap_key)}: expected=#{notional_cap.fetch(:expected_after_notional_usd)} USD cap=#{notional_cap.fetch(:cap_value)} USD"

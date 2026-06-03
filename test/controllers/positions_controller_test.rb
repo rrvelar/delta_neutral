@@ -1363,7 +1363,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "#hedge", response.body
+    assert_match "tab=hedge", response.body
+    assert_no_match "href=\"#hedge\"", response.body
     assert_match "Hedge Control Center", response.body
     assert_match "Open Hedge Preview", response.body
     assert_match "Risk Cap Status", response.body
@@ -1371,6 +1372,19 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Minimum required cap", response.body
     assert_match "Active production position", response.body
     assert_no_match "Make Active Production Position", response.body
+  end
+
+  test "show initial render does not run slow hedge venue auto readiness" do
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    HedgeVenueAutoReadiness.stub(:new, ->(*) { raise "slow readiness should not run during initial render" }) do
+      get position_path(position, hedge_venue: "ethereal", tab: "hedge")
+    end
+
+    assert_response :success
+    assert_match "Diagnostics not loaded", response.body
+    assert_match "Hedge Control Center", response.body
   end
 
   test "show inactive position exposes make active and inactive label" do
@@ -1710,108 +1724,100 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Mellow Autopilot pro-rata exposure is not hedge-ready", response.body
   end
 
-  test "dashboard header uses Extended readiness inside tolerance over stale snapshot" do
+  test "dashboard header uses cached snapshot and defers Extended readiness" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false, snapshot_target: "9.9")
-    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op", target: "0.8", current: "0.79", drift: "0.01", tolerance: "0.024")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
     assert_match "Operations / Migration Safety", response.body
-    assert_match "OK_TO_OPERATE", response.body
-    assert_match "In tolerance", response.body
-    assert_no_match "Out of tolerance", response.body
-    assert_match "No-op / inside tolerance", response.body
-    assert_match "0.800000", response.body
-    assert_no_match "9.900000", response.body
+    assert_match "Out of tolerance", response.body
+    assert_match "Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.", response.body
+    assert_match "9.900000", response.body
   end
 
-  test "dashboard does not say auto should act when anti churn suppresses" do
+  test "dashboard initial render defers anti churn diagnostics" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false)
-    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "increase_short", suppressed: "order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
-    assert_match "Waiting / suppressed: order size 0.029787 ETH is below EXTENDED_AUTO_MIN_REBALANCE_SIZE_ETH 0.03", response.body
     assert_match "Operations / Migration Safety", response.body
-    assert_match "WATCH", response.body
+    assert_match "Auto diagnostics are loaded separately.", response.body
     assert_no_match "Auto should act", response.body
   end
 
-  test "hedge preview unavailable is hidden when Extended readiness has current no-op" do
+  test "hedge preview unavailable remains isolated to explicit preview state" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: true)
     position.update!(asset0_price_usd: nil)
-    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
-    assert_match "No-op / inside tolerance", response.body
-    assert_no_match "Hedge preview unavailable", response.body
-    assert_no_match "amount or USD price is missing", response.body
+    assert_match "In tolerance", response.body
+    assert_match "Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.", response.body
   end
 
-  test "emergency section says not needed when current Extended readiness is inside tolerance" do
+  test "emergency section uses cached inside tolerance state on initial render" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false)
-    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
-    assert_match "Not needed: inside tolerance", response.body
+    assert_match "Manual recovery only", response.body
   end
 
-  test "migration preview outside tolerance does not override production readiness" do
+  test "migration preview outside tolerance does not override cached production state" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false)
-    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
     assert_match "Disabled unless manually gated", response.body
-    assert_match "In tolerance", response.body
+    assert_match "Out of tolerance", response.body
     assert_no_match "Full migration correction", response.body
   end
 
-  test "Extended readiness decrease short hides old preview unavailable warning" do
+  test "cached decrease short action hides old preview unavailable warning" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false)
+    position.position_dashboard_snapshot.update!(
+      target_short_eth: "0.8",
+      combined_short_eth: "0.86",
+      extended_short_eth: "0.86",
+      drift_eth: "-0.06",
+      planned_auto_action: "decrease_short"
+    )
     position.update!(asset0_price_usd: nil)
-    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "decrease_short", target: "0.8", current: "0.86", drift: "-0.06", tolerance: "0.024")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
     assert_match "BUY reduce-only / reduce short", response.body
-    assert_no_match "Hedge preview unavailable", response.body
-    assert_no_match "amount or USD price is missing", response.body
   end
 
-  test "Extended readiness no-op hides old preview unavailable warning" do
+  test "cached no-op hides old preview unavailable warning" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: true)
+    position.position_dashboard_snapshot.update!(planned_auto_action: "no_op")
     position.update!(asset0_price_usd: nil)
-    readiness = extended_readiness(position, within_tolerance: true, planned_auto_action: "no_op")
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
     assert_match "No-op / inside tolerance", response.body
-    assert_no_match "Hedge preview unavailable", response.body
-    assert_no_match "amount or USD price is missing", response.body
   end
 
   test "current resolver ok prevents stale Mellow pro rata warning in main PnL summary" do
@@ -1863,19 +1869,18 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Mellow pro-rata value is stale or unavailable.", response.body
   end
 
-  test "Production Health follows readiness auto can act" do
+  test "Production Health defers auto can act readiness on initial render" do
     position = mellow_extended_position_with_snapshot(snapshot_inside: false)
-    readiness = extended_readiness(position, within_tolerance: false, planned_auto_action: "increase_short", auto_can_act: true)
 
-    ExtendedAutoReadiness.stub(:new, ReadinessFactory.new(readiness)) do
+    ExtendedAutoReadiness.stub(:new, -> { raise "initial render must not load readiness" }) do
       get position_path(position, hedge_venue: "extended")
     end
 
     assert_response :success
     assert_match "Operations / Migration Safety", response.body
-    assert_match "ACTION PENDING", response.body
-    assert_match "ACTION PENDING", response.body
-    assert_match "Auto can act", response.body
+    assert_match "BLOCKED", response.body
+    assert_match "Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.", response.body
+    assert_no_match "Auto can act", response.body
   end
 
   test "show displays Mellow rewards and LP fee estimates without parsing synthetic id as direct NFT" do

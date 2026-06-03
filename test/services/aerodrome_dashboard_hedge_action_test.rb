@@ -419,7 +419,8 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       report = build_action(position: position, action: "open", positions: [ nil ]).report
 
       assert_equal "blocked", report.fetch(:status)
-      assert report.fetch(:blockers).any? { |blocker| blocker.include?("target hedge exceeds AERODROME_MAX_SHORT_ETH") }
+      assert report.fetch(:blockers).any? { |blocker| blocker.include?("Blocked by risk limit.") }
+      assert report.fetch(:blockers).any? { |blocker| blocker.include?("Current cap: AERODROME_MAX_SHORT_ETH = 1.5 ETH") }
       assert_equal "AERODROME_MAX_SHORT_ETH", report.dig(:cap_diagnostics, :short_cap, :cap_key)
       assert_equal "1.6", report.dig(:cap_diagnostics, :short_cap, :target_short_eth)
       assert_equal "1.5", report.dig(:cap_diagnostics, :short_cap, :cap_value)

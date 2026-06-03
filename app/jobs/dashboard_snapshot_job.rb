@@ -30,7 +30,15 @@ class DashboardSnapshotJob < ApplicationJob
     )
     return scope.where(id: position_id).to_a if position_id
 
-    scope.active.joins(:dex).where(dexes: { name: "aerodrome_slipstream" }).to_a
+    scope
+      .active
+      .left_outer_joins(:dex)
+      .where(
+        "dexes.name = :aerodrome OR positions.source IN (:direct_sources)",
+        aerodrome: "aerodrome_slipstream",
+        direct_sources: [ Position::SOURCE_AERODROME_DIRECT ]
+      )
+      .to_a
   end
 
   def refresh_position(position, force:)

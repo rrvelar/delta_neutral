@@ -124,12 +124,12 @@ class PositionProductionState
       target: BigDecimal("1.0"),
       tolerance: BigDecimal("0.03"),
       active: true,
-      execution_venue: HedgeVenues.default_supported
+      execution_venue: RiskSettings.default_hedge_venue
     )
   end
 
   def supported_execution_venue(value)
-    HedgeVenues.supported?(value) ? HedgeVenues.normalize(value) : HedgeVenues.default_supported
+    HedgeVenues.supported?(value) ? HedgeVenues.normalize(value) : RiskSettings.default_hedge_venue
   end
 
   def bool_env(key)

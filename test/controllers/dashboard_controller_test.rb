@@ -82,8 +82,9 @@ class DashboardControllerTest < ActionDispatch::IntegrationTest
     get root_path
 
     assert_response :success
-    assert_match "No active position selected", response.body
-    assert_match "Activate a position from Positions", response.body
+    assert_match "No active production position selected", response.body
+    assert_match "Activate one from Positions", response.body
+    assert_match "Activate", response.body
     assert_no_match "Add a wallet</a> to get started", response.body
   end
 

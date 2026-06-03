@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_27_000500) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_03_000100) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -235,6 +235,29 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_27_000500) do
     t.index ["user_id"], name: "index_settings_on_user_id", unique: true
   end
 
+  create_table "risk_setting_audits", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.string "new_value", null: false
+    t.string "old_value"
+    t.text "reason"
+    t.datetime "updated_at", null: false
+    t.integer "updated_by_id"
+    t.index ["key"], name: "index_risk_setting_audits_on_key"
+    t.index ["updated_by_id"], name: "index_risk_setting_audits_on_updated_by_id"
+  end
+
+  create_table "risk_settings", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.text "reason"
+    t.datetime "updated_at", null: false
+    t.integer "updated_by_id"
+    t.string "value", null: false
+    t.index ["key"], name: "index_risk_settings_on_key", unique: true
+    t.index ["updated_by_id"], name: "index_risk_settings_on_updated_by_id"
+  end
+
   create_table "short_rebalances", force: :cascade do |t|
     t.string "asset"
     t.datetime "created_at", null: false
@@ -283,6 +306,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_27_000500) do
   add_foreign_key "positions", "dexes"
   add_foreign_key "positions", "users"
   add_foreign_key "positions", "wallets"
+  add_foreign_key "risk_setting_audits", "users", column: "updated_by_id"
+  add_foreign_key "risk_settings", "users", column: "updated_by_id"
   add_foreign_key "sessions", "users"
   add_foreign_key "settings", "users"
   add_foreign_key "short_rebalances", "hedges"

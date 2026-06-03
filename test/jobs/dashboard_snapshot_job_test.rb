@@ -38,6 +38,28 @@ class DashboardSnapshotJobTest < ActiveSupport::TestCase
     refute_includes calls, [ :position, inactive.id ]
   end
 
+  test "all active refresh includes active aerodrome direct and excludes inactive duplicate and mellow" do
+    active_direct = aerodrome_position(active: true)
+    active_direct.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988")
+    inactive_duplicate = aerodrome_position(active: false)
+    inactive_duplicate.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988", pool_address: active_direct.pool_address)
+    inactive_mellow = aerodrome_position(active: false)
+    inactive_mellow.update!(source: Position::SOURCE_MELLOW_AUTOPILOT, external_id: "mellow:old")
+    calls = []
+
+    DashboardSnapshotRefresh.stub(:new, ->(position:, **) { refresher(calls, [ :position, position.id ], SnapshotResult.new("ok")) }) do
+      RewardsFeesSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, [ :rewards, position.id ], SnapshotResult.new("ok")) }) do
+        HedgeAccountingSnapshotRefresh.stub(:new, ->(position:) { refresher(calls, [ :accounting, position.id ], SnapshotResult.new("ok")) }) do
+          DashboardSnapshotJob.perform_now
+        end
+      end
+    end
+
+    assert_includes calls, [ :position, active_direct.id ]
+    refute_includes calls, [ :position, inactive_duplicate.id ]
+    refute_includes calls, [ :position, inactive_mellow.id ]
+  end
+
   test "explicit position refreshes all three snapshot types" do
     position = aerodrome_position(active: true)
     calls = []

@@ -5,6 +5,8 @@
 <% cached_snapshot = @cached_hedge_dashboard_snapshot || {} %>
 <% cached_venue_states = cached_snapshot[:venue_states] || {} %>
 <% selected_venue = @selected_hedge_venue || HedgeVenues.normalize(@position.hedge&.execution_venue) %>
+<% position_tab = @position_tab.presence || "overview" %>
+<% tab_class = ->(*tabs) { tabs.map(&:to_s).include?(position_tab) ? "" : " hidden" } %>
 <% selected_adapter = @selected_hedge_venue_adapter || (aerodrome ? HedgeVenues.build(selected_venue) : nil) %>
 <% selected_venue_name = selected_adapter&.venue_name || HedgeVenues.label(selected_venue) %>
 <% venue_dashboard = @selected_hedge_venue_dashboard || {} %>
@@ -263,15 +265,17 @@ end %>
     <nav class="sticky top-0 z-10 -mx-4 border-y border-gray-800 bg-gray-950/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
       <div class="flex gap-2 overflow-x-auto text-sm">
         <% [
-          [ "Overview", "#overview" ],
-          [ "Hedge", "#hedge" ],
-          [ "Migration", "#migration" ],
-          [ "Routes", "#routes" ],
-          [ "Accounting", "#accounting" ],
-          [ "Diagnostics", "#diagnostics" ],
-          [ "Settings", "#settings" ]
-        ].each do |label, href| %>
-          <a href="<%= href %>" class="whitespace-nowrap rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-gray-200 hover:bg-gray-800"><%= label %></a>
+          [ "Overview", "overview" ],
+          [ "Hedge", "hedge" ],
+          [ "Migration", "migration" ],
+          [ "Routes", "routes" ],
+          [ "Accounting", "accounting" ],
+          [ "Diagnostics", "diagnostics" ],
+          [ "Settings", "settings" ]
+        ].each do |label, tab| %>
+          <% tab_url = tab == "settings" ? edit_settings_path(anchor: "risk-settings") : position_path(@position, hedge_venue: selected_venue, tab: tab) %>
+          <% active = position_tab == tab %>
+          <a href="<%= tab_url %>" class="whitespace-nowrap rounded-lg border px-3 py-2 <%= active ? 'border-blue-700 bg-blue-950/60 text-blue-100' : 'border-gray-800 bg-gray-900 text-gray-200 hover:bg-gray-800' %>"><%= label %></a>
         <% end %>
       </div>
     </nav>
@@ -302,7 +306,7 @@ end %>
   <% end %>
 
   <% if aerodrome %>
-    <section class="grid grid-cols-1 gap-3 lg:grid-cols-4">
+    <section class="grid grid-cols-1 gap-3 lg:grid-cols-4<%= tab_class.call('overview') %>">
       <% [
         [ "Production venue", cached_snapshot[:production_venue_name] || selected_venue_name, "Selected hedge execution venue" ],
         [ "Hedge status", tolerance_label, target_eth_short.present? && current_short_eth.present? ? "Target/current computed from latest known data" : "Current short unknown" ],
@@ -347,7 +351,7 @@ end %>
     when "ACTION REQUIRED", "BLOCKED" then "border-red-800 bg-red-950/50 text-red-100"
     else "border-gray-700 bg-gray-950 text-gray-300"
     end %>
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('overview') %>">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Production Health</p>
@@ -412,7 +416,7 @@ end %>
       <% end %>
     </section>
 
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('overview') %>">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Venue Exposure Summary</p>
@@ -475,7 +479,7 @@ end %>
     else
       "BLOCKED"
     end %>
-    <section id="migration" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="migration" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('migration') %>">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Operations / Migration Safety</p>
@@ -518,7 +522,7 @@ end %>
         </ul>
       <% end %>
     </section>
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('migration', 'routes') %>">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
@@ -660,7 +664,7 @@ end %>
         </div>
       </div>
 
-      <div id="routes" class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+      <div id="routes" class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4<%= tab_class.call('routes', 'migration') %>">
         <div class="flex items-start justify-between gap-3">
           <div>
             <p class="text-xs uppercase tracking-wide text-gray-500">Live Autopilot Readiness</p>
@@ -817,7 +821,7 @@ end %>
       </div>
     </section>
 
-    <section id="diagnostics">
+    <section id="diagnostics" class="<%= tab_class.call('diagnostics') %>">
       <div class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>
         <div class="flex flex-wrap items-center justify-end gap-2 text-xs">
@@ -856,7 +860,7 @@ end %>
       </div>
     </section>
 
-    <section id="hedge" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="hedge" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('hedge') %>">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Hedge Control Center</p>
@@ -1152,7 +1156,7 @@ end %>
       </div>
     </section>
 
-    <section id="accounting" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="accounting" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('accounting') %>">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Auto-Rebalance Status</p>
@@ -1201,7 +1205,7 @@ end %>
     <% selected_success_history = selected_history.select { |record| record.status == ShortRebalance::STATUS_SUCCESS } %>
     <% primary_selected_history = selected_success_history.presence || selected_history %>
     <% previous_history = history_records.reject { |record| HedgeVenues.normalize(record.venue) == selected_venue } %>
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('hedge', 'diagnostics') %>">
       <div class="flex items-center justify-between gap-3">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Recent Rebalance History</p>
@@ -1275,7 +1279,7 @@ end %>
       <% end %>
     </section>
 
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5<%= tab_class.call('accounting') %>">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Hedge PnL & Costs</p>
@@ -1329,7 +1333,7 @@ end %>
       </div>
     </section>
 
-    <section class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+    <section class="grid grid-cols-1 gap-4 xl:grid-cols-3<%= tab_class.call('accounting', 'settings') %>">
       <div class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 xl:col-span-2">
         <p class="text-xs uppercase tracking-wide text-gray-500">PnL & Rewards</p>
         <h2 class="mt-1 text-lg font-semibold text-white">PnL Summary</h2>
@@ -1460,7 +1464,7 @@ end %>
             </details>
           </div>
 
-      <div id="settings" class="space-y-4">
+      <div id="settings" class="space-y-4<%= tab_class.call('settings') %>">
         <details class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
           <summary class="cursor-pointer text-sm font-semibold text-white">Position Details</summary>
           <dl class="mt-4 space-y-2 text-sm">
