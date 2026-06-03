@@ -1108,7 +1108,7 @@ end %>
               [ :rebalance, hedge_rebalance_preview_position_path(@position), hedge_rebalance_position_path(@position), "Rebalance Hedge" ]
             ].each do |key, preview_path, live_path, label| %>
               <% action_preflight = action_preflights[key] || {} %>
-              <% action_blockers = (action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") } %>
+              <% action_blockers = (action_preflight[:blockers] || []).uniq.reject { |blocker| blocker.to_s.start_with?("submitted confirmation must equal") || neutral_preflight_messages.include?(blocker.to_s) } %>
               <% action_needed = case key
               when :open then next_action == "open"
               when :rebalance then next_action.in?([ "increase short", "reduce short", "rebalance" ])

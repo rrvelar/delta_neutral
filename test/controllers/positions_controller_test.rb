@@ -1235,10 +1235,34 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   test "show selected Ethereal venue enables confirmation input when live gates pass except confirmation" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.25",
+      tolerance_abs_eth: "0.0625",
+      combined_short_eth: "0",
+      drift_eth: "1.25",
+      inside_tolerance: false,
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_short_eth: "0"
+    )
 
     with_env(
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
       "ETHEREAL_READ_ONLY_ENABLED" => "true",
+      "ETHEREAL_MAX_SHORT_ETH" => "2.3",
+      "ETHEREAL_MAX_ORDER_SIZE_ETH" => "2.3",
+      "ETHEREAL_MAX_NOTIONAL_USD" => "5000",
+      "AERODROME_MAX_SHORT_ETH" => "2.3",
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => "5000",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "5000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "2.3",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "2.3",
       "ETHEREAL_API_BASE_URL" => "https://ethereal.example",
       "ETHEREAL_SUBACCOUNT_ID" => "0x7072696d61727900000000000000000000000000000000000000000000000000",
       "ETHEREAL_LINKED_SIGNER_ADDRESS" => "0x0000000000000000000000000000000000000001",
@@ -1261,6 +1285,14 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Live submit is disabled for Ethereal; previews do not create orders.", response.body
     assert_match "Live preflight is loaded separately.", response.body
     assert_match "Open Hedge", response.body
+    assert_match AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION, response.body
+    assert_select "input#dashboard-hedge-confirmation-open[name='dashboard_hedge_confirmation']" do |inputs|
+      assert_equal 1, inputs.size
+      assert_nil inputs.first["disabled"]
+      assert_equal AerodromeDashboardHedgeAction::ETHEREAL_CONFIRMATION, inputs.first["data-required-confirmation"]
+    end
+    assert_select "input#dashboard-hedge-live-submit-open[disabled]", 1
+    assert_match "document.getElementById(this.dataset.liveSubmitId).disabled = this.value !== this.dataset.requiredConfirmation", response.body
   end
 
   test "show selected Ethereal venue keeps confirmation input disabled when live flag false" do
