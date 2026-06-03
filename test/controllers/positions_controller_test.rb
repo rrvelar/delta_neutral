@@ -1597,6 +1597,43 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
   end
 
+  test "auto rebalance toggle rejects wrong confirmation without changing settings" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.6",
+      combined_short_eth: "1.6",
+      drift_eth: "0",
+      inside_tolerance: true,
+      ethereal_short_eth: "1.6",
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      signer_status: "ok"
+    )
+
+    with_env("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true") do
+      assert_no_difference [ "OperationalSetting.count", "OperationalSettingAudit.count", "ShortRebalance.count" ] do
+        post auto_rebalance_position_path(position), params: {
+          venue: "ethereal",
+          enabled: "true",
+          auto_confirmation: "WRONG"
+        }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "ethereal", tab: "accounting")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    follow_redirect!
+    assert_match "Auto setting blocked: confirmation must equal #{OperationalSettings::ENABLE_CONFIRMATIONS.fetch('ethereal')}", response.body
+  end
+
   test "show tab navigation does not change active production selection" do
     position = create_aerodrome_position(active: true)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")

@@ -172,6 +172,38 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     old_live.nil? ? ENV.delete("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED") : ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = old_live
   end
 
+  test "settings auto update rejects wrong confirmation without changing settings" do
+    position = create_extended_position
+    position.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988")
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      ethereal_short_eth: "0.727",
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      combined_short_eth: "0.727",
+      signer_status: "ok"
+    )
+    old_live = ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"]
+    ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = "true"
+
+    assert_no_difference [ "OperationalSetting.count", "OperationalSettingAudit.count", "ShortRebalance.count" ] do
+      patch auto_settings_path, params: {
+        position_id: position.id,
+        venue: "ethereal",
+        enabled: "true",
+        auto_confirmation: "WRONG"
+      }
+    end
+
+    assert_response :unprocessable_entity
+    assert_match "confirmation must equal #{OperationalSettings::ENABLE_CONFIRMATIONS.fetch('ethereal')}", response.body
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+  ensure
+    old_live.nil? ? ENV.delete("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED") : ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = old_live
+  end
+
   test "navbar settings link points to valid settings route" do
     get root_path
 
