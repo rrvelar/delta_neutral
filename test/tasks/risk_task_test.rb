@@ -4,7 +4,9 @@ require "rake"
 class RiskTaskTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks unless Rake::Task.task_defined?("risk:list")
-    %w[risk:list risk:set hedge:cap_diagnostics].each { |task| Rake::Task[task].reenable }
+    RiskSetting.delete_all
+    RiskSettingAudit.delete_all
+    %w[risk:list risk:set risk:recommend risk:apply_recommended hedge:cap_diagnostics].each { |task| Rake::Task[task].reenable }
   end
 
   test "risk list prints whitelisted caps with no live counters" do
@@ -13,9 +15,23 @@ class RiskTaskTest < ActiveSupport::TestCase
 
     assert_equal "risk_list", payload.fetch("action")
     assert payload.fetch("settings").any? { |row| row.fetch("key") == "ETHEREAL_MAX_SHORT_ETH" }
+    assert payload.fetch("runtime_caps").any? { |row| row.fetch("key") == "ETHEREAL_MAX_SHORT_ETH" }
+    assert payload.fetch("hard_ceilings").any? { |row| row.fetch("key") == "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" }
     assert_equal false, payload.fetch("restart_required")
     assert_equal 0, payload.fetch("orders_submitted")
     assert_equal 0, payload.fetch("signatures_created")
+  end
+
+  test "risk list flags invalid legacy cap above hard ceiling" do
+    RiskSetting.create!(key: "AERODROME_MAX_SHORT_ETH", value: "3.5")
+
+    with_env("AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "1.5") do
+      out, = capture_io { Rake::Task["risk:list"].invoke }
+      row = JSON.parse(out).fetch("runtime_caps").find { |entry| entry.fetch("key") == "AERODROME_MAX_SHORT_ETH" }
+
+      assert_equal false, row.fetch("valid")
+      assert row.fetch("validation_errors").first.include?("Cannot set Global max short size")
+    end
   end
 
   test "risk set updates cap with confirmation and no live counters" do
@@ -55,6 +71,56 @@ class RiskTaskTest < ActiveSupport::TestCase
       assert_equal "hedge_cap_diagnostics", payload.fetch("action")
       assert_equal "ETHEREAL_MAX_SHORT_ETH", payload.dig("cap_diagnostics", "short_cap", "cap_key")
       assert_equal "1.25", payload.dig("cap_diagnostics", "short_cap", "target_short_eth")
+      assert_equal 0, payload.fetch("orders_submitted")
+      assert_equal 0, payload.fetch("signatures_created")
+    end
+  end
+
+  test "risk recommend prints requirements without live counters" do
+    position = aerodrome_position
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "ethereal")
+
+    with_env("position_id" => position.id.to_s, "venue" => "ethereal") do
+      out, = capture_io { Rake::Task["risk:recommend"].invoke }
+      payload = JSON.parse(out)
+
+      assert_equal "risk_recommend", payload.fetch("action")
+      keys = payload.fetch("required_changes").map { |change| change.fetch("key") }
+      assert_includes keys, "ETHEREAL_MAX_SHORT_ETH"
+      assert_includes keys, "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH"
+      assert_equal 0, payload.fetch("orders_submitted")
+      assert_equal 0, payload.fetch("signatures_created")
+    end
+  end
+
+  test "risk apply recommended refuses weak confirmation and succeeds with hard confirmation" do
+    position = aerodrome_position
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "ethereal")
+
+    with_env(
+      "position_id" => position.id.to_s,
+      "venue" => "ethereal",
+      "confirmation" => RiskSettings::INCREASE_CONFIRMATION
+    ) do
+      out, = capture_io { Rake::Task["risk:apply_recommended"].invoke }
+      payload = JSON.parse(out)
+
+      assert_equal false, payload.fetch("ok")
+      assert_equal 0, payload.fetch("orders_submitted")
+      assert_equal 0, payload.fetch("signatures_created")
+    end
+
+    Rake::Task["risk:apply_recommended"].reenable
+    with_env(
+      "position_id" => position.id.to_s,
+      "venue" => "ethereal",
+      "confirmation" => RiskSettings::HARD_INCREASE_CONFIRMATION
+    ) do
+      out, = capture_io { Rake::Task["risk:apply_recommended"].invoke }
+      payload = JSON.parse(out)
+
+      assert_equal true, payload.fetch("ok")
+      assert RiskSetting.find_by(key: "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH")
       assert_equal 0, payload.fetch("orders_submitted")
       assert_equal 0, payload.fetch("signatures_created")
     end

@@ -55,12 +55,7 @@ class AerodromeProductionRiskLimits
   end
 
   def self.decimal_env(key)
-    raw = ENV[key].presence
-    return nil unless raw
-
-    BigDecimal(raw)
-  rescue ArgumentError
-    nil
+    RiskSettings.get(key).value
   end
   private_class_method :decimal_env
 

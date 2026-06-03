@@ -6,10 +6,21 @@ namespace :risk do
         key: setting.key,
         value: setting.raw_value,
         parsed_value: setting.value&.to_s("F"),
-        source: setting.source
+        source: setting.source,
+        layer: RiskSettings.hard_key?(setting.key) ? "hard_ceiling" : "runtime",
+        valid: RiskSettings.hard_ceiling_validation_errors(setting.key, setting.raw_value).empty?,
+        validation_errors: RiskSettings.hard_ceiling_validation_errors(setting.key, setting.raw_value)
       }
     end
-    puts JSON.pretty_generate(action: "risk_list", settings: rows, restart_required: false, orders_submitted: 0, signatures_created: 0)
+    puts JSON.pretty_generate(
+      action: "risk_list",
+      settings: rows,
+      runtime_caps: rows.reject { |row| row.fetch(:layer) == "hard_ceiling" },
+      hard_ceilings: rows.select { |row| row.fetch(:layer) == "hard_ceiling" },
+      restart_required: false,
+      orders_submitted: 0,
+      signatures_created: 0
+    )
   end
 
   desc "Set a whitelisted risk setting: key=ETHEREAL_MAX_SHORT_ETH value=2 confirmation=..."
@@ -27,6 +38,38 @@ namespace :risk do
       value: result.setting&.value || ENV["value"] || ENV["VALUE"],
       errors: result.errors,
       restart_required: false,
+      orders_submitted: 0,
+      signatures_created: 0
+    )
+  end
+
+  desc "Recommend no-live risk limits for a position and venue"
+  task recommend: :environment do
+    position = Position.includes(:hedge, :position_dashboard_snapshot).find(ENV["position_id"] || ENV["POSITION_ID"])
+    venue = ENV["venue"] || ENV["VENUE"] || position.hedge&.execution_venue
+    puts JSON.pretty_generate(
+      RiskLimitRecommendation.new(position: position, venue: venue).report.merge(
+        action: "risk_recommend",
+        orders_submitted: 0,
+        signatures_created: 0
+      )
+    )
+  end
+
+  desc "Apply no-live recommended risk limits for a position and venue"
+  task apply_recommended: :environment do
+    position = Position.includes(:hedge, :position_dashboard_snapshot).find(ENV["position_id"] || ENV["POSITION_ID"])
+    venue = ENV["venue"] || ENV["VENUE"] || position.hedge&.execution_venue
+    result = RiskLimitRecommendation.new(position: position, venue: venue).apply!(
+      reason: ENV["reason"] || ENV["REASON"],
+      confirmation: ENV["confirmation"] || ENV["CONFIRMATION"]
+    )
+    puts JSON.pretty_generate(
+      action: "risk_apply_recommended",
+      ok: result.ok,
+      errors: result.errors,
+      applied: result.applied,
+      recommendation: result.recommendation,
       orders_submitted: 0,
       signatures_created: 0
     )

@@ -590,12 +590,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def decimal_env(key)
-    raw = ENV[key].presence
-    return nil unless raw
-
-    BigDecimal(raw)
-  rescue ArgumentError
-    nil
+    RiskSettings.get(key).value
   end
 
   def write_receipt(result)

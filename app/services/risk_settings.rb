@@ -3,6 +3,7 @@ require "bigdecimal"
 class RiskSettings
   INCREASE_CONFIRMATION = "I_UNDERSTAND_THIS_INCREASES_HEDGE_RISK".freeze
   DECREASE_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_HEDGE_RISK_LIMITS".freeze
+  HARD_INCREASE_CONFIRMATION = "I_UNDERSTAND_THIS_RAISES_PRODUCTION_HARD_RISK_LIMITS".freeze
   ABSURD_CAP_ETH = BigDecimal("100")
   ABSURD_NOTIONAL_USD = BigDecimal("10000000")
   ABSURD_ORDER_ETH = BigDecimal("25")
@@ -14,6 +15,14 @@ class RiskSettings
     AERODROME_MAX_NOTIONAL_USD
     AERODROME_MAX_SHORT_NOTIONAL_USD
     AERODROME_MAX_TOTAL_HEDGE_ETH
+    AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH
+  ].freeze
+  HARD_CAP_KEYS = %w[
+    AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH
+    AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD
+    AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH
+    AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD
+    AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH
   ].freeze
   VENUE_CAP_KEYS = HedgeVenues::SUPPORTED_KEYS.flat_map do |venue|
     prefix = venue.upcase
@@ -23,7 +32,7 @@ class RiskSettings
       "#{prefix}_MAX_NOTIONAL_USD"
     ]
   end.freeze
-  ALLOWED_KEYS = (DEFAULT_KEYS + GLOBAL_CAP_KEYS + VENUE_CAP_KEYS).freeze
+  ALLOWED_KEYS = (DEFAULT_KEYS + GLOBAL_CAP_KEYS + HARD_CAP_KEYS + VENUE_CAP_KEYS).freeze
 
   Result = Data.define(:ok, :setting, :errors, :audit)
   Value = Data.define(:key, :value, :source, :raw_value) do
@@ -38,6 +47,10 @@ class RiskSettings
 
   def self.numeric_key?(key)
     allowed_key?(key) && key.to_s != "DEFAULT_HEDGE_EXECUTION_VENUE"
+  end
+
+  def self.hard_key?(key)
+    HARD_CAP_KEYS.include?(key.to_s)
   end
 
   def self.valid_value?(key, value)
@@ -86,6 +99,7 @@ class RiskSettings
     current = RiskSetting.find_by(key: key)
     old_value = current&.value
     errors = confirmation_errors(key: key, old_value: old_value, new_value: value.to_s, confirmation: confirmation)
+    errors.concat(hard_ceiling_validation_errors(key, value.to_s))
     return Result.new(false, current, errors, nil) if errors.present?
 
     audit = nil
@@ -115,6 +129,35 @@ class RiskSettings
     end
   end
 
+  def self.hard_ceiling_for(kind:, env: ENV)
+    key = hard_key_for(kind)
+    get(key, env: env)
+  end
+
+  def self.hard_key_for(kind)
+    case kind.to_sym
+    when :short_eth
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH"
+    when :order_size_eth
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH"
+    when :notional_usd
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD"
+    when :short_notional_usd
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD"
+    when :emergency_close_eth
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH"
+    end
+  end
+
+  def self.runtime_kind_for_key(key)
+    key = key.to_s
+    return :emergency_close_eth if key == "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH"
+    return :order_size_eth if key.end_with?("MAX_ORDER_SIZE_ETH")
+    return :short_notional_usd if key == "AERODROME_MAX_SHORT_NOTIONAL_USD"
+    return :notional_usd if key.end_with?("MAX_NOTIONAL_USD")
+    :short_eth if key.end_with?("MAX_SHORT_ETH") || key == "AERODROME_MAX_TOTAL_HEDGE_ETH"
+  end
+
   def self.confirmation_errors(key:, old_value:, new_value:, confirmation:)
     return [] unless numeric_key?(key)
 
@@ -123,11 +166,61 @@ class RiskSettings
     return [ "invalid risk setting value" ] unless new_decimal&.positive?
 
     increased = old_decimal.nil? || new_decimal > old_decimal
-    required = increased ? INCREASE_CONFIRMATION : DECREASE_CONFIRMATION
+    required = if hard_key?(key) && increased
+      HARD_INCREASE_CONFIRMATION
+    elsif increased
+      INCREASE_CONFIRMATION
+    else
+      DECREASE_CONFIRMATION
+    end
+    valid_confirmation = confirmation.to_s == required || (increased && !hard_key?(key) && confirmation.to_s == HARD_INCREASE_CONFIRMATION)
     errors = []
-    errors << "confirmation must equal #{required}" unless confirmation.to_s == required
+    errors << "confirmation must equal #{required}" unless valid_confirmation
     errors << "advanced override required for unusually high cap" if absurd_cap?(key, new_decimal) && confirmation.to_s != INCREASE_CONFIRMATION
     errors
+  end
+
+  def self.hard_ceiling_validation_errors(key, value)
+    return [] if hard_key?(key)
+    return [] unless numeric_key?(key)
+
+    decimal = decimal(value)
+    return [] unless decimal
+
+    errors = []
+    kind = runtime_kind_for_key(key)
+    hard = hard_ceiling_for(kind: kind) if kind
+    if hard&.value.present? && decimal > hard.value
+      errors << "Cannot set #{human_label(key)} to #{decimal.to_s('F')} #{unit_for(key)} because #{human_label(hard.key).downcase} is #{hard.value.to_s('F')} #{unit_for(hard.key)}. Raise the production hard ceiling first or reduce the LP size."
+    end
+
+    if key == "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH"
+      max_short = get("AERODROME_MAX_SHORT_ETH")
+      if max_short.value.present? && decimal < max_short.value
+        errors << "Cannot set Emergency close max ETH below AERODROME_MAX_SHORT_ETH. Emergency close limit must be at least the maximum hedge size."
+      end
+    end
+    errors
+  end
+
+  def self.human_label(key)
+    case key.to_s
+    when "AERODROME_MAX_SHORT_ETH" then "Global max short size"
+    when "ETHEREAL_MAX_SHORT_ETH" then "Ethereal max short size"
+    when "NADO_MAX_SHORT_ETH" then "Nado max short size"
+    when "EXTENDED_MAX_SHORT_ETH" then "Extended max short size"
+    when "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" then "Production hard max short size"
+    when "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" then "Production hard max order size"
+    when "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" then "Production hard max notional"
+    when "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" then "Production hard max short notional"
+    when "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" then "Production hard emergency close max"
+    when "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" then "Emergency close max ETH"
+    else key.to_s.humanize
+    end
+  end
+
+  def self.unit_for(key)
+    key.to_s.end_with?("USD") ? "USD" : "ETH"
   end
 
   def self.absurd_cap?(key, value)
