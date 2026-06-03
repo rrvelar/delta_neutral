@@ -191,6 +191,7 @@ namespace :dashboard do
     }
     rewards_snapshot = position.position_rewards_fees_snapshot
     snapshot = position.position_dashboard_snapshot
+    combined_health = dashboard_combined_health(snapshot, readiness)
     last_success = position.hedge&.short_rebalances&.where(venue: "extended", asset: [ nil, "ETH", "WETH" ], status: ShortRebalance::STATUS_SUCCESS)&.order(rebalanced_at: :desc, created_at: :desc)&.first
 
     puts JSON.pretty_generate(
@@ -227,8 +228,8 @@ namespace :dashboard do
       extended_auto_planned_action: readiness[:planned_auto_action],
       extended_auto_suppressed_reason: readiness[:action_suppressed_reason],
       dashboard_header_status: dashboard_header_status(readiness),
-      production_health_status: dashboard_production_health_status(readiness),
-      production_health_reason: dashboard_production_health_reason(readiness),
+      production_health_status: dashboard_production_health_status(readiness, combined_health: combined_health),
+      production_health_reason: dashboard_production_health_reason(readiness, combined_health: combined_health),
       hedge_control_action_label: dashboard_hedge_control_action_label(readiness),
       hedge_control_uses_readiness_preview: dashboard_readiness_preview_available?(readiness),
       stale_preview_warning_present: !dashboard_readiness_preview_available?(readiness),
@@ -305,7 +306,8 @@ namespace :dashboard do
     within ? "In tolerance" : "Out of tolerance"
   end
 
-  def dashboard_production_health_status(readiness)
+  def dashboard_production_health_status(readiness, combined_health: nil)
+    return combined_health[:status] if combined_health
     return "WATCH" if readiness[:action_suppressed_reason].present?
     return "HEALTHY" if readiness[:active_within_tolerance] == true || readiness[:within_tolerance] == true
     return "ACTION PENDING" if readiness[:auto_can_act] == true
@@ -328,13 +330,38 @@ namespace :dashboard do
     end
   end
 
-  def dashboard_production_health_reason(readiness)
+  def dashboard_production_health_reason(readiness, combined_health: nil)
+    return combined_health[:reason] if combined_health
     return "inside tolerance" if readiness[:active_within_tolerance] == true || readiness[:within_tolerance] == true
     return readiness[:action_suppressed_reason] if readiness[:action_suppressed_reason].present?
     return "auto_can_act=true" if readiness[:auto_can_act] == true
     return "fresh exposure unavailable" if readiness[:target_short_eth].blank?
 
     Array(readiness[:blockers]).first
+  end
+
+  def dashboard_combined_health(snapshot, readiness)
+    return nil unless snapshot
+
+    active_venues = dashboard_active_short_venues(snapshot)
+    return { status: "ACTION REQUIRED", reason: "combined hedge outside tolerance" } if snapshot.inside_tolerance == false
+    if active_venues.size > 1
+      if readiness[:action_suppressed_reason].to_s.match?(/continuation|overhedg/i)
+        return { status: "PENDING CONTINUATION", reason: "overhedged awaiting source close" }
+      end
+
+      return { status: "OVERHEDGED", reason: "multiple venues have active short exposure: #{active_venues.join(', ')}" }
+    end
+
+    nil
+  end
+
+  def dashboard_active_short_venues(snapshot)
+    %w[extended ethereal nado].select do |venue|
+      BigDecimal(snapshot.public_send("#{venue}_short_eth").to_s) > BigDecimal("0.001")
+    rescue ArgumentError, TypeError
+      false
+    end
   end
 
   def dashboard_readiness_preview_available?(readiness)

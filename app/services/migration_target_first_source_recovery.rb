@@ -8,7 +8,8 @@ class MigrationTargetFirstSourceRecovery
 
   def initialize(position:, from:, to:, dry_run: nil, live: false, confirmation: nil, env: ENV,
                  extended_venue: nil, ethereal_venue: nil, nado_venue: nil, fresh_target: nil,
-                 lifecycle_factory: nil, leg_runner: nil, now: -> { Time.current }, receipt_dir: RECEIPT_DIR)
+                 lifecycle_factory: nil, leg_runner: nil, now: -> { Time.current }, receipt_dir: RECEIPT_DIR,
+                 require_recovery_live_gate: true)
     @position = position
     @from = HedgeVenues.normalize(from)
     @to = HedgeVenues.normalize(to)
@@ -24,6 +25,7 @@ class MigrationTargetFirstSourceRecovery
     @leg_runner = leg_runner
     @now = now
     @receipt_dir = Pathname(receipt_dir)
+    @require_recovery_live_gate = require_recovery_live_gate
   end
 
   def run
@@ -131,7 +133,9 @@ class MigrationTargetFirstSourceRecovery
   def live_gate_blockers(context)
     blockers = []
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation_valid?
-    blockers << "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true" unless bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED")
+    if require_recovery_live_gate?
+      blockers << "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true" unless bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED")
+    end
     if context.fetch(:source_short).positive?
       blockers << "#{HedgeVenues.label(from)} live gate must be enabled" unless venue_live_enabled?(from)
       blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" if from == "extended" && !bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
@@ -270,6 +274,7 @@ class MigrationTargetFirstSourceRecovery
   def live_gates
     {
       exact_confirmation: confirmation_valid?,
+      migration_target_first_source_recovery_enabled_required: require_recovery_live_gate?,
       migration_target_first_source_recovery_enabled: bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED"),
       source_live_enabled: venue_live_enabled?(from),
       extended_auto_disabled: !bool_env("EXTENDED_AUTO_REBALANCE_ENABLED"),
@@ -374,6 +379,10 @@ class MigrationTargetFirstSourceRecovery
     return true if confirmation == CONFIRMATION
 
     from == "extended" && to == "ethereal" && confirmation == LEGACY_EXTENDED_ETHEREAL_CONFIRMATION
+  end
+
+  def require_recovery_live_gate?
+    @require_recovery_live_gate
   end
 
   def failure_receipt(error)

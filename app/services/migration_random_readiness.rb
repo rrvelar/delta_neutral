@@ -13,7 +13,8 @@ class MigrationRandomReadiness
     plan = planner.plan(position: position, require_live_proofs: false).receipt
     live_plan = planner.plan(position: position, require_live_proofs: true).receipt
     next_canary = next_recommended_canary(proof_report)
-    blockers = live_blockers(proof_report: proof_report, live_plan: live_plan)
+    pending_continuation = pending_nado_target_continuation
+    blockers = live_blockers(proof_report: proof_report, live_plan: live_plan, pending_continuation: pending_continuation)
     {
       action: "migration_random_readiness",
       position_id: position.id,
@@ -32,7 +33,7 @@ class MigrationRandomReadiness
       operator_commands: operator_commands(next_canary),
       route_proof_statuses: proof_report.fetch(:routes),
       random_live_gates: random_live_gates,
-      pending_nado_target_continuation: pending_nado_target_continuation,
+      pending_nado_target_continuation: pending_continuation,
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
       orders_placed: 0,
@@ -44,7 +45,7 @@ class MigrationRandomReadiness
 
   attr_reader :position, :planner, :proof_registry
 
-  def live_blockers(proof_report:, live_plan:)
+  def live_blockers(proof_report:, live_plan:, pending_continuation:)
     blockers = []
     blockers << "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
     blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
@@ -52,7 +53,7 @@ class MigrationRandomReadiness
     blockers << "no eligible proven route from current production venue" if live_plan.fetch(:selected_route).blank?
     blockers << "pending ShortRebalance must be resolved before random migration" if pending_rebalance?
     blockers << "pending recovery must be resolved before random migration" if pending_recovery?
-    blockers << "pending target=Nado migration continuation must be completed before random migration" if pending_nado_target_continuation
+    blockers << "pending target=Nado migration continuation must be completed before random migration" if pending_continuation
     blockers << "dashboard health must be HEALTHY" unless dashboard_healthy?
     blockers.uniq
   end
@@ -132,12 +133,14 @@ class MigrationRandomReadiness
         []
       end
         .select { |event| pending_nado_target_event?(event) }
+        .reject { |event| proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event) }
         .max_by { |event| event_time(event) || Time.zone.at(0) }
         &.then do |event|
           {
             route: "#{event['from_venue']}->#{event['to_venue']}",
             from_venue: event["from_venue"],
             to_venue: event["to_venue"],
+            pending_migration_id: event["pending_migration_id"],
             nado_target_digest: event["nado_target_digest"] || Array(event["exchange_order_ids"]).first,
             status: event["final_status"],
             continuation_command: event["continuation_command"] || "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{event['from_venue']} to=#{event['to_venue']} dry_run=true",
@@ -161,9 +164,24 @@ class MigrationRandomReadiness
   end
 
   def dashboard_healthy?
-    snapshot = position.position_dashboard_snapshot
-    status = @dashboard_health || (snapshot.production_health_status if snapshot&.respond_to?(:production_health_status)) || "HEALTHY"
+    status = @dashboard_health || combined_dashboard_status || "HEALTHY"
     status.to_s.in?(%w[HEALTHY OK healthy ok])
+  end
+
+  def combined_dashboard_status
+    snapshot = position.position_dashboard_snapshot
+    return unless snapshot
+    return "ACTION REQUIRED" if snapshot.inside_tolerance == false
+    return "OVERHEDGED" if active_short_venues(snapshot).size > 1
+    "HEALTHY" if snapshot.inside_tolerance == true && active_short_venues(snapshot).size == 1
+  end
+
+  def active_short_venues(snapshot)
+    %w[extended ethereal nado].select do |venue|
+      BigDecimal(snapshot.public_send("#{venue}_short_eth").to_s) > BigDecimal("0.001")
+    rescue ArgumentError, TypeError
+      false
+    end
   end
 
   def bool_env(key)

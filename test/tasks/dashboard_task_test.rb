@@ -339,6 +339,114 @@ class DashboardTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "production smoke does not report healthy when another venue is also open" do
+    position = aerodrome_position
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "0.8",
+      tolerance_ratio: "0.03",
+      tolerance_abs_eth: "0.024",
+      combined_short_eth: "0.8",
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "0.5",
+      ethereal_short_eth: "0.3",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "active",
+      nado_status: "flat"
+    )
+    readiness = readiness_payload(within_tolerance: true, current_short: "0.5", target: "0.8")
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(status: "ok") }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "OVERHEDGED", payload.fetch("production_health_status")
+          assert_match(/multiple venues/, payload.fetch("production_health_reason"))
+        end
+      end
+    end
+  end
+
+  test "production smoke does not report healthy when combined hedge is outside tolerance" do
+    position = aerodrome_position
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "0.8",
+      tolerance_ratio: "0.03",
+      tolerance_abs_eth: "0.024",
+      combined_short_eth: "0.91",
+      drift_eth: "-0.11",
+      inside_tolerance: false,
+      extended_short_eth: "0.91",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat"
+    )
+    readiness = readiness_payload(within_tolerance: true, current_short: "0.91", target: "0.8")
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(status: "ok") }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "ACTION REQUIRED", payload.fetch("production_health_status")
+          assert_equal "combined hedge outside tolerance", payload.fetch("production_health_reason")
+        end
+      end
+    end
+  end
+
+  test "production smoke reports healthy when single venue short is inside tolerance" do
+    position = aerodrome_position
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "nado",
+      selected_venue: "nado",
+      target_short_eth: "0.8",
+      tolerance_ratio: "0.03",
+      tolerance_abs_eth: "0.024",
+      combined_short_eth: "0.8",
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0.8",
+      extended_status: "flat",
+      ethereal_status: "flat",
+      nado_status: "active"
+    )
+    readiness = readiness_payload(venue: "nado", within_tolerance: true, current_short: "0.8", target: "0.8")
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(status: "ok") }) do
+      HedgeVenueAutoReadiness.stub(:new, -> { resolver_result(readiness, method_name: :report) }) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal "HEALTHY", payload.fetch("production_health_status")
+          assert_equal "inside tolerance", payload.fetch("production_health_reason")
+        end
+      end
+    end
+  end
+
   private
 
   def aerodrome_position
@@ -382,6 +490,28 @@ class DashboardTaskTest < ActiveSupport::TestCase
         result
       end
     end
+  end
+
+  def readiness_payload(venue: "extended", within_tolerance:, current_short:, target:)
+    {
+      execution_venue: venue,
+      active_auto_venue: venue,
+      active_current_short_eth: current_short,
+      active_target_short_eth: target,
+      active_within_tolerance: within_tolerance,
+      active_planned_auto_action: "no_op",
+      target_short_eth: target,
+      within_tolerance: within_tolerance,
+      continuous_auto_ready: true,
+      planned_auto_action: "no_op",
+      action_suppressed_reason: nil,
+      auto_can_act: false,
+      min_rebalance_size_eth: "0.03",
+      cooldown_remaining_seconds: 0,
+      consecutive_outside_tolerance_count: 0,
+      strong_drift_bypass_used: false,
+      blockers: []
+    }
   end
 
   def with_position_id(position_id)

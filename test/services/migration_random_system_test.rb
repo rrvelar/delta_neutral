@@ -311,6 +311,82 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(canary_dir) if canary_dir
   end
 
+  test "random readiness suppresses pending Nado continuation when route proof is ready by continuation" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "extended"))
+    write_event(continuation_dir, continuation_event(position: position, from: "extended"))
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, continuation_dir: continuation_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+
+    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(continuation_dir) if continuation_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "random readiness still blocks when matching Nado continuation failed" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "extended"))
+    write_event(continuation_dir, continuation_event(position: position, from: "extended", final_status: "CONTINUATION_BLOCKED", target_confirmed: false))
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, continuation_dir: continuation_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+
+    assert_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+    assert_equal "extended->nado", report.fetch(:pending_nado_target_continuation).fetch(:route)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(continuation_dir) if continuation_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "random readiness resolves Nado continuation by pending migration id" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    pending = partial_nado_target_canary_event(position: position, from: "extended").merge(pending_migration_id: "pending-123", nado_target_digest: "0xold")
+    write_event(canary_dir, pending)
+    write_event(continuation_dir, continuation_event(position: position, from: "extended", pending_migration_id: "pending-123", digest: "0xdifferent"))
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, continuation_dir: continuation_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+
+    assert_nil report.fetch(:pending_nado_target_continuation)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(continuation_dir) if continuation_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "random readiness resolves Nado continuation by target digest" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal").merge(pending_migration_id: "pending-123"))
+    write_event(continuation_dir, continuation_event(position: position, from: "ethereal", pending_migration_id: nil, digest: "0xnado-target"))
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, continuation_dir: continuation_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+
+    assert_nil report.fetch(:pending_nado_target_continuation)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(continuation_dir) if continuation_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
   test "random readiness is actionable and blocks live while proofs are missing" do
     report = MigrationRandomReadiness.new(position: migration_position("nado"), planner: random_planner).report
 
@@ -380,6 +456,25 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_not_includes report.fetch(:blockers), "pending ShortRebalance must be resolved before random migration"
     assert_nil report.dig(:nado_auto_summary, :latest_nado_pending)
     assert_equal 1, report.dig(:nado_auto_summary, :stale_acknowledged_nado_pending_count)
+  end
+
+  test "confirmed later Nado pending row no longer appears as latest pending" do
+    position = migration_position("nado")
+    position.hedge.short_rebalances.create!(
+      asset: "WETH",
+      venue: "nado",
+      old_short_size: "1.0",
+      new_short_size: "1.1",
+      realized_pnl: "0",
+      status: ShortRebalance::STATUS_SUCCESS,
+      message: "Confirmed by later Nado readback",
+      rebalanced_at: Time.current
+    )
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner).report
+
+    assert_nil report.dig(:nado_auto_summary, :latest_nado_pending)
+    assert_not_includes report.fetch(:blockers), "pending ShortRebalance must be resolved before random migration"
   end
 
   private
@@ -547,16 +642,17 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     }
   end
 
-  def continuation_event(position:, from:, timestamp: Time.current)
+  def continuation_event(position:, from:, timestamp: Time.current, final_status: "MIGRATION_FINALIZED", target_confirmed: true, pending_migration_id: nil, digest: "0xnado-target")
     {
       action: "continue_target_first_after_nado_confirmed",
       position_id: position.id,
       from_venue: from,
       to_venue: "nado",
-      final_status: "MIGRATION_FINALIZED",
+      final_status: final_status,
       continuation_of_accepted_nado_target: true,
-      nado_target_digest: "0xnado-target",
-      target_confirmed: true,
+      pending_migration_id: pending_migration_id,
+      nado_target_digest: digest,
+      target_confirmed: target_confirmed,
       source_close_confirmed: true,
       final_inside_tolerance: true,
       production_venue_finalized: true,

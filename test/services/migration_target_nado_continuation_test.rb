@@ -69,6 +69,82 @@ class MigrationTargetNadoContinuationTest < ActiveSupport::TestCase
     FileUtils.rm_rf(canary_dir) if canary_dir
   end
 
+  test "live continuation does not require source recovery env gate" do
+    position = migration_position("extended")
+    canary_dir = write_pending_canary(position: position, from: "extended", expected: "0.9134680515417161", source_size: "0.903", digest: "0xextendednado")
+    calls = []
+    leg_runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: "extended-close",
+        after_short_eth: "0",
+        receipt: { exchange_order_id: "extended-close", orders_placed: 1, signatures_created: 1 }
+      }
+    end
+
+    result = continuation(
+      position: position,
+      from: "extended",
+      canary_dir: canary_dir,
+      extended_short: "0.903",
+      nado_short: "0.913",
+      target: "0.9134680515417161",
+      live: true,
+      confirmation: MigrationTargetNadoContinuation::CONFIRMATION,
+      env: recovery_env.merge("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED" => "false"),
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "MIGRATION_FINALIZED", result.status, result.blockers.inspect
+    assert_equal 1, calls.size
+    assert_not_includes result.blockers, "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true"
+    assert_equal true, result.receipt.fetch(:target_confirmed)
+    assert_equal "nado", position.hedge.reload.execution_venue
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
+  test "continuation never opens or closes Nado target" do
+    position = migration_position("ethereal")
+    canary_dir = write_pending_canary(position: position, from: "ethereal", expected: "0.9363623373136126", source_size: "0.9671", digest: "0x22f2")
+    calls = []
+    leg_runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: "ethereal-close",
+        after_short_eth: "0",
+        receipt: { exchange_order_id: "ethereal-close", orders_placed: 1, signatures_created: 1 }
+      }
+    end
+
+    result = continuation(
+      position: position,
+      from: "ethereal",
+      canary_dir: canary_dir,
+      ethereal_short: "0.9671",
+      nado_short: "0.936",
+      target: "0.9363623373136126",
+      live: true,
+      confirmation: MigrationTargetNadoContinuation::CONFIRMATION,
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "MIGRATION_FINALIZED", result.status, result.blockers.inspect
+    assert_equal [ "ethereal" ], calls.map { |leg| leg.fetch(:venue) }
+    assert_equal true, calls.first.fetch(:reduce_only)
+    assert_equal "buy", calls.first.fetch(:side)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
   test "ethereal to nado delayed target live continuation closes source and finalizes" do
     position = migration_position("ethereal")
     canary_dir = write_pending_canary(position: position, from: "ethereal", expected: "0.9363623373136126", source_size: "0.9671", digest: "0x22f2aaa2a032853609a860cf8b60c593da9085547b3dab646f2774783264e6a6")
@@ -155,7 +231,7 @@ class MigrationTargetNadoContinuationTest < ActiveSupport::TestCase
 
   private
 
-  def continuation(position:, from:, canary_dir:, extended_short: "0", ethereal_short: "0", nado_short:, target:, live: false, confirmation: nil, leg_runner: nil)
+  def continuation(position:, from:, canary_dir:, extended_short: "0", ethereal_short: "0", nado_short:, target:, live: false, confirmation: nil, env: recovery_env, leg_runner: nil)
     MigrationTargetNadoContinuation.new(
       position: position,
       from: from,
@@ -164,7 +240,7 @@ class MigrationTargetNadoContinuationTest < ActiveSupport::TestCase
       receipt_dir: Rails.root.join("tmp/test-nado-continuations-#{SecureRandom.hex(4)}"),
       live: live,
       confirmation: confirmation,
-      env: recovery_env,
+      env: env,
       recovery_factory: ->(position:, from:, to:, dry_run:, live:, confirmation:) {
         MigrationTargetFirstSourceRecovery.new(
           position: position,
@@ -173,13 +249,14 @@ class MigrationTargetNadoContinuationTest < ActiveSupport::TestCase
           dry_run: dry_run,
           live: live,
           confirmation: confirmation,
-          env: recovery_env,
+          env: env,
           extended_venue: FakeVenue.new("extended", extended_short),
           ethereal_venue: FakeVenue.new("ethereal", ethereal_short),
           nado_venue: FakeVenue.new("nado", nado_short),
           fresh_target: FreshTarget.new(target),
           leg_runner: leg_runner,
-          receipt_dir: Rails.root.join("tmp/test-migration-recoveries-#{SecureRandom.hex(4)}")
+          receipt_dir: Rails.root.join("tmp/test-migration-recoveries-#{SecureRandom.hex(4)}"),
+          require_recovery_live_gate: false
         )
       }
     )

@@ -80,6 +80,19 @@ class MigrationRouteProofRegistry
     }
   end
 
+  def resolved_nado_target_continuation?(position:, pending_event:)
+    return false unless pending_event["to_venue"] == "nado"
+
+    from = pending_event["from_venue"]
+    to = pending_event["to_venue"]
+    route = route_status(position: position, from: from, to: to)
+    return false unless route[:status] == STATUSES[:ready] && route[:continuation_receipt].present?
+
+    continuation_events(position: position, from: from, to: to).any? do |event|
+      continuation_proof?(event) && continuation_matches_pending?(continuation: event, pending: pending_event)
+    end
+  end
+
   private
 
   attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :now, :source_commit, :stale_after
@@ -142,6 +155,26 @@ class MigrationRouteProofRegistry
     rescue SystemCallError
       []
     end
+  end
+
+  def continuation_events(position:, from:, to:)
+    events([ continuation_dir ])
+      .select { |event| event["position_id"].to_s == position.id.to_s && event["from_venue"] == from && event["to_venue"] == to }
+  end
+
+  def continuation_matches_pending?(continuation:, pending:)
+    continuation_id = continuation["pending_migration_id"].presence
+    pending_id = pending["pending_migration_id"].presence
+    return true if continuation_id && pending_id && continuation_id == pending_id
+
+    continuation_digest = continuation["nado_target_digest"].presence || continuation["nado_target_exchange_order_id"].presence
+    pending_digest = pending["nado_target_digest"].presence || Array(pending["exchange_order_ids"]).first.presence
+    return true if continuation_digest && pending_digest && continuation_digest == pending_digest
+
+    continuation["from_venue"] == pending["from_venue"] &&
+      continuation["to_venue"] == pending["to_venue"] &&
+      continuation_digest.present? &&
+      Array(pending["exchange_order_ids"]).map(&:to_s).include?(continuation_digest.to_s)
   end
 
   def dry_run_proof?(event)

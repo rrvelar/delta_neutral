@@ -92,7 +92,8 @@ class MigrationTargetNadoContinuation
       dry_run: !live,
       live: live,
       confirmation: confirmation,
-      env: env
+      env: env,
+      require_recovery_live_gate: false
     )
   end
 
@@ -112,7 +113,7 @@ class MigrationTargetNadoContinuation
 
   def receipt_for(pending:, recovery:, blockers:, status:)
     recovery_receipt = recovery&.receipt || {}
-    target_digest = pending && Array(pending["exchange_order_ids"]).first
+    target_digest = pending && (pending["nado_target_digest"].presence || Array(pending["exchange_order_ids"]).first)
     {
       action: "continue_target_first_after_nado_confirmed",
       route: "#{from}->#{to}",
