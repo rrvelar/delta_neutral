@@ -251,11 +251,11 @@ class AerodromeProductionDashboardStatus
   end
 
   def max_short_eth
-    decimal_env("AERODROME_MAX_SHORT_ETH")
+    RiskSettings.cap_for(venue: execution_venue, kind: :short_eth).value
   end
 
   def max_short_notional_usd
-    decimal_env("AERODROME_MAX_SHORT_NOTIONAL_USD")
+    RiskSettings.cap_for(venue: execution_venue, kind: :notional_usd).value
   end
 
   def emergency_close_max_eth

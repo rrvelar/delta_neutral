@@ -141,6 +141,7 @@ class AerodromeDashboardHedgeAction
       hedge_venue_preview: venue_preview(target: target, drift: drift, current_short: current_short),
       hedge_venue_live_preflight: hedge_venue_live_preflight(target: target, drift: drift, current_short: current_short, before_position: before_position),
       hedge_venue_account_state: venue.account_state,
+      cap_diagnostics: cap_diagnostics(target: target, current_short: current_short, drift: drift),
       target_short_eth: target&.to_s("F"),
       target_notional_usd: target && eth_price ? (target * eth_price).to_s("F") : nil,
       current_short_eth: current_short&.to_s("F"),
@@ -186,21 +187,41 @@ class AerodromeDashboardHedgeAction
     blockers << "Mellow Autopilot pro-rata exposure is not hedge-ready" if @position.mellow_autopilot? && !@position.hedge_ready?
     blockers << "WETH/ETH LP exposure is unavailable" unless weth_amount
     blockers << "WETH/ETH price is unavailable" unless eth_price
+    short_cap = RiskSettings.cap_for(venue: @venue_key, kind: :short_eth)
+    notional_cap = RiskSettings.cap_for(venue: @venue_key, kind: :notional_usd)
     blockers.concat(AerodromeProductionRiskLimits.runtime_cap_errors(
-      max_short_eth: decimal_env("AERODROME_MAX_SHORT_ETH"),
-      max_short_notional_usd: decimal_env("AERODROME_MAX_SHORT_NOTIONAL_USD"),
+      max_short_eth: short_cap.value,
+      max_short_notional_usd: notional_cap.value,
       emergency_close_max_eth: decimal_env("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH")
     ))
-    if target && decimal_env("AERODROME_MAX_SHORT_ETH") && target > decimal_env("AERODROME_MAX_SHORT_ETH")
-      blockers << "target hedge exceeds AERODROME_MAX_SHORT_ETH"
-    end
-    if target && eth_price && decimal_env("AERODROME_MAX_SHORT_NOTIONAL_USD") && target * eth_price > decimal_env("AERODROME_MAX_SHORT_NOTIONAL_USD")
-      blockers << "target hedge notional exceeds AERODROME_MAX_SHORT_NOTIONAL_USD"
-    end
-    if decimal_env("AERODROME_MAX_SHORT_ETH") && current_short > decimal_env("AERODROME_MAX_SHORT_ETH")
-      blockers << "current ETH short exceeds AERODROME_MAX_SHORT_ETH"
-    end
+    blockers.concat(cap_blockers(target: target, current_short: current_short))
     blockers.uniq
+  end
+
+  def cap_blockers(target:, current_short:)
+    diagnostics = cap_diagnostics(target: target, current_short: current_short, drift: target ? target - current_short : nil)
+    blockers = []
+    short_cap = diagnostics.fetch(:short_cap)
+    order_cap = diagnostics.fetch(:order_cap)
+    notional_cap = diagnostics.fetch(:notional_cap)
+
+    blockers << "cap not configured for #{short_cap.fetch(:cap_key)}" if cap_checked? && short_cap.fetch(:cap_value).blank?
+    blockers << "cap not configured for #{order_cap.fetch(:cap_key)}" if cap_checked? && order_cap.fetch(:cap_value).blank?
+    blockers << "cap not configured for #{notional_cap.fetch(:cap_key)}" if cap_checked? && eth_price && notional_cap.fetch(:cap_value).blank?
+    if short_cap.fetch(:cap_blocked)
+      blockers << "target hedge exceeds #{short_cap.fetch(:cap_key)}: target=#{short_cap.fetch(:target_short_eth)} ETH requested=#{short_cap.fetch(:requested_size_eth)} ETH cap=#{short_cap.fetch(:cap_value)} ETH minimum_required=#{short_cap.fetch(:minimum_required_cap)} ETH"
+    end
+    if notional_cap.fetch(:cap_blocked)
+      blockers << "target hedge notional exceeds #{notional_cap.fetch(:cap_key)}: expected=#{notional_cap.fetch(:expected_after_notional_usd)} USD cap=#{notional_cap.fetch(:cap_value)} USD"
+    end
+    if order_cap.fetch(:cap_blocked)
+      blockers << "requested order size exceeds #{order_cap.fetch(:cap_key)}: requested=#{order_cap.fetch(:requested_size_eth)} ETH cap=#{order_cap.fetch(:cap_value)} ETH"
+    end
+    blockers
+  end
+
+  def cap_checked?
+    @action.in?(%w[open rebalance])
   end
 
   def read_only_venue_preview?
@@ -413,6 +434,70 @@ class AerodromeDashboardHedgeAction
     else
       BigDecimal("0")
     end
+  end
+
+  def cap_diagnostics(target:, current_short:, drift:)
+    requested = preflight_target_size(target: target || BigDecimal("0"), drift: drift, current_short: current_short || BigDecimal("0"))
+    expected_after = expected_after_short(target: target, current_short: current_short, drift: drift)
+    short_cap = RiskSettings.cap_for(venue: @venue_key, kind: :short_eth)
+    order_cap = RiskSettings.cap_for(venue: @venue_key, kind: :order_size_eth)
+    notional_cap = RiskSettings.cap_for(venue: @venue_key, kind: :notional_usd)
+    expected_notional = expected_after && eth_price ? expected_after * eth_price : nil
+    {
+      venue: @venue_key,
+      action: @action,
+      settings_path: Rails.application.routes.url_helpers.edit_settings_path(anchor: "risk-settings"),
+      short_cap: cap_payload(short_cap, target: target, current_short: current_short, requested: requested, expected_after: expected_after),
+      order_cap: order_cap_payload(order_cap, requested: requested),
+      notional_cap: notional_cap_payload(notional_cap, expected_notional: expected_notional)
+    }
+  end
+
+  def expected_after_short(target:, current_short:, drift:)
+    return current_short unless cap_checked?
+    return target if @action == "open"
+    return current_short + drift if @action == "rebalance" && drift&.positive?
+
+    current_short
+  end
+
+  def cap_payload(cap, target:, current_short:, requested:, expected_after:)
+    cap_value = cap.value
+    {
+      selected_venue: @venue_key,
+      action: @action,
+      target_short_eth: target&.to_s("F"),
+      current_short_eth: current_short&.to_s("F"),
+      requested_size_eth: requested&.to_s("F"),
+      expected_after_short_eth: expected_after&.to_s("F"),
+      cap_key: cap.key,
+      cap_value: cap_value&.to_s("F"),
+      cap_source: cap.source,
+      cap_blocked: cap_checked? && cap_value.present? && expected_after.present? && expected_after > cap_value,
+      minimum_required_cap: expected_after&.to_s("F")
+    }
+  end
+
+  def order_cap_payload(cap, requested:)
+    cap_value = cap.value
+    {
+      cap_key: cap.key,
+      cap_value: cap_value&.to_s("F"),
+      cap_source: cap.source,
+      requested_size_eth: requested&.to_s("F"),
+      cap_blocked: cap_checked? && cap_value.present? && requested.present? && requested > cap_value
+    }
+  end
+
+  def notional_cap_payload(cap, expected_notional:)
+    cap_value = cap.value
+    {
+      cap_key: cap.key,
+      cap_value: cap_value&.to_s("F"),
+      cap_source: cap.source,
+      expected_after_notional_usd: expected_notional&.to_s("F"),
+      cap_blocked: cap_checked? && cap_value.present? && expected_notional.present? && expected_notional > cap_value
+    }
   end
 
   def nado_action_size(target:, drift:, current_short:)

@@ -29,6 +29,29 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     assert_match "These settings do not indicate the current production venue.", response.body
   end
 
+  test "edit shows risk settings and updates supported cap with confirmation" do
+    get edit_settings_path
+
+    assert_response :success
+    assert_match "Risk Limits", response.body
+    assert_match "ETHEREAL_MAX_SHORT_ETH", response.body
+    assert_no_match "HYPERLIQUID_MAX_SHORT_ETH", response.body
+
+    assert_difference "RiskSetting.count", 1 do
+      patch risk_settings_path, params: {
+        key: "ETHEREAL_MAX_SHORT_ETH",
+        value: "2.0",
+        reason: "new LP size",
+        confirmation: RiskSettings::INCREASE_CONFIRMATION
+      }
+    end
+
+    assert_redirected_to edit_settings_path(anchor: "risk-settings")
+    setting = RiskSetting.find_by!(key: "ETHEREAL_MAX_SHORT_ETH")
+    assert_equal "2.0", setting.value
+    assert_equal users(:one), setting.updated_by
+  end
+
   test "navbar settings link points to valid settings route" do
     get root_path
 

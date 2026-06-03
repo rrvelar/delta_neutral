@@ -7,6 +7,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
       "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_MAX_ORDER_SIZE_ETH" => "1.5",
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
       "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED" => "true",
@@ -418,7 +419,35 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       report = build_action(position: position, action: "open", positions: [ nil ]).report
 
       assert_equal "blocked", report.fetch(:status)
-      assert_includes report.fetch(:blockers), "target hedge exceeds AERODROME_MAX_SHORT_ETH"
+      assert report.fetch(:blockers).any? { |blocker| blocker.include?("target hedge exceeds AERODROME_MAX_SHORT_ETH") }
+      assert_equal "AERODROME_MAX_SHORT_ETH", report.dig(:cap_diagnostics, :short_cap, :cap_key)
+      assert_equal "1.6", report.dig(:cap_diagnostics, :short_cap, :target_short_eth)
+      assert_equal "1.5", report.dig(:cap_diagnostics, :short_cap, :cap_value)
+    end
+  end
+
+  test "venue specific cap diagnostics override generic cap" do
+    position = create_position(asset0_amount: "1.25", target: "1.0")
+
+    with_env(@env.merge("AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "2.5", "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "2.5", "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "2.5", "AERODROME_MAX_SHORT_ETH" => "1.0", "ETHEREAL_MAX_SHORT_ETH" => "2.0", "ETHEREAL_MAX_ORDER_SIZE_ETH" => "2.0")) do
+      report = build_action(position: position, action: "open", venue: "ethereal", positions: [ nil ]).report
+
+      assert_equal "preview", report.fetch(:status)
+      assert_equal "ETHEREAL_MAX_SHORT_ETH", report.dig(:cap_diagnostics, :short_cap, :cap_key)
+      assert_equal "2.0", report.dig(:cap_diagnostics, :short_cap, :cap_value)
+      assert_empty report.fetch(:blockers)
+    end
+  end
+
+  test "missing cap fails closed" do
+    position = create_position(asset0_amount: "1.25", target: "1.0")
+
+    with_env(@env.merge("AERODROME_MAX_SHORT_ETH" => nil, "AERODROME_MAX_ORDER_SIZE_ETH" => nil, "ETHEREAL_MAX_SHORT_ETH" => nil, "ETHEREAL_MAX_ORDER_SIZE_ETH" => nil)) do
+      report = build_action(position: position, action: "open", venue: "ethereal", positions: [ nil ]).report
+
+      assert_equal "blocked", report.fetch(:status)
+      assert_includes report.fetch(:blockers), "cap not configured for ETHEREAL_MAX_SHORT_ETH"
+      assert_includes report.fetch(:blockers), "cap not configured for ETHEREAL_MAX_ORDER_SIZE_ETH"
     end
   end
 

@@ -1346,6 +1346,44 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Nado Hedge Actions", response.body
   end
 
+  test "show active unhedged position puts hedge tab and open hedge risk cap near top" do
+    position = create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+
+    with_env(
+      "ETHEREAL_MAX_SHORT_ETH" => "1.0",
+      "ETHEREAL_MAX_ORDER_SIZE_ETH" => "1.0",
+      "ETHEREAL_MAX_NOTIONAL_USD" => "5000",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "2.0",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "5000",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "2.0",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "2.0"
+    ) do
+      get position_path(position)
+    end
+
+    assert_response :success
+    assert_match "#hedge", response.body
+    assert_match "Hedge Control Center", response.body
+    assert_match "Open Hedge Preview", response.body
+    assert_match "Risk Cap Status", response.body
+    assert_match "ETHEREAL_MAX_SHORT_ETH", response.body
+    assert_match "Minimum required cap", response.body
+    assert_match "Active production position", response.body
+    assert_no_match "Make Active Production Position", response.body
+  end
+
+  test "show inactive position exposes make active and inactive label" do
+    position = create_aerodrome_position(active: false)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: false, execution_venue: "ethereal")
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Inactive / archived", response.body
+    assert_match "Make Active Production Position", response.body
+  end
+
   test "hedge venue selection persists to hedge" do
     position = create_aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true)
@@ -2806,6 +2844,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4000",
       "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_MAX_SHORT_ETH" => "1.5",
+      "AERODROME_MAX_ORDER_SIZE_ETH" => "1.5",
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4000",
       "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6",
       "AERODROME_DASHBOARD_HEDGE_EXECUTION_ENABLED" => "true",

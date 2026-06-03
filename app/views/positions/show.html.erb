@@ -178,6 +178,23 @@ end %>
 rescue ArgumentError
   false
 end %>
+<% risk_short_cap = RiskSettings.cap_for(venue: selected_venue, kind: :short_eth) %>
+<% risk_order_cap = RiskSettings.cap_for(venue: selected_venue, kind: :order_size_eth) %>
+<% risk_target_short = target_eth_short.present? ? BigDecimal(target_eth_short.to_s) : nil rescue nil %>
+<% risk_current_short = current_short_eth.present? ? BigDecimal(current_short_eth.to_s) : BigDecimal("0") rescue BigDecimal("0") %>
+<% risk_drift = drift_eth.present? ? BigDecimal(drift_eth.to_s) : (risk_target_short ? risk_target_short - risk_current_short : nil) rescue nil %>
+<% risk_requested_size = case recommended_action_key
+when :open then risk_target_short
+when :rebalance then risk_drift&.abs
+when :close then risk_current_short
+end %>
+<% risk_expected_after = case recommended_action_key
+when :open then risk_target_short
+when :rebalance then risk_drift&.positive? ? risk_current_short + risk_drift : risk_current_short
+else risk_current_short
+end %>
+<% risk_cap_blocked = risk_short_cap.value.present? && risk_expected_after.present? && risk_expected_after > risk_short_cap.value %>
+<% risk_order_blocked = risk_order_cap.value.present? && risk_requested_size.present? && risk_requested_size > risk_order_cap.value %>
 
 <div class="space-y-8">
   <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20">
@@ -241,6 +258,48 @@ end %>
       </div>
     </div>
   </section>
+
+  <% if aerodrome %>
+    <nav class="sticky top-0 z-10 -mx-4 border-y border-gray-800 bg-gray-950/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
+      <div class="flex gap-2 overflow-x-auto text-sm">
+        <% [
+          [ "Overview", "#overview" ],
+          [ "Hedge", "#hedge" ],
+          [ "Migration", "#migration" ],
+          [ "Routes", "#routes" ],
+          [ "Accounting", "#accounting" ],
+          [ "Diagnostics", "#diagnostics" ],
+          [ "Settings", "#settings" ]
+        ].each do |label, href| %>
+          <a href="<%= href %>" class="whitespace-nowrap rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-gray-200 hover:bg-gray-800"><%= label %></a>
+        <% end %>
+      </div>
+    </nav>
+
+    <section id="overview" class="grid grid-cols-1 gap-4 lg:grid-cols-4">
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <p class="text-xs uppercase tracking-wide text-gray-500">LP Position</p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= @position.asset0 %>/<%= @position.asset1 %></p>
+        <p class="mt-1 text-xs text-gray-500"><%= @position.active? ? "Active production position" : "Inactive / archived" %> · <%= @position.external_id %></p>
+        <p class="mt-3 text-sm text-gray-300"><%= format_venue_eth_amount(@position.asset0_amount) %> WETH · <%= amount_display(@position.asset1_amount, precision: 2) %> USDC</p>
+      </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <p class="text-xs uppercase tracking-wide text-gray-500">Hedge Target</p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= format_venue_eth_amount(target_eth_short) %> ETH target</p>
+        <p class="mt-1 text-xs text-gray-500">Current <%= format_venue_eth_amount(current_short_eth) %> · drift <%= format_venue_eth_amount(drift_eth) %> · tolerance <%= format_venue_eth_amount(tolerance_eth) %></p>
+      </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <p class="text-xs uppercase tracking-wide text-gray-500">Selected Venue</p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= selected_venue_name %></p>
+        <p class="mt-1 text-xs text-gray-500"><%= live_status_label %> · <%= auto_operational_label %> · signer <%= signer_label %></p>
+      </div>
+      <div class="rounded-xl border <%= selected_action_blockers.present? || risk_cap_blocked || risk_order_blocked ? 'border-yellow-800 bg-yellow-950/20' : 'border-gray-800 bg-gray-900' %> p-4">
+        <p class="text-xs uppercase tracking-wide text-gray-500">Next Action</p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= recommended_action_key.to_s.humanize %></p>
+        <p class="mt-1 text-xs text-gray-500">Requested <%= format_venue_eth_amount(risk_requested_size) %> ETH · <%= selected_action_blockers.first || (risk_cap_blocked ? "Blocked by risk limit" : "Preview available") %></p>
+      </div>
+    </section>
+  <% end %>
 
   <% if aerodrome %>
     <section class="grid grid-cols-1 gap-3 lg:grid-cols-4">
@@ -416,7 +475,7 @@ end %>
     else
       "BLOCKED"
     end %>
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="migration" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Operations / Migration Safety</p>
@@ -601,7 +660,7 @@ end %>
         </div>
       </div>
 
-      <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+      <div id="routes" class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
         <div class="flex items-start justify-between gap-3">
           <div>
             <p class="text-xs uppercase tracking-wide text-gray-500">Live Autopilot Readiness</p>
@@ -758,7 +817,7 @@ end %>
       </div>
     </section>
 
-    <section>
+    <section id="diagnostics">
       <div class="mb-3 flex items-center justify-between">
         <h2 class="text-lg font-semibold text-white">Portfolio Snapshot</h2>
         <div class="flex flex-wrap items-center justify-end gap-2 text-xs">
@@ -797,7 +856,7 @@ end %>
       </div>
     </section>
 
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="hedge" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Hedge Control Center</p>
@@ -884,6 +943,43 @@ end %>
                 <p class="mt-3 border-t border-gray-800 pt-3 text-green-200">Extended auto is a no-op because the current short is inside tolerance.</p>
               <% end %>
             </div>
+          <% end %>
+        </div>
+
+        <div class="rounded-xl border <%= risk_cap_blocked || risk_order_blocked || risk_short_cap.value.blank? ? 'border-yellow-800 bg-yellow-950/20' : 'border-gray-800 bg-gray-950/60' %> p-4 xl:col-span-2">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-xs uppercase tracking-wide text-gray-500">Risk Cap Status</p>
+              <h3 class="mt-1 text-lg font-semibold text-white"><%= risk_cap_blocked || risk_order_blocked ? "Blocked by risk limit" : "Risk limits loaded" %></h3>
+              <p class="mt-1 text-sm text-gray-400">Venue-specific caps override generic Aerodrome caps. Missing caps fail closed.</p>
+            </div>
+            <a href="<%= edit_settings_path(anchor: 'risk-settings') %>" class="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500">Risk Settings</a>
+          </div>
+          <div class="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+            <div class="rounded-lg border border-gray-800 bg-gray-950/70 p-3">
+              <p class="text-xs text-gray-500">Target hedge</p>
+              <p class="mt-1 text-white"><%= format_venue_eth_amount(risk_target_short) %> ETH</p>
+            </div>
+            <div class="rounded-lg border border-gray-800 bg-gray-950/70 p-3">
+              <p class="text-xs text-gray-500">Current <%= selected_venue_name %> short</p>
+              <p class="mt-1 text-white"><%= format_venue_eth_amount(risk_current_short) %> ETH</p>
+            </div>
+            <div class="rounded-lg border border-gray-800 bg-gray-950/70 p-3">
+              <p class="text-xs text-gray-500">Requested <%= recommended_action_key %></p>
+              <p class="mt-1 text-white"><%= format_venue_eth_amount(risk_requested_size) %> ETH</p>
+            </div>
+            <div class="rounded-lg border border-gray-800 bg-gray-950/70 p-3 md:col-span-2">
+              <p class="text-xs text-gray-500">Current cap</p>
+              <p class="mt-1 break-words font-mono text-xs text-white"><%= risk_short_cap.key %> = <%= risk_short_cap.value&.to_s("F") || "not configured" %> ETH</p>
+              <p class="mt-1 text-xs text-gray-500">Source: <%= risk_short_cap.source %></p>
+            </div>
+            <div class="rounded-lg border border-gray-800 bg-gray-950/70 p-3">
+              <p class="text-xs text-gray-500">Minimum required cap</p>
+              <p class="mt-1 text-white"><%= format_venue_eth_amount(risk_expected_after) %> ETH</p>
+            </div>
+          </div>
+          <% if risk_cap_blocked || risk_order_blocked || risk_short_cap.value.blank? %>
+            <p class="mt-4 text-sm text-yellow-100">Action: raise cap intentionally, reduce LP size, or choose another supported venue. Cap increases require <%= RiskSettings::INCREASE_CONFIRMATION %>.</p>
           <% end %>
         </div>
 
@@ -1056,7 +1152,7 @@ end %>
       </div>
     </section>
 
-    <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+    <section id="accounting" class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Auto-Rebalance Status</p>
@@ -1364,7 +1460,7 @@ end %>
             </details>
           </div>
 
-      <div class="space-y-4">
+      <div id="settings" class="space-y-4">
         <details class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
           <summary class="cursor-pointer text-sm font-semibold text-white">Position Details</summary>
           <dl class="mt-4 space-y-2 text-sm">

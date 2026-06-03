@@ -11,6 +11,7 @@ end
 FileUtils.chdir APP_ROOT do
   if ARGV.include?("--print-installer-defaults")
     require_relative "../app/services/hedge_venues"
+    require_relative "../app/services/risk_settings"
     require_relative "../lib/setup_defaults"
     puts JSON.pretty_generate(SetupDefaults.new.report)
     exit 0
