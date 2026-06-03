@@ -216,7 +216,7 @@ class ExtendedAutoReadiness
   end
 
   def bool_env(key)
-    ActiveModel::Type::Boolean.new.cast(@env[key])
+    OperationalSettings.enabled?(key, env: @env)
   end
 
   def decimal_string(value)

@@ -8,6 +8,8 @@ class DashboardTaskTest < ActiveSupport::TestCase
     Rake::Task["dashboard:refresh_position_snapshot"].reenable if Rake::Task.task_defined?("dashboard:refresh_position_snapshot")
     Rake::Task["dashboard:production_health"].reenable if Rake::Task.task_defined?("dashboard:production_health")
     Rake::Task["dashboard:production_smoke"].reenable if Rake::Task.task_defined?("dashboard:production_smoke")
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
   end
 
   test "refresh all position snapshots runs all read-only refreshers" do
@@ -242,6 +244,84 @@ class DashboardTaskTest < ActiveSupport::TestCase
           assert_not_includes payload.fetch("active_auto_blockers"), "EXTENDED_AUTO_REBALANCE_ENABLED must be true"
           assert_equal "0.8829", payload.dig("combined_hedge", "ethereal_short_eth")
           assert_equal true, payload.dig("combined_hedge", "combined_inside_tolerance")
+          assert_equal 0, payload.fetch("orders_submitted")
+          assert_equal 0, payload.fetch("signatures_created")
+        end
+      end
+    end
+  end
+
+  test "production smoke reports DB enabled Ethereal auto without missing env blocker" do
+    OperationalSetting.delete_all
+    position = aerodrome_position
+    position.hedge.update!(execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.8736",
+      tolerance_ratio: "0.03",
+      tolerance_abs_eth: "0.0562",
+      combined_short_eth: "1.6087",
+      drift_eth: "0.2649",
+      inside_tolerance: false,
+      extended_short_eth: "0",
+      ethereal_short_eth: "1.6087",
+      nado_short_eth: "0",
+      extended_status: "flat",
+      ethereal_status: "active",
+      nado_status: "flat",
+      signer_status: "ok"
+    )
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+    readiness = Object.new
+    readiness.define_singleton_method(:report) do |position:|
+      auto_enabled = OperationalSettings.enabled?(
+        "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED",
+        env: { "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false" }
+      )
+      blockers = []
+      blockers << "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" unless auto_enabled
+      {
+        execution_venue: "ethereal",
+        active_auto_venue: "ethereal",
+        active_current_short_eth: "1.6087",
+        active_target_short_eth: "1.8736",
+        active_drift_eth: "0.2649",
+        active_tolerance_eth: "0.0562",
+        active_within_tolerance: false,
+        active_planned_auto_action: "increase_short",
+        active_auto_enabled: auto_enabled,
+        active_live_enabled: true,
+        active_auto_ready: blockers.empty?,
+        active_auto_blockers: blockers,
+        active_auto_warnings: [],
+        target_short_eth: "1.8736",
+        current_short_eth: "1.6087",
+        ethereal_current_short_eth: "1.6087",
+        within_tolerance: false,
+        continuous_auto_ready: blockers.empty?,
+        planned_auto_action: "increase_short",
+        blockers: blockers,
+        warnings: []
+      }
+    end
+    mellow = { status: "ok", exposure_source: "current_share_token_resolver", successful_method: "previewMint(uint256)" }
+
+    MellowCurrentExposureResolver.stub(:new, ->(position:) { resolver_result(mellow) }) do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        with_position_id(position.id) do
+          out, = capture_io { Rake::Task["dashboard:production_smoke"].invoke }
+          payload = JSON.parse(out)
+
+          assert_equal true, payload.fetch("active_auto_enabled")
+          assert_equal true, payload.fetch("active_auto_ready")
+          assert_equal true, payload.fetch("continuous_auto_ready")
+          assert_equal "increase_short", payload.fetch("active_planned_auto_action")
+          assert_equal [], payload.fetch("active_auto_blockers")
+          assert_not_includes payload.to_s, "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true"
           assert_equal 0, payload.fetch("orders_submitted")
           assert_equal 0, payload.fetch("signatures_created")
         end

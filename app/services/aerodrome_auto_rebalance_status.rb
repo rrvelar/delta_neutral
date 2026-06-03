@@ -168,6 +168,8 @@ class AerodromeAutoRebalanceStatus
   end
 
   def bool_env(key, default: false)
+    return OperationalSettings.enabled?(key) if OperationalSettings.allowed_key?(key)
+
     ActiveModel::Type::Boolean.new.cast(ENV.fetch(key, default.to_s))
   end
 
@@ -210,7 +212,7 @@ class AerodromeAutoRebalanceStatus
 
   def nado_env_gates
     {
-      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => ENV.fetch("AERODROME_NADO_AUTO_REBALANCE_ENABLED", nil),
+      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => operational_value("AERODROME_NADO_AUTO_REBALANCE_ENABLED"),
       "AERODROME_NADO_HEDGE_LIVE_ENABLED" => ENV.fetch("AERODROME_NADO_HEDGE_LIVE_ENABLED", nil),
       "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
@@ -220,7 +222,7 @@ class AerodromeAutoRebalanceStatus
   def ethereal_env_gates
     {
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED", nil),
-      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => ENV.fetch("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", nil),
+      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => operational_value("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"),
       "AERODROME_MAX_SHORT_ETH" => ENV.fetch("AERODROME_MAX_SHORT_ETH", nil),
       "AERODROME_MAX_SHORT_NOTIONAL_USD" => ENV.fetch("AERODROME_MAX_SHORT_NOTIONAL_USD", nil)
     }
@@ -230,7 +232,12 @@ class AerodromeAutoRebalanceStatus
     {
       "EXTENDED_ENABLED" => ENV.fetch("EXTENDED_ENABLED", nil),
       "EXTENDED_LIVE_ENABLED" => ENV.fetch("EXTENDED_LIVE_ENABLED", nil),
-      "EXTENDED_AUTO_REBALANCE_ENABLED" => ENV.fetch("EXTENDED_AUTO_REBALANCE_ENABLED", nil)
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => operational_value("EXTENDED_AUTO_REBALANCE_ENABLED")
     }
+  end
+
+  def operational_value(key)
+    value = OperationalSettings.get(key)
+    { "value" => value.raw_value, "enabled" => value.enabled, "source" => value.source }
   end
 end

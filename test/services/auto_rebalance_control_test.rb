@@ -46,6 +46,19 @@ class AutoRebalanceControlTest < ActiveSupport::TestCase
     assert_equal 0, right.payload.fetch(:signatures_created)
   end
 
+  test "DB operational override false beats env true and env fallback works without DB row" do
+    with_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "true") do
+      assert_equal true, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+
+      OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: false)
+
+      assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+      value = OperationalSettings.get("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+      assert_equal "DB setting", value.source
+      assert_equal false, value.enabled
+    end
+  end
+
   test "rejects unsupported venue and inactive position" do
     unsupported = AutoRebalanceControl.new(position: ethereal_position, venue: "hyperliquid").set!(
       enabled: true,

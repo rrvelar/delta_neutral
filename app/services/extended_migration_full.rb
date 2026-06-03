@@ -338,6 +338,8 @@ class ExtendedMigrationFull
   end
 
   def bool_env(key)
+    return OperationalSettings.enabled?(key, env: @env) if OperationalSettings.allowed_key?(key)
+
     ActiveModel::Type::Boolean.new.cast(@env[key])
   end
 

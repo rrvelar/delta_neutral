@@ -3,6 +3,7 @@ require "test_helper"
 class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
   setup do
     DashboardSnapshotRefresh.extended_optional_attempts.clear
+    OperationalSetting.delete_all
   end
 
   test "refresh stores current venue readbacks without using rebalance history" do
@@ -163,6 +164,31 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_nil snapshot.combined_short_eth
     assert_equal "unknown", snapshot.extended_status
     assert_equal "not_configured", snapshot.extended_source_status
+  end
+
+  test "refresh stores DB operational auto overrides over env" do
+    position = create_position_with_hedge
+    position.hedge.update!(execution_venue: "ethereal")
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false)
+    env = snapshot_env.merge(
+      "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false",
+      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "true"
+    )
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: env,
+      venue_builder: fake_builder(
+        "extended" => { position: nil, account_state: { open_orders_count: 0 } },
+        "ethereal" => { position: { short_size: "1.25" }, account_state: { open_orders_count: 0 } },
+        "nado" => { position: nil, account_state: { open_orders_count: 0 } }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    assert_equal true, snapshot.ethereal_auto_enabled
+    assert_equal false, snapshot.nado_auto_enabled
   end
 
   test "uses dashboard snapshot timeout instead of page section timeout" do

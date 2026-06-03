@@ -135,6 +135,8 @@ class PositionProductionState
   end
 
   def bool_env(key)
+    return OperationalSettings.enabled?(key) if OperationalSettings.allowed_key?(key)
+
     ActiveModel::Type::Boolean.new.cast(ENV[key])
   end
 

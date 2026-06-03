@@ -218,7 +218,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Portfolio Snapshot", response.body
     assert_match "Selected Venue: Nado", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Unknown", response.body
+    assert_match "Auto Off", response.body
     assert_match "Aerodrome Slipstream", response.body
     assert_match "Token ID", response.body
     assert_match "315985", response.body
@@ -318,7 +318,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0.625000", response.body
     assert_match "Current Nado ETH short", response.body
     assert_match "Live Gated", response.body
-    assert_match "Auto Unknown", response.body
+    assert_match "Auto Off", response.body
     assert_match "Initial render uses cached values; diagnostics load separately.", response.body
     assert_match "Recent Rebalance History", response.body
     assert_match rebalance.id.to_s, response.body
@@ -465,7 +465,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Extended production venue", response.body
-    assert_match "Auto: Auto Unknown", response.body
+    assert_match "Auto: Auto Off", response.body
     assert_match "Signer: Unknown", response.body
     assert_match "Required: 1x isolated-equivalent", response.body
     assert_match "Migration tools", response.body
@@ -515,7 +515,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Current Extended ETH short", response.body
     assert_operator response.body.scan("1.250000").size, :>=, 2
-    assert_match "Auto Active", response.body
+    assert_match "Auto On", response.body
     assert_no_match "Auto Paused", response.body
     assert_operator response.body.scan("Live preflight is loaded separately.").size, :<=, 1
     assert_match "Emergency / manual close tools", response.body
@@ -598,7 +598,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Unknown Margin", response.body
     assert_no_match(/Effective leverage.*Unavailable/m, response.body)
     assert_match "$2.47", response.body
-    assert_match "Auto Active", response.body
+    assert_match "Auto On", response.body
     assert_match "In tolerance", response.body
     assert_no_match "Timeout::Error", response.body
   end
@@ -1516,6 +1516,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       ethereal_short_eth: "1.6",
       extended_short_eth: "0",
       nado_short_eth: "0",
+      ethereal_auto_enabled: false,
       signer_status: "ok"
     )
 
@@ -1557,6 +1558,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Auto On", response.body
+    assert_match "Auto: Auto On", response.body
+    assert_no_match "Auto: Auto Off", response.body
     assert_match "Disable Ethereal Auto", response.body
     assert_match OperationalSettings::DISABLE_CONFIRMATIONS.fetch("ethereal"), response.body
   end

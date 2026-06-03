@@ -42,8 +42,8 @@ elsif selected_venue == "extended"
 else
   ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_ENABLED", "false")) && !ActiveModel::Type::Boolean.new.cast(ENV.fetch("AERODROME_HEDGE_PAUSED", "true"))
 end %>
-<% auto_status_label = auto_gate_enabled ? "Auto Active" : "Auto Off" %>
-<% auto_operational_label = cached_snapshot.dig(:auto_status, :label).presence || auto_status_label %>
+<% auto_status_label = auto_gate_enabled ? "Auto On" : "Auto Off" %>
+<% auto_operational_label = auto_status_label %>
 <% signer_label = cached_snapshot.dig(:signer_status, :label).presence || "Unknown" %>
 <% next_action = venue_dashboard[:next_action] || (rebalance_needed ? "rebalance" : "no-op") %>
 <% action_preflights = venue_dashboard[:action_live_preflights] || {} %>

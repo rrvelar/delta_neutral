@@ -7,6 +7,8 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
     ENV["HYPERLIQUID_PRIVATE_KEY"] ||= "0xtest"
     ENV["HYPERLIQUID_WALLET_ADDRESS"] ||= "0xwallet"
     ENV["HYPERLIQUID_TESTNET"] ||= "true"
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
   end
 
   private
@@ -690,6 +692,69 @@ class HedgeSyncJobTest < ActiveSupport::TestCase
 
     assert_equal 1, runner.calls.size
     assert_equal false, runner.calls.first.fetch(:one_shot)
+  end
+
+  test "ethereal continuous auto decision honors DB auto override when env is false" do
+    hedge = nado_mellow_hedge(weth_exposure: "1.2")
+    hedge.update!(execution_venue: "ethereal")
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+    readiness = Object.new
+    readiness.define_singleton_method(:report) do |position:|
+      auto_enabled = OperationalSettings.enabled?(
+        "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED",
+        env: { "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false" }
+      )
+      blockers = []
+      blockers << "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be true" unless auto_enabled
+      {
+        active_auto_venue: "ethereal",
+        active_auto_enabled: auto_enabled,
+        ethereal_auto_rebalance_enabled: auto_enabled,
+        active_live_enabled: true,
+        active_within_tolerance: false,
+        planned_auto_action: "increase_short",
+        active_planned_auto_action: "increase_short",
+        target_source: "position_asset0_amount",
+        target_short_eth: "1.2",
+        active_target_short_eth: "1.2",
+        current_short_eth: "1.0",
+        active_current_short_eth: "1.0",
+        requested_size_eth: "0.2",
+        side: "sell",
+        reduce_only: false,
+        continuous_auto_ready: blockers.empty?,
+        active_auto_ready: blockers.empty?,
+        auto_can_act: blockers.empty?,
+        blockers: blockers,
+        active_auto_blockers: blockers,
+        orders_submitted: 0,
+        signatures_created: 0
+      }
+    end
+    runner = ActiveAutoRebalanceStub.new(
+      HedgeVenueAutoRebalanceOnce::Result.new("no_op", [], [], {
+        venue: "ethereal",
+        source: "continuous_auto",
+        planned_auto_action: "increase_short",
+        orders_submitted: 0,
+        signatures_created: 0,
+        blockers: []
+      })
+    )
+
+    with_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false") do
+      HedgeVenueAutoReadiness.stub(:new, readiness) do
+        HedgeVenueAutoRebalanceOnce.stub(:new, runner) do
+          assert_no_difference "ShortRebalance.count" do
+            HedgeSyncJob.perform_now(hedge.id)
+          end
+        end
+      end
+    end
+
+    assert_equal 1, runner.calls.size
+    assert_equal false, runner.calls.first.fetch(:one_shot)
+    assert_equal true, runner.calls.first.fetch(:live)
   end
 
   test "nado continuous auto missing manual confirmation blocker is not recorded as failed rebalance" do

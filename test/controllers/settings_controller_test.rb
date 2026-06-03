@@ -204,6 +204,21 @@ class SettingsControllerTest < ActionDispatch::IntegrationTest
     old_live.nil? ? ENV.delete("AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED") : ENV["AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"] = old_live
   end
 
+  test "settings current production summary uses DB Ethereal auto override" do
+    position = create_extended_position
+    position.update!(source: Position::SOURCE_AERODROME_DIRECT, external_id: "71674988")
+    position.hedge.update!(execution_venue: "ethereal")
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
+
+    get edit_settings_path
+
+    assert_response :success
+    assert_match "Current Production Hedge", response.body
+    assert_select "p", text: "Ethereal auto"
+    assert_select "p", text: "Enabled"
+    assert_match "Disable Ethereal Auto", response.body
+  end
+
   test "navbar settings link points to valid settings route" do
     get root_path
 

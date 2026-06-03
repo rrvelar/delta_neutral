@@ -123,7 +123,7 @@ class MigrationRandomRotationDailyRunner
       status: decision.receipt[:status],
       blockers: decision.receipt[:blockers],
       warnings: decision.receipt[:warnings],
-      auto_enabled: ActiveModel::Type::Boolean.new.cast(env["MIGRATION_AUTO_ENABLED"]),
+      auto_enabled: bool_env("MIGRATION_AUTO_ENABLED"),
       daily_enabled: true,
       enabled_override: enabled_override,
       dry_run_only: true,
@@ -256,6 +256,8 @@ class MigrationRandomRotationDailyRunner
   end
 
   def bool_env(key)
+    return OperationalSettings.enabled?(key, env: env) if OperationalSettings.allowed_key?(key)
+
     ActiveModel::Type::Boolean.new.cast(env[key])
   end
 end
