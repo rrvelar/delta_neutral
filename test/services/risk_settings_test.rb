@@ -134,6 +134,32 @@ class RiskSettingsTest < ActiveSupport::TestCase
     assert_equal true, decrease.ok
   end
 
+  test "emergency close below max short is rejected" do
+    RiskSetting.create!(key: "AERODROME_MAX_SHORT_ETH", value: "2.1")
+
+    result = RiskSettings.set!(
+      key: "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH",
+      value: "1.6",
+      confirmation: RiskSettings::INCREASE_CONFIRMATION
+    )
+
+    assert_equal false, result.ok
+    assert_includes result.errors, "Cannot set Emergency close max ETH below AERODROME_MAX_SHORT_ETH. Emergency close limit must be at least the maximum hedge size."
+  end
+
+  test "emergency close above hard emergency ceiling is rejected" do
+    RiskSetting.create!(key: "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH", value: "2.3")
+
+    result = RiskSettings.set!(
+      key: "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH",
+      value: "2.4",
+      confirmation: RiskSettings::INCREASE_CONFIRMATION
+    )
+
+    assert_equal false, result.ok
+    assert_includes result.errors.first, "Cannot set Emergency close max ETH to 2.4 ETH because production hard emergency close max is 2.3 ETH"
+  end
+
   private
 
   def with_env(overrides)

@@ -1399,6 +1399,49 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Make Active Production Position", response.body
   end
 
+  test "show hedge tab presents recommended risk dependency fix" do
+    RiskSetting.delete_all
+    position = create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      selected_venue: "ethereal",
+      production_venue: "ethereal",
+      target_short_eth: "1.66",
+      combined_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_short_eth: "0",
+      drift_eth: "1.66",
+      inside_tolerance: false
+    )
+    {
+      "ETHEREAL_MAX_SHORT_ETH" => "2.3",
+      "ETHEREAL_MAX_ORDER_SIZE_ETH" => "2.3",
+      "ETHEREAL_MAX_NOTIONAL_USD" => "4200",
+      "AERODROME_MAX_SHORT_ETH" => "3.5",
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4200",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" => "4200",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4200"
+    }.each { |key, value| RiskSetting.create!(key: key, value: value) }
+
+    with_env("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6") do
+      get position_path(position, hedge_venue: "ethereal", tab: "hedge")
+    end
+
+    assert_response :success
+    assert_match "Recommended fix available", response.body
+    assert_match "Lower Global max short size from 3.5 to 2.1 ETH", response.body
+    assert_match "Set Emergency close max ETH from 1.6 to 2.1 ETH", response.body
+    assert_match "Apply recommended limits", response.body
+    assert_match RiskSettings::INCREASE_CONFIRMATION, response.body
+  end
+
   test "show initial render does not run slow hedge venue auto readiness" do
     position = create_aerodrome_position(active: true)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")

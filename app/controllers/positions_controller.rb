@@ -129,6 +129,7 @@ class PositionsController < ApplicationController
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
       @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
       @position_tab = selected_position_tab
+      @risk_recommendation = RiskLimitRecommendation.new(position: @position, venue: @selected_hedge_venue).report
       @current_auto_readiness = unavailable_extended_auto_readiness("Initial render uses cached dashboard snapshot; refresh diagnostics for venue readiness.")
       @current_extended_auto_readiness = @selected_hedge_venue == "extended" ? @current_auto_readiness : nil
       @selected_hedge_venue_dashboard = lightweight_selected_hedge_venue_dashboard

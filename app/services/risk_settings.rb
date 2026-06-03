@@ -91,14 +91,20 @@ class RiskSettings
     HedgeVenues.supported?(configured) ? HedgeVenues.normalize(configured) : HedgeVenues.default_supported(env: env)
   end
 
-  def self.set!(key:, value:, updated_by: nil, reason: nil, confirmation: nil)
+  def self.set!(key:, value:, updated_by: nil, reason: nil, confirmation: nil, allow_mixed_recommendation_confirmation: false)
     key = key.to_s
     return Result.new(false, nil, [ "invalid risk setting key" ], nil) unless allowed_key?(key)
     return Result.new(false, nil, [ "invalid risk setting value" ], nil) unless valid_value?(key, value)
 
     current = RiskSetting.find_by(key: key)
     old_value = current&.value
-    errors = confirmation_errors(key: key, old_value: old_value, new_value: value.to_s, confirmation: confirmation)
+    errors = confirmation_errors(
+      key: key,
+      old_value: old_value,
+      new_value: value.to_s,
+      confirmation: confirmation,
+      allow_mixed_recommendation_confirmation: allow_mixed_recommendation_confirmation
+    )
     errors.concat(hard_ceiling_validation_errors(key, value.to_s))
     return Result.new(false, current, errors, nil) if errors.present?
 
@@ -158,7 +164,7 @@ class RiskSettings
     :short_eth if key.end_with?("MAX_SHORT_ETH") || key == "AERODROME_MAX_TOTAL_HEDGE_ETH"
   end
 
-  def self.confirmation_errors(key:, old_value:, new_value:, confirmation:)
+  def self.confirmation_errors(key:, old_value:, new_value:, confirmation:, allow_mixed_recommendation_confirmation: false)
     return [] unless numeric_key?(key)
 
     old_decimal = decimal(old_value)
@@ -173,7 +179,9 @@ class RiskSettings
     else
       DECREASE_CONFIRMATION
     end
-    valid_confirmation = confirmation.to_s == required || (increased && !hard_key?(key) && confirmation.to_s == HARD_INCREASE_CONFIRMATION)
+    valid_confirmation = confirmation.to_s == required ||
+      (increased && !hard_key?(key) && confirmation.to_s == HARD_INCREASE_CONFIRMATION) ||
+      (!increased && allow_mixed_recommendation_confirmation && [ INCREASE_CONFIRMATION, HARD_INCREASE_CONFIRMATION ].include?(confirmation.to_s))
     errors = []
     errors << "confirmation must equal #{required}" unless valid_confirmation
     errors << "advanced override required for unusually high cap" if absurd_cap?(key, new_decimal) && confirmation.to_s != INCREASE_CONFIRMATION

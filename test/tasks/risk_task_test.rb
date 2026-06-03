@@ -71,6 +71,8 @@ class RiskTaskTest < ActiveSupport::TestCase
       assert_equal "hedge_cap_diagnostics", payload.fetch("action")
       assert_equal "ETHEREAL_MAX_SHORT_ETH", payload.dig("cap_diagnostics", "short_cap", "cap_key")
       assert_equal "1.25", payload.dig("cap_diagnostics", "short_cap", "target_short_eth")
+      assert_equal "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH", payload.dig("cap_diagnostics", "emergency_close", "emergency_close_key")
+      assert_equal "AERODROME_MAX_SHORT_ETH", payload.dig("cap_diagnostics", "emergency_close", "compared_against_key")
       assert_equal 0, payload.fetch("orders_submitted")
       assert_equal 0, payload.fetch("signatures_created")
     end
@@ -126,7 +128,58 @@ class RiskTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "risk apply recommended normalizes emergency close dependency in one command" do
+    position = aerodrome_position
+    position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      target_short_eth: "1.66",
+      combined_short_eth: "0",
+      drift_eth: "1.66",
+      inside_tolerance: false
+    )
+    incident_settings.each { |key, value| RiskSetting.create!(key: key, value: value) }
+
+    with_env(
+      "position_id" => position.id.to_s,
+      "venue" => "ethereal",
+      "confirmation" => RiskSettings::INCREASE_CONFIRMATION,
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "1.6"
+    ) do
+      out, = capture_io { Rake::Task["risk:apply_recommended"].invoke }
+      payload = JSON.parse(out)
+
+      assert_equal true, payload.fetch("ok")
+      applied_keys = payload.fetch("applied").map { |row| row.fetch("key") }
+      assert_includes applied_keys, "AERODROME_MAX_SHORT_ETH"
+      assert_includes applied_keys, "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH"
+      assert_equal "2.1", RiskSetting.find_by!(key: "AERODROME_MAX_SHORT_ETH").value
+      assert_equal "2.1", RiskSetting.find_by!(key: "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH").value
+      assert_equal 0, payload.fetch("orders_submitted")
+      assert_equal 0, payload.fetch("signatures_created")
+    end
+  end
+
   private
+
+  def incident_settings
+    {
+      "ETHEREAL_MAX_SHORT_ETH" => "2.3",
+      "ETHEREAL_MAX_ORDER_SIZE_ETH" => "2.3",
+      "ETHEREAL_MAX_NOTIONAL_USD" => "4200",
+      "AERODROME_MAX_SHORT_ETH" => "3.5",
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => "4200",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "2.3",
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" => "4200",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "4200"
+    }
+  end
 
   def aerodrome_position
     Position.create!(

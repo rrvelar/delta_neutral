@@ -987,6 +987,37 @@ end %>
           <% end %>
         </div>
 
+        <% position_risk_changes = @risk_recommendation&.fetch(:required_changes, []) || [] %>
+        <% if position_risk_changes.present? %>
+          <div class="rounded-xl border border-yellow-800 bg-yellow-950/20 p-4 xl:col-span-2">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p class="text-xs uppercase tracking-wide text-yellow-300">Recommended fix available</p>
+                <h3 class="mt-1 text-lg font-semibold text-white">Apply limits that clear the current risk blockers</h3>
+                <p class="mt-1 text-sm text-yellow-100">This updates app risk settings only. It does not submit orders, create signatures, or close positions.</p>
+                <ul class="mt-3 space-y-1 text-sm text-gray-200">
+                  <% position_risk_changes.each do |change| %>
+                    <% current_value = change[:current_value].presence || "not configured" %>
+                    <% verb = begin
+                      current_decimal = RiskSettings.decimal(change[:current_value])
+                      recommended_decimal = RiskSettings.decimal(change[:recommended_value])
+                      current_decimal && recommended_decimal && recommended_decimal < current_decimal ? "Lower" : "Set"
+                    end %>
+                    <li><%= verb %> <%= change[:label] %> from <%= current_value %> to <%= change[:recommended_value] %> <%= RiskSettings.unit_for(change[:key]) %>.</li>
+                  <% end %>
+                </ul>
+              </div>
+              <%= form_with url: risk_settings_path, method: :patch, class: "min-w-full space-y-2 lg:min-w-80" do |form| %>
+                <%= form.hidden_field :position_id, value: @risk_recommendation[:position_id] %>
+                <%= form.hidden_field :venue, value: @risk_recommendation[:venue] %>
+                <%= form.text_field :confirmation, placeholder: @risk_recommendation[:confirmation_required], class: "w-full rounded border border-yellow-800 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-500" %>
+                <%= form.button "Apply recommended limits", name: "apply_recommended", value: "1", class: "w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500" %>
+                <p class="text-xs text-gray-500">Required confirmation: <%= @risk_recommendation[:confirmation_required] %></p>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
         <% emergency_restore_outside = begin
           (BigDecimal((cached_snapshot[:target_short_eth] || target_eth_short).to_s) - BigDecimal(cached_snapshot[:combined_short_eth].to_s)).abs > BigDecimal((cached_snapshot[:tolerance_eth] || "0").to_s)
         rescue ArgumentError, TypeError

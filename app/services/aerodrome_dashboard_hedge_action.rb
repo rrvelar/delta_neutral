@@ -187,12 +187,12 @@ class AerodromeDashboardHedgeAction
     blockers << "Mellow Autopilot pro-rata exposure is not hedge-ready" if @position.mellow_autopilot? && !@position.hedge_ready?
     blockers << "WETH/ETH LP exposure is unavailable" unless weth_amount
     blockers << "WETH/ETH price is unavailable" unless eth_price
-    short_cap = RiskSettings.cap_for(venue: @venue_key, kind: :short_eth)
-    notional_cap = RiskSettings.cap_for(venue: @venue_key, kind: :notional_usd)
+    global_short_cap = RiskSettings.get("AERODROME_MAX_SHORT_ETH")
+    global_notional_cap = RiskSettings.get("AERODROME_MAX_SHORT_NOTIONAL_USD")
     blockers.concat(AerodromeProductionRiskLimits.runtime_cap_errors(
-      max_short_eth: short_cap.value,
-      max_short_notional_usd: notional_cap.value,
-      emergency_close_max_eth: decimal_env("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH")
+      max_short_eth: global_short_cap.value,
+      max_short_notional_usd: global_notional_cap.value,
+      emergency_close_max_eth: RiskSettings.get("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH").value
     ))
     blockers.concat(cap_blockers(target: target, current_short: current_short))
     blockers.uniq
@@ -449,7 +449,31 @@ class AerodromeDashboardHedgeAction
       settings_path: Rails.application.routes.url_helpers.edit_settings_path(anchor: "risk-settings"),
       short_cap: cap_payload(short_cap, target: target, current_short: current_short, requested: requested, expected_after: expected_after),
       order_cap: order_cap_payload(order_cap, requested: requested),
-      notional_cap: notional_cap_payload(notional_cap, expected_notional: expected_notional)
+      notional_cap: notional_cap_payload(notional_cap, expected_notional: expected_notional),
+      emergency_close: emergency_close_payload
+    }
+  end
+
+  def emergency_close_payload
+    recommendation = RiskLimitRecommendation.new(position: @position, venue: @venue_key).report
+    emergency = RiskSettings.get("AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH")
+    compared = RiskSettings.get("AERODROME_MAX_SHORT_ETH")
+    hard = RiskSettings.get("AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH")
+    emergency_change = recommendation.fetch(:emergency_close)
+    recommended_changes = recommendation.fetch(:required_changes).select do |change|
+      [ "AERODROME_MAX_SHORT_ETH", "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" ].include?(change.fetch(:key))
+    end
+    {
+      emergency_close_key: "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH",
+      current_emergency_close: emergency.value&.to_s("F"),
+      required_emergency_close: emergency_change&.fetch(:recommended_value),
+      compared_against_key: "AERODROME_MAX_SHORT_ETH",
+      compared_against_value: compared.value&.to_s("F"),
+      hard_emergency_close_key: "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH",
+      hard_emergency_close_value: hard.value&.to_s("F"),
+      blocker: emergency_change&.fetch(:required) || false,
+      reason: emergency_change&.fetch(:reason),
+      recommended_changes: recommended_changes
     }
   end
 
