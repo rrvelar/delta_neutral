@@ -370,6 +370,92 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
   end
 
+  test "dashboard live open uses full server target size without probe cap" do
+    api_client = live_api_client(
+      account_value: "8000",
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "2.268371052741099", value: "4809.74623129113", openPrice: "2120", markPrice: "2120", status: "OPEN" } ]
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => "0.01"), api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "2.268371052741099",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false,
+      size_source: "dashboard_server_target"
+    )
+
+    assert_equal "success", result.status
+    assert_equal "2.268371052741099", result.receipt.fetch(:requested_size_eth)
+    assert_equal "2.268", result.receipt.fetch(:submitted_size_eth)
+    assert_equal "2.268", result.receipt.fetch(:quantity_sent_to_extended)
+    assert_equal "2.268", api_client.submitted_payload.fetch("qty")
+    assert_not_equal "0.01", api_client.submitted_payload.fetch("qty")
+    assert_equal "dashboard_server_target", result.receipt.fetch(:size_source)
+    assert_equal false, result.receipt.fetch(:partial)
+  end
+
+  test "missing dashboard size fails closed before signing or submit" do
+    api_client = live_api_client(account_value: "8000")
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: nil,
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false,
+      size_source: "dashboard_server_target"
+    )
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended live open size could not be computed; refusing to default to probe/min size."
+    assert_equal 0, signer.sign_calls
+    assert_equal 0, api_client.submit_calls
+  end
+
+  test "probe cap remains isolated from dashboard sizing policy" do
+    result = build_service(api_client: live_api_client(account_value: "8000")).run(
+      position: fake_position,
+      mode: "delta_round_trip",
+      size_eth: "2.268371052741099",
+      confirmation: nil,
+      dry_run: true,
+      size_source: "probe_cap"
+    )
+
+    summaries = result.receipt.fetch(:order_payload_summaries)
+    assert_equal "0.02", summaries.first.fetch(:rounded_size_eth)
+    assert_equal "2.268371052741099", result.receipt.fetch(:requested_size_eth)
+    assert_equal "0.02", result.receipt.fetch(:submitted_size_eth)
+    assert_equal true, result.receipt.fetch(:partial)
+  end
+
+  test "underfilled dashboard live open is not successful" do
+    api_client = live_api_client(
+      account_value: "8000",
+      after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ]
+    )
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true), sleeper: ->(_) { }).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "2.27",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false,
+      size_source: "dashboard_server_target"
+    )
+
+    assert_equal "underfilled", result.status
+    assert_equal "2.27", result.receipt.fetch(:requested_size_eth)
+    assert_equal "2.27", result.receipt.fetch(:submitted_size_eth)
+    assert_equal "2.27", result.receipt.fetch(:expected_after_short_eth)
+    assert_equal "0.01", result.receipt.fetch(:readback_short_after_submit)
+    assert_equal "-2.26", result.receipt.fetch(:readback_delta_eth)
+    assert_equal false, result.receipt.fetch(:inside_tolerance_after_submit)
+  end
+
   test "live open accepted without readback is pending" do
     api_client = live_api_client
     result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true), sleeper: ->(_) { }).run(
@@ -692,16 +778,17 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     end.new
   end
 
-  def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil, leverage_payload: nil)
+  def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil, leverage_payload: nil, account_value: "1999.79")
     Class.new do
       attr_reader :submit_calls, :submitted_payload
 
-      define_method(:initialize) do |before_rows, after_rows, orders, response, leverage_response|
+      define_method(:initialize) do |before_rows, after_rows, orders, response, leverage_response, value|
         @before_rows = before_rows
         @after_rows = after_rows
         @orders = orders
         @submit_response = response
         @leverage_payload = leverage_response
+        @account_value = value
         @submit_calls = 0
       end
 
@@ -709,8 +796,8 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         @submit_calls.positive? ? @after_rows : @before_rows
       end
 
-      def balance = { "status" => "OK", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
-      def account_info = { "status" => "ACTIVE", "data" => { "equity" => "1999.79", "balance" => "1999.79" } }
+      def balance = { "status" => "OK", "data" => { "equity" => @account_value, "balance" => @account_value } }
+      def account_info = { "status" => "ACTIVE", "data" => { "equity" => @account_value, "balance" => @account_value } }
       def open_orders(market:) = @orders
       def leverage(market:) = @leverage_payload || { "data" => [ { "market" => market, "leverage" => "1" } ] }
       def fees(market:) = { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
@@ -736,7 +823,7 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         @submitted_payload = payload
         @submit_response || { "status" => "OK", "data" => { "id" => "abc123" } }
       end
-    end.new(before_positions, after_positions, open_orders, submit_response, leverage_payload)
+    end.new(before_positions, after_positions, open_orders, submit_response, leverage_payload, account_value)
   end
 
   def sequence_api_client(states:, open_orders: [], submit_response: nil, leverage_payload: nil)

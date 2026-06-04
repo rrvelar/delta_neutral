@@ -11,12 +11,14 @@ class ExtendedMainnetLifecycleCheck
     @sleeper = sleeper
   end
 
-  def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil)
+  def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil, size_source: "probe_cap")
     mode = mode.to_s
-    requested_size = mode == "rebalance_delta" && delta_eth.present? ? BigDecimal(delta_eth.to_s).abs : BigDecimal(size_eth.to_s)
-    size = capped_size(requested_size)
+    requested_size = requested_size_for(mode: mode, size_eth: size_eth, delta_eth: delta_eth)
+    return missing_size_result(position: position, mode: mode, dry_run: dry_run, size_source: size_source) unless requested_size&.positive? || mode == "close_only"
+
+    sizing = sizing_plan(mode: mode, requested_size: requested_size, size_source: size_source)
     current_position = @venue.read_position(symbol: "ETH")
-    orders = build_orders(position: position, mode: mode, size_eth: size, current_position: current_position, max_slippage: max_slippage, delta_eth: delta_eth)
+    orders = build_orders(position: position, mode: mode, size_eth: sizing.fetch(:submitted_size), current_position: current_position, max_slippage: max_slippage, delta_eth: delta_eth)
     dry_run_signer_health = signer_health_for_diagnostics if dry_run
     blockers = structural_blockers(mode: mode, orders: orders, dry_run: dry_run, signer_health: dry_run_signer_health)
 
@@ -29,11 +31,13 @@ class ExtendedMainnetLifecycleCheck
         dry_run: true,
         current_position: current_position,
         orders: orders,
-        signer_health: dry_run_signer_health
+        signer_health: dry_run_signer_health,
+        sizing: sizing
       )
     end
 
     blockers.concat(live_blockers(mode: mode, confirmation: confirmation, orders: orders, current_position: current_position))
+    blockers.concat(sizing_blockers(sizing))
     if blockers.any?
       return result(
         status: "blocked_before_submit",
@@ -42,7 +46,8 @@ class ExtendedMainnetLifecycleCheck
         mode: mode,
         dry_run: false,
         current_position: current_position,
-        orders: orders
+        orders: orders,
+        sizing: sizing
       )
     end
 
@@ -58,7 +63,8 @@ class ExtendedMainnetLifecycleCheck
         dry_run: false,
         current_position: current_position,
         orders: orders,
-        signer_health: signer_health
+        signer_health: signer_health,
+        sizing: sizing
       )
     end
 
@@ -73,7 +79,8 @@ class ExtendedMainnetLifecycleCheck
       current_position: current_position,
       orders: orders,
       signer_health: signer_health,
-      execution: signed_result
+      execution: signed_result,
+      sizing: sizing
     )
   end
 
@@ -242,21 +249,29 @@ class ExtendedMainnetLifecycleCheck
     submit_response = @venue.submit_order(submit_payload)
     readback_attempts = mode == "close_only" ? poll_flat_readback : poll_short_readback(expected_size: expected_short)
     confirmed = readback_attempts.any? { |attempt| attempt[:confirmed] }
+    final_status = confirmed ? "success" : unconfirmed_status(readback_attempts: readback_attempts, expected_short: expected_short, mode: mode)
     {
-      final_status: confirmed ? "success" : "submitted_but_readback_pending",
+      final_status: final_status,
       unsigned_order: unsigned_order,
       signer_response: sanitize_signer_response(signer_response),
       submit_payload: sanitize_submit_payload(submit_payload),
       submit_response: sanitize_submit_response(submit_response),
       exchange_order_id: exchange_order_id(submit_response, signer_response),
       readback_attempts: readback_attempts,
+      expected_after_short_eth: expected_short.to_s("F"),
+      readback_short_after_submit: last_readback_size(readback_attempts)&.to_s("F"),
+      readback_delta_eth: readback_delta(readback_attempts: readback_attempts, expected_short: expected_short)&.to_s("F"),
       orders_placed: 1,
       signatures_created: 1,
       submitted: true
     }
   end
 
-  def result(status:, blockers:, position:, mode:, dry_run:, current_position:, orders:, signer_health: nil, execution: nil)
+  def result(status:, blockers:, position:, mode:, dry_run:, current_position:, orders:, signer_health: nil, execution: nil, sizing: nil)
+    first_payload = orders.first&.fetch(:payload, {}) || {}
+    expected_after = execution&.fetch(:expected_after_short_eth, nil)
+    readback_after = execution&.fetch(:readback_short_after_submit, nil)
+    readback_delta = execution&.fetch(:readback_delta_eth, nil)
     receipt = {
       venue: "extended",
       action: "mainnet_lifecycle_check",
@@ -264,6 +279,22 @@ class ExtendedMainnetLifecycleCheck
       dry_run: dry_run,
       position_id: position.id,
       timestamp: @now.call.utc.iso8601,
+      selected_venue: "extended",
+      requested_size_eth: sizing&.fetch(:requested_size, nil)&.to_s("F"),
+      submitted_size_eth: first_payload[:rounded_size_eth] || sizing&.fetch(:submitted_size, nil)&.to_s("F"),
+      quantity_sent_to_extended: first_payload[:rounded_size_eth],
+      side: first_payload[:extended_side],
+      reduce_only: first_payload[:reduce_only],
+      size_source: sizing&.fetch(:size_source, nil),
+      cap_key: sizing&.fetch(:cap_key, nil),
+      cap_value: sizing&.fetch(:cap_value, nil)&.to_s("F"),
+      cap_source: sizing&.fetch(:cap_source, nil),
+      partial: sizing&.fetch(:partial, false),
+      partial_reason: sizing&.fetch(:partial_reason, nil),
+      expected_after_short_eth: expected_after,
+      readback_short_after_submit: readback_after,
+      readback_delta_eth: readback_delta,
+      inside_tolerance_after_submit: readback_delta ? BigDecimal(readback_delta.to_s).abs <= BigDecimal("0.001") : nil,
       current_position: current_position,
       read_only_account_diagnostics: @venue.read_only_account_diagnostics(current_position: current_position),
       market_metadata: @venue.market_metadata_diagnostics,
@@ -303,10 +334,83 @@ class ExtendedMainnetLifecycleCheck
     }.compact
   end
 
+  def requested_size_for(mode:, size_eth:, delta_eth:)
+    raw = mode == "rebalance_delta" && delta_eth.present? ? delta_eth : size_eth
+    return nil if raw.blank?
+
+    BigDecimal(raw.to_s).abs
+  rescue ArgumentError
+    nil
+  end
+
+  def missing_size_result(position:, mode:, dry_run:, size_source:)
+    blockers = [ "Extended live open size could not be computed; refusing to default to probe/min size." ]
+    result(
+      status: dry_run ? "dry_run" : "blocked_before_submit",
+      blockers: blockers,
+      position: position,
+      mode: mode,
+      dry_run: dry_run,
+      current_position: nil,
+      orders: [],
+      sizing: {
+        requested_size: nil,
+        submitted_size: nil,
+        size_source: size_source,
+        partial: false,
+        blockers: blockers
+      }
+    )
+  end
+
+  def sizing_plan(mode:, requested_size:, size_source:)
+    if probe_capped_size_source?(size_source)
+      submitted = capped_size(requested_size)
+      cap = probe_cap
+      {
+        requested_size: requested_size,
+        submitted_size: submitted,
+        size_source: size_source,
+        cap_key: "EXTENDED_PROBE_MAX_SIZE_ETH",
+        cap_value: cap,
+        cap_source: @env["EXTENDED_PROBE_MAX_SIZE_ETH"].present? ? "env" : "default_probe_max_size",
+        partial: submitted < requested_size,
+        partial_reason: submitted < requested_size ? "probe size cap" : nil,
+        blockers: []
+      }
+    else
+      {
+        requested_size: requested_size,
+        submitted_size: requested_size,
+        size_source: size_source,
+        cap_key: nil,
+        cap_value: nil,
+        cap_source: nil,
+        partial: false,
+        partial_reason: nil,
+        blockers: []
+      }
+    end
+  end
+
+  def probe_capped_size_source?(size_source)
+    size_source.to_s.in?(%w[probe probe_cap delta_round_trip migration_canary])
+  end
+
+  def sizing_blockers(sizing)
+    return [] if sizing.nil?
+    return Array(sizing[:blockers]) if sizing[:partial] == false
+
+    [ "Extended live order was capped by #{sizing[:cap_key]} from #{sizing[:requested_size].to_s('F')} ETH to #{sizing[:submitted_size].to_s('F')} ETH; normal dashboard opens require explicit uncapped server sizing." ]
+  end
+
   def capped_size(size_eth)
     requested = BigDecimal(size_eth.to_s)
-    cap = BigDecimal((@env["EXTENDED_PROBE_MAX_SIZE_ETH"].presence || default_probe_max_size).to_s)
-    [ requested, cap ].min
+    [ requested, probe_cap ].min
+  end
+
+  def probe_cap
+    BigDecimal((@env["EXTENDED_PROBE_MAX_SIZE_ETH"].presence || default_probe_max_size).to_s)
   end
 
   def default_probe_max_size
@@ -378,6 +482,28 @@ class ExtendedMainnetLifecycleCheck
     rescue ArgumentError
       { attempt: index + 1, confirmed: false }
     end
+  end
+
+  def unconfirmed_status(readback_attempts:, expected_short:, mode:)
+    return "submitted_but_readback_pending" if readback_attempts.empty?
+
+    actual = last_readback_size(readback_attempts)
+    return "submitted_but_readback_pending" unless actual
+    return "submitted_but_readback_pending" if mode == "close_only"
+
+    actual < expected_short ? "underfilled" : "submitted_but_not_confirmed"
+  end
+
+  def last_readback_size(readback_attempts)
+    last = readback_attempts.reverse.find { |attempt| attempt[:short_size].present? }
+    BigDecimal(last[:short_size].to_s) if last
+  rescue ArgumentError
+    nil
+  end
+
+  def readback_delta(readback_attempts:, expected_short:)
+    actual = last_readback_size(readback_attempts)
+    actual - expected_short if actual
   end
 
   def expected_short_after(order_preview:, current_position:)

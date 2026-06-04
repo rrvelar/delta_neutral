@@ -6,7 +6,7 @@ class AerodromeDashboardHedgeAction
   ACTIONS = %w[open rebalance close].freeze
   HEDGEABLE_SYMBOLS = %w[ETH WETH].freeze
 
-  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, nado_service_factory: nil, ethereal_service_factory: nil, log_dir: nil)
+  def initialize(position:, action:, execute: false, confirmation: nil, venue: HedgeVenues::DEFAULT, hyperliquid_service: nil, hedge_sync_runner: nil, emergency_close_factory: nil, nado_service_factory: nil, ethereal_service_factory: nil, extended_service_factory: nil, log_dir: nil)
     @position = position
     @hedge = position.hedge
     @action = action.to_s
@@ -18,6 +18,7 @@ class AerodromeDashboardHedgeAction
     @emergency_close_factory = emergency_close_factory || method(:default_emergency_close)
     @nado_service_factory = nado_service_factory
     @ethereal_service_factory = ethereal_service_factory
+    @extended_service_factory = extended_service_factory
     @log_dir = log_dir || Rails.root.join("storage", "aerodrome_dashboard_hedge_actions")
     @warnings = []
   end
@@ -324,7 +325,16 @@ class AerodromeDashboardHedgeAction
     else
       ExtendedHedgeExecutionService::Result.new("blocked_before_submit", [ "unsupported Extended action" ], [], {})
     end
-    result.receipt
+    receipt = result.receipt.merge(
+      target_short_eth: target&.to_s("F"),
+      current_short_eth: current_short&.to_s("F"),
+      drift_eth: drift&.to_s("F"),
+      selected_venue: @venue_key,
+      form_params_used_for_sizing: { hedge_venue: @venue_key, action: @action }
+    )
+    create_extended_short_rebalance!(receipt: receipt, target: target, current_short: current_short)
+    log_extended_action_diagnostics(receipt)
+    receipt
   end
 
   def execution_status(execution_result)
@@ -549,7 +559,7 @@ class AerodromeDashboardHedgeAction
   end
 
   def extended_service
-    @extended_service ||= ExtendedHedgeExecutionService.new(venue: venue)
+    @extended_service ||= @extended_service_factory ? @extended_service_factory.call : ExtendedHedgeExecutionService.new(venue: venue)
   end
 
   def target_short
@@ -627,5 +637,85 @@ class AerodromeDashboardHedgeAction
     )
     File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
     result[:receipt_path] = path.to_s
+    @extended_short_rebalance&.update!(receipt_path: path.to_s)
+  end
+
+  def create_extended_short_rebalance!(receipt:, target:, current_short:)
+    return unless @execute && @venue_key == "extended" && @hedge
+
+    readback = decimal_or_nil(receipt[:readback_short_after_submit])
+    submitted = decimal_or_nil(receipt[:submitted_size_eth]) || decimal_or_nil(receipt[:quantity_sent_to_extended])
+    final_status = receipt[:final_status].to_s
+    @extended_short_rebalance = @hedge.short_rebalances.create!(
+      asset: "WETH",
+      old_short_size: current_short,
+      new_short_size: readback || expected_new_short_from(receipt: receipt, current_short: current_short, submitted: submitted),
+      realized_pnl: BigDecimal("0"),
+      rebalanced_at: Time.current,
+      status: short_rebalance_status(final_status),
+      message: extended_rebalance_message(receipt: receipt, target: target, readback: readback, submitted: submitted),
+      venue: "extended",
+      order_side: receipt[:side]&.to_s&.downcase,
+      reduce_only: receipt[:reduce_only],
+      exchange_order_id: receipt[:exchange_order_id],
+      receipt_path: receipt[:receipt_path]
+    )
+  end
+
+  def expected_new_short_from(receipt:, current_short:, submitted:)
+    return current_short unless submitted
+
+    if receipt[:side].to_s.upcase == "BUY" && receipt[:reduce_only]
+      [ current_short - submitted, BigDecimal("0") ].max
+    else
+      current_short + submitted
+    end
+  end
+
+  def short_rebalance_status(final_status)
+    final_status == "success" ? ShortRebalance::STATUS_SUCCESS : ShortRebalance::STATUS_FAILED
+  end
+
+  def extended_rebalance_message(receipt:, target:, readback:, submitted:)
+    requested = receipt[:requested_size_eth]
+    if receipt[:partial]
+      return "Extended live open partial: requested #{requested} ETH, submitted #{receipt[:submitted_size_eth]} ETH (#{receipt[:partial_reason]})."
+    end
+
+    if receipt[:final_status].to_s == "underfilled"
+      return "Extended live open underfilled: requested #{requested || target&.to_s('F')} ETH, readback #{readback&.to_s('F') || 'unavailable'} ETH."
+    end
+
+    [
+      "Extended dashboard #{@action}",
+      "status=#{receipt[:final_status]}",
+      "requested=#{requested || target&.to_s('F')} ETH",
+      "submitted=#{submitted&.to_s('F') || receipt[:submitted_size_eth] || 'unavailable'} ETH",
+      "readback=#{readback&.to_s('F') || 'unavailable'} ETH",
+      "exchange_order_id=#{receipt[:exchange_order_id] || 'unavailable'}"
+    ].join(", ")
+  end
+
+  def log_extended_action_diagnostics(receipt)
+    Rails.logger.info(
+      "[AerodromeDashboardHedgeAction] " \
+      "position_id=#{receipt[:position_id]} selected_venue=#{receipt[:selected_venue]} " \
+      "target_short_eth=#{receipt[:target_short_eth]} current_short_eth=#{receipt[:current_short_eth]} drift_eth=#{receipt[:drift_eth]} " \
+      "requested_size_eth=#{receipt[:requested_size_eth]} submitted_size_eth=#{receipt[:submitted_size_eth]} " \
+      "quantity_sent_to_extended=#{receipt[:quantity_sent_to_extended]} side=#{receipt[:side]} reduce_only=#{receipt[:reduce_only]} " \
+      "size_source=#{receipt[:size_source]} cap_key=#{receipt[:cap_key]} cap_value=#{receipt[:cap_value]} cap_source=#{receipt[:cap_source]} " \
+      "partial=#{receipt[:partial]} partial_reason=#{receipt[:partial_reason]} exchange_order_id=#{receipt[:exchange_order_id]} " \
+      "readback_short_after_submit=#{receipt[:readback_short_after_submit]} expected_after_short_eth=#{receipt[:expected_after_short_eth]} " \
+      "readback_delta_eth=#{receipt[:readback_delta_eth]} inside_tolerance_after_submit=#{receipt[:inside_tolerance_after_submit]} " \
+      "final_status=#{receipt[:final_status]} form_params_used_for_sizing=#{receipt[:form_params_used_for_sizing].to_json}"
+    )
+  end
+
+  def decimal_or_nil(value)
+    return nil if value.blank?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError
+    nil
   end
 end

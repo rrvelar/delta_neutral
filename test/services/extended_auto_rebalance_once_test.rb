@@ -512,7 +512,7 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 0, client.submit_calls
   end
 
-  test "mocked live one-shot remains pending when readback does not confirm and does not retry" do
+  test "mocked live one-shot marks underfill when readback does not confirm and does not retry" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.20") ], after_positions: [ extended_short("0.20") ])
 
@@ -522,7 +522,7 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
       confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION
     )
 
-    assert_equal "submitted_but_readback_pending", result.status, result.blockers.inspect
+    assert_equal "underfilled", result.status, result.blockers.inspect
     assert_equal 1, signer.sign_calls
     assert_equal 1, client.submit_calls
     assert_equal false, result.receipt.fetch(:readback_attempts).any? { |attempt| attempt.fetch(:confirmed) }

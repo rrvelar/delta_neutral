@@ -360,6 +360,124 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
+  test "extended dashboard live open uses full server target and records visible receipt" do
+    position = create_position(asset0_amount: "2.268371052741099", target: "1.0", tolerance: "0.03")
+    deactivate_other_positions(position)
+    position.hedge.update!(execution_venue: "extended")
+    service = ExtendedServiceStub.new(status: "success", readback_short: "2.268371052741099")
+
+    with_env(@env.merge(
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "AERODROME_MAX_SHORT_ETH" => "3.9",
+      "AERODROME_MAX_ORDER_SIZE_ETH" => "3.9",
+      "AERODROME_MAX_SHORT_NOTIONAL_USD" => "6200",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "EXTENDED_MAX_SHORT_ETH" => "3.9",
+      "EXTENDED_MAX_ORDER_SIZE_ETH" => "3.9",
+      "EXTENDED_MAX_NOTIONAL_USD" => "6200"
+    )) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::EXTENDED_CONFIRMATION,
+        positions: [],
+        venue: "extended",
+        extended_service_factory: -> { service }
+      ).report
+
+      assert_equal "submitted", report.fetch(:status), report.fetch(:blockers).inspect
+      assert_equal "2.268371052741099", report.fetch(:target_short_eth)
+      assert_equal BigDecimal("2.268371052741099"), service.open_calls.first.fetch(:size_eth)
+      assert_equal "2.268371052741099", report.dig(:result, :requested_size_eth)
+      assert_equal "2.268371052741099", report.dig(:result, :submitted_size_eth)
+      assert_equal "2.268371052741099", report.dig(:result, :quantity_sent_to_extended)
+      assert_not_equal "0.01", report.dig(:result, :submitted_size_eth)
+
+      row = position.hedge.short_rebalances.order(created_at: :desc).first
+      assert_equal "extended", row.venue
+      assert_equal ShortRebalance::STATUS_SUCCESS, row.status
+      assert_equal BigDecimal("0"), row.old_short_size
+      assert_equal BigDecimal("2.26837105"), row.new_short_size
+      assert_equal "extended-order-1", row.exchange_order_id
+      assert_match "requested=2.268371052741099 ETH", row.message
+      assert row.receipt_path.present?
+    end
+  end
+
+  test "extended dashboard live open ignores migration and probe size params" do
+    position = create_position(asset0_amount: "2.268371052741099", target: "1.0", tolerance: "0.03")
+    deactivate_other_positions(position)
+    position.hedge.update!(execution_venue: "extended")
+    service = ExtendedServiceStub.new(status: "success", readback_short: "2.268371052741099")
+
+    with_env(@env.merge(
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "EXTENDED_MAX_SHORT_ETH" => "3.9",
+      "EXTENDED_MAX_ORDER_SIZE_ETH" => "3.9",
+      "EXTENDED_MAX_NOTIONAL_USD" => "6200",
+      "size_eth" => "0.01",
+      "max_step_eth" => "0.01"
+    )) do
+      build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::EXTENDED_CONFIRMATION,
+        positions: [],
+        venue: "extended",
+        extended_service_factory: -> { service }
+      ).report
+
+      assert_equal BigDecimal("2.268371052741099"), service.open_calls.first.fetch(:size_eth)
+      assert_not_equal BigDecimal("0.01"), service.open_calls.first.fetch(:size_eth)
+    end
+  end
+
+  test "extended dashboard underfill records failed receipt" do
+    position = create_position(asset0_amount: "2.27", target: "1.0", tolerance: "0.03")
+    deactivate_other_positions(position)
+    position.hedge.update!(execution_venue: "extended")
+    service = ExtendedServiceStub.new(status: "underfilled", readback_short: "0.01", readback_delta: "-2.26")
+
+    with_env(@env.merge(
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",
+      "AERODROME_PRODUCTION_HARD_MAX_NOTIONAL_USD" => "6500",
+      "AERODROME_PRODUCTION_HARD_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "AERODROME_LIVE_EMERGENCY_CLOSE_MAX_ETH" => "3.9",
+      "EXTENDED_MAX_SHORT_ETH" => "3.9",
+      "EXTENDED_MAX_ORDER_SIZE_ETH" => "3.9",
+      "EXTENDED_MAX_NOTIONAL_USD" => "6200"
+    )) do
+      report = build_action(
+        position: position,
+        action: "open",
+        execute: true,
+        confirmation: AerodromeDashboardHedgeAction::EXTENDED_CONFIRMATION,
+        positions: [],
+        venue: "extended",
+        extended_service_factory: -> { service }
+      ).report
+
+      assert_equal "failed", report.fetch(:status)
+      row = position.hedge.short_rebalances.order(created_at: :desc).first
+      assert_equal ShortRebalance::STATUS_FAILED, row.status
+      assert_equal BigDecimal("0.01"), row.new_short_size
+      assert_match "Extended live open underfilled: requested 2.27 ETH, readback 0.01 ETH.", row.message
+    end
+  end
+
   test "hyperliquid preview still blocks inactive position" do
     position = create_position(active: false)
 
@@ -590,7 +708,43 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     end
   end
 
-  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil, nado_service_factory: nil, venue: "hyperliquid")
+  class ExtendedServiceStub
+    attr_reader :open_calls
+
+    def initialize(status:, readback_short:, readback_delta: "0")
+      @status = status
+      @readback_short = readback_short
+      @readback_delta = readback_delta
+      @open_calls = []
+    end
+
+    def preflight(*)
+      { blockers: [], warnings: [] }
+    end
+
+    def open_short(**kwargs)
+      @open_calls << kwargs
+      ExtendedHedgeExecutionService::Result.new(@status, [], [], {
+        final_status: @status,
+        requested_size_eth: kwargs.fetch(:size_eth).to_s("F"),
+        submitted_size_eth: kwargs.fetch(:size_eth).to_s("F"),
+        quantity_sent_to_extended: kwargs.fetch(:size_eth).to_s("F"),
+        size_source: "dashboard_server_target",
+        side: "SELL",
+        reduce_only: false,
+        partial: false,
+        exchange_order_id: "extended-order-1",
+        expected_after_short_eth: kwargs.fetch(:size_eth).to_s("F"),
+        readback_short_after_submit: @readback_short,
+        readback_delta_eth: @readback_delta,
+        inside_tolerance_after_submit: @status == "success",
+        orders_submitted: 1,
+        signatures_created: 1
+      })
+    end
+  end
+
+  def build_action(position:, action:, positions:, execute: false, confirmation: nil, hedge_sync_runner: CallRecorder.new, emergency_close_factory: nil, nado_service_factory: nil, extended_service_factory: nil, venue: "hyperliquid")
     AerodromeDashboardHedgeAction.new(
       position: position,
       action: action,
@@ -601,6 +755,7 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
       hedge_sync_runner: hedge_sync_runner,
       emergency_close_factory: emergency_close_factory,
       nado_service_factory: nado_service_factory,
+      extended_service_factory: extended_service_factory,
       log_dir: @log_dir
     )
   end
@@ -667,6 +822,10 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
 
   def eth_position(size)
     { asset: "ETH", size: BigDecimal(size), mark_price: BigDecimal("2300") }
+  end
+
+  def deactivate_other_positions(position)
+    Position.where.not(id: position.id).update_all(active: false)
   end
 
   def with_env(values)

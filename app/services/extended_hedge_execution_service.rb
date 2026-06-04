@@ -41,19 +41,19 @@ class ExtendedHedgeExecutionService
   def open_short(**kwargs)
     return blocked_result("open") if kwargs.blank?
 
-    run_lifecycle("open_only", **kwargs)
+    run_lifecycle("open_only", size_source: "dashboard_server_target", **kwargs)
   end
 
   def rebalance_short(position: nil, delta_eth: nil, current_position: nil, confirmation: nil, max_slippage: nil, **)
     return blocked_result("rebalance", extra_blockers: [ "Extended rebalance delta is unavailable." ]) unless delta_eth
 
-    run_lifecycle("rebalance_delta", position: position, size_eth: BigDecimal(delta_eth.to_s).abs, delta_eth: delta_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage)
+    run_lifecycle("rebalance_delta", position: position, size_eth: BigDecimal(delta_eth.to_s).abs, delta_eth: delta_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, size_source: "dashboard_server_drift")
   end
 
   def close_short(**kwargs)
     return blocked_result("close") if kwargs.blank?
 
-    run_lifecycle("close_only", **kwargs)
+    run_lifecycle("close_only", size_source: "dashboard_server_current_short", **kwargs)
   end
 
   def open_short_preview(size_eth:, max_slippage: nil)
@@ -112,7 +112,7 @@ class ExtendedHedgeExecutionService
     )
   end
 
-  def run_lifecycle(mode, position:, size_eth:, current_position:, confirmation:, max_slippage:, delta_eth: nil)
+  def run_lifecycle(mode, position:, size_eth:, current_position:, confirmation:, max_slippage:, delta_eth: nil, size_source: "probe_cap")
     result = ExtendedMainnetLifecycleCheck.new(env: @venue.env, venue: @venue, signer_client: @signer_client).run(
       position: position,
       mode: mode,
@@ -120,7 +120,8 @@ class ExtendedHedgeExecutionService
       delta_eth: delta_eth,
       confirmation: confirmation,
       dry_run: false,
-      max_slippage: max_slippage
+      max_slippage: max_slippage,
+      size_source: size_source
     )
     receipt = result.receipt.merge(
       action: mode,
