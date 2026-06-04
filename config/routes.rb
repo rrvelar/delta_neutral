@@ -22,6 +22,15 @@ Rails.application.routes.draw do
     post :migration_cancel, on: :member
     post :migration_route_proof, on: :member
     post :migration_random_rotation_decision, on: :member
+    post :random_rotation_prepare_next_route, on: :member
+    post :random_rotation_live_canary, on: :member
+    post :random_rotation_continue, on: :member
+    post :random_rotation_finalize, on: :member
+    post :random_rotation_cancel, on: :member
+    post :random_rotation_refresh, on: :member
+    post :random_rotation_enable, on: :member
+    post :random_rotation_disable, on: :member
+    post :random_rotation_disable_all, on: :member
     post :hedge_emergency_restore, on: :member
     post :activate, on: :member
     post :archive, on: :member

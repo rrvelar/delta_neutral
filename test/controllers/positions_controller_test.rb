@@ -698,7 +698,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
     create_dashboard_snapshot(
       position,
-      extended_short_eth: "1.0",
+      extended_short_eth: "1.25",
       ethereal_short_eth: "0",
       nado_short_eth: "0",
       refreshed_at: Time.current,
@@ -813,7 +813,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
     create_dashboard_snapshot(
       position,
-      extended_short_eth: "1.0",
+      extended_short_eth: "1.25",
       ethereal_short_eth: "0",
       nado_short_eth: "0",
       refreshed_at: Time.current,
@@ -892,7 +892,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
     create_dashboard_snapshot(
       position,
-      extended_short_eth: "1.0",
+      extended_short_eth: "1.25",
       ethereal_short_eth: "0",
       nado_short_eth: "0",
       refreshed_at: Time.current,
@@ -938,6 +938,134 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, receipt.fetch("would_migrate")
     assert_equal 0, receipt.fetch("orders_submitted")
     assert_equal 0, receipt.fetch("signatures_created")
+  end
+
+  test "random rotation setup panel guides new extended position without terminal commands" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    get position_path(position, hedge_venue: "extended", tab: "migration")
+
+    assert_response :success
+    assert_match "Random Rotation Setup", response.body
+    assert_match "Dashboard setup wizard", response.body
+    assert_match "Status:", response.body
+    assert_match "Current venue:", response.body
+    assert_match "Extended", response.body
+    assert_match "Prepare Next Route", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "Live order possible?", response.body
+    assert_match "No", response.body
+    assert_match "Route proofs", response.body
+    assert_match "Advanced details", response.body
+    assert_no_match "Hyperliquid -&gt;", response.body
+  end
+
+  test "random rotation prepare next route is dry run only and preserves migration tab" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    proof_path = Rails.root.join("storage/hedge_migration_route_proofs/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    rehearsal_path = Rails.root.join("storage/hedge_migration_random_rehearsals/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    proof_lines_before = File.exist?(proof_path) ? File.readlines(proof_path).size : 0
+    rehearsal_lines_before = File.exist?(rehearsal_path) ? File.readlines(rehearsal_path).size : 0
+
+    post random_rotation_prepare_next_route_position_path(position), params: {
+      tab: "migration",
+      from_venue: "extended",
+      to_venue: "ethereal"
+    }
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_includes response.location, "preview_from_venue=extended"
+    assert_includes response.location, "preview_to_venue=ethereal"
+    assert_match "orders_submitted=0, signatures_created=0", flash[:notice]
+
+    proof_receipt = File.readlines(proof_path).drop(proof_lines_before).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "migration_route_proof" }
+    assert proof_receipt
+    assert_equal 0, proof_receipt.fetch("orders_submitted")
+    assert_equal 0, proof_receipt.fetch("signatures_created")
+
+    rehearsal_receipt = File.readlines(rehearsal_path).drop(rehearsal_lines_before).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "random_migration_rehearsal" }
+    assert rehearsal_receipt
+    assert_equal false, rehearsal_receipt.fetch("would_execute_live")
+    assert_equal 0, rehearsal_receipt.fetch("orders_submitted")
+    assert_equal 0, rehearsal_receipt.fetch("signatures_created")
+  end
+
+  test "random rotation live canary rejects wrong phrase without submitting" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    assert_no_difference "ShortRebalance.count" do
+      post random_rotation_live_canary_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "ethereal",
+        random_rotation_confirmation: "WRONG"
+      }
+    end
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_match "submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}", flash[:alert]
+    assert_match "orders_submitted=0", flash[:alert]
+  end
+
+  test "random rotation enable writes DB operational settings when all routes are ready" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    write_ready_random_route_proofs(position)
+
+    post random_rotation_enable_position_path(position), params: {
+      tab: "migration",
+      random_rotation_confirmation: RandomRotationSetupWizard::ENABLE_CONFIRMATION
+    }
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_match "No orders or signatures were created", flash[:notice]
   end
 
   test "migration run is fail closed without env gate" do
@@ -3026,6 +3154,44 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       nado_source_status: "ok",
       source_errors: source_errors.to_json
     )
+  end
+
+  def write_ready_random_route_proofs(position)
+    writer = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_live_canaries"))
+    MigrationRouteProofRegistry::ROUTES.each do |from, to|
+      writer.write(
+        action: "manual_live_canary",
+        timestamp: Time.current.utc.iso8601,
+        position_id: position.id,
+        from_venue: from,
+        to_venue: to,
+        route: "#{from}->#{to}",
+        final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+        target_leg_readback_confirmed: true,
+        source_leg_readback_confirmed: true,
+        final_inside_tolerance: true,
+        source_flat_after: true,
+        target_holds_expected_short: true,
+        open_orders_after: 0,
+        production_venue_finalized: true,
+        orders_submitted: 1,
+        orders_placed: 1,
+        signatures_created: 1
+      )
+    end
+  end
+
+  def clear_migration_receipts_for_position(position_id)
+    Dir.glob(Rails.root.join("storage/hedge_migration_{route_proofs,random_rehearsals,live_canaries,recoveries,continuations}/*.jsonl")).each do |path|
+      retained = File.readlines(path).reject do |line|
+        JSON.parse(line)["position_id"].to_s == position_id.to_s
+      rescue JSON::ParserError
+        false
+      end
+      File.write(path, retained.join)
+    rescue SystemCallError
+      next
+    end
   end
 
   def hyperliquid_write_guard

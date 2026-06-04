@@ -546,6 +546,8 @@ end %>
         Preview does not switch the production hedge venue. Production remains <%= cached_snapshot[:production_venue_name] || HedgeVenues.label(@position.hedge&.execution_venue) %> until a live migration completes and final readback allows finalize.
       </div>
 
+      <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup %>
+
       <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-2">
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

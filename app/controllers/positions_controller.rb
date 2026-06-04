@@ -154,6 +154,11 @@ class PositionsController < ApplicationController
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
       @live_autopilot_readiness = MigrationLiveAutopilotReadiness.new(position: @position, route_matrix: @migration_route_matrix).report
       @production_health = auto_readiness_production_health(@current_auto_readiness)
+      @random_rotation_setup = safe_dashboard_section("random_rotation_setup", fallback: RandomRotationSetupWizard.unavailable(position: @position, message: "Random rotation setup did not load.")) do
+        proof_registry = MigrationRouteProofRegistry.new
+        readiness = MigrationRandomReadiness.new(position: @position, proof_registry: proof_registry, dashboard_health: @production_health[:status]).report
+        RandomRotationSetupWizard.new(position: @position, readiness: readiness, proof_registry: proof_registry, route_matrix: @migration_route_matrix).report
+      end
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
           position: @position,
@@ -350,6 +355,126 @@ class PositionsController < ApplicationController
       notice: "Random rotation decision recorded#{path ? " at #{path}" : ""}. No orders or signatures."
   end
 
+  def random_rotation_prepare_next_route
+    position = load_position_for_migration
+    route = random_rotation_route(position)
+    summary = HedgeVenueMigrationRouteMatrix.new(position: position).prove_routes!
+    rehearsal = MigrationRandomRehearsal.new.run(position: position, dry_run: true)
+    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+      notice: "Prepared next random route #{random_rotation_route_label(route)}. Dry-run route proof wrote #{summary.fetch(:receipts_written)} rows; rehearsal #{rehearsal.status}. orders_submitted=0, signatures_created=0."
+  end
+
+  def random_rotation_live_canary
+    position = load_position_for_migration
+    route = random_rotation_route(position)
+    result = MigrationManualLiveCanaryRunner.new.run(
+      position: position,
+      from: route.fetch(:from_venue),
+      to: route.fetch(:to_venue),
+      confirmation: params[:random_rotation_confirmation],
+      sequence: params[:migration_sequence].presence || "target_first"
+    )
+    level = result.blockers.present? ? :alert : :notice
+    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+      flash: { level => random_rotation_result_message("Supervised live canary", result) }
+  end
+
+  def random_rotation_continue
+    position = load_position_for_migration
+    route = random_rotation_route(position)
+    result = if route.fetch(:to_venue) == "nado"
+      MigrationTargetNadoContinuation.new(
+        position: position,
+        from: route.fetch(:from_venue),
+        to: route.fetch(:to_venue),
+        live: true,
+        confirmation: params[:random_rotation_confirmation]
+      ).run
+    else
+      MigrationTargetFirstSourceRecovery.new(
+        position: position,
+        from: route.fetch(:from_venue),
+        to: route.fetch(:to_venue),
+        live: true,
+        confirmation: params[:random_rotation_confirmation]
+      ).run
+    end
+    level = result.blockers.present? ? :alert : :notice
+    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+      flash: { level => random_rotation_result_message("Source close continuation", result) }
+  end
+
+  def random_rotation_finalize
+    position = load_position_for_migration
+    route = random_rotation_route(position)
+    result = MigrationTargetFirstSourceRecovery.new(
+      position: position,
+      from: route.fetch(:from_venue),
+      to: route.fetch(:to_venue),
+      live: true,
+      confirmation: params[:random_rotation_confirmation]
+    ).run
+    level = result.blockers.present? ? :alert : :notice
+    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+      flash: { level => random_rotation_result_message("Migration finalization", result) }
+  end
+
+  def random_rotation_cancel
+    position = load_position_for_migration
+    redirect_to position_path(position, random_rotation_redirect_params(position)),
+      notice: "Random rotation setup state refreshed. No orders, signatures, cancels, or production venue changes were made."
+  end
+
+  def random_rotation_refresh
+    position = load_position_for_migration
+    report = MigrationRandomReadiness.new(position: position).report
+    redirect_to position_path(position, random_rotation_redirect_params(position)),
+      notice: "Random readiness refreshed: #{report.fetch(:missing_route_proofs).size} route proofs missing. orders_submitted=0, signatures_created=0."
+  end
+
+  def random_rotation_enable
+    position = load_position_for_migration
+    setup = RandomRotationSetupWizard.new(position: position).report
+    unless params[:random_rotation_confirmation].to_s == RandomRotationSetupWizard::ENABLE_CONFIRMATION
+      return redirect_to position_path(position, random_rotation_redirect_params(position)),
+        alert: "Enable random blocked: confirmation must equal #{RandomRotationSetupWizard::ENABLE_CONFIRMATION}"
+    end
+    if setup.fetch(:enable_blockers).present?
+      return redirect_to position_path(position, random_rotation_redirect_params(position)),
+        alert: "Enable random blocked: #{setup.fetch(:enable_blockers).join('; ')}"
+    end
+
+    %w[MIGRATION_LIVE_ENABLED MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
+      OperationalSettings.set!(key: key, enabled: true, updated_by: Current.user, reason: "dashboard random rotation setup enable")
+    end
+    redirect_to position_path(position, random_rotation_redirect_params(position)),
+      notice: "Random rotation enabled from dashboard DB settings. No orders or signatures were created."
+  end
+
+  def random_rotation_disable
+    position = load_position_for_migration
+    unless params[:random_rotation_confirmation].to_s == RandomRotationSetupWizard::DISABLE_CONFIRMATION
+      return redirect_to position_path(position, random_rotation_redirect_params(position)),
+        alert: "Disable random blocked: confirmation must equal #{RandomRotationSetupWizard::DISABLE_CONFIRMATION}"
+    end
+
+    %w[MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
+      OperationalSettings.set!(key: key, enabled: false, updated_by: Current.user, reason: "dashboard random rotation setup disable")
+    end
+    redirect_to position_path(position, random_rotation_redirect_params(position)),
+      notice: "Random rotation disabled. No orders, signatures, or cancels were created."
+  end
+
+  def random_rotation_disable_all
+    position = load_position_for_migration
+    result = AutoRebalanceControl.new(position: position, venue: position.hedge&.execution_venue, updated_by: Current.user)
+      .disable_all!(confirmation: params[:random_rotation_confirmation])
+    level = result.ok ? :notice : :alert
+    message = result.ok ? "All auto and migration loops disabled. No orders, signatures, or cancels were created." : "Disable all blocked: #{result.errors.join('; ')}"
+    redirect_to position_path(position, random_rotation_redirect_params(position)),
+      flash: { level => message }
+  end
+
   def hedge_emergency_restore
     position = load_position_for_migration
     live = ActiveModel::Type::Boolean.new.cast(params[:live])
@@ -379,6 +504,53 @@ class PositionsController < ApplicationController
     else
       "#{label} #{result.status}: #{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}, #{receipt[:planned_to_leg]&.dig(:size_eth) || '0'} ETH target leg, #{receipt[:planned_from_leg]&.dig(:size_eth) || '0'} ETH source leg."
     end
+  end
+
+  def random_rotation_result_message(label, result)
+    receipt = result.receipt
+    route = "#{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}"
+    counters = "orders_submitted=#{receipt[:orders_submitted].to_i}, signatures_created=#{receipt[:signatures_created].to_i}"
+    if result.blockers.present?
+      "#{label} #{result.status} for #{route}: #{result.blockers.join('; ')}. #{counters}."
+    else
+      exchange_ids = Array(receipt[:exchange_order_ids]).presence || [ receipt[:source_leg_exchange_order_id] ].compact
+      "#{label} #{result.status} for #{route}. exchange_order_ids=#{exchange_ids.presence&.join(',') || 'none'}, #{counters}."
+    end
+  end
+
+  def random_rotation_route(position)
+    from = params[:from_venue].presence || params[:preview_from_venue].presence
+    to = params[:to_venue].presence || params[:preview_to_venue].presence
+    if from.present? && to.present?
+      normalized_from = HedgeVenues.normalize(from)
+      normalized_to = HedgeVenues.normalize(to)
+      return { from_venue: normalized_from, to_venue: normalized_to, route: "#{normalized_from}->#{normalized_to}" }
+    end
+
+    route = RandomRotationSetupWizard.new(position: position).report[:next_route]
+    return route if route
+
+    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    fallback_to = current == "extended" ? "ethereal" : "extended"
+    { from_venue: current, to_venue: fallback_to, route: "#{current}->#{fallback_to}" }
+  end
+
+  def random_rotation_redirect_params(position, route = nil)
+    route ||= random_rotation_route(position)
+    {
+      hedge_venue: position.hedge&.execution_venue,
+      tab: params[:tab].presence || "migration",
+      preview_from_venue: route[:from_venue],
+      preview_to_venue: route[:to_venue],
+      preview_migration_mode: params[:migration_mode].presence || params[:preview_migration_mode].presence || "full",
+      preview_migration_sequence: params[:migration_sequence].presence || params[:preview_migration_sequence].presence || "target_first",
+      max_step_size_eth: params[:max_step_size_eth].presence,
+      preview_full_migration_allowed: params[:full_migration_allowed].presence || "1"
+    }.compact
+  end
+
+  def random_rotation_route_label(route)
+    "#{HedgeVenues.label(route[:from_venue])} -> #{HedgeVenues.label(route[:to_venue])}"
   end
 
   def hedge_emergency_restore_message(receipt)
