@@ -86,6 +86,27 @@ class NadoMigrationReadinessTest < ActiveSupport::TestCase
     assert_equal "open", service.preview_calls.first.fetch(:action)
   end
 
+  test "Nado live migration gates can be enabled from DB settings" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
+    OperationalSettings.set!(key: "AERODROME_NADO_LIVE_MIGRATION_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED", enabled: true)
+    service = FakeNadoService.new(current_position: nil)
+
+    report = NadoMigrationReadiness.new(
+      position: migration_position,
+      intended_role: "target",
+      env: {
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "false",
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "false"
+      },
+      nado_service: service
+    ).report
+
+    assert_not_includes report.fetch(:blockers), NadoMigrationReadiness::LIVE_BLOCKER
+    assert_equal true, report.fetch(:nado_live_enabled)
+  end
+
   test "real Nado preflight does not raise BigDecimal on blank price fields" do
     position = migration_position
     position.update_column(:asset0_price_usd, nil)

@@ -1188,19 +1188,26 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
 
+    runner = Object.new
+    runner.define_singleton_method(:run) { raise "canary runner must not be called with a wrong phrase" }
     assert_no_difference "ShortRebalance.count" do
-      post random_rotation_live_canary_position_path(position), params: {
-        tab: "migration",
-        from_venue: "extended",
-        to_venue: "ethereal",
-        random_rotation_confirmation: "WRONG"
-      }
+      MigrationManualLiveCanaryRunner.stub(:new, runner) do
+        post random_rotation_live_canary_position_path(position), params: {
+          tab: "migration",
+          from_venue: "extended",
+          to_venue: "ethereal",
+          random_rotation_confirmation: "WRONG"
+        }
+      end
     end
 
     assert_response :redirect
     assert_includes response.location, "tab=migration"
     assert_match "submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}", flash[:alert]
     assert_match "orders_submitted=0", flash[:alert]
+    assert_match "orders_placed=0", flash[:alert]
+    assert_match "signatures_created=0", flash[:alert]
+    assert_match "cancels_submitted=0", flash[:alert]
     assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
   end
@@ -1261,6 +1268,63 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
     assert_match "Supervised live canary LIVE_CANARY_CONFIRMED", flash[:notice]
+  end
+
+  test "random rotation live canary exact phrase enables Nado supervised gates only" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    captured = {}
+    runner = Object.new
+    runner.define_singleton_method(:run) do |**kwargs|
+      captured.merge!(kwargs)
+      MigrationManualLiveCanaryRunner::Result.new(
+        "TARGET_LEG_FAILED_SOURCE_UNCHANGED",
+        [ "mock stopped before live submit" ],
+        [],
+        {
+          from_venue: kwargs.fetch(:from),
+          to_venue: kwargs.fetch(:to),
+          orders_submitted: 0,
+          orders_placed: 0,
+          signatures_created: 0
+        }
+      )
+    end
+
+    MigrationManualLiveCanaryRunner.stub(:new, runner) do
+      post random_rotation_live_canary_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "nado",
+        migration_sequence: "target_first",
+        random_rotation_confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_equal position, captured.fetch(:position)
+    assert_equal "extended", captured.fetch(:from)
+    assert_equal "nado", captured.fetch(:to)
+    assert_equal "target_first", captured.fetch(:sequence)
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_FULL_ALLOWED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
   end
 
   test "random rotation enable writes DB operational settings when all routes are ready" do

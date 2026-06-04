@@ -524,7 +524,7 @@ class NadoHedgeExecutionService
     blockers << "AERODROME_NADO_DELTA_PROBE_ENABLED must be true" unless delta_probe_enabled?
     blockers << "submitted confirmation must equal #{DELTA_PROBE_CONFIRMATION}" unless confirmation.to_s == DELTA_PROBE_CONFIRMATION
     blockers << "position must be active" unless position.active?
-    blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
+    blockers << "active hedge-ready Mellow Autopilot position is required" if mellow_position_not_hedge_ready?(position)
     blockers << "Nado signer service is not configured" if signer_url.blank?
     blockers << "Nado signer service is unavailable" if signer_url.present? && !signer_available?
     blockers << "Nado submit URL is not configured" if submit_base_url.blank?
@@ -853,7 +853,7 @@ class NadoHedgeExecutionService
     blockers << "AERODROME_NADO_HEDGE_LIVE_ENABLED must be true" unless @venue.live_flag_enabled?
     blockers << "submitted confirmation must equal #{@venue.live_confirmation_phrase}" if require_confirmation && !(confirmation.to_s == @venue.live_confirmation_phrase && @venue.live_confirmation_phrase.present?)
     blockers << "position must be active" unless position.active?
-    blockers << "active hedge-ready Mellow Autopilot position is required" unless position.mellow_autopilot? && position.hedge_ready?
+    blockers << "active hedge-ready Mellow Autopilot position is required" if mellow_position_not_hedge_ready?(position)
     blockers << "target hedge size must be positive" if action.to_s == "open" && !requested_order_size.positive?
     blockers << "rebalance delta must be non-zero" if action.to_s == "rebalance" && requested_order_size.zero?
     blockers << "close size must be positive" if action.to_s == "close" && !preview_order_size.positive?
@@ -1150,6 +1150,10 @@ class NadoHedgeExecutionService
     end
 
     decimal_or_nil(position.asset0_price_usd)
+  end
+
+  def mellow_position_not_hedge_ready?(position)
+    position.mellow_autopilot? && !position.hedge_ready?
   end
 
   def round_price(price, side:, product:)

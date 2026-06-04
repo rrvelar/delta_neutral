@@ -162,7 +162,68 @@ class MigrationManualLiveCanaryReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be true for supervised live canary."
   end
 
+  test "Aerodrome direct Extended to Nado readiness does not require Mellow Autopilot" do
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: position,
+      from: "extended",
+      to: "nado",
+      env: ready_nado_env,
+      capability_registry: capability_registry,
+      target_preflight: { blockers: [] }
+    ).report
+
+    assert_equal "extended->nado", report.fetch(:route)
+    assert_equal true, report.fetch(:live_path_implemented)
+    assert_not_includes report.fetch(:blockers), "active hedge-ready Mellow Autopilot position is required"
+    assert_not_includes report.fetch(:blockers), "fresh Mellow target is required before supervised canary."
+  end
+
+  test "Mellow Autopilot positions can still require Mellow hedge readiness" do
+    mellow = position
+    mellow.update!(source: Position::SOURCE_MELLOW_AUTOPILOT, mellow_metadata: { hedge_ready: false }.to_json)
+
+    report = MigrationManualLiveCanaryReadiness.new(
+      position: mellow,
+      from: "extended",
+      to: "nado",
+      env: ready_nado_env,
+      capability_registry: capability_registry,
+      fresh_target: Struct.new(:target) {
+        def resolve(refresh_if_stale:)
+          {
+            status: "ok",
+            target_short_eth: BigDecimal(target),
+            target_source: "test",
+            exposure_source: "test",
+            exposure_refreshed_at: Time.current.iso8601,
+            exposure_stale: false,
+            blockers: [],
+            orders_submitted: 0,
+            signatures_created: 0
+          }
+        end
+      }.new("1.0"),
+      target_preflight: { blockers: [ "active hedge-ready Mellow Autopilot position is required" ] }
+    ).report
+
+    assert_includes report.fetch(:blockers), "active hedge-ready Mellow Autopilot position is required"
+  end
+
   private
+
+  def ready_nado_env
+    {
+      "MIGRATION_LIVE_ENABLED" => "true",
+      "MIGRATION_MANUAL_LIVE_CANARY_ENABLED" => "true",
+      "MIGRATION_FULL_ALLOWED" => "true",
+      "EXTENDED_LIVE_ENABLED" => "true",
+      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false"
+    }
+  end
 
   def capability_registry
     Class.new do

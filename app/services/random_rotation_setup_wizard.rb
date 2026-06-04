@@ -36,7 +36,7 @@ class RandomRotationSetupWizard
       action: "random_rotation_setup",
       position_id: position.id,
       status: status,
-      status_label: status_label_override || status_label(status),
+      status_label: status_label_override || status_label(status, next_route),
       current_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       current_venue_label: HedgeVenues.label(position.hedge&.execution_venue),
       hedge_health: hedge_health,
@@ -230,7 +230,9 @@ class RandomRotationSetupWizard
     STATES[:no_dry_run]
   end
 
-  def status_label(status)
+  def status_label(status, next_route = nil)
+    return "Dry-run complete / supervised Nado canary required" if status == STATES[:dry_run_proven] && nado_route?(next_route)
+
     {
       STATES[:random_enabled] => "Random enabled",
       STATES[:ready_for_random] => "Ready to enable random rotation",
@@ -268,6 +270,10 @@ class RandomRotationSetupWizard
 
   def next_action_live?(status)
     status.in?([ STATES[:dry_run_proven], STATES[:target_only] ])
+  end
+
+  def nado_route?(route)
+    route && route.values_at(:from_venue, :to_venue).include?("nado")
   end
 
   def required_confirmation_phrase(status, pending)

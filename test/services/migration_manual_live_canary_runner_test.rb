@@ -257,6 +257,100 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 2, result.receipt.fetch(:signatures_created)
   end
 
+  test "Aerodrome direct Extended to Nado target failure keeps source unchanged" do
+    source_close_called = false
+    executor = Class.new do
+      attr_reader :received_plan
+
+      def initialize(source_close_called)
+        @source_close_called = source_close_called
+      end
+
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        @received_plan = plan
+        HedgeVenueMigrationExecutor::Result.new(
+          "first_leg_not_confirmed",
+          [ "Nado target open failed; source unchanged." ],
+          plan.fetch(:warnings),
+          plan.merge(
+            final_status: "first_leg_not_confirmed",
+            to_leg_execution: { confirmed: false, orders_placed: 0, signatures_created: 0 },
+            from_leg_execution: nil,
+            source_leg_submitted: @source_close_called,
+            final_inside_tolerance: false,
+            orders_placed: 0,
+            orders_submitted: 0,
+            signatures_created: 0,
+            blockers: [ "Nado target open failed; source unchanged." ]
+          )
+        )
+      end
+    end.new(source_close_called)
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_nado_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "nado",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "TARGET_LEG_FAILED_SOURCE_UNCHANGED", result.status
+    assert_equal false, result.receipt.fetch(:source_leg_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_not_includes result.blockers, "active hedge-ready Mellow Autopilot position is required"
+  end
+
+  test "Aerodrome direct Extended to Nado accepted target shows continuation instead of duplicate target open" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "TARGET_ACCEPTED_AWAITING_CONTINUATION",
+          target_leg_status: "TARGET_SUBMITTED_PENDING_READBACK",
+          source_leg_status: nil,
+          source_leg_submitted: false,
+          to_leg_execution: { confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "0xnado-target" },
+          from_leg_execution: nil,
+          final_inside_tolerance: false,
+          continuation_pending: true,
+          nado_target_digest: "0xnado-target",
+          exchange_order_ids: [ "0xnado-target" ],
+          orders_placed: 1,
+          orders_submitted: 1,
+          signatures_created: 1,
+          blockers: [],
+          warnings: plan.fetch(:warnings)
+        )
+        HedgeVenueMigrationExecutor::Result.new("TARGET_ACCEPTED_AWAITING_CONTINUATION", [], receipt.fetch(:warnings), receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_nado_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: ready_position,
+      from: "extended",
+      to: "nado",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "TARGET_ACCEPTED_AWAITING_CONTINUATION", result.status
+    assert_equal true, result.receipt.fetch(:continuation_pending)
+    assert_equal false, result.receipt.fetch(:source_leg_submitted)
+    assert_equal "0xnado-target", result.receipt.fetch(:nado_target_digest)
+    assert_equal [ "0xnado-target" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
   test "runner blocked result uses the same canonical planner blockers" do
     env = ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")
     plan = MigrationManualCanaryPlanner.new(
@@ -304,6 +398,13 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
       "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
       "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
     }
+  end
+
+  def ready_nado_env
+    ready_env.merge(
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
+    )
   end
 
   def fresh_target

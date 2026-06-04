@@ -76,6 +76,46 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_not_equal "prepare_next_route", report.fetch(:next_action)
   end
 
+  test "dry run proven Nado route shows supervised Nado canary action" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "nado")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:dry_run_proven], report.fetch(:status)
+    assert_equal "Dry-run complete / supervised Nado canary required", report.fetch(:status_label)
+    assert_equal "run_live_canary", report.fetch(:next_action)
+    assert_equal "extended", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_route).fetch(:to_venue)
+    assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
+  end
+
+  test "successful Extended to Nado canary advances random readiness count" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+
+    before = registry.report(position: position)
+    assert_equal 2, before.fetch(:completed_route_proofs).size
+
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    after = registry.report(position: position)
+    route = after.fetch(:routes).find { |entry| entry[:route] == "extended->nado" }
+
+    assert_equal 3, after.fetch(:completed_route_proofs).size
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal "nado", route.fetch(:final_venue)
+    assert_equal 2, route.fetch(:orders_submitted)
+    assert_equal 2, route.fetch(:signatures_created)
+  end
+
   test "final random blockers do not hide dry run proven canary action" do
     position = position_with_snapshot("extended")
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
@@ -225,6 +265,26 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0
+    )
+  end
+
+  def write_ready_route(dir:, position:, from:, to:)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
     )
   end
 end

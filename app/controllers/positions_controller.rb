@@ -368,9 +368,11 @@ class PositionsController < ApplicationController
   def random_rotation_live_canary
     position = load_position_for_migration
     route = random_rotation_route(position)
-    if params[:random_rotation_confirmation].to_s == MigrationManualLiveCanaryRunner::CONFIRMATION
-      enable_supervised_canary_gates!
+    unless params[:random_rotation_confirmation].to_s == MigrationManualLiveCanaryRunner::CONFIRMATION
+      return redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+        alert: "Supervised live canary blocked_before_submit for #{random_rotation_route_label(route)}: submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
     end
+    enable_supervised_canary_gates!(route)
     result = MigrationManualLiveCanaryRunner.new.run(
       position: position,
       from: route.fetch(:from_venue),
@@ -557,8 +559,10 @@ class PositionsController < ApplicationController
     "#{HedgeVenues.label(route[:from_venue])} -> #{HedgeVenues.label(route[:to_venue])}"
   end
 
-  def enable_supervised_canary_gates!
-    %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED].each do |key|
+  def enable_supervised_canary_gates!(route)
+    keys = %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED]
+    keys += %w[AERODROME_NADO_LIVE_MIGRATION_ENABLED AERODROME_NADO_HEDGE_LIVE_ENABLED] if route.values_at(:from_venue, :to_venue).include?("nado")
+    keys.each do |key|
       OperationalSettings.set!(
         key: key,
         enabled: true,
