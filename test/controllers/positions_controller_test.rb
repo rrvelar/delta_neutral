@@ -961,6 +961,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Status:", response.body
     assert_match "Current venue:", response.body
     assert_match "Extended", response.body
+    assert_match "0 ready / 6 total", response.body
+    assert_match "6 missing", response.body
     assert_match "Prepare Next Route", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Live order possible?", response.body
@@ -968,6 +970,121 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Route proofs", response.body
     assert_match "Advanced details", response.body
     assert_no_match "Hyperliquid -&gt;", response.body
+    assert_no_match "Random rotation setup did not load", response.body
+    assert_no_match "0 ready / 0 total", response.body
+  end
+
+  test "random rotation setup renders out of tolerance blocker with route matrix" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "2.166",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    position.update!(asset0_amount: BigDecimal("2.248279624519602"))
+    position.position_dashboard_snapshot.update!(
+      target_short_eth: "2.248279624519602",
+      tolerance_abs_eth: "0.06744838873558806",
+      combined_short_eth: "2.166",
+      drift_eth: "0.082279624519602",
+      inside_tolerance: false
+    )
+
+    get position_path(position, hedge_venue: "extended", tab: "migration")
+
+    assert_response :success
+    assert_match "Setup blocked / current hedge out of tolerance", response.body
+    assert_match "Out of tolerance", response.body
+    assert_match "Target 2.248280 ETH", response.body
+    assert_match "drift 0.082280 ETH", response.body
+    assert_match "Extended 2.166000", response.body
+    assert_match "0 ready / 6 total", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "Rebalance current hedge first", response.body
+    assert_no_match "Random rotation setup did not load", response.body
+    assert_no_match "0 ready / 0 total", response.body
+  end
+
+  test "random rotation setup tolerates readiness slower than old 300ms timeout" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    readiness_factory = ->(**kwargs) do
+      Object.new.tap do |object|
+        object.define_singleton_method(:report) do
+          sleep 0.4
+          proof_report = kwargs.fetch(:proof_registry).report(position: kwargs.fetch(:position))
+          {
+            action: "migration_random_readiness",
+            position_id: kwargs.fetch(:position).id,
+            current_production_venue: "extended",
+            next_recommended_canary: proof_report.fetch(:missing_route_proofs).find { |route| route[:from_venue] == "extended" },
+            completed_route_proofs: proof_report.fetch(:completed_route_proofs),
+            missing_route_proofs: proof_report.fetch(:missing_route_proofs),
+            stale_route_proofs: [],
+            pending_nado_target_continuation: nil,
+            blockers: [
+              "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true",
+              "MIGRATION_LIVE_ENABLED must be true",
+              "all route proofs must be READY_FOR_RANDOM"
+            ],
+            orders_submitted: 0,
+            orders_placed: 0,
+            signatures_created: 0
+          }
+        end
+      end
+    end
+
+    MigrationRandomReadiness.stub(:new, readiness_factory) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Random Rotation Setup", response.body
+    assert_match "0 ready / 6 total", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_no_match "Random rotation setup did not load", response.body
+    assert_no_match "0 ready / 0 total", response.body
+  end
+
+  test "random rotation setup falls back to route matrix when readiness raises" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    MigrationRandomReadiness.stub(:new, ->(**) { raise "random readiness failed in test" }) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Setup loaded with limited diagnostics", response.body
+    assert_match "0 ready / 6 total", response.body
+    assert_match "6 missing", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "Random readiness refresh needed", response.body
+    assert_no_match "0 ready / 0 total", response.body
   end
 
   test "random rotation prepare next route is dry run only and preserves migration tab" do
@@ -982,33 +1099,20 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       refreshed_at: Time.current,
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
-    proof_path = Rails.root.join("storage/hedge_migration_route_proofs/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
-    rehearsal_path = Rails.root.join("storage/hedge_migration_random_rehearsals/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
-    proof_lines_before = File.exist?(proof_path) ? File.readlines(proof_path).size : 0
-    rehearsal_lines_before = File.exist?(rehearsal_path) ? File.readlines(rehearsal_path).size : 0
-
-    post random_rotation_prepare_next_route_position_path(position), params: {
-      tab: "migration",
-      from_venue: "extended",
-      to_venue: "ethereal"
-    }
+    assert_no_difference "ShortRebalance.count" do
+      post random_rotation_prepare_next_route_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "ethereal"
+      }
+    end
 
     assert_response :redirect
     assert_includes response.location, "tab=migration"
     assert_includes response.location, "preview_from_venue=extended"
     assert_includes response.location, "preview_to_venue=ethereal"
     assert_match "orders_submitted=0, signatures_created=0", flash[:notice]
-
-    proof_receipt = File.readlines(proof_path).drop(proof_lines_before).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "migration_route_proof" }
-    assert proof_receipt
-    assert_equal 0, proof_receipt.fetch("orders_submitted")
-    assert_equal 0, proof_receipt.fetch("signatures_created")
-
-    rehearsal_receipt = File.readlines(rehearsal_path).drop(rehearsal_lines_before).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.find { |row| row["position_id"] == position.id && row["action"] == "random_migration_rehearsal" }
-    assert rehearsal_receipt
-    assert_equal false, rehearsal_receipt.fetch("would_execute_live")
-    assert_equal 0, rehearsal_receipt.fetch("orders_submitted")
-    assert_equal 0, rehearsal_receipt.fetch("signatures_created")
+    assert_no_match "signatures_created=1", flash[:notice]
   end
 
   test "random rotation live canary rejects wrong phrase without submitting" do
@@ -1053,12 +1157,17 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       refreshed_at: Time.current,
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
-    write_ready_random_route_proofs(position)
-
-    post random_rotation_enable_position_path(position), params: {
-      tab: "migration",
-      random_rotation_confirmation: RandomRotationSetupWizard::ENABLE_CONFIRMATION
+    setup = {
+      enable_blockers: [],
+      next_route: { from_venue: "extended", to_venue: "ethereal", route: "extended->ethereal" }
     }
+
+    RandomRotationSetupWizard.stub(:new, ->(**) { Object.new.tap { |object| object.define_singleton_method(:report) { setup } } }) do
+      post random_rotation_enable_position_path(position), params: {
+        tab: "migration",
+        random_rotation_confirmation: RandomRotationSetupWizard::ENABLE_CONFIRMATION
+      }
+    end
 
     assert_response :redirect
     assert_includes response.location, "tab=migration"

@@ -154,7 +154,8 @@ class PositionsController < ApplicationController
       @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
       @live_autopilot_readiness = MigrationLiveAutopilotReadiness.new(position: @position, route_matrix: @migration_route_matrix).report
       @production_health = auto_readiness_production_health(@current_auto_readiness)
-      @random_rotation_setup = safe_dashboard_section("random_rotation_setup", fallback: RandomRotationSetupWizard.unavailable(position: @position, message: "Random rotation setup did not load.")) do
+      random_setup_fallback = RandomRotationSetupWizard.degraded(position: @position, message: "Random readiness refresh needed; showing cached dashboard snapshot and route proof registry.")
+      @random_rotation_setup = safe_dashboard_section("random_rotation_setup", timeout_seconds: random_rotation_setup_timeout_seconds, fallback: random_setup_fallback) do
         proof_registry = MigrationRouteProofRegistry.new
         readiness = MigrationRandomReadiness.new(position: @position, proof_registry: proof_registry, dashboard_health: @production_health[:status]).report
         RandomRotationSetupWizard.new(position: @position, readiness: readiness, proof_registry: proof_registry, route_matrix: @migration_route_matrix).report
@@ -1198,6 +1199,12 @@ class PositionsController < ApplicationController
     0.25
   end
 
+  def random_rotation_setup_timeout_seconds
+    BigDecimal(ENV.fetch("POSITIONS_RANDOM_ROTATION_SETUP_TIMEOUT_SECONDS", "1.5")).to_f
+  rescue ArgumentError
+    1.5
+  end
+
   def diagnostic_timeout_seconds
     BigDecimal(ENV.fetch("POSITIONS_DASHBOARD_DIAGNOSTIC_TIMEOUT_SECONDS", "2.0")).to_f
   rescue ArgumentError
@@ -1207,13 +1214,17 @@ class PositionsController < ApplicationController
   def log_dashboard_section_duration(name, started, timed_out: false, error: nil)
     elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
     suffix = if timed_out
-      " timed_out=true"
+      " timed_out=true timeout_seconds=#{name == 'random_rotation_setup' ? random_rotation_setup_timeout_seconds : dashboard_section_timeout_seconds}"
     elsif error
-      " error=#{error.class}"
+      " error=#{error.class} error_message=#{error.message.to_s.truncate(180)}"
     else
       ""
     end
-    Rails.logger.info("[PositionsController#show] section=#{name} duration_ms=#{elapsed_ms}#{suffix}")
+    Rails.logger.info(
+      "[PositionsController#show] section=#{name} position_id=#{@position&.id} " \
+      "current_venue=#{@position&.hedge&.execution_venue} duration_ms=#{elapsed_ms}#{suffix} " \
+      "orders_submitted=0 signatures_created=0"
+    )
   end
 
   def fallback_with_warning(fallback, warning)

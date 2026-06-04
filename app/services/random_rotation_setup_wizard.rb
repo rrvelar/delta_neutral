@@ -16,14 +16,19 @@ class RandomRotationSetupWizard
     routes = proof_report.fetch(:routes)
     pending = readiness_report[:pending_nado_target_continuation]
     next_route = next_route_for(readiness_report: readiness_report, routes: routes, pending: pending)
-    plan = route_plan(next_route)
     status = status_for(readiness_report: readiness_report, proof_report: proof_report, pending: pending, next_route: next_route)
 
+    base_report(readiness_report: readiness_report, proof_report: proof_report, routes: routes, next_route: next_route, status: status)
+  end
+
+  def base_report(readiness_report:, proof_report:, routes:, next_route:, status:, status_label_override: nil)
+    plan = route_plan(next_route)
+    pending = readiness_report[:pending_nado_target_continuation]
     {
       action: "random_rotation_setup",
       position_id: position.id,
       status: status,
-      status_label: status_label(status),
+      status_label: status_label_override || status_label(status),
       current_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       current_venue_label: HedgeVenues.label(position.hedge&.execution_venue),
       hedge_health: hedge_health,
@@ -53,29 +58,50 @@ class RandomRotationSetupWizard
   end
 
   def self.unavailable(position:, message:)
+    degraded(position: position, message: message, status: "unavailable", status_label: "Unavailable")
+  end
+
+  def self.degraded(position:, message:, proof_registry: nil, env: ENV, status: nil, status_label: nil)
+    registry = proof_registry || MigrationRouteProofRegistry.new
+    proof_report = registry.report(position: position)
+    readiness_report = degraded_readiness(position: position, proof_report: proof_report, message: message)
+    routes = proof_report.fetch(:routes)
+    next_route = readiness_report[:next_recommended_canary]
+    fallback_status = status || (position.position_dashboard_snapshot&.inside_tolerance == false ? "blocked_hedge_health" : "degraded")
+
+    new(position: position, readiness: readiness_report, proof_registry: registry, env: env).base_report(
+      readiness_report: readiness_report,
+      proof_report: proof_report,
+      routes: routes,
+      next_route: next_route,
+      status: fallback_status,
+      status_label_override: status_label
+    )
+  rescue => e
+    canonical_routes = canonical_route_statuses
     {
       action: "random_rotation_setup",
       position_id: position.id,
-      status: "unavailable",
-      status_label: "Unavailable",
+      status: status || "degraded",
+      status_label: status_label || "Setup loaded with limited diagnostics",
       current_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       current_venue_label: HedgeVenues.label(position.hedge&.execution_venue),
-      hedge_health: { status: "Unavailable", message: message },
-      venue_shorts: {},
+      hedge_health: hedge_health_for(position),
+      venue_shorts: venue_shorts_for(position),
       auto_states: {},
       migration_gates: {},
       completed_route_proofs: [],
-      missing_route_proofs: [],
+      missing_route_proofs: canonical_routes,
       stale_route_proofs: [],
-      route_proof_statuses: [],
+      route_proof_statuses: canonical_routes,
       all_routes_ready: false,
-      next_route: nil,
+      next_route: canonical_routes.find { |route| route[:from_venue] == HedgeVenues.normalize(position.hedge&.execution_venue) } || canonical_routes.first,
       next_action: "refresh",
       next_action_label: "Refresh Random Readiness",
       next_action_live: false,
       required_confirmation_phrase: nil,
       plan: {},
-      blockers: [ message ],
+      blockers: [ message, "#{e.class}: #{e.message}" ],
       enable_blockers: [ message ],
       counters: {
         orders_submitted: 0,
@@ -84,6 +110,62 @@ class RandomRotationSetupWizard
         cancels_submitted: 0
       }
     }
+  end
+
+  def self.canonical_route_statuses
+    MigrationRouteProofRegistry::ROUTES.map do |from, to|
+      {
+        route: "#{from}->#{to}",
+        from_venue: from,
+        to_venue: to,
+        status: MigrationRouteProofRegistry::STATUSES[:not_started],
+        blockers: [ "#{from}->#{to} route proof has not started." ],
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0
+      }
+    end
+  end
+
+  def self.degraded_readiness(position:, proof_report:, message:)
+    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    missing = proof_report.fetch(:missing_route_proofs)
+    {
+      action: "migration_random_readiness",
+      position_id: position.id,
+      current_production_venue: current,
+      next_recommended_canary: missing.find { |route| route[:from_venue] == current } || missing.first,
+      completed_route_proofs: proof_report.fetch(:completed_route_proofs),
+      missing_route_proofs: missing,
+      stale_route_proofs: proof_report.fetch(:stale_route_proofs),
+      pending_nado_target_continuation: nil,
+      blockers: [ message ],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    }
+  end
+
+  def self.hedge_health_for(position)
+    snapshot = position.position_dashboard_snapshot
+    return { status: "Unknown", message: "No dashboard snapshot yet." } unless snapshot
+
+    {
+      status: snapshot.inside_tolerance ? "Healthy" : "Out of tolerance",
+      inside_tolerance: snapshot.inside_tolerance,
+      target_short_eth: snapshot.target_short_eth,
+      combined_short_eth: snapshot.combined_short_eth,
+      drift_eth: snapshot.drift_eth,
+      tolerance_abs_eth: snapshot.tolerance_abs_eth,
+      refreshed_at: snapshot.refreshed_at
+    }
+  end
+
+  def self.venue_shorts_for(position)
+    snapshot = position.position_dashboard_snapshot
+    return {} unless snapshot
+
+    %w[extended ethereal nado].to_h { |venue| [ venue, snapshot.public_send("#{venue}_short_eth") ] }
   end
 
   private
@@ -119,6 +201,7 @@ class RandomRotationSetupWizard
   def status_for(readiness_report:, proof_report:, pending:, next_route:)
     return "enabled" if OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", env: env)
     return "continuation_required" if pending
+    return "blocked_hedge_health" if position.position_dashboard_snapshot&.inside_tolerance == false
     return "ready_to_enable" if proof_report.fetch(:missing_route_proofs).empty?
     return "ready_for_supervised_canary" if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run]
     return "in_progress" if readiness_report.fetch(:completed_route_proofs).any? || proof_report.fetch(:routes).any? { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:not_started] }
@@ -131,6 +214,8 @@ class RandomRotationSetupWizard
       "enabled" => "Enabled",
       "ready_to_enable" => "Ready to enable",
       "continuation_required" => "Continuation required",
+      "blocked_hedge_health" => "Setup blocked / current hedge out of tolerance",
+      "degraded" => "Setup loaded with limited diagnostics",
       "ready_for_supervised_canary" => "Ready for supervised canary",
       "in_progress" => "In progress",
       "not_ready" => "Not ready",
@@ -143,6 +228,7 @@ class RandomRotationSetupWizard
       "enabled" => "disable_random",
       "ready_to_enable" => "enable_random",
       "continuation_required" => "continue_source_close",
+      "blocked_hedge_health" => "rebalance_current_hedge",
       "ready_for_supervised_canary" => "run_live_canary"
     }.fetch(status, "prepare_next_route")
   end
@@ -152,6 +238,7 @@ class RandomRotationSetupWizard
       "enabled" => "Disable Random Rotation",
       "ready_to_enable" => "Enable Random Rotation",
       "continuation_required" => "Close source venue and continue migration",
+      "blocked_hedge_health" => "Rebalance current hedge first",
       "ready_for_supervised_canary" => "Run Supervised Live Canary"
     }.fetch(status, "Prepare Next Route")
   end
@@ -214,7 +301,7 @@ class RandomRotationSetupWizard
     return { status: "Unknown", message: "No dashboard snapshot yet." } unless snapshot
 
     {
-      status: snapshot.inside_tolerance ? "Healthy" : "Needs attention",
+      status: snapshot.inside_tolerance ? "Healthy" : "Out of tolerance",
       inside_tolerance: snapshot.inside_tolerance,
       target_short_eth: snapshot.target_short_eth,
       combined_short_eth: snapshot.combined_short_eth,
