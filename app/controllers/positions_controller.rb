@@ -362,12 +362,15 @@ class PositionsController < ApplicationController
     summary = HedgeVenueMigrationRouteMatrix.new(position: position).prove_routes!
     rehearsal = MigrationRandomRehearsal.new.run(position: position, dry_run: true)
     redirect_to position_path(position, random_rotation_redirect_params(position, route)),
-      notice: "Prepared next random route #{random_rotation_route_label(route)}. Dry-run route proof wrote #{summary.fetch(:receipts_written)} rows; rehearsal #{rehearsal.status}. orders_submitted=0, signatures_created=0."
+      notice: "Prepared next random route #{random_rotation_route_label(route)}. Dry-run route proof wrote #{summary.fetch(:receipts_written)} rows; rehearsal #{rehearsal.status}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
   end
 
   def random_rotation_live_canary
     position = load_position_for_migration
     route = random_rotation_route(position)
+    if params[:random_rotation_confirmation].to_s == MigrationManualLiveCanaryRunner::CONFIRMATION
+      enable_supervised_canary_gates!
+    end
     result = MigrationManualLiveCanaryRunner.new.run(
       position: position,
       from: route.fetch(:from_venue),
@@ -430,7 +433,7 @@ class PositionsController < ApplicationController
     position = load_position_for_migration
     report = MigrationRandomReadiness.new(position: position).report
     redirect_to position_path(position, random_rotation_redirect_params(position)),
-      notice: "Random readiness refreshed: #{report.fetch(:missing_route_proofs).size} route proofs missing. orders_submitted=0, signatures_created=0."
+      notice: "Random readiness refreshed: #{report.fetch(:missing_route_proofs).size} route proofs missing. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
   end
 
   def random_rotation_enable
@@ -552,6 +555,17 @@ class PositionsController < ApplicationController
 
   def random_rotation_route_label(route)
     "#{HedgeVenues.label(route[:from_venue])} -> #{HedgeVenues.label(route[:to_venue])}"
+  end
+
+  def enable_supervised_canary_gates!
+    %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED].each do |key|
+      OperationalSettings.set!(
+        key: key,
+        enabled: true,
+        updated_by: Current.user,
+        reason: "dashboard supervised live canary confirmation"
+      )
+    end
   end
 
   def hedge_emergency_restore_message(receipt)

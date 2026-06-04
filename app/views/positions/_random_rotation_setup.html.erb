@@ -2,9 +2,11 @@
 <% next_route = setup[:next_route] || {} %>
 <% plan = setup[:plan] || {} %>
 <% counters = setup[:counters] || {} %>
+<% setup_progress = setup[:setup_progress] || {} %>
+<% random_enablement = setup[:random_enablement] || {} %>
 <% status_color = case setup[:status].to_s
-                  when "enabled", "ready_to_enable" then "border-green-800 bg-green-950/40 text-green-200"
-                  when "ready_for_supervised_canary", "continuation_required", "in_progress" then "border-yellow-800 bg-yellow-950/30 text-yellow-100"
+                  when RandomRotationSetupWizard::STATES[:random_enabled], RandomRotationSetupWizard::STATES[:ready_for_random] then "border-green-800 bg-green-950/40 text-green-200"
+                  when RandomRotationSetupWizard::STATES[:dry_run_proven], RandomRotationSetupWizard::STATES[:target_only], RandomRotationSetupWizard::STATES[:full_route], "in_progress" then "border-yellow-800 bg-yellow-950/30 text-yellow-100"
                   else "border-gray-800 bg-gray-950/70 text-gray-200"
                   end %>
 
@@ -21,6 +23,16 @@
         Next required step:
         <span class="text-white"><%= setup[:next_action_label] || "Refresh Random Readiness" %><%= next_route[:from_venue].present? ? " #{HedgeVenues.label(next_route[:from_venue])} -> #{HedgeVenues.label(next_route[:to_venue])}" : "" %></span>
       </p>
+      <% if setup_progress[:from_venue].present? %>
+        <p class="mt-1 text-sm text-gray-400">
+          Route setup progress:
+          <span class="text-white"><%= HedgeVenues.label(setup_progress[:from_venue]) %> -> <%= HedgeVenues.label(setup_progress[:to_venue]) %>: <%= setup_progress[:status_label] %></span>
+        </p>
+      <% end %>
+      <p class="mt-1 text-sm text-gray-400">
+        Random rotation:
+        <span class="text-white"><%= random_enablement[:ready_routes] || 0 %> / <%= random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size %> routes READY_FOR_RANDOM</span>
+      </p>
     </div>
     <span class="rounded-full border px-3 py-1 text-xs <%= status_color %>"><%= setup[:status_label] || "Unavailable" %></span>
   </div>
@@ -36,13 +48,13 @@
       <p class="mt-1 text-xs text-gray-300">Extended <%= format_venue_eth_amount(setup.dig(:venue_shorts, "extended") || setup.dig(:venue_shorts, :extended)) %> · Ethereal <%= format_venue_eth_amount(setup.dig(:venue_shorts, "ethereal") || setup.dig(:venue_shorts, :ethereal)) %> · Nado <%= format_venue_eth_amount(setup.dig(:venue_shorts, "nado") || setup.dig(:venue_shorts, :nado)) %> ETH</p>
     </div>
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
-      <p class="text-xs text-gray-500">Route proofs</p>
-      <p class="mt-1 text-white"><%= Array(setup[:completed_route_proofs]).size %> ready / <%= Array(setup[:route_proof_statuses]).size %> total</p>
-      <p class="mt-1 text-xs text-gray-500"><%= Array(setup[:missing_route_proofs]).size %> missing</p>
+      <p class="text-xs text-gray-500">Random enablement</p>
+      <p class="mt-1 text-white"><%= random_enablement[:ready_routes] || Array(setup[:completed_route_proofs]).size %> / <%= random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size %> READY_FOR_RANDOM</p>
+      <p class="mt-1 text-xs text-gray-500">Final random rotation stays blocked until every route is ready.</p>
     </div>
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
       <p class="text-xs text-gray-500">Action counters</p>
-      <p class="mt-1 text-white"><%= counters[:orders_submitted] || 0 %> orders · <%= counters[:signatures_created] || 0 %> signatures</p>
+      <p class="mt-1 text-white"><%= counters[:orders_submitted] || 0 %> orders · <%= counters[:signatures_created] || 0 %> signatures · <%= counters[:cancels_submitted] || 0 %> cancels</p>
       <p class="mt-1 text-xs text-gray-500">Dry-run setup actions must stay zero.</p>
     </div>
   </div>
@@ -51,6 +63,7 @@
     <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
       <div class="grid grid-cols-1 gap-3 text-xs md:grid-cols-3">
         <div><span class="text-gray-500">Route</span><p class="text-white"><%= HedgeVenues.label(next_route[:from_venue]) %> -> <%= HedgeVenues.label(next_route[:to_venue]) %></p></div>
+        <div><span class="text-gray-500">Route status</span><p class="text-white"><%= setup_progress[:status] || next_route[:status] %></p><p class="text-gray-500"><%= setup_progress[:status_label] %></p></div>
         <div><span class="text-gray-500">Sequence</span><p class="text-white"><%= (plan[:sequence] || "target_first").to_s.tr("_", " ") %></p></div>
         <div><span class="text-gray-500">Live order possible?</span><p class="<%= setup[:next_action_live] ? 'text-yellow-200' : 'text-green-300' %>"><%= setup[:next_action_live] ? "Yes, only with exact phrase" : "No" %></p></div>
         <div><span class="text-gray-500">Target venue open first</span><p class="text-white"><%= HedgeVenues.label(next_route[:to_venue]) %> <%= plan.dig(:target_leg, :side).presence || "open" %> <%= format_venue_eth_amount(plan.dig(:target_leg, :size_eth)) %> ETH</p></div>
@@ -83,8 +96,15 @@
           <%= form.hidden_field :to_venue, value: next_route[:to_venue] %>
           <%= form.hidden_field :migration_sequence, value: "target_first" %>
           <code class="block break-all rounded border border-gray-800 bg-gray-950 p-2 text-[11px] text-gray-300"><%= setup[:required_confirmation_phrase] %></code>
-          <%= form.text_field :random_rotation_confirmation, autocomplete: "off", placeholder: setup[:required_confirmation_phrase], class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
-          <%= form.submit "Run Supervised Live Canary", class: "w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900" %>
+          <% submit_id = "random-rotation-live-canary-submit" %>
+          <%= form.text_field :random_rotation_confirmation,
+            autocomplete: "off",
+            placeholder: setup[:required_confirmation_phrase],
+            data: { required_confirmation: setup[:required_confirmation_phrase], live_submit_id: submit_id },
+            oninput: "document.getElementById(this.dataset.liveSubmitId).disabled = this.value !== this.dataset.requiredConfirmation",
+            class: "w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
+          <%= form.submit "Run Supervised Live Canary", id: submit_id, disabled: true, class: "w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900 disabled:border-gray-800 disabled:bg-gray-900 disabled:text-gray-600" %>
+          <p class="text-xs text-yellow-200">This opens the target leg first and can temporarily overhedge until the source close readback confirms.</p>
         <% end %>
       <% when "continue_source_close" %>
         <%= form_with url: random_rotation_continue_position_path(position), method: :post, class: "mt-3 space-y-2" do |form| %>
@@ -122,14 +142,22 @@
     </div>
 
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
-      <p class="text-xs uppercase tracking-wide text-gray-500">Blockers</p>
-      <% blockers = Array(setup[:enable_blockers].presence || setup[:blockers]).first(4) %>
-      <% if blockers.present? %>
+      <p class="text-xs uppercase tracking-wide text-gray-500">Current setup blockers</p>
+      <% setup_blockers = Array(plan[:blockers]).presence || Array(setup[:blockers]).reject { |blocker| blocker.to_s.in?(Array(random_enablement[:blockers])) } %>
+      <% if setup_blockers.present? %>
         <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-yellow-200">
-          <% blockers.each do |blocker| %><li><%= blocker %></li><% end %>
+          <% setup_blockers.first(4).each do |blocker| %><li><%= blocker %></li><% end %>
         </ul>
       <% else %>
         <p class="mt-2 text-xs text-green-300">No setup blockers for the current step.</p>
+      <% end %>
+      <p class="mt-4 text-xs uppercase tracking-wide text-gray-500">Random enablement blockers</p>
+      <% if Array(random_enablement[:blockers]).present? %>
+        <ul class="mt-2 list-disc space-y-1 pl-4 text-xs text-gray-400">
+          <% Array(random_enablement[:blockers]).first(4).each do |blocker| %><li><%= blocker %></li><% end %>
+        </ul>
+      <% else %>
+        <p class="mt-2 text-xs text-green-300">All routes are READY_FOR_RANDOM.</p>
       <% end %>
       <%= button_to "Refresh route proof registry", random_rotation_refresh_position_path(position), method: :post, params: { tab: "migration" }, class: "mt-3 w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
       <%= form_with url: random_rotation_disable_all_position_path(position), method: :post, class: "mt-2 space-y-2" do |form| %>

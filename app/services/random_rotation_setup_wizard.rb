@@ -1,6 +1,14 @@
 class RandomRotationSetupWizard
   ENABLE_CONFIRMATION = "I_UNDERSTAND_THIS_ENABLES_RANDOM_ROTATION".freeze
   DISABLE_CONFIRMATION = "I_UNDERSTAND_THIS_DISABLES_RANDOM_ROTATION".freeze
+  STATES = {
+    no_dry_run: "NO_DRY_RUN",
+    dry_run_proven: "DRY_RUN_PROVEN",
+    target_only: "LIVE_CANARY_CONFIRMED_TARGET_ONLY",
+    full_route: "LIVE_CANARY_CONFIRMED_FULL_ROUTE",
+    ready_for_random: "READY_FOR_RANDOM",
+    random_enabled: "RANDOM_ENABLED"
+  }.freeze
 
   def initialize(position:, readiness: nil, proof_registry: nil, route_matrix: nil, env: ENV)
     @position = position
@@ -40,6 +48,8 @@ class RandomRotationSetupWizard
       stale_route_proofs: proof_report.fetch(:stale_route_proofs),
       route_proof_statuses: routes,
       all_routes_ready: proof_report.fetch(:missing_route_proofs).empty?,
+      setup_progress: setup_progress(next_route),
+      random_enablement: random_enablement(readiness_report, proof_report, pending),
       next_route: next_route,
       next_action: next_action(status),
       next_action_label: next_action_label(status),
@@ -67,7 +77,7 @@ class RandomRotationSetupWizard
     readiness_report = degraded_readiness(position: position, proof_report: proof_report, message: message)
     routes = proof_report.fetch(:routes)
     next_route = readiness_report[:next_recommended_canary]
-    fallback_status = status || (position.position_dashboard_snapshot&.inside_tolerance == false ? "blocked_hedge_health" : "degraded")
+    fallback_status = status || fallback_status_for(position: position, proof_report: proof_report, next_route: next_route)
 
     new(position: position, readiness: readiness_report, proof_registry: registry, env: env).base_report(
       readiness_report: readiness_report,
@@ -95,6 +105,8 @@ class RandomRotationSetupWizard
       stale_route_proofs: [],
       route_proof_statuses: canonical_routes,
       all_routes_ready: false,
+      setup_progress: {},
+      random_enablement: { ready_routes: 0, total_routes: canonical_routes.size, blockers: [ message ] },
       next_route: canonical_routes.find { |route| route[:from_venue] == HedgeVenues.normalize(position.hedge&.execution_venue) } || canonical_routes.first,
       next_action: "refresh",
       next_action_label: "Refresh Random Readiness",
@@ -144,6 +156,14 @@ class RandomRotationSetupWizard
       orders_placed: 0,
       signatures_created: 0
     }
+  end
+
+  def self.fallback_status_for(position:, proof_report:, next_route:)
+    return "blocked_hedge_health" if position.position_dashboard_snapshot&.inside_tolerance == false
+    return STATES[:ready_for_random] if proof_report.fetch(:missing_route_proofs).empty?
+    return STATES[:dry_run_proven] if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run]
+
+    "degraded"
   end
 
   def self.hedge_health_for(position)
@@ -199,65 +219,100 @@ class RandomRotationSetupWizard
   end
 
   def status_for(readiness_report:, proof_report:, pending:, next_route:)
-    return "enabled" if OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", env: env)
-    return "continuation_required" if pending
+    return STATES[:random_enabled] if OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", env: env)
+    return STATES[:target_only] if pending
     return "blocked_hedge_health" if position.position_dashboard_snapshot&.inside_tolerance == false
-    return "ready_to_enable" if proof_report.fetch(:missing_route_proofs).empty?
-    return "ready_for_supervised_canary" if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run]
+    return STATES[:ready_for_random] if proof_report.fetch(:missing_route_proofs).empty?
+    return STATES[:dry_run_proven] if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run]
+    return STATES[:full_route] if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:live]
     return "in_progress" if readiness_report.fetch(:completed_route_proofs).any? || proof_report.fetch(:routes).any? { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:not_started] }
 
-    "not_ready"
+    STATES[:no_dry_run]
   end
 
   def status_label(status)
     {
-      "enabled" => "Enabled",
-      "ready_to_enable" => "Ready to enable",
-      "continuation_required" => "Continuation required",
+      STATES[:random_enabled] => "Random enabled",
+      STATES[:ready_for_random] => "Ready to enable random rotation",
+      STATES[:dry_run_proven] => "Dry-run complete / supervised canary required",
+      STATES[:target_only] => "Live canary target confirmed / source close required",
+      STATES[:full_route] => "Live canary route confirmed",
+      STATES[:no_dry_run] => "No dry-run proof yet",
       "blocked_hedge_health" => "Setup blocked / current hedge out of tolerance",
       "degraded" => "Setup loaded with limited diagnostics",
-      "ready_for_supervised_canary" => "Ready for supervised canary",
       "in_progress" => "In progress",
-      "not_ready" => "Not ready",
       "unavailable" => "Unavailable"
     }.fetch(status, status.to_s.tr("_", " ").capitalize)
   end
 
   def next_action(status)
     {
-      "enabled" => "disable_random",
-      "ready_to_enable" => "enable_random",
-      "continuation_required" => "continue_source_close",
+      STATES[:random_enabled] => "disable_random",
+      STATES[:ready_for_random] => "enable_random",
+      STATES[:target_only] => "continue_source_close",
       "blocked_hedge_health" => "rebalance_current_hedge",
-      "ready_for_supervised_canary" => "run_live_canary"
+      STATES[:dry_run_proven] => "run_live_canary"
     }.fetch(status, "prepare_next_route")
   end
 
   def next_action_label(status)
     {
-      "enabled" => "Disable Random Rotation",
-      "ready_to_enable" => "Enable Random Rotation",
-      "continuation_required" => "Close source venue and continue migration",
+      STATES[:random_enabled] => "Disable Random Rotation",
+      STATES[:ready_for_random] => "Enable Random Rotation",
+      STATES[:target_only] => "Close source venue and continue migration",
+      STATES[:full_route] => "Finalize migration / prepare next route",
       "blocked_hedge_health" => "Rebalance current hedge first",
-      "ready_for_supervised_canary" => "Run Supervised Live Canary"
+      STATES[:dry_run_proven] => "Run Supervised Live Canary"
     }.fetch(status, "Prepare Next Route")
   end
 
   def next_action_live?(status)
-    status.in?(%w[ready_for_supervised_canary continuation_required])
+    status.in?([ STATES[:dry_run_proven], STATES[:target_only] ])
   end
 
   def required_confirmation_phrase(status, pending)
     case status
-    when "ready_for_supervised_canary"
+    when STATES[:dry_run_proven]
       MigrationManualLiveCanaryRunner::CONFIRMATION
-    when "continuation_required"
+    when STATES[:target_only]
       pending && pending[:to_venue] == "nado" ? MigrationTargetNadoContinuation::CONFIRMATION : MigrationTargetFirstSourceRecovery::CONFIRMATION
-    when "ready_to_enable"
+    when STATES[:ready_for_random]
       ENABLE_CONFIRMATION
-    when "enabled"
+    when STATES[:random_enabled]
       DISABLE_CONFIRMATION
     end
+  end
+
+  def setup_progress(next_route)
+    return {} unless next_route
+
+    {
+      route: next_route[:route],
+      from_venue: next_route[:from_venue],
+      to_venue: next_route[:to_venue],
+      status: next_route[:status],
+      status_label: setup_route_status_label(next_route[:status])
+    }
+  end
+
+  def setup_route_status_label(status)
+    {
+      MigrationRouteProofRegistry::STATUSES[:dry_run] => "dry-run proven, live canary required",
+      MigrationRouteProofRegistry::STATUSES[:live] => "target canary confirmed, source close may be required",
+      MigrationRouteProofRegistry::STATUSES[:ready] => "ready for random rotation",
+      MigrationRouteProofRegistry::STATUSES[:not_started] => "dry-run proof required"
+    }.fetch(status, status.to_s.tr("_", " ").downcase)
+  end
+
+  def random_enablement(readiness_report, proof_report, pending)
+    total = proof_report.fetch(:routes).size
+    ready = proof_report.fetch(:completed_route_proofs).size
+    {
+      ready_routes: ready,
+      total_routes: total,
+      status: ready == total ? "ready" : "not_ready",
+      blockers: enable_blockers(readiness_report, proof_report, pending)
+    }
   end
 
   def route_plan(next_route)

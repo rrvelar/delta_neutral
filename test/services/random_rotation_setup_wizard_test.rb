@@ -8,14 +8,16 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
     report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
 
-    assert_equal "not_ready", report.fetch(:status)
-    assert_equal "Not ready", report.fetch(:status_label)
+    assert_equal RandomRotationSetupWizard::STATES[:no_dry_run], report.fetch(:status)
+    assert_equal "No dry-run proof yet", report.fetch(:status_label)
     assert_equal "prepare_next_route", report.fetch(:next_action)
     assert_equal "extended", report.fetch(:next_route).fetch(:from_venue)
     assert_equal "ethereal", report.fetch(:next_route).fetch(:to_venue)
     assert_equal false, report.fetch(:next_action_live)
     assert_equal 0, report.fetch(:counters).fetch(:orders_submitted)
+    assert_equal 0, report.fetch(:counters).fetch(:orders_placed)
     assert_equal 0, report.fetch(:counters).fetch(:signatures_created)
+    assert_equal 0, report.fetch(:counters).fetch(:cancels_submitted)
   end
 
   test "all ready route proofs show enable random action" do
@@ -46,10 +48,82 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
     report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
 
-    assert_equal "ready_to_enable", report.fetch(:status)
+    assert_equal RandomRotationSetupWizard::STATES[:ready_for_random], report.fetch(:status)
     assert_equal "enable_random", report.fetch(:next_action)
     assert_equal RandomRotationSetupWizard::ENABLE_CONFIRMATION, report.fetch(:required_confirmation_phrase)
     assert_empty report.fetch(:enable_blockers)
+  end
+
+  test "dry run proven route shows supervised live canary action" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:dry_run_proven], report.fetch(:status)
+    assert_equal "Dry-run complete / supervised canary required", report.fetch(:status_label)
+    assert_equal "run_live_canary", report.fetch(:next_action)
+    assert_equal "Run Supervised Live Canary", report.fetch(:next_action_label)
+    assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
+    assert_equal "extended", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:next_route).fetch(:to_venue)
+    assert_equal "DRY_RUN_PROVEN", report.fetch(:setup_progress).fetch(:status)
+    assert_equal 0, report.fetch(:random_enablement).fetch(:ready_routes)
+    assert_equal 6, report.fetch(:random_enablement).fetch(:total_routes)
+    assert_not_equal "prepare_next_route", report.fetch(:next_action)
+  end
+
+  test "final random blockers do not hide dry run proven canary action" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    proof_report = registry.report(position: position)
+    dry_route = proof_report.fetch(:routes).find { |route| route[:route] == "extended->ethereal" }
+    readiness = {
+      action: "migration_random_readiness",
+      position_id: position.id,
+      current_production_venue: "extended",
+      next_recommended_canary: dry_route,
+      completed_route_proofs: [],
+      missing_route_proofs: proof_report.fetch(:missing_route_proofs),
+      stale_route_proofs: [],
+      pending_nado_target_continuation: nil,
+      blockers: [
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true",
+        "MIGRATION_LIVE_ENABLED must be true",
+        "all route proofs must be READY_FOR_RANDOM"
+      ],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    }
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal "run_live_canary", report.fetch(:next_action)
+    assert_includes report.fetch(:random_enablement).fetch(:blockers), "all route proofs must be READY_FOR_RANDOM"
+    assert_not_equal "prepare_next_route", report.fetch(:next_action)
+  end
+
+  test "degraded fallback preserves dry run proven canary action" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "ethereal")
+
+    report = RandomRotationSetupWizard.degraded(
+      position: position,
+      message: "random readiness timed out",
+      proof_registry: registry
+    )
+
+    assert_equal RandomRotationSetupWizard::STATES[:dry_run_proven], report.fetch(:status)
+    assert_equal "run_live_canary", report.fetch(:next_action)
+    assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
   end
 
   test "degraded report keeps canonical routes when readiness is unavailable" do
@@ -70,7 +144,9 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_equal "Healthy", report.fetch(:hedge_health).fetch(:status)
     assert_equal BigDecimal("1.25"), report.fetch(:venue_shorts).fetch("extended")
     assert_equal 0, report.fetch(:counters).fetch(:orders_submitted)
+    assert_equal 0, report.fetch(:counters).fetch(:orders_placed)
     assert_equal 0, report.fetch(:counters).fetch(:signatures_created)
+    assert_equal 0, report.fetch(:counters).fetch(:cancels_submitted)
   end
 
   test "out of tolerance snapshot blocks setup without losing routes" do
@@ -134,6 +210,21 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       recovery_dir: base_dir.join("recoveries"),
       continuation_dir: base_dir.join("continuations"),
       random_dir: base_dir.join("random")
+    )
+  end
+
+  def write_dry_run_route(dir:, position:, from:, to:)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("random")).write(
+      action: "random_migration_rehearsal",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      final_status: "dry_run",
+      route_status: "READY_FOR_DRY_RUN",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
     )
   end
 end

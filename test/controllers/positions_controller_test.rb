@@ -961,13 +961,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Status:", response.body
     assert_match "Current venue:", response.body
     assert_match "Extended", response.body
-    assert_match "0 ready / 6 total", response.body
-    assert_match "6 missing", response.body
+    assert_match "0 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Final random rotation stays blocked until every route is ready.", response.body
     assert_match "Prepare Next Route", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Live order possible?", response.body
     assert_match "No", response.body
-    assert_match "Route proofs", response.body
+    assert_match "Route setup progress:", response.body
     assert_match "Advanced details", response.body
     assert_no_match "Hyperliquid -&gt;", response.body
     assert_no_match "Random rotation setup did not load", response.body
@@ -1003,7 +1003,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Target 2.248280 ETH", response.body
     assert_match "drift 0.082280 ETH", response.body
     assert_match "Extended 2.166000", response.body
-    assert_match "0 ready / 6 total", response.body
+    assert_match "0 / 6 READY_FOR_RANDOM", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Rebalance current hedge first", response.body
     assert_no_match "Random rotation setup did not load", response.body
@@ -1055,7 +1055,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Random Rotation Setup", response.body
-    assert_match "0 ready / 6 total", response.body
+    assert_match "0 / 6 READY_FOR_RANDOM", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_no_match "Random rotation setup did not load", response.body
     assert_no_match "0 ready / 0 total", response.body
@@ -1080,11 +1080,69 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Setup loaded with limited diagnostics", response.body
-    assert_match "0 ready / 6 total", response.body
-    assert_match "6 missing", response.body
+    assert_match "0 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Final random rotation stays blocked until every route is ready.", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Random readiness refresh needed", response.body
     assert_no_match "0 ready / 0 total", response.body
+  end
+
+  test "random rotation setup shows live canary CTA after dry run proof" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_dry_run_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Dry-run complete / supervised canary required", response.body
+    assert_match "Run Supervised Live Canary", response.body
+    assert_match MigrationManualLiveCanaryRunner::CONFIRMATION, response.body
+    assert_match "Route setup progress:", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "dry-run proven, live canary required", response.body
+    assert_match "0 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Random enablement blockers", response.body
+    assert_no_match "Next safe action</p>\n      <p class=\"mt-1 text-sm text-gray-300\">Prepare Next Route</p>", response.body
+  end
+
+  test "random rotation setup keeps final random blockers separate from canary CTA" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_dry_run_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Run Supervised Live Canary", response.body
+    assert_match "Random enablement blockers", response.body
+    assert_match "all route proofs must be READY_FOR_RANDOM", response.body
   end
 
   test "random rotation prepare next route is dry run only and preserves migration tab" do
@@ -1111,11 +1169,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.location, "tab=migration"
     assert_includes response.location, "preview_from_venue=extended"
     assert_includes response.location, "preview_to_venue=ethereal"
-    assert_match "orders_submitted=0, signatures_created=0", flash[:notice]
+    assert_match "orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0", flash[:notice]
     assert_no_match "signatures_created=1", flash[:notice]
   end
 
   test "random rotation live canary rejects wrong phrase without submitting" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
     position = create_aerodrome_position
     clear_migration_receipts_for_position(position.id)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -1141,6 +1201,66 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.location, "tab=migration"
     assert_match "submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}", flash[:alert]
     assert_match "orders_submitted=0", flash[:alert]
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
+  end
+
+  test "random rotation live canary accepts exact phrase and calls supervised canary runner" do
+    OperationalSetting.delete_all
+    OperationalSettingAudit.delete_all
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    captured = {}
+    runner = Object.new
+    runner.define_singleton_method(:run) do |**kwargs|
+      captured.merge!(kwargs)
+      MigrationManualLiveCanaryRunner::Result.new(
+        "LIVE_CANARY_CONFIRMED",
+        [],
+        [],
+        {
+          from_venue: kwargs.fetch(:from),
+          to_venue: kwargs.fetch(:to),
+          orders_submitted: 2,
+          orders_placed: 2,
+          signatures_created: 2,
+          exchange_order_ids: [ "test-order-1", "test-order-2" ]
+        }
+      )
+    end
+
+    MigrationManualLiveCanaryRunner.stub(:new, runner) do
+      post random_rotation_live_canary_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "ethereal",
+        migration_sequence: "target_first",
+        random_rotation_confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_equal position, captured.fetch(:position)
+    assert_equal "extended", captured.fetch(:from)
+    assert_equal "ethereal", captured.fetch(:to)
+    assert_equal "target_first", captured.fetch(:sequence)
+    assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, captured.fetch(:confirmation)
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("MIGRATION_FULL_ALLOWED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_match "Supervised live canary LIVE_CANARY_CONFIRMED", flash[:notice]
   end
 
   test "random rotation enable writes DB operational settings when all routes are ready" do
@@ -3288,6 +3408,33 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
         signatures_created: 1
       )
     end
+  end
+
+  def isolated_route_registry(base_dir)
+    MigrationRouteProofRegistry.new(
+      route_proof_dir: base_dir.join("route_proofs"),
+      canary_dir: base_dir.join("canaries"),
+      recovery_dir: base_dir.join("recoveries"),
+      continuation_dir: base_dir.join("continuations"),
+      random_dir: base_dir.join("random")
+    )
+  end
+
+  def write_dry_run_route_proof(position, from:, to:, receipt_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"))
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: receipt_dir).write(
+      action: "random_migration_rehearsal",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      route: "#{from}->#{to}",
+      final_status: "dry_run",
+      route_status: "READY_FOR_DRY_RUN",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
   end
 
   def clear_migration_receipts_for_position(position_id)
