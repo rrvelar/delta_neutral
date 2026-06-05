@@ -34,6 +34,7 @@ class MigrationRandomReadiness
       route_proof_statuses: proof_report.fetch(:routes),
       random_live_gates: random_live_gates,
       pending_nado_target_continuation: pending_continuation,
+      pending_nado_target_continuation_blocking: pending_continuation.present?,
       stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
@@ -141,7 +142,7 @@ class MigrationRandomReadiness
         []
       end
         .select { |event| pending_nado_target_event?(event) }
-        .reject { |event| proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event) }
+        .reject { |event| resolved_nado_target_continuation?(event) }
         .reject { |event| stale_nado_target_continuation?(event, proof_report) }
         .max_by { |event| event_time(event) || Time.zone.at(0) }
         &.then do |event|
@@ -167,6 +168,12 @@ class MigrationRandomReadiness
       safe_readback_for_completed_route?(from: event["from_venue"], to: event["to_venue"])
     @stale_pending_continuation_ignored = true if safe
     safe
+  end
+
+  def resolved_nado_target_continuation?(event)
+    resolved = proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event)
+    @stale_pending_continuation_ignored = true if resolved
+    resolved
   end
 
   def stale_pending_continuation_ignored?

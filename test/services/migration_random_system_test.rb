@@ -84,7 +84,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
-  test "partial canary plus source close recovery finalization becomes recovery proven" do
+  test "partial canary plus source close recovery finalization becomes ready for random" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("nado")
@@ -94,11 +94,11 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
 
-    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_equal false, route.fetch(:manual_intervention)
     assert_match(%r{test-recovery-proofs}, route.fetch(:recovery_receipt))
     assert_match(%r{test-recovery-proofs}, route.fetch(:finalization_receipt))
-    assert_includes route.fetch(:blockers), "nado->extended recovery-proven; optional clean rerun required for READY_FOR_RANDOM."
+    assert_empty route.fetch(:blockers)
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
@@ -114,7 +114,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
 
-    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_not_equal "FAILED_NEEDS_REPAIR", route.fetch(:status)
     assert_equal "extended", route.fetch(:final_venue)
     assert_equal 0, route.fetch(:orders_submitted)
@@ -186,7 +186,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
-  test "recovery-only route remains recovery proven" do
+  test "recovery-only route is ready when recovery finalization is safe" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
@@ -195,8 +195,8 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
 
-    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
-    assert_includes route.fetch(:blockers), "nado->extended recovery-proven; optional clean rerun required for READY_FOR_RANDOM."
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
@@ -212,7 +212,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
 
-    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_match(%r{test-recovery-proofs}, route.fetch(:finalization_receipt))
     assert_not_includes route.fetch(:blockers), "nado->extended latest proof failed and needs repair."
   ensure
@@ -237,7 +237,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
-  test "random readiness uses recovery proven proof status" do
+  test "random readiness counts safe recovery proof as completed route" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
@@ -248,8 +248,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry).report
     route = report.fetch(:route_proof_statuses).find { |entry| entry[:route] == "nado->extended" }
 
-    assert_equal "RECOVERY_PROVEN", route.fetch(:status)
-    assert report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "nado->extended" && entry[:status] == "RECOVERY_PROVEN" }
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert report.fetch(:completed_route_proofs).any? { |entry| entry[:route] == "nado->extended" }
+    assert_not report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "nado->extended" }
     assert_not_includes route.fetch(:blockers), "nado->extended latest proof failed and needs repair."
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
@@ -506,6 +507,44 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     assert_nil report.dig(:nado_auto_summary, :latest_nado_pending)
     assert_not_includes report.fetch(:blockers), "pending ShortRebalance must be resolved before random migration"
+  end
+
+  test "current recovery-finalized Ethereal to Nado route leaves Nado to Ethereal as next canary" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    random_dir = Rails.root.join("tmp/test-random-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "ethereal", production_venue: "ethereal"))
+    write_event(canary_dir, live_canary_event(position: position, from: "ethereal", to: "extended", production_venue: "extended"))
+    write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado", production_venue: "nado"))
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", production_venue: "extended"))
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 10.minutes.ago))
+    write_event(recovery_dir, recovery_event(position: position, from: "ethereal", to: "nado", timestamp: 5.minutes.ago, source_already_flat: true, orders_submitted: 0, signatures_created: 0))
+    write_event(random_dir, {
+      action: "random_migration_rehearsal",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "dry_run",
+      timestamp: Time.current.iso8601,
+      orders_submitted: 0,
+      signatures_created: 0
+    })
+    registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: random_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+    ethereal_nado = report.fetch(:route_proof_statuses).find { |entry| entry[:route] == "ethereal->nado" }
+
+    assert_equal "READY_FOR_RANDOM", ethereal_nado.fetch(:status)
+    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+    assert_equal "nado->ethereal", report.fetch(:next_recommended_canary).fetch(:route)
+    assert_equal "DRY_RUN_PROVEN", report.fetch(:next_recommended_canary).fetch(:status)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+    FileUtils.rm_rf(random_dir) if random_dir
   end
 
   private

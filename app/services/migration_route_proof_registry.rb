@@ -86,7 +86,9 @@ class MigrationRouteProofRegistry
     from = pending_event["from_venue"]
     to = pending_event["to_venue"]
     route = route_status(position: position, from: from, to: to)
-    return false unless route[:status] == STATUSES[:ready] && route[:continuation_receipt].present?
+    return false unless route[:status] == STATUSES[:ready]
+    return true if finalized_route_readback?(route, to: to)
+    return false unless route[:continuation_receipt].present?
 
     continuation_events(position: position, from: from, to: to).any? do |event|
       continuation_proof?(event) && continuation_matches_pending?(continuation: event, pending: pending_event)
@@ -112,6 +114,7 @@ class MigrationRouteProofRegistry
       return stale?(live) ? STATUSES[:stale] : STATUSES[:ready]
     end
 
+    return stale?(recovery) ? STATUSES[:stale] : STATUSES[:ready] if recovery && recovery_ready_for_random?(recovery)
     return stale?(recovery) ? STATUSES[:stale] : STATUSES[:recovery] if recovery
 
     if failed && event_time(failed) == event_time(latest)
@@ -128,7 +131,7 @@ class MigrationRouteProofRegistry
   def proof_event_for(status:, dry:, live:, continuation:, recovery:, failed:, latest:)
     case status
     when STATUSES[:ready], STATUSES[:live]
-      [ continuation, live ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+      [ continuation, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
     when STATUSES[:recovery]
       recovery
     when STATUSES[:dry_run]
@@ -181,6 +184,19 @@ class MigrationRouteProofRegistry
       Array(pending["exchange_order_ids"]).map(&:to_s).include?(continuation_digest.to_s)
   end
 
+  def finalized_route_readback?(route, to:)
+    summary = route[:final_readback_summary] || {}
+    return false unless route[:final_venue] == to
+    return false unless summary[:production_venue_finalized] == true
+    return false unless summary[:final_inside_tolerance] == true
+
+    source_flat = summary[:source_flat_after] == true || summary[:source_already_flat] == true || summary[:source_close_confirmed] == true
+    target_confirmed = summary[:target_holds_expected_short] == true || summary[:target_confirmed] == true
+    venue_flat = summary[:other_venues_flat] != false && summary[:third_venue_flat] != false
+    open_orders_clear = summary[:open_orders_clear_after] != false
+    source_flat && target_confirmed && venue_flat && open_orders_clear
+  end
+
   def dry_run_proof?(event)
     event["action"].to_s.in?(%w[migration_route_proof random_migration_rehearsal]) &&
       (event["route_status"] == "READY_FOR_DRY_RUN" || event["final_status"].to_s.in?(%w[dry_run READY_FOR_TARGET_FIRST]))
@@ -209,13 +225,20 @@ class MigrationRouteProofRegistry
 
   def recovery_proof?(event)
     event["action"] == "recover_target_first_source_close" &&
-      event["final_status"].to_s.in?(%w[MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE SOURCE_CLOSE_RECOVERY_CONFIRMED]) &&
+      event["final_status"].to_s.in?(%w[MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK SOURCE_CLOSE_RECOVERY_CONFIRMED]) &&
       event["target_confirmed"] == true &&
       (event["source_already_flat"] == true || event["source_close_confirmed"] == true || event["readback_confirmed"] == true) &&
       event["other_venues_flat"] == true &&
       event["final_inside_tolerance"] == true &&
       event["production_venue_finalized"] == true &&
       !manual_exchange_intervention?(event)
+  end
+
+  def recovery_ready_for_random?(event)
+    recovery_proof?(event) &&
+      event["production_venue_finalized"] == true &&
+      (event["final_venue"].blank? || event["final_venue"] == event["to_venue"] || event["production_venue"] == event["to_venue"]) &&
+      !manual_intervention?(event)
   end
 
   def continuation_proof?(event)
@@ -303,6 +326,12 @@ class MigrationRouteProofRegistry
     {
       source_flat_after: event["source_flat_after"],
       target_holds_expected_short: event["target_holds_expected_short"],
+      source_already_flat: event["source_already_flat"],
+      source_close_confirmed: event["source_close_confirmed"],
+      target_confirmed: event["target_confirmed"],
+      other_venues_flat: event["other_venues_flat"],
+      third_venue_flat: event["third_venue_flat"],
+      open_orders_clear_after: event["open_orders_clear_after"],
       final_inside_tolerance: event["final_inside_tolerance"],
       production_venue_finalized: event["production_venue_finalized"]
     }.compact

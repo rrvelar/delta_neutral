@@ -106,7 +106,7 @@ class MigrationTargetNadoContinuation
     receipt = recovery.receipt
     return "READY_TO_CLOSE_SOURCE" if !live? && recovery_status == "dry_run" && receipt[:target_confirmed] == true && receipt[:source_already_flat] == false
     return "TARGET_STILL_PENDING" if receipt[:target_confirmed] == false
-    return "MIGRATION_FINALIZED" if recovery_status.in?(%w[SOURCE_CLOSE_RECOVERY_CONFIRMED MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE])
+    return "MIGRATION_FINALIZED" if recovery_status.in?(%w[SOURCE_CLOSE_RECOVERY_CONFIRMED MIGRATION_FINALIZED ALREADY_FINALIZED SOURCE_ALREADY_FLAT_READY_TO_FINALIZE SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK])
 
     recovery_status.presence || "CONTINUATION_RECHECK_REQUIRED"
   end

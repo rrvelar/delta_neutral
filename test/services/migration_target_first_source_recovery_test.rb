@@ -104,8 +104,8 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
       env: recovery_env
     ).run
 
-    assert_equal "MIGRATION_FINALIZED", result.status, result.blockers.inspect
-    assert_equal "MIGRATION_FINALIZED", result.receipt.fetch(:lifecycle_state)
+    assert_equal "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK", result.status, result.blockers.inspect
+    assert_equal "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK", result.receipt.fetch(:lifecycle_state)
     assert_equal "nado", position.hedge.reload.execution_venue
     assert_equal true, result.receipt.fetch(:production_venue_finalized)
     assert_equal 0, result.receipt.fetch(:orders_submitted)
@@ -134,7 +134,7 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_equal "ethereal", position.hedge.reload.execution_venue
   end
 
-  test "live finalization blocks without recovery gate" do
+  test "source already flat live finalization does not require recovery gate" do
     position = migration_position(execution_venue: "ethereal")
 
     result = recovery(
@@ -142,6 +142,31 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
       from: "ethereal",
       to: "nado",
       ethereal_short: "0",
+      nado_short: "1.11",
+      target: "1.11",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env.merge("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED" => "false")
+    ).run
+
+    assert_equal "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK", result.status, result.blockers.inspect
+    assert_not_includes result.blockers, "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true"
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, result.receipt.fetch(:production_venue_finalized)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:would_execute_live)
+  end
+
+  test "source still open live recovery still requires recovery gate" do
+    position = migration_position(execution_venue: "ethereal")
+
+    result = recovery(
+      position: position,
+      from: "ethereal",
+      to: "nado",
+      ethereal_short: "1.11",
       nado_short: "1.11",
       target: "1.11",
       live: true,

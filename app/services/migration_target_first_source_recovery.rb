@@ -133,17 +133,21 @@ class MigrationTargetFirstSourceRecovery
   def live_gate_blockers(context)
     blockers = []
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation_valid?
-    if require_recovery_live_gate?
+    if source_close_order_planned?(context) && require_recovery_live_gate?
       blockers << "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be true" unless bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED")
     end
-    if context.fetch(:source_short).positive?
+    if source_close_order_planned?(context)
       blockers << "#{HedgeVenues.label(from)} live gate must be enabled" unless venue_live_enabled?(from)
       blockers << "EXTENDED_MAINNET_PROBE_ENABLED must be true" if from == "extended" && !bool_env("EXTENDED_MAINNET_PROBE_ENABLED")
+      blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
+      blockers << "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+      blockers << "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     end
-    blockers << "EXTENDED_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("EXTENDED_AUTO_REBALANCE_ENABLED")
-    blockers << "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
-    blockers << "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be false during source-close recovery" if bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     blockers
+  end
+
+  def source_close_order_planned?(context)
+    context.fetch(:planned_source_close_leg).present?
   end
 
   def planned_source_close_leg(source_short)
@@ -260,7 +264,7 @@ class MigrationTargetFirstSourceRecovery
     return "ALREADY_FINALIZED" if already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize)
     return "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE" if !live? && source_already_flat && safe_to_finalize && HedgeVenues.normalize(position.hedge&.execution_venue) != to
     return "dry_run" unless live?
-    return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize
+    return "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK" if source_already_flat && safe_to_finalize
 
     execution && recovery_confirmed?(context.merge(execution: execution)) ? "SOURCE_CLOSE_RECOVERY_CONFIRMED" : "SOURCE_CLOSE_RECOVERY_MANUAL_ACTION_REQUIRED"
   end
@@ -269,7 +273,7 @@ class MigrationTargetFirstSourceRecovery
     return "RECOVERY_BLOCKED" if blockers.any?
     return "MIGRATION_FINALIZED" if already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize)
     return "SOURCE_ALREADY_FLAT_READY_TO_FINALIZE" if source_already_flat && safe_to_finalize && !live?
-    return "MIGRATION_FINALIZED" if source_already_flat && safe_to_finalize && live?
+    return "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK" if source_already_flat && safe_to_finalize && live?
     return "SOURCE_CLOSE_CONFIRMED" if execution && (execution[:confirmed] || execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed]))
 
     live? ? "RECOVERY_REQUIRED" : "READY_FOR_TARGET_FIRST"

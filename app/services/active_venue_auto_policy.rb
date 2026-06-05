@@ -24,6 +24,16 @@ class ActiveVenueAutoPolicy
           reason: reason
         )
       end
+      if venue == "nado"
+        %w[AERODROME_NADO_HEDGE_LIVE_ENABLED AERODROME_NADO_LIVE_MIGRATION_ENABLED].each do |key|
+          applied << OperationalSettings.set!(
+            key: key,
+            enabled: true,
+            updated_by: updated_by,
+            reason: reason
+          )
+        end
+      end
     end
     errors = applied.flat_map(&:errors).uniq
     result(errors.empty?, applied.select(&:ok).map(&:setting), errors, venue: venue)

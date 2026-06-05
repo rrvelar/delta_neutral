@@ -65,6 +65,42 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_includes route.fetch(:blockers), "extended->nado route proof has not started."
   end
 
+  test "safe finalized recovery receipt marks route ready for random" do
+    position = position_with_snapshot("nado")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("recoveries")).write(
+      action: "recover_target_first_source_close",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      final_status: "SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK",
+      production_venue: "nado",
+      source_already_flat: true,
+      target_confirmed: true,
+      other_venues_flat: true,
+      third_venue_flat: true,
+      open_orders_clear_after: true,
+      final_inside_tolerance: true,
+      production_venue_finalized: true,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
+
+    report = registry.report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "ethereal->nado" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+    assert_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "ethereal->nado"
+    assert_not report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "ethereal->nado" }
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   private
 
   def registry_for(dir)
