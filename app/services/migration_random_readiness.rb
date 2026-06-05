@@ -14,7 +14,9 @@ class MigrationRandomReadiness
     live_plan = planner.plan(position: position, require_live_proofs: true).receipt
     next_canary = next_recommended_canary(proof_report)
     pending_continuation = pending_nado_target_continuation(proof_report)
+    pending_continuation_blocking = pending_continuation.present? && !stale_pending_continuation_ignored?
     blockers = live_blockers(proof_report: proof_report, live_plan: live_plan, pending_continuation: pending_continuation)
+    blockers.delete("pending target=Nado migration continuation must be completed before random migration") unless pending_continuation_blocking
     {
       action: "migration_random_readiness",
       position_id: position.id,
@@ -34,7 +36,7 @@ class MigrationRandomReadiness
       route_proof_statuses: proof_report.fetch(:routes),
       random_live_gates: random_live_gates,
       pending_nado_target_continuation: pending_continuation,
-      pending_nado_target_continuation_blocking: pending_continuation.present?,
+      pending_nado_target_continuation_blocking: pending_continuation_blocking,
       stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
@@ -184,7 +186,6 @@ class MigrationRandomReadiness
     snapshot = position.position_dashboard_snapshot
     return false unless snapshot
     return false unless snapshot.refresh_status == "ok"
-    return false unless snapshot.inside_tolerance == true
     return false unless open_orders_zero?(snapshot)
 
     !target_nado_waiting_for_source_close?(snapshot: snapshot, from: from, to: to)

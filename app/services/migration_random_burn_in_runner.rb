@@ -38,6 +38,7 @@ class MigrationRandomBurnInRunner
     @final_target_short_eth = nil
     @max_target_delta_eth = BigDecimal("0")
     @target_refresh_failures = 0
+    @last_readiness_report = {}
     @started_at = @now.call
     @receipt_path = @log_dir.join("#{@started_at.utc.strftime('%Y%m%d_%H%M%S')}_position_#{position.id}.jsonl")
   end
@@ -46,7 +47,7 @@ class MigrationRandomBurnInRunner
     prepare_log!
     start_blockers = preflight_blockers
     if start_blockers.any?
-      write_event(event: "burn_in_start", status: "blocked_before_start", blockers: start_blockers)
+      write_event(readiness_diagnostics.merge(event: "burn_in_start", status: "blocked_before_start", blocker_status: preflight_status(start_blockers), blockers: start_blockers))
       finish(status: "blocked", blockers: start_blockers)
       return result("blocked", start_blockers)
     end
@@ -83,7 +84,8 @@ class MigrationRandomBurnInRunner
     :executor_factory, :now, :sleeper, :selector, :log_dir, :stdout, :started_at, :receipt_path, :disable_after,
     :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
-    :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures
+    :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
+    :last_readiness_report
 
   def live?
     @live
@@ -105,15 +107,15 @@ class MigrationRandomBurnInRunner
     blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
     blockers << "current production venue must be extended, ethereal, or nado" unless VENUES.include?(current)
     readiness = readiness_report
+    self.last_readiness_report = readiness
     blockers << "pending target=Nado migration continuation must be completed before burn-in" if readiness[:pending_nado_target_continuation_blocking]
     blockers << "migration lock is already active for this position" if MigrationExecutionLock.locked?(position)
-    return blockers.uniq if blockers.any?
 
     snapshot, refresh_blockers = refresh_snapshot("preflight")
     blockers.concat(refresh_blockers)
     blockers << "dashboard snapshot must be present" unless snapshot
     if snapshot
-      blockers << "current hedge must be inside tolerance" unless snapshot.inside_tolerance == true
+      blockers << outside_tolerance_blocker(snapshot) unless snapshot.inside_tolerance == true
       blockers << "dashboard snapshot refresh_status must be ok" unless snapshot.refresh_status == "ok"
       blockers << "dashboard snapshot must not be stale" if snapshot.respond_to?(:stale_now?) && snapshot.stale_now?
       blockers << "exactly one venue must have a real short" unless active_short_venues(snapshot).one?
@@ -301,6 +303,9 @@ class MigrationRandomBurnInRunner
       signatures_created: signatures_created,
       final_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       final_combined_inside_tolerance: snapshot&.inside_tolerance == true,
+      blocker_status: preflight_status(blockers),
+      stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
+      pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
       initial_target_short_eth: decimal_string(initial_target_short_eth),
       final_target_short_eth: decimal_string(final_target_short_eth || snapshot&.target_short_eth),
       max_target_delta_eth: decimal_string(max_target_delta_eth),
@@ -367,7 +372,7 @@ class MigrationRandomBurnInRunner
     return [ blockers, "blocked_stale_or_unavailable_lp_target" ] if blockers.any?
 
     blockers << "LP target is stale or unavailable" unless trusted_snapshot?(snapshot)
-    blockers << "current hedge is outside tolerance and rebalance_before_cycle=false; drift_eth=#{decimal_string(snapshot&.drift_eth)} recommended_rebalance_eth=#{decimal_string(snapshot&.drift_eth)}" if snapshot&.inside_tolerance != true && !rebalance_before_cycle
+    blockers << outside_tolerance_blocker(snapshot) if snapshot&.inside_tolerance != true && !rebalance_before_cycle
     active = snapshot ? active_short_venues(snapshot) : []
     blockers << "more than one venue has exposure" if active.size > 1
     blockers << "no venue has the production hedge" if active.empty?
@@ -408,6 +413,15 @@ class MigrationRandomBurnInRunner
     "blocked_unexpected_venue_exposure"
   end
 
+  def preflight_status(blockers)
+    return "success" if blockers.empty?
+    return "blocked_before_cycle_out_of_tolerance" if blockers.any? { |blocker| blocker.include?("current hedge outside tolerance") }
+    return "blocked_stale_or_unavailable_lp_target" if blockers.any? { |blocker| blocker.match?(/LP target|refresh failed|stale/i) }
+    return "blocked_open_orders_nonzero" if blockers.any? { |blocker| blocker.include?("open orders") }
+
+    "blocked_before_start"
+  end
+
   def post_cycle_status(blockers)
     return "success" if blockers.empty?
     return "stopped_target_changed_too_much" if blockers.any? { |blocker| blocker.include?("target changed") }
@@ -424,6 +438,23 @@ class MigrationRandomBurnInRunner
     return "dashboard_snapshot_error" if snapshot.source_errors_hash.key?("mellow_exposure")
 
     position.mellow_autopilot? ? "dashboard_snapshot_fresh_mellow_exposure" : "dashboard_snapshot_position_asset0_amount"
+  end
+
+  def outside_tolerance_blocker(snapshot)
+    drift = decimal(snapshot&.drift_eth)
+    side = drift.positive? ? "increase_short" : "decrease_short"
+    "current hedge outside tolerance: target_short_eth=#{decimal_string(snapshot&.target_short_eth)} " \
+      "current_short_eth=#{decimal_string(snapshot&.combined_short_eth)} drift_eth=#{decimal_string(snapshot&.drift_eth)} " \
+      "tolerance_abs_eth=#{decimal_string(snapshot&.tolerance_abs_eth)} recommended_rebalance_side=#{side} " \
+      "recommended_rebalance_size_eth=#{decimal_string(drift.abs)}"
+  end
+
+  def readiness_diagnostics
+    {
+      stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
+      pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
+      pending_nado_target_continuation: last_readiness_report[:pending_nado_target_continuation]
+    }
   end
 
   def decimal(value)

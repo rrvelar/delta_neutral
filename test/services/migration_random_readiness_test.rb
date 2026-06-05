@@ -29,6 +29,41 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
     FileUtils.rm_rf(random_dir) if random_dir
   end
 
+  test "route-ready stale Nado continuation is non-blocking even when hedge is outside tolerance" do
+    pending_dir = Rails.root.join("tmp/test-readiness-pending-#{SecureRandom.hex(4)}")
+    proof_dir = Rails.root.join("tmp/test-readiness-ready-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-readiness-recoveries-#{SecureRandom.hex(4)}")
+    position = migration_position("ethereal")
+    write_pending_nado_canary(pending_dir, position: position, from: "extended", timestamp: 10.minutes.ago)
+    write_ready_canary(proof_dir, position: position, from: "extended", to: "nado")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      extended_short_eth: "0",
+      ethereal_short_eth: "2.469",
+      nado_short_eth: "0",
+      target_short_eth: "2.288623048860169",
+      tolerance_abs_eth: "0.06865869146580507",
+      combined_short_eth: "2.469",
+      drift_eth: "-0.180376951139831",
+      inside_tolerance: false,
+      open_orders_count_extended: 0
+    )
+    registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, proof_registry: registry, canary_dir: pending_dir).report
+
+    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+  ensure
+    FileUtils.rm_rf(pending_dir) if pending_dir
+    FileUtils.rm_rf(proof_dir) if proof_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
   private
 
   def migration_position(venue)

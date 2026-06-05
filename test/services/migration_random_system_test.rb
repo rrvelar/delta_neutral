@@ -597,6 +597,67 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in does not block on stale ignored pending Nado continuation when routes are ready" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    stale_ignored_readiness = {
+      pending_nado_target_continuation: { route: "extended->nado" },
+      pending_nado_target_continuation_blocking: false,
+      stale_pending_continuation_ignored: true,
+      blockers: []
+    }
+
+    result = burn_in(position: position, live: false, log_dir: dir, readiness_report: stale_ignored_readiness).run
+    events = read_jsonl(result.receipt_path)
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "burn_in_started", events.first.fetch("event")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocked start reports stale continuation ignored and outside tolerance" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    stale_ignored_readiness = {
+      pending_nado_target_continuation: { route: "extended->nado" },
+      pending_nado_target_continuation_blocking: false,
+      stale_pending_continuation_ignored: true,
+      blockers: []
+    }
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.30" })
+
+    result = burn_in(position: position, live: false, log_dir: dir, readiness_report: stale_ignored_readiness, snapshot_refresher: refresher).run
+    start = read_jsonl(result.receipt_path).first
+
+    assert_equal "blocked", result.status
+    assert_equal "blocked_before_start", start.fetch("status")
+    assert_equal "blocked_before_cycle_out_of_tolerance", start.fetch("blocker_status")
+    assert_equal true, start.fetch("stale_pending_continuation_ignored")
+    assert_equal false, start.fetch("pending_nado_target_continuation_blocking")
+    assert_match "current hedge outside tolerance", start.fetch("blockers").join(" ")
+    assert_no_match "pending target=Nado migration continuation", start.fetch("blockers").join(" ")
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in preflight collects multiple blockers" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    registry = BurnInProofRegistry.new(missing: [ { route: "nado->ethereal", from_venue: "nado", to_venue: "ethereal", status: "DRY_RUN_PROVEN" } ])
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.30" })
+
+    result = burn_in(position: position, live: false, proof_registry: registry, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "all route proofs must be READY_FOR_RANDOM"
+    assert_match "current hedge outside tolerance", result.blockers.join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in stops when target changes more than max allowed" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -623,7 +684,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "stopped", result.status
     assert_equal "blocked_before_cycle_out_of_tolerance", cycle.fetch("status")
     assert_equal 0, cycle.fetch("execution").fetch("orders_submitted")
-    assert_match "recommended_rebalance_eth", cycle.fetch("blockers").join(" ")
+    assert_match "recommended_rebalance_size_eth", cycle.fetch("blockers").join(" ")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -747,7 +808,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
 
     assert_equal "blocked", result.status
-    assert_includes result.blockers, "current hedge must be inside tolerance"
+    assert_match "current hedge outside tolerance", result.blockers.join(" ")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -940,7 +1001,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15")
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil)
     MigrationRandomBurnInRunner.new(
       position: position,
       duration_minutes: 30,
@@ -958,7 +1019,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       rebalance_before_cycle: rebalance_before_cycle,
       max_target_change_per_cycle_eth: max_target_change_per_cycle_eth,
       readiness_factory: ->(**) {
-        {
+        readiness_report || {
           pending_nado_target_continuation: nil,
           pending_nado_target_continuation_blocking: false,
           stale_pending_continuation_ignored: false,
