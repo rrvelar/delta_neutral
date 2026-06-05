@@ -116,6 +116,70 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_equal 2, route.fetch(:signatures_created)
   end
 
+  test "completed Extended to Nado readback with stale app venue shows finalize instead of canary" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "nado")
+    set_completed_readback(position, from: "extended", to: "nado", production_venue: "extended")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:source_closed_not_finalized], report.fetch(:status)
+    assert_equal "finalize_migration", report.fetch(:next_action)
+    assert_equal "Finalize migration", report.fetch(:next_action_label)
+    assert_equal "extended", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_route).fetch(:to_venue)
+    assert_not_equal "run_live_canary", report.fetch(:next_action)
+    assert_equal 0, report.fetch(:counters).fetch(:orders_submitted)
+    assert_equal 0, report.fetch(:counters).fetch(:signatures_created)
+  end
+
+  test "completed Extended to Nado readback with app venue already target advances to Nado to Ethereal" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_dry_run_route(dir: dir, position: position, from: "extended", to: "nado")
+    position.hedge.update!(execution_venue: "nado")
+    set_completed_readback(position, from: "extended", to: "nado", production_venue: "nado")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+    route = registry.report(position: position).fetch(:routes).find { |item| item[:route] == "extended->nado" }
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal 3, report.fetch(:random_enablement).fetch(:ready_routes)
+    assert_equal "prepare_next_route", report.fetch(:next_action)
+    assert_equal "nado", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:next_route).fetch(:to_venue)
+    assert_no_match(/Run Supervised Live Canary/, report.fetch(:next_action_label))
+  end
+
+  test "all routes reconcile completed readback without showing duplicate canary" do
+    MigrationRouteProofRegistry::ROUTES.each do |from, to|
+      position = position_with_snapshot(from)
+      dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+      registry = isolated_registry(base_dir: dir)
+      write_dry_run_route(dir: dir, position: position, from: from, to: to)
+      position.hedge.update!(execution_venue: to)
+      set_completed_readback(position, from: from, to: to, production_venue: to)
+      readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+      report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+      route = registry.report(position: position).fetch(:routes).find { |item| item[:route] == "#{from}->#{to}" }
+
+      assert_equal "READY_FOR_RANDOM", route.fetch(:status), "#{from}->#{to}"
+      assert_not_equal "run_live_canary", report.fetch(:next_action), "#{from}->#{to}"
+      assert_equal 0, report.fetch(:counters).fetch(:orders_submitted), "#{from}->#{to}"
+      assert_equal 0, report.fetch(:counters).fetch(:orders_placed), "#{from}->#{to}"
+      assert_equal 0, report.fetch(:counters).fetch(:signatures_created), "#{from}->#{to}"
+      assert_equal 0, report.fetch(:counters).fetch(:cancels_submitted), "#{from}->#{to}"
+    end
+  end
+
   test "final random blockers do not hide dry run proven canary action" do
     position = position_with_snapshot("extended")
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
@@ -286,5 +350,23 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       orders_placed: 2,
       signatures_created: 2
     )
+  end
+
+  def set_completed_readback(position, from:, to:, production_venue:)
+    target = position.position_dashboard_snapshot.target_short_eth
+    attrs = {
+      production_venue: production_venue,
+      selected_venue: production_venue,
+      combined_short_eth: target,
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      open_orders_count_extended: 0
+    }
+    attrs["#{from}_short_eth"] = "0"
+    attrs["#{to}_short_eth"] = target
+    position.position_dashboard_snapshot.update!(attrs)
   end
 end

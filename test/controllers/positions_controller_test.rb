@@ -1327,6 +1327,121 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
   end
 
+  test "random rotation setup reconciles completed Extended to Nado and shows next Nado to Ethereal" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "nado")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "1.25",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_ready_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "ethereal", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_dry_run_route_proof(position, from: "extended", to: "nado", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "nado", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Current venue:", response.body
+    assert_match "Nado", response.body
+    assert_match "3 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Nado -&gt; Ethereal", response.body
+    assert_match "Prepare Next Route", response.body
+    assert_no_match "Run Supervised Live Canary", response.body
+    assert_no_match "active hedge-ready Mellow Autopilot position is required", response.body
+  end
+
+  test "random rotation finalize is idempotent and submits no orders" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "1.25",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    position.position_dashboard_snapshot.update!(production_venue: "extended", selected_venue: "extended")
+
+    assert_no_difference "ShortRebalance.count" do
+      post random_rotation_finalize_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "nado",
+        random_rotation_confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_includes response.location, "tab=migration"
+    assert_no_match "preview_from_venue=extended", response.location
+    assert_match "Migration finalization MIGRATION_FINALIZED_BY_READBACK", flash[:notice]
+    assert_match "orders_submitted=0", flash[:notice]
+    assert_match "orders_placed=0", flash[:notice]
+    assert_match "signatures_created=0", flash[:notice]
+    assert_match "cancels_submitted=0", flash[:notice]
+  end
+
+  test "random rotation live canary stale already complete result clears old route params" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "nado")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "1.25",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    runner = Object.new
+    runner.define_singleton_method(:run) do |**kwargs|
+      MigrationManualLiveCanaryRunner::Result.new(
+        "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE",
+        [],
+        [],
+        {
+          from_venue: kwargs.fetch(:from),
+          to_venue: kwargs.fetch(:to),
+          orders_submitted: 0,
+          orders_placed: 0,
+          signatures_created: 0,
+          cancels_submitted: 0,
+          exchange_order_ids: []
+        }
+      )
+    end
+
+    MigrationManualLiveCanaryRunner.stub(:new, runner) do
+      post random_rotation_live_canary_position_path(position), params: {
+        tab: "migration",
+        from_venue: "extended",
+        to_venue: "nado",
+        random_rotation_confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_no_match "preview_from_venue=extended", response.location
+    assert_match "Supervised live canary STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE", flash[:notice]
+    assert_match "orders_submitted=0", flash[:notice]
+    assert_match "orders_placed=0", flash[:notice]
+    assert_match "signatures_created=0", flash[:notice]
+    assert_match "cancels_submitted=0", flash[:notice]
+  end
+
   test "random rotation enable writes DB operational settings when all routes are ready" do
     OperationalSetting.delete_all
     OperationalSettingAudit.delete_all
@@ -3497,6 +3612,29 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0,
+      cancels_submitted: 0
+    )
+  end
+
+  def write_ready_route_proof(position, from:, to:, receipt_dir:)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: receipt_dir).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      route: "#{from}->#{to}",
+      final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1,
       cancels_submitted: 0
     )
   end

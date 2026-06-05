@@ -93,6 +93,10 @@ class MigrationRouteProofRegistry
     end
   end
 
+  def canary_receipt_dir
+    canary_dir
+  end
+
   private
 
   attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :now, :source_commit, :stale_after
@@ -196,7 +200,10 @@ class MigrationRouteProofRegistry
     status.to_s.in?([
       MigrationLiveCanaryChecker::CONFIRMED_STATUS,
       "MIGRATION_FINALIZED",
-      "MIGRATION_CONFIRMED_LATE"
+      "MIGRATION_CONFIRMED_LATE",
+      "ALREADY_MIGRATED_CONFIRMED_BY_READBACK",
+      "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE",
+      MigrationRouteCompletionReconciler::FINALIZED_STATUS
     ])
   end
 

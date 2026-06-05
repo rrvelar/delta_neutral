@@ -381,7 +381,8 @@ class PositionsController < ApplicationController
       sequence: params[:migration_sequence].presence || "target_first"
     )
     level = result.blockers.present? ? :alert : :notice
-    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+    redirect_params = result.blockers.present? ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
+    redirect_to position_path(position, redirect_params),
       flash: { level => random_rotation_result_message("Supervised live canary", result) }
   end
 
@@ -413,15 +414,14 @@ class PositionsController < ApplicationController
   def random_rotation_finalize
     position = load_position_for_migration
     route = random_rotation_route(position)
-    result = MigrationTargetFirstSourceRecovery.new(
-      position: position,
-      from: route.fetch(:from_venue),
-      to: route.fetch(:to_venue),
-      live: true,
-      confirmation: params[:random_rotation_confirmation]
-    ).run
+    unless params[:random_rotation_confirmation].to_s == MigrationManualLiveCanaryRunner::CONFIRMATION
+      return redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+        alert: "Migration finalization blocked_before_submit for #{random_rotation_route_label(route)}: submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
+    end
+    result = MigrationRouteCompletionReconciler.new(position: position, from: route.fetch(:from_venue), to: route.fetch(:to_venue)).finalize!
     level = result.blockers.present? ? :alert : :notice
-    redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+    redirect_params = result.blockers.present? ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
+    redirect_to position_path(position, redirect_params),
       flash: { level => random_rotation_result_message("Migration finalization", result) }
   end
 
@@ -515,7 +515,7 @@ class PositionsController < ApplicationController
   def random_rotation_result_message(label, result)
     receipt = result.receipt
     route = "#{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}"
-    counters = "orders_submitted=#{receipt[:orders_submitted].to_i}, signatures_created=#{receipt[:signatures_created].to_i}"
+    counters = "orders_submitted=#{receipt[:orders_submitted].to_i}, orders_placed=#{receipt[:orders_placed].to_i}, signatures_created=#{receipt[:signatures_created].to_i}, cancels_submitted=#{receipt[:cancels_submitted].to_i}"
     if result.blockers.present?
       "#{label} #{result.status} for #{route}: #{result.blockers.join('; ')}. #{counters}."
     else
@@ -552,6 +552,13 @@ class PositionsController < ApplicationController
       preview_migration_sequence: params[:migration_sequence].presence || params[:preview_migration_sequence].presence || "target_first",
       max_step_size_eth: params[:max_step_size_eth].presence,
       preview_full_migration_allowed: params[:full_migration_allowed].presence || "1"
+    }.compact
+  end
+
+  def random_rotation_clear_route_redirect_params(position)
+    {
+      hedge_venue: position.hedge&.execution_venue,
+      tab: params[:tab].presence || "migration"
     }.compact
   end
 

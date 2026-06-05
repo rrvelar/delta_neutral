@@ -18,6 +18,9 @@ class MigrationManualLiveCanaryRunner
     blockers = hard_blockers(plan: plan, confirmation: confirmation)
     receipt = base_receipt(position: position, plan: plan, confirmation: confirmation, blockers: blockers)
     if blockers.any?
+      reconciled = reconcile_stale_action(position: position, from: from, to: to, confirmation: confirmation, blockers: blockers)
+      return reconciled if reconciled
+
       write_receipt(receipt)
       return Result.new("blocked_before_submit", blockers, plan.fetch(:warnings), receipt)
     end
@@ -29,6 +32,9 @@ class MigrationManualLiveCanaryRunner
     )
     canary_receipt = receipt.merge(from_executor_result(result))
     canary_receipt[:final_status] = normalized_final_status(canary_receipt, result)
+    reconciled = reconcile_stale_action(position: position, from: from, to: to, confirmation: confirmation, blockers: Array(canary_receipt[:blockers]))
+    return reconciled if canary_receipt[:blockers].present? && reconciled
+
     write_receipt(canary_receipt)
     Result.new(canary_receipt[:final_status], Array(canary_receipt[:blockers]), Array(canary_receipt[:warnings]), canary_receipt)
   end
@@ -121,5 +127,24 @@ class MigrationManualLiveCanaryRunner
 
   def write_receipt(receipt)
     HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir).write(receipt)
+  end
+
+  def reconcile_stale_action(position:, from:, to:, confirmation:, blockers:)
+    return unless confirmation == CONFIRMATION
+    return unless stale_action_blockers?(blockers)
+
+    reconciler = MigrationRouteCompletionReconciler.new(position: position, from: from, to: to, now: now, receipt_dir: receipt_dir)
+    current = reconciler.report
+    return unless current.route_complete_by_readback
+
+    finalized = current.production_venue_finalized ? reconciler.write_ready_receipt!(status: "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE") : current
+    Result.new(finalized.status, [], finalized.warnings, finalized.receipt.merge(stale_action_blockers: blockers))
+  end
+
+  def stale_action_blockers?(blockers)
+    Array(blockers).any? do |blocker|
+      text = blocker.to_s
+      text.match?(/source venue .* has no current short|source venue must have a real short|source close preview unavailable|execution_venue must be|production venue.*target|source.*flat/i)
+    end
   end
 end

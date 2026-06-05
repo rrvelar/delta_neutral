@@ -5,6 +5,8 @@ class RandomRotationSetupWizard
     no_dry_run: "NO_DRY_RUN",
     dry_run_proven: "DRY_RUN_PROVEN",
     target_only: "LIVE_CANARY_CONFIRMED_TARGET_ONLY",
+    source_closed_not_finalized: "SOURCE_CLOSED_TARGET_CONFIRMED_NOT_FINALIZED",
+    route_complete_by_readback: "ROUTE_ALREADY_COMPLETE_BY_READBACK",
     full_route: "LIVE_CANARY_CONFIRMED_FULL_ROUTE",
     ready_for_random: "READY_FOR_RANDOM",
     random_enabled: "RANDOM_ENABLED"
@@ -19,9 +21,26 @@ class RandomRotationSetupWizard
   end
 
   def report
-    readiness_report = readiness
     proof_report = proof_registry.report(position: position)
     routes = proof_report.fetch(:routes)
+    reconciliation = reconcile_routes(routes)
+    if reconciliation&.finalize_safe
+      return base_report(
+        readiness_report: readiness,
+        proof_report: proof_report,
+        routes: routes,
+        next_route: route_hash(reconciliation.receipt),
+        status: STATES[:source_closed_not_finalized],
+        reconciliation: reconciliation
+      )
+    end
+    if reconciliation&.route_complete_by_readback && reconciliation.production_venue_finalized
+      proof_report = proof_registry.report(position: position)
+      @readiness = nil
+      routes = proof_report.fetch(:routes)
+    end
+
+    readiness_report = readiness
     pending = readiness_report[:pending_nado_target_continuation]
     next_route = next_route_for(readiness_report: readiness_report, routes: routes, pending: pending)
     status = status_for(readiness_report: readiness_report, proof_report: proof_report, pending: pending, next_route: next_route)
@@ -29,7 +48,7 @@ class RandomRotationSetupWizard
     base_report(readiness_report: readiness_report, proof_report: proof_report, routes: routes, next_route: next_route, status: status)
   end
 
-  def base_report(readiness_report:, proof_report:, routes:, next_route:, status:, status_label_override: nil)
+  def base_report(readiness_report:, proof_report:, routes:, next_route:, status:, status_label_override: nil, reconciliation: nil)
     plan = route_plan(next_route)
     pending = readiness_report[:pending_nado_target_continuation]
     {
@@ -58,6 +77,7 @@ class RandomRotationSetupWizard
       plan: plan,
       blockers: Array(readiness_report[:blockers]),
       enable_blockers: enable_blockers(readiness_report, proof_report, pending),
+      reconciliation: reconciliation_payload(reconciliation),
       counters: {
         orders_submitted: 0,
         orders_placed: 0,
@@ -203,7 +223,7 @@ class RandomRotationSetupWizard
     return route_hash(recommended) if recommended.present?
 
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
-    route_hash(routes.find { |route| route[:from_venue] == current && route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] }) ||
+    route_hash(preferred_missing_route(routes, current)) ||
       route_hash(routes.find { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] })
   end
 
@@ -238,6 +258,8 @@ class RandomRotationSetupWizard
       STATES[:ready_for_random] => "Ready to enable random rotation",
       STATES[:dry_run_proven] => "Dry-run complete / supervised canary required",
       STATES[:target_only] => "Live canary target confirmed / source close required",
+      STATES[:source_closed_not_finalized] => "Migration completed by readback / finalize required",
+      STATES[:route_complete_by_readback] => "Route already complete by readback",
       STATES[:full_route] => "Live canary route confirmed",
       STATES[:no_dry_run] => "No dry-run proof yet",
       "blocked_hedge_health" => "Setup blocked / current hedge out of tolerance",
@@ -252,6 +274,8 @@ class RandomRotationSetupWizard
       STATES[:random_enabled] => "disable_random",
       STATES[:ready_for_random] => "enable_random",
       STATES[:target_only] => "continue_source_close",
+      STATES[:source_closed_not_finalized] => "finalize_migration",
+      STATES[:route_complete_by_readback] => "prepare_next_route",
       "blocked_hedge_health" => "rebalance_current_hedge",
       STATES[:dry_run_proven] => "run_live_canary"
     }.fetch(status, "prepare_next_route")
@@ -262,6 +286,8 @@ class RandomRotationSetupWizard
       STATES[:random_enabled] => "Disable Random Rotation",
       STATES[:ready_for_random] => "Enable Random Rotation",
       STATES[:target_only] => "Close source venue and continue migration",
+      STATES[:source_closed_not_finalized] => "Finalize migration",
+      STATES[:route_complete_by_readback] => "Prepare Next Route",
       STATES[:full_route] => "Finalize migration / prepare next route",
       "blocked_hedge_health" => "Rebalance current hedge first",
       STATES[:dry_run_proven] => "Run Supervised Live Canary"
@@ -269,7 +295,7 @@ class RandomRotationSetupWizard
   end
 
   def next_action_live?(status)
-    status.in?([ STATES[:dry_run_proven], STATES[:target_only] ])
+    status.in?([ STATES[:dry_run_proven], STATES[:target_only], STATES[:source_closed_not_finalized] ])
   end
 
   def nado_route?(route)
@@ -282,6 +308,8 @@ class RandomRotationSetupWizard
       MigrationManualLiveCanaryRunner::CONFIRMATION
     when STATES[:target_only]
       pending && pending[:to_venue] == "nado" ? MigrationTargetNadoContinuation::CONFIRMATION : MigrationTargetFirstSourceRecovery::CONFIRMATION
+    when STATES[:source_closed_not_finalized]
+      MigrationManualLiveCanaryRunner::CONFIRMATION
     when STATES[:ready_for_random]
       ENABLE_CONFIRMATION
     when STATES[:random_enabled]
@@ -308,6 +336,45 @@ class RandomRotationSetupWizard
       MigrationRouteProofRegistry::STATUSES[:ready] => "ready for random rotation",
       MigrationRouteProofRegistry::STATUSES[:not_started] => "dry-run proof required"
     }.fetch(status, status.to_s.tr("_", " ").downcase)
+  end
+
+  def reconcile_routes(routes)
+    routes.each do |route|
+      next if route[:status] == MigrationRouteProofRegistry::STATUSES[:ready]
+      next unless route[:status].in?([ MigrationRouteProofRegistry::STATUSES[:dry_run], MigrationRouteProofRegistry::STATUSES[:live], MigrationRouteProofRegistry::STATUSES[:failed] ])
+
+      reconciler = MigrationRouteCompletionReconciler.new(position: position, from: route[:from_venue], to: route[:to_venue], receipt_dir: proof_registry.canary_receipt_dir)
+      result = reconciler.report
+      return result if result.finalize_safe
+      return reconciler.write_ready_receipt! if result.route_complete_by_readback && result.production_venue_finalized
+    end
+    nil
+  end
+
+  def reconciliation_payload(result)
+    return nil unless result
+
+    result.receipt.slice(
+      :final_status,
+      :from_venue,
+      :to_venue,
+      :source_flat_after,
+      :target_holds_expected_short,
+      :final_inside_tolerance,
+      :open_orders_after,
+      :production_venue_finalized,
+      :orders_submitted,
+      :orders_placed,
+      :signatures_created,
+      :cancels_submitted
+    )
+  end
+
+  def preferred_missing_route(routes, current)
+    candidates = routes.select { |route| route[:from_venue] == current && route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] }
+    return candidates.find { |route| route[:to_venue] == "ethereal" } if current == "nado"
+
+    candidates.first
   end
 
   def random_enablement(readiness_report, proof_report, pending)

@@ -351,6 +351,75 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal [ "0xnado-target" ], result.receipt.fetch(:exchange_order_ids)
   end
 
+  test "stale duplicate canary after completed route does not call executor" do
+    executed = false
+    executor = Class.new do
+      def initialize(flag)
+        @flag = flag
+      end
+
+      def run_precomputed_plan(*)
+        @flag = true
+        raise "executor should not run for completed stale route"
+      end
+    end.new(executed)
+    current = ready_position
+    current.hedge.update!(execution_venue: "nado")
+    set_completed_readback(current, from: "extended", to: "nado", production_venue: "nado")
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_nado_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: current,
+      from: "extended",
+      to: "nado",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE", result.status
+    assert_empty result.blockers
+    assert_equal false, executed
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal 0, result.receipt.fetch(:cancels_submitted)
+  end
+
+  test "stale duplicate canary with app venue not finalized returns finalize required without executor" do
+    executor = Class.new do
+      def run_precomputed_plan(*)
+        raise "executor should not run for completed stale route"
+      end
+    end.new
+    current = ready_position
+    set_completed_readback(current, from: "extended", to: "nado", production_venue: "extended")
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_nado_env,
+      target_preflight: { blockers: [] },
+      fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      executor: executor
+    ).run(
+      position: current,
+      from: "extended",
+      to: "nado",
+      confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+    )
+
+    assert_equal "SOURCE_CLOSED_TARGET_CONFIRMED_NOT_FINALIZED", result.status
+    assert_empty result.blockers
+    assert_equal true, result.receipt.fetch(:finalize_safe)
+    assert_equal 0, result.receipt.fetch(:orders_submitted)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal 0, result.receipt.fetch(:cancels_submitted)
+  end
+
   test "runner blocked result uses the same canonical planner blockers" do
     env = ready_env.merge("EXTENDED_AUTO_REBALANCE_ENABLED" => "true")
     plan = MigrationManualCanaryPlanner.new(
@@ -439,6 +508,24 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
       open_orders_count_extended: 0
     )
     current
+  end
+
+  def set_completed_readback(position, from:, to:, production_venue:)
+    target = position.position_dashboard_snapshot.target_short_eth
+    attrs = {
+      production_venue: production_venue,
+      selected_venue: production_venue,
+      combined_short_eth: target,
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      open_orders_count_extended: 0
+    }
+    attrs["#{from}_short_eth"] = "0"
+    attrs["#{to}_short_eth"] = target
+    position.position_dashboard_snapshot.update!(attrs)
   end
 
   def position

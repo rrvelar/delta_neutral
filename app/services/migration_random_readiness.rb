@@ -60,11 +60,18 @@ class MigrationRandomReadiness
 
   def next_recommended_canary(proof_report)
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
-    preferred = proof_report.fetch(:routes).find { |route| route[:from_venue] == current && route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] } ||
+    preferred = preferred_missing_route(proof_report.fetch(:routes), current) ||
       proof_report.fetch(:routes).find { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] }
     return nil unless preferred
 
     preferred.merge(commands_for(preferred[:from_venue], preferred[:to_venue]))
+  end
+
+  def preferred_missing_route(routes, current)
+    candidates = routes.select { |route| route[:from_venue] == current && route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] }
+    return candidates.find { |route| route[:to_venue] == "ethereal" } if current == "nado"
+
+    candidates.first
   end
 
   def operator_commands(next_canary)

@@ -32,6 +32,39 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal 0, service.sign_calls
   end
 
+  test "Aerodrome direct Nado preflight does not require Mellow Autopilot readiness" do
+    service = ConfirmationBypassNadoService.new
+    position = aerodrome_direct_position
+
+    report = service.preflight(
+      position: position,
+      action: "open",
+      size_eth: "1.0",
+      current_position: nil,
+      confirmation: ConfirmationVenue::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_not_includes report.fetch(:blockers), "active hedge-ready Mellow Autopilot position is required"
+  end
+
+  test "Mellow Nado preflight still requires Mellow hedge readiness" do
+    service = ConfirmationBypassNadoService.new
+    position = mellow_position
+    position.update!(mellow_metadata: { hedge_ready: false }.to_json)
+
+    report = service.preflight(
+      position: position,
+      action: "open",
+      size_eth: "1.0",
+      current_position: nil,
+      confirmation: ConfirmationVenue::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_includes report.fetch(:blockers), "active hedge-ready Mellow Autopilot position is required"
+  end
+
   test "accepted digest stale readback confirms late when final readback is inside tolerance" do
     service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-1.18"), short_size: BigDecimal("1.18"), margin_mode: "isolated" })
     result = service.reconcile_pending_result(
@@ -146,11 +179,38 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     end
   end
 
+  def aerodrome_direct_position
+    Position.create!(
+      user: users(:one),
+      wallet: wallets(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "1",
+      asset1_amount: "1000",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      external_id: SecureRandom.hex(4),
+      active: true,
+      source: Position::SOURCE_AERODROME_DIRECT
+    ).tap do |position|
+      position.create_hedge!(target: "1.0", tolerance: "0.03", active: true, execution_venue: "extended")
+    end
+  end
+
   class ConfirmationVenue
     CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_ORDERS".freeze
 
     def live_flag_enabled?
       true
+    end
+
+    def live_enabled?
+      true
+    end
+
+    def live_mode_state
+      "live_enabled"
     end
 
     def live_confirmation_phrase

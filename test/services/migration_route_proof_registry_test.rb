@@ -1,0 +1,114 @@
+require "test_helper"
+
+class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
+  test "readback reconciliation receipt marks route ready with zero safety counters" do
+    position = position_with_snapshot("nado")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: "extended",
+      to_venue: "nado",
+      final_status: "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
+
+    route = registry.route_status(position: position, from: "extended", to: "nado")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal "nado", route.fetch(:final_venue)
+    assert_equal 0, route.fetch(:orders_submitted)
+    assert_equal 0, route.fetch(:orders_placed)
+    assert_equal 0, route.fetch(:signatures_created)
+    assert_empty route.fetch(:blockers)
+  end
+
+  test "readback reconciliation receipt without source flat proof is not ready" do
+    position = position_with_snapshot("nado")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: "extended",
+      to_venue: "nado",
+      final_status: "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: false,
+      final_inside_tolerance: true,
+      source_flat_after: false,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
+
+    route = registry.route_status(position: position, from: "extended", to: "nado")
+
+    assert_not_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_includes route.fetch(:blockers), "extended->nado route proof has not started."
+  end
+
+  private
+
+  def registry_for(dir)
+    MigrationRouteProofRegistry.new(
+      route_proof_dir: dir.join("route_proofs"),
+      canary_dir: dir.join("canaries"),
+      recovery_dir: dir.join("recoveries"),
+      continuation_dir: dir.join("continuations"),
+      random_dir: dir.join("random")
+    )
+  end
+
+  def position_with_snapshot(venue)
+    position = Position.create!(
+      user: users(:one),
+      wallet: wallets(:one),
+      dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
+      asset0: "WETH",
+      asset1: "USDC",
+      asset0_amount: "1",
+      asset1_amount: "500",
+      asset0_price_usd: "2000",
+      asset1_price_usd: "1",
+      external_id: SecureRandom.hex(6),
+      pool_address: "0x#{SecureRandom.hex(20)}",
+      active: true
+    )
+    position.create_hedge!(target: "1.0", tolerance: "0.05", active: true, execution_venue: venue)
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: venue,
+      selected_venue: venue,
+      target_short_eth: "1",
+      tolerance_abs_eth: "0.05",
+      combined_short_eth: "1",
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: venue == "nado" ? "1" : "0",
+      signer_status: "ok"
+    )
+    position
+  end
+end
