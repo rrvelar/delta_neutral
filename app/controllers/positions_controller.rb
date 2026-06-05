@@ -384,9 +384,34 @@ class PositionsController < ApplicationController
     end
     switch_auto_after_successful_random_migration(position, route, result)
     level = result.blockers.present? ? :alert : :notice
+    invalid_source = invalid_random_canary_source?(position, route)
+    redirect_params = result.blockers.present? && !invalid_source ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
+    redirect_to position_path(position, redirect_params),
+      flash: { level => random_rotation_result_message("Supervised live canary", result, invalid_source: invalid_source) }
+  end
+
+  def random_rotation_move_to_source
+    position = load_position_for_migration
+    route = random_rotation_route(position)
+    unless params[:random_rotation_confirmation].to_s == MigrationManualLiveCanaryRunner::CONFIRMATION
+      return redirect_to position_path(position, random_rotation_redirect_params(position, route)),
+        alert: "Move to required source venue blocked_before_submit for #{random_rotation_route_label(route)}: submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
+    end
+    enable_supervised_canary_gates!(route)
+    result = run_random_migration_with_auto_pause(position) do
+      MigrationManualLiveCanaryRunner.new.run(
+        position: position,
+        from: route.fetch(:from_venue),
+        to: route.fetch(:to_venue),
+        confirmation: params[:random_rotation_confirmation],
+        sequence: params[:migration_sequence].presence || "target_first"
+      )
+    end
+    switch_auto_after_successful_random_migration(position, route, result)
+    level = result.blockers.present? ? :alert : :notice
     redirect_params = result.blockers.present? ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
     redirect_to position_path(position, redirect_params),
-      flash: { level => random_rotation_result_message("Supervised live canary", result) }
+      flash: { level => random_rotation_result_message("Source venue move", result) }
   end
 
   def random_rotation_continue
@@ -524,16 +549,29 @@ class PositionsController < ApplicationController
     end
   end
 
-  def random_rotation_result_message(label, result)
+  def random_rotation_result_message(label, result, invalid_source: false)
     receipt = result.receipt
     route = "#{HedgeVenues.label(receipt[:from_venue])} -> #{HedgeVenues.label(receipt[:to_venue])}"
     counters = "orders_submitted=#{receipt[:orders_submitted].to_i}, orders_placed=#{receipt[:orders_placed].to_i}, signatures_created=#{receipt[:signatures_created].to_i}, cancels_submitted=#{receipt[:cancels_submitted].to_i}"
     if result.blockers.present?
-      "#{label} #{result.status} for #{route}: #{result.blockers.join('; ')}. #{counters}."
+      suffix = invalid_source ? " Move to #{HedgeVenues.label(receipt[:from_venue])} first." : ""
+      "#{label} #{result.status} for #{route}: #{result.blockers.join('; ')}. #{counters}.#{suffix}"
     else
       exchange_ids = Array(receipt[:exchange_order_ids]).presence || [ receipt[:source_leg_exchange_order_id] ].compact
       "#{label} #{result.status} for #{route}. exchange_order_ids=#{exchange_ids.presence&.join(',') || 'none'}, #{counters}."
     end
+  end
+
+  def invalid_random_canary_source?(position, route)
+    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    return true unless route.fetch(:from_venue) == current
+
+    snapshot = position.position_dashboard_snapshot
+    return true unless snapshot
+
+    BigDecimal(snapshot.public_send("#{route.fetch(:from_venue)}_short_eth").to_s) <= BigDecimal("0.001")
+  rescue ArgumentError, TypeError
+    true
   end
 
   def random_rotation_route(position)

@@ -1145,6 +1145,45 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "all route proofs must be READY_FOR_RANDOM", response.body
   end
 
+  test "random rotation setup offers source move instead of canary for flat non-current source" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_ready_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "ethereal", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "extended", to: "nado", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "nado", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_dry_run_route_proof(position, from: "ethereal", to: "nado", receipt_dir: registry_dir.join("random"))
+    write_dry_run_route_proof(position, from: "nado", to: "ethereal", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "4 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Next required setup move", response.body
+    assert_match "Move to required source venue", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "Ethereal", response.body
+    assert_match "Nado", response.body
+    assert_match "using the already READY_FOR_RANDOM route", response.body
+    assert_no_match "Run Supervised Live Canary", response.body
+    assert_no_match "Prepare Next Route", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
+  end
+
   test "random rotation prepare next route is dry run only and preserves migration tab" do
     position = create_aerodrome_position
     clear_migration_receipts_for_position(position.id)
@@ -1210,6 +1249,42 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "cancels_submitted=0", flash[:alert]
     assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
+  end
+
+  test "stale invalid canary request remains blocked and tells operator to move source first" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    assert_no_difference "ShortRebalance.count" do
+      post random_rotation_live_canary_position_path(position), params: {
+        tab: "migration",
+        from_venue: "ethereal",
+        to_venue: "nado",
+        migration_sequence: "target_first",
+        random_rotation_confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_includes response.location, "tab=migration"
+    assert_no_match "preview_from_venue=ethereal", response.location
+    assert_match "position hedge execution_venue must be ethereal before migration", flash[:alert]
+    assert_match "source venue must have a real short before canary", flash[:alert]
+    assert_match "orders_submitted=0", flash[:alert]
+    assert_match "orders_placed=0", flash[:alert]
+    assert_match "signatures_created=0", flash[:alert]
+    assert_match "cancels_submitted=0", flash[:alert]
+    assert_match "Move to Ethereal first", flash[:alert]
   end
 
   test "random rotation live canary accepts exact phrase and calls supervised canary runner" do

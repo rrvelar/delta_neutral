@@ -98,6 +98,113 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
   end
 
+  test "missing proof source differing from current venue creates source reposition action" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_ready_route(dir: dir, position: position, from: "nado", to: "extended")
+    write_dry_run_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    write_dry_run_route(dir: dir, position: position, from: "nado", to: "ethereal")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:source_reposition_required], report.fetch(:status)
+    assert_equal "move_to_required_source_venue", report.fetch(:next_action)
+    assert_equal "ethereal", report.fetch(:next_missing_proof_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_missing_proof_route).fetch(:to_venue)
+    assert_equal true, report.fetch(:source_reposition_required)
+    assert_equal "extended", report.fetch(:source_reposition_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:source_reposition_route).fetch(:to_venue)
+    assert_equal "extended", report.fetch(:next_executable_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:next_executable_route).fetch(:to_venue)
+    assert_equal "source_reposition", report.fetch(:executable_route_role)
+    assert_match "Ethereal -> Nado cannot run", report.fetch(:source_reposition_reason)
+    assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
+  end
+
+  test "dry run proof runs when current production venue matches source" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_ready_route(dir: dir, position: position, from: "nado", to: "extended")
+    write_dry_run_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    write_dry_run_route(dir: dir, position: position, from: "nado", to: "ethereal")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:dry_run_proven], report.fetch(:status)
+    assert_equal "run_live_canary", report.fetch(:next_action)
+    assert_equal "ethereal", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_route).fetch(:to_venue)
+    assert_equal false, report.fetch(:source_reposition_required)
+  end
+
+  test "source reposition is blocked when no ready route reaches required source" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_dry_run_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:source_reposition_blocked], report.fetch(:status)
+    assert_equal "source_reposition_unavailable", report.fetch(:next_action)
+    assert_nil report.fetch(:next_executable_route)
+    assert_nil report.fetch(:source_reposition_route)
+    assert_match "No READY_FOR_RANDOM route is available from Extended to Ethereal", report.fetch(:source_reposition_reason)
+    assert_equal false, report.fetch(:next_action_live)
+  end
+
+  test "remaining setup flow advances through source move and final canary proofs" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    %w[extended->ethereal ethereal->extended extended->nado nado->extended].each do |route|
+      from, to = route.split("->")
+      write_ready_route(dir: dir, position: position, from: from, to: to)
+    end
+    write_dry_run_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    write_dry_run_route(dir: dir, position: position, from: "nado", to: "ethereal")
+
+    first = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
+    assert_equal "move_to_required_source_venue", first.fetch(:next_action)
+    assert_equal "extended", first.fetch(:next_route).fetch(:from_venue)
+    assert_equal "ethereal", first.fetch(:next_route).fetch(:to_venue)
+
+    position.hedge.update!(execution_venue: "ethereal")
+    set_completed_readback(position, from: "extended", to: "ethereal", production_venue: "ethereal")
+    second = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
+    assert_equal "run_live_canary", second.fetch(:next_action)
+    assert_equal "ethereal", second.fetch(:next_route).fetch(:from_venue)
+    assert_equal "nado", second.fetch(:next_route).fetch(:to_venue)
+
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    position.hedge.update!(execution_venue: "nado")
+    set_completed_readback(position, from: "ethereal", to: "nado", production_venue: "nado")
+    third = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
+    assert_equal "run_live_canary", third.fetch(:next_action)
+    assert_equal "nado", third.fetch(:next_route).fetch(:from_venue)
+    assert_equal "ethereal", third.fetch(:next_route).fetch(:to_venue)
+
+    write_ready_route(dir: dir, position: position, from: "nado", to: "ethereal")
+    position.hedge.update!(execution_venue: "ethereal")
+    set_completed_readback(position, from: "nado", to: "ethereal", production_venue: "ethereal")
+    final = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
+    assert_equal "enable_random", final.fetch(:next_action)
+    assert_equal 6, final.fetch(:random_enablement).fetch(:ready_routes)
+    assert_empty final.fetch(:enable_blockers)
+  end
+
   test "successful Extended to Nado canary advances random readiness count" do
     position = position_with_snapshot("extended")
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")

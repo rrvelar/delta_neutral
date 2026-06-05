@@ -24,6 +24,7 @@ Rails.application.routes.draw do
     post :migration_random_rotation_decision, on: :member
     post :random_rotation_prepare_next_route, on: :member
     post :random_rotation_live_canary, on: :member
+    post :random_rotation_move_to_source, on: :member
     post :random_rotation_continue, on: :member
     post :random_rotation_finalize, on: :member
     post :random_rotation_cancel, on: :member
