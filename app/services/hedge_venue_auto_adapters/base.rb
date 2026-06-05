@@ -86,7 +86,7 @@ module HedgeVenueAutoAdapters
       blockers << "fresh Mellow target is required before #{HedgeVenues.label(venue)} auto sizing" unless fresh_target[:status] == "ok" && target
       blockers << "#{HedgeVenues.label(venue)} auto requires open_orders_count=0" if account_state[:open_orders_count].present? && account_state[:open_orders_count].to_i.nonzero?
       blockers.concat(conflicting_venue_blockers(venue, other_positions))
-      blockers.concat(migration_gate_blockers)
+      blockers.concat(migration_gate_blockers(position))
       blockers.concat(extra_blockers)
       blockers.uniq
     end
@@ -100,12 +100,11 @@ module HedgeVenueAutoAdapters
       end
     end
 
-    def migration_gate_blockers
+    def migration_gate_blockers(position)
       blockers = []
-      blockers << "MIGRATION_LIVE_ENABLED must be false during continuous auto" if bool_env("MIGRATION_LIVE_ENABLED")
+      blockers << "migration is in progress for this position; continuous auto is paused" if MigrationExecutionLock.locked?(position)
       blockers << "MIGRATION_MANUAL_LIVE_CANARY_ENABLED must be false during continuous auto" if bool_env("MIGRATION_MANUAL_LIVE_CANARY_ENABLED")
-      blockers << "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be false during continuous auto" if bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
-      blockers << "MIGRATION_AUTO_ENABLED must be false during continuous auto" if bool_env("MIGRATION_AUTO_ENABLED")
+      blockers << "MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED must be false during continuous auto" if bool_env("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED")
       blockers
     end
 

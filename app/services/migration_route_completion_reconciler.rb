@@ -99,6 +99,10 @@ class MigrationRouteCompletionReconciler
     return current unless current.finalize_safe || current.production_venue_finalized
 
     position.hedge&.update!(execution_venue: to) unless current.production_venue_finalized
+    ActiveVenueAutoPolicy.new(position: position).enable_venue!(
+      venue: to,
+      reason: "migration finalization moved active venue auto"
+    )
     receipt = current.receipt.merge(
       action: "manual_live_canary",
       final_status: current.production_venue_finalized ? "ALREADY_FINALIZED" : FINALIZED_STATUS,

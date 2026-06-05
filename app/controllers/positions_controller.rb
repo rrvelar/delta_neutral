@@ -276,7 +276,7 @@ class PositionsController < ApplicationController
     result = control.set!(enabled: params[:enabled], confirmation: params[:auto_confirmation])
     redirect_params = {
       hedge_venue: control.status.fetch(:selected_venue),
-      tab: "accounting"
+      tab: params[:tab].presence || "accounting"
     }
     if result.ok
       state = ActiveModel::Type::Boolean.new.cast(params[:enabled]) ? "enabled" : "disabled"
@@ -373,13 +373,16 @@ class PositionsController < ApplicationController
         alert: "Supervised live canary blocked_before_submit for #{random_rotation_route_label(route)}: submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
     end
     enable_supervised_canary_gates!(route)
-    result = MigrationManualLiveCanaryRunner.new.run(
-      position: position,
-      from: route.fetch(:from_venue),
-      to: route.fetch(:to_venue),
-      confirmation: params[:random_rotation_confirmation],
-      sequence: params[:migration_sequence].presence || "target_first"
-    )
+    result = run_random_migration_with_auto_pause(position) do
+      MigrationManualLiveCanaryRunner.new.run(
+        position: position,
+        from: route.fetch(:from_venue),
+        to: route.fetch(:to_venue),
+        confirmation: params[:random_rotation_confirmation],
+        sequence: params[:migration_sequence].presence || "target_first"
+      )
+    end
+    switch_auto_after_successful_random_migration(position, route, result)
     level = result.blockers.present? ? :alert : :notice
     redirect_params = result.blockers.present? ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
     redirect_to position_path(position, redirect_params),
@@ -389,23 +392,26 @@ class PositionsController < ApplicationController
   def random_rotation_continue
     position = load_position_for_migration
     route = random_rotation_route(position)
-    result = if route.fetch(:to_venue) == "nado"
-      MigrationTargetNadoContinuation.new(
-        position: position,
-        from: route.fetch(:from_venue),
-        to: route.fetch(:to_venue),
-        live: true,
-        confirmation: params[:random_rotation_confirmation]
-      ).run
-    else
-      MigrationTargetFirstSourceRecovery.new(
-        position: position,
-        from: route.fetch(:from_venue),
-        to: route.fetch(:to_venue),
-        live: true,
-        confirmation: params[:random_rotation_confirmation]
-      ).run
+    result = run_random_migration_with_auto_pause(position) do
+      if route.fetch(:to_venue) == "nado"
+        MigrationTargetNadoContinuation.new(
+          position: position,
+          from: route.fetch(:from_venue),
+          to: route.fetch(:to_venue),
+          live: true,
+          confirmation: params[:random_rotation_confirmation]
+        ).run
+      else
+        MigrationTargetFirstSourceRecovery.new(
+          position: position,
+          from: route.fetch(:from_venue),
+          to: route.fetch(:to_venue),
+          live: true,
+          confirmation: params[:random_rotation_confirmation]
+        ).run
+      end
     end
+    switch_auto_after_successful_random_migration(position, route, result)
     level = result.blockers.present? ? :alert : :notice
     redirect_to position_path(position, random_rotation_redirect_params(position, route)),
       flash: { level => random_rotation_result_message("Source close continuation", result) }
@@ -418,7 +424,10 @@ class PositionsController < ApplicationController
       return redirect_to position_path(position, random_rotation_redirect_params(position, route)),
         alert: "Migration finalization blocked_before_submit for #{random_rotation_route_label(route)}: submitted confirmation must equal #{MigrationManualLiveCanaryRunner::CONFIRMATION}. orders_submitted=0, orders_placed=0, signatures_created=0, cancels_submitted=0."
     end
-    result = MigrationRouteCompletionReconciler.new(position: position, from: route.fetch(:from_venue), to: route.fetch(:to_venue)).finalize!
+    result = run_random_migration_with_auto_pause(position) do
+      MigrationRouteCompletionReconciler.new(position: position, from: route.fetch(:from_venue), to: route.fetch(:to_venue)).finalize!
+    end
+    switch_auto_after_successful_random_migration(position, route, result)
     level = result.blockers.present? ? :alert : :notice
     redirect_params = result.blockers.present? ? random_rotation_redirect_params(position, route) : random_rotation_clear_route_redirect_params(position.reload)
     redirect_to position_path(position, redirect_params),
@@ -453,8 +462,11 @@ class PositionsController < ApplicationController
     %w[MIGRATION_LIVE_ENABLED MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
       OperationalSettings.set!(key: key, enabled: true, updated_by: Current.user, reason: "dashboard random rotation setup enable")
     end
+    ActiveVenueAutoPolicy.new(position: position, updated_by: Current.user).enable_current!(
+      reason: "dashboard random rotation setup enable active venue auto"
+    )
     redirect_to position_path(position, random_rotation_redirect_params(position)),
-      notice: "Random rotation enabled from dashboard DB settings. No orders or signatures were created."
+      notice: "Random rotation enabled from dashboard DB settings; active venue auto is enabled only for #{HedgeVenues.label(position.hedge&.execution_venue)}. No orders or signatures were created."
   end
 
   def random_rotation_disable
@@ -577,6 +589,54 @@ class PositionsController < ApplicationController
         reason: "dashboard supervised live canary confirmation"
       )
     end
+  end
+
+  def run_random_migration_with_auto_pause(position)
+    ActiveVenueAutoPolicy.new(position: position, updated_by: Current.user).disable_all!(
+      reason: "dashboard pauses venue auto during random migration"
+    )
+    ran = false
+    result = nil
+    MigrationExecutionLock.with_lock(position) do
+      ran = true
+      result = yield
+    end
+    return result if ran
+
+    blocked_random_migration_result(position)
+  end
+
+  def blocked_random_migration_result(position)
+    receipt = {
+      position_id: position.id,
+      from_venue: position.hedge&.execution_venue,
+      to_venue: position.hedge&.execution_venue,
+      final_status: "blocked_before_submit",
+      blockers: [ "migration is already in progress for this position" ],
+      warnings: [],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    }
+    MigrationManualLiveCanaryRunner::Result.new("blocked_before_submit", receipt[:blockers], receipt[:warnings], receipt)
+  end
+
+  def switch_auto_after_successful_random_migration(position, route, result)
+    return if result.blockers.present?
+    position.reload
+    return unless HedgeVenues.normalize(position.hedge&.execution_venue) == route.fetch(:to_venue)
+    return unless random_migration_finalized_receipt?(result.receipt)
+
+    ActiveVenueAutoPolicy.new(position: position, updated_by: Current.user).enable_venue!(
+      venue: route.fetch(:to_venue),
+      reason: "dashboard random migration finalized active venue auto"
+    )
+  end
+
+  def random_migration_finalized_receipt?(receipt)
+    receipt[:production_venue_finalized] == true ||
+      receipt[:final_status].to_s.in?(%w[MIGRATION_FINALIZED_BY_READBACK ALREADY_FINALIZED MIGRATION_FINALIZED SOURCE_CLOSE_RECOVERY_CONFIRMED LIVE_CANARY_CONFIRMED success])
   end
 
   def hedge_emergency_restore_message(receipt)

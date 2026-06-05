@@ -59,10 +59,15 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "Extended must be flat before Ethereal continuous auto"
   end
 
-  test "Ethereal blocks when migration gate is enabled" do
-    report = ethereal_adapter(env: ready_env.merge("MIGRATION_LIVE_ENABLED" => "true")).readiness(position: position("ethereal"))
+  test "Ethereal blocks while migration execution lock is held" do
+    current_position = position("ethereal")
 
-    assert_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be false during continuous auto"
+    MigrationExecutionLock.with_lock(current_position) do
+      report = ethereal_adapter(env: ready_env.merge("MIGRATION_LIVE_ENABLED" => "true")).readiness(position: current_position)
+
+      assert_includes report.fetch(:blockers), "migration is in progress for this position; continuous auto is paused"
+      assert_not_includes report.fetch(:blockers), "MIGRATION_LIVE_ENABLED must be false during continuous auto"
+    end
   end
 
   test "Ethereal blocks live when auto gate disabled but reports inside tolerance" do

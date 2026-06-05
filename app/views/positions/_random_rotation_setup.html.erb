@@ -5,6 +5,10 @@
 <% setup_progress = setup[:setup_progress] || {} %>
 <% random_enablement = setup[:random_enablement] || {} %>
 <% reconciliation = setup[:reconciliation] || {} %>
+<% auto_policy = setup[:auto_policy] || {} %>
+<% current_auto_venue = auto_policy[:auto_that_will_be_enabled_with_random] || setup[:current_venue] || position.hedge&.execution_venue %>
+<% current_auto_key = OperationalSettings.auto_key_for(current_auto_venue) %>
+<% current_auto_enabled = auto_policy[:current_active_auto_venue].to_s == HedgeVenues.normalize(current_auto_venue) %>
 <% nado_route = [ next_route[:from_venue], next_route[:to_venue] ].include?("nado") %>
 <% status_color = case setup[:status].to_s
                   when RandomRotationSetupWizard::STATES[:random_enabled], RandomRotationSetupWizard::STATES[:ready_for_random] then "border-green-800 bg-green-950/40 text-green-200"
@@ -59,6 +63,33 @@
       <p class="mt-1 text-white"><%= counters[:orders_submitted] || 0 %> orders · <%= counters[:signatures_created] || 0 %> signatures · <%= counters[:cancels_submitted] || 0 %> cancels</p>
       <p class="mt-1 text-xs text-gray-500">Dry-run setup actions must stay zero.</p>
     </div>
+  </div>
+
+  <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
+    <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div>
+        <p class="text-xs uppercase tracking-wide text-gray-500">Auto-rebalance policy</p>
+        <p class="mt-1 text-sm text-gray-300">When random rotation is enabled, the app keeps auto-rebalance enabled only on the active production venue. During migrations, auto-rebalance is paused or blocked. After each successful migration, auto-rebalance moves to the new venue.</p>
+      </div>
+      <% if current_auto_key && setup[:next_action] != "enable_random" && setup[:next_action] != "disable_random" %>
+        <%= form_with url: auto_rebalance_position_path(position), method: :post, class: "min-w-64 space-y-2" do |form| %>
+          <%= form.hidden_field :tab, value: "migration" %>
+          <%= form.hidden_field :venue, value: current_auto_venue %>
+          <%= form.hidden_field :enabled, value: "true" %>
+          <%= form.hidden_field :auto_confirmation, value: OperationalSettings.enable_confirmation_for(current_auto_venue) %>
+          <%= form.submit "Enable auto for current venue only", class: "w-full rounded-lg bg-gray-100 px-3 py-2 text-xs font-semibold text-gray-950 hover:bg-white" %>
+        <% end %>
+      <% end %>
+    </div>
+    <div class="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-4">
+      <div><span class="text-gray-500">Current production venue</span><p class="text-white"><%= auto_policy[:current_production_venue_name] || HedgeVenues.label(current_auto_venue) %></p></div>
+      <div><span class="text-gray-500">Current active auto</span><p class="<%= current_auto_enabled ? 'text-green-300' : 'text-gray-300' %>"><%= current_auto_enabled ? "On" : "Off" %></p></div>
+      <div><span class="text-gray-500">Auto enabled with random</span><p class="text-white"><%= auto_policy[:auto_that_will_be_enabled_with_random_name] || HedgeVenues.label(current_auto_venue) %></p></div>
+      <div><span class="text-gray-500">Other venue autos</span><p class="text-gray-300">Off</p></div>
+    </div>
+    <% if setup[:stale_pending_continuation_ignored] %>
+      <p class="mt-3 text-xs text-green-300">A stale Nado target continuation was ignored because the route is already READY_FOR_RANDOM and current readback is safe.</p>
+    <% end %>
   </div>
 
   <% if next_route[:from_venue].present? %>

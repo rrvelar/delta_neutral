@@ -48,6 +48,7 @@ class HedgeVenueMigrationExecutor
       manual_action_required: true,
       final_status: dry_run ? plan.status : "blocked_before_submit"
     )
+    pause_active_auto(position) unless dry_run
     blockers = Array(plan.blockers) + live_blockers(position: position, receipt: receipt, dry_run: dry_run, confirmation: confirmation)
     if dry_run || blockers.any?
       receipt[:blockers] = blockers.uniq
@@ -140,6 +141,7 @@ class HedgeVenueMigrationExecutor
       manual_action_required: true,
       final_status: "blocked_before_submit"
     )
+    pause_active_auto(position)
     blockers = Array(plan[:blockers])
     if blockers.any?
       receipt[:blockers] = blockers.uniq
@@ -479,8 +481,8 @@ class HedgeVenueMigrationExecutor
     blockers << "position hedge execution_venue must be #{receipt[:from_venue]} before migration" unless HedgeVenues.normalize(position.hedge&.execution_venue) == receipt[:from_venue]
     blockers << "#{HedgeVenues.label(receipt[:from_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:from_venue])
     blockers << "#{HedgeVenues.label(receipt[:to_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:to_venue])
-    blockers << "#{HedgeVenues.label(receipt[:from_venue])} auto must be disabled during migration." if venue_auto_enabled?(position.position_dashboard_snapshot, receipt[:from_venue])
-    blockers << "#{HedgeVenues.label(receipt[:to_venue])} auto must be disabled during migration." if venue_auto_enabled?(position.position_dashboard_snapshot, receipt[:to_venue])
+    blockers << "#{HedgeVenues.label(receipt[:from_venue])} auto must be disabled during migration." if venue_auto_enabled?(receipt[:from_venue])
+    blockers << "#{HedgeVenues.label(receipt[:to_venue])} auto must be disabled during migration." if venue_auto_enabled?(receipt[:to_venue])
     blockers << "target venue readiness failed or is not cached." unless target_readiness_cached?(position.position_dashboard_snapshot, receipt[:to_venue])
     blockers << "source current position must exist." unless decimal(receipt[:from_short_before]).positive?
     blockers << "target/source open orders must be zero." unless open_orders_clear?(position.position_dashboard_snapshot, receipt[:from_venue], receipt[:to_venue])
@@ -514,15 +516,11 @@ class HedgeVenueMigrationExecutor
     end
   end
 
-  def venue_auto_enabled?(snapshot, venue)
-    return true unless snapshot
+  def venue_auto_enabled?(venue)
+    key = OperationalSettings.auto_key_for(venue)
+    return true unless key
 
-    case venue
-    when "extended" then ActiveModel::Type::Boolean.new.cast(snapshot.extended_auto_enabled)
-    when "ethereal" then ActiveModel::Type::Boolean.new.cast(snapshot.ethereal_auto_enabled)
-    when "nado" then bool_env("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
-    else true
-    end
+    bool_env(key)
   end
 
   def recent_rebalance_blockers(position, from, to)
@@ -622,8 +620,18 @@ class HedgeVenueMigrationExecutor
     return unless position.hedge
 
     position.hedge.update!(execution_venue: receipt[:to_venue])
+    ActiveVenueAutoPolicy.new(position: position).enable_venue!(
+      venue: receipt[:to_venue],
+      reason: "migration executor finalized production venue"
+    )
     receipt[:production_venue_finalized] = true
     receipt[:finalized_hedge_id] = position.hedge.id
+  end
+
+  def pause_active_auto(position)
+    ActiveVenueAutoPolicy.new(position: position).disable_all!(
+      reason: "migration executor pauses venue auto during migration"
+    )
   end
 
   def bool_env(key)

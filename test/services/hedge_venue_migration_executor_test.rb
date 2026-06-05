@@ -821,9 +821,29 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
   end
 
-  test "live execution blocks when source auto is enabled" do
+  test "live execution pauses source auto instead of blocking migration" do
     position = migration_position(extended_auto_enabled: true)
-    result = HedgeVenueMigrationExecutor.new(env: live_env, snapshot_refresher: ->(item) { item.position_dashboard_snapshot }).run(
+    OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: true)
+    calls = []
+    runner = ->(leg, context:) do
+      calls << [ leg, context ]
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        after_short_eth: leg.fetch(:expected_after_short_eth),
+        exchange_order_id: "order-#{calls.size}",
+        readback: { short_size: leg.fetch(:expected_after_short_eth) }
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env,
+      leg_runner: runner,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal")
+    ).run(
       position: position,
       from_venue: "extended",
       to_venue: "ethereal",
@@ -833,8 +853,9 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "blocked_before_submit", result.status
-    assert_includes result.blockers, "Extended auto must be disabled during migration."
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
   end
 
   test "successful full migration finalizes only after target holds hedge and source is flat" do

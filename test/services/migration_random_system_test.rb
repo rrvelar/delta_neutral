@@ -331,6 +331,37 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
+  test "random readiness ignores stale Nado continuation when route is ready and readback is safe" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    proof_dir = Rails.root.join("tmp/test-ready-proofs-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "extended", timestamp: 10.minutes.ago))
+    write_event(proof_dir, live_canary_event(position: position, from: "extended", to: "nado", timestamp: 5.minutes.ago, production_venue: "nado"))
+    position.position_dashboard_snapshot.update!(
+      production_venue: "extended",
+      selected_venue: "extended",
+      extended_short_eth: "1.18",
+      nado_short_eth: "0",
+      combined_short_eth: "1.18",
+      drift_eth: "0",
+      inside_tolerance: true,
+      open_orders_count_extended: 0
+    )
+    registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+
+    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(proof_dir) if proof_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
   test "random readiness still blocks when matching Nado continuation failed" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")

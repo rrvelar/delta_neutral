@@ -28,6 +28,76 @@ class AutoRebalanceControlTest < ActiveSupport::TestCase
     end
   end
 
+  test "active venue auto policy enables only Extended for Extended production venue" do
+    position = ethereal_position
+    position.hedge.update!(execution_venue: "extended")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "extended",
+      selected_venue: "extended",
+      extended_short_eth: "1.6",
+      ethereal_short_eth: "0"
+    )
+
+    result = ActiveVenueAutoPolicy.new(position: position, updated_by: users(:one)).enable_current!
+
+    assert_equal true, result.ok
+    assert_equal true, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal 0, result.payload.fetch(:orders_submitted)
+    assert_equal 0, result.payload.fetch(:signatures_created)
+    assert_equal 0, result.payload.fetch(:cancels_submitted)
+  end
+
+  test "active venue auto policy enables only Nado for Nado production venue" do
+    position = ethereal_position
+    position.hedge.update!(execution_venue: "nado")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "nado",
+      selected_venue: "nado",
+      nado_short_eth: "1.6",
+      ethereal_short_eth: "0"
+    )
+
+    result = ActiveVenueAutoPolicy.new(position: position, updated_by: users(:one)).enable_current!
+
+    assert_equal true, result.ok
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal 0, result.payload.fetch(:orders_submitted)
+    assert_equal 0, result.payload.fetch(:signatures_created)
+    assert_equal 0, result.payload.fetch(:cancels_submitted)
+  end
+
+  test "active venue auto policy enables only Ethereal for Ethereal production venue" do
+    position = ethereal_position
+
+    result = ActiveVenueAutoPolicy.new(position: position, updated_by: users(:one)).enable_current!
+
+    assert_equal true, result.ok
+    assert_equal true, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal 0, result.payload.fetch(:orders_submitted)
+    assert_equal 0, result.payload.fetch(:signatures_created)
+    assert_equal 0, result.payload.fetch(:cancels_submitted)
+  end
+
+  test "auto readiness blocks while migration lock is held for position" do
+    position = ethereal_position
+    adapter = TestAutoAdapter.new
+
+    MigrationExecutionLock.with_lock(position) do
+      report = adapter.readiness(position: position)
+
+      assert_equal false, report.fetch(:active_auto_ready)
+      assert_includes report.fetch(:blockers), "migration is in progress for this position; continuous auto is paused"
+      assert_equal 0, report.fetch(:orders_submitted)
+      assert_equal 0, report.fetch(:signatures_created)
+    end
+  end
+
   test "disable ethereal auto requires exact disable confirmation" do
     position = ethereal_position
     OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true)
@@ -120,5 +190,40 @@ class AutoRebalanceControlTest < ActiveSupport::TestCase
     yield
   ensure
     old.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  class TestAutoAdapter < HedgeVenueAutoAdapters::Base
+    def initialize
+      super(
+        env: {},
+        fresh_target_factory: ->(_position) do
+          Object.new.tap do |target|
+            target.define_singleton_method(:resolve) do |refresh_if_stale:|
+              {
+                status: "ok",
+                target_short_eth: "1.6",
+                target_source: "test",
+                exposure_source: "test",
+                exposure_refreshed_at: Time.current,
+                exposure_stale: false,
+                blockers: []
+              }
+            end
+          end
+        end
+      )
+    end
+
+    def readiness(position:)
+      base_report(
+        position: position,
+        venue: "ethereal",
+        current_position: { size: "-1.6" },
+        other_positions: { "extended" => { size: "0" }, "nado" => { size: "0" } },
+        account_state: { open_orders_count: 0 },
+        live_enabled: true,
+        auto_enabled: true
+      )
+    end
   end
 end

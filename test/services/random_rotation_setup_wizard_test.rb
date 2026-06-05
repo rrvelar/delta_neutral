@@ -52,6 +52,9 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_equal "enable_random", report.fetch(:next_action)
     assert_equal RandomRotationSetupWizard::ENABLE_CONFIRMATION, report.fetch(:required_confirmation_phrase)
     assert_empty report.fetch(:enable_blockers)
+    assert_equal "extended", report.fetch(:auto_policy).fetch(:auto_that_will_be_enabled_with_random)
+    assert_equal "Extended", report.fetch(:auto_policy).fetch(:auto_that_will_be_enabled_with_random_name)
+    assert_equal false, report.fetch(:auto_policy).fetch(:current_active_auto_enabled)
   end
 
   test "dry run proven route shows supervised live canary action" do

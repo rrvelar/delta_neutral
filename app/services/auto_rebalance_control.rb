@@ -75,6 +75,10 @@ class AutoRebalanceControl
     result(errors.empty?, errors, applied.select(&:ok).map(&:setting))
   end
 
+  def enable_current_without_confirmation!(reason: "dashboard random rotation active venue auto")
+    ActiveVenueAutoPolicy.new(position: position, updated_by: updated_by).enable_current!(reason: reason)
+  end
+
   def disable_all!(confirmation:)
     return result(false, [ "confirmation must equal #{OperationalSettings::DISABLE_ALL_CONFIRMATION}" ]) unless confirmation.to_s == OperationalSettings::DISABLE_ALL_CONFIRMATION
 

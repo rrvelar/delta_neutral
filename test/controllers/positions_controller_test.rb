@@ -1360,6 +1360,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "random rotation finalize is idempotent and submits no orders" do
+    OperationalSetting.delete_all
     position = create_aerodrome_position
     clear_migration_receipts_for_position(position.id)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -1384,6 +1385,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :redirect
     assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
     assert_includes response.location, "tab=migration"
     assert_no_match "preview_from_venue=extended", response.location
     assert_match "Migration finalization MIGRATION_FINALIZED_BY_READBACK", flash[:notice]
@@ -1473,7 +1477,39 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal true, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
     assert_equal true, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
     assert_equal true, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_match "active venue auto is enabled only for Extended", flash[:notice]
     assert_match "No orders or signatures were created", flash[:notice]
+  end
+
+  test "random rotation enable remains blocked until all six routes are ready" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    assert_no_difference "ShortRebalance.count" do
+      post random_rotation_enable_position_path(position), params: {
+        tab: "migration",
+        random_rotation_confirmation: RandomRotationSetupWizard::ENABLE_CONFIRMATION
+      }
+    end
+
+    assert_response :redirect
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_match "all route proofs must be READY_FOR_RANDOM", flash[:alert]
   end
 
   test "migration run is fail closed without env gate" do
@@ -2134,6 +2170,38 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+  end
+
+  test "enable auto for current venue only keeps random and migration disabled" do
+    OperationalSetting.delete_all
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+
+    with_env("EXTENDED_LIVE_ENABLED" => "true") do
+      assert_no_difference "ShortRebalance.count" do
+        post auto_rebalance_position_path(position), params: {
+          tab: "migration",
+          venue: "extended",
+          enabled: "true",
+          auto_confirmation: OperationalSettings::ENABLE_CONFIRMATIONS.fetch("extended")
+        }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "extended", tab: "migration")
+    assert_equal true, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
   end
 
   test "auto rebalance toggle rejects wrong confirmation without changing settings" do

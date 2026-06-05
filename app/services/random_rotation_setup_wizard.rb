@@ -61,6 +61,7 @@ class RandomRotationSetupWizard
       hedge_health: hedge_health,
       venue_shorts: venue_shorts,
       auto_states: auto_states,
+      auto_policy: auto_policy,
       migration_gates: migration_gates,
       completed_route_proofs: proof_report.fetch(:completed_route_proofs),
       missing_route_proofs: proof_report.fetch(:missing_route_proofs),
@@ -78,6 +79,7 @@ class RandomRotationSetupWizard
       blockers: Array(readiness_report[:blockers]),
       enable_blockers: enable_blockers(readiness_report, proof_report, pending),
       reconciliation: reconciliation_payload(reconciliation),
+      stale_pending_continuation_ignored: readiness_report[:stale_pending_continuation_ignored] == true,
       counters: {
         orders_submitted: 0,
         orders_placed: 0,
@@ -453,6 +455,22 @@ class RandomRotationSetupWizard
       setting = OperationalSettings.get(key, env: env)
       [ venue, { key: key, enabled: setting.enabled, source: setting.source, raw_value: setting.raw_value } ]
     end
+  end
+
+  def auto_policy
+    current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    active = ActiveVenueAutoPolicy.active_auto_venue(env: env)
+    {
+      description: "When random rotation is enabled, only the active production venue keeps auto-rebalance enabled. During migrations, auto-rebalance is paused or blocked. After each successful migration, auto-rebalance moves to the new venue.",
+      current_production_venue: current,
+      current_production_venue_name: HedgeVenues.label(current),
+      current_active_auto_venue: active,
+      current_active_auto_name: active ? HedgeVenues.label(active) : nil,
+      current_active_auto_enabled: active.present?,
+      auto_that_will_be_enabled_with_random: current,
+      auto_that_will_be_enabled_with_random_name: HedgeVenues.label(current),
+      other_venue_autos: OperationalSettings::AUTO_KEYS_BY_VENUE.keys.reject { |venue| venue == current }
+    }
   end
 
   def migration_gates

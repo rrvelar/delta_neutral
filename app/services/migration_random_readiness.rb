@@ -13,7 +13,7 @@ class MigrationRandomReadiness
     plan = planner.plan(position: position, require_live_proofs: false).receipt
     live_plan = planner.plan(position: position, require_live_proofs: true).receipt
     next_canary = next_recommended_canary(proof_report)
-    pending_continuation = pending_nado_target_continuation
+    pending_continuation = pending_nado_target_continuation(proof_report)
     blockers = live_blockers(proof_report: proof_report, live_plan: live_plan, pending_continuation: pending_continuation)
     {
       action: "migration_random_readiness",
@@ -34,6 +34,7 @@ class MigrationRandomReadiness
       route_proof_statuses: proof_report.fetch(:routes),
       random_live_gates: random_live_gates,
       pending_nado_target_continuation: pending_continuation,
+      stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
       orders_placed: 0,
@@ -128,7 +129,7 @@ class MigrationRandomReadiness
     false
   end
 
-  def pending_nado_target_continuation
+  def pending_nado_target_continuation(proof_report)
     @pending_nado_target_continuation ||= begin
       Dir.glob(@canary_dir.join("*.jsonl")).flat_map do |path|
         File.readlines(path).filter_map do |line|
@@ -141,6 +142,7 @@ class MigrationRandomReadiness
       end
         .select { |event| pending_nado_target_event?(event) }
         .reject { |event| proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event) }
+        .reject { |event| stale_nado_target_continuation?(event, proof_report) }
         .max_by { |event| event_time(event) || Time.zone.at(0) }
         &.then do |event|
           {
@@ -155,6 +157,50 @@ class MigrationRandomReadiness
           }
         end
     end
+  end
+
+  def stale_nado_target_continuation?(event, proof_report)
+    route = proof_report.fetch(:routes).find do |entry|
+      entry[:from_venue] == event["from_venue"] && entry[:to_venue] == event["to_venue"]
+    end
+    safe = route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:ready] &&
+      safe_readback_for_completed_route?(from: event["from_venue"], to: event["to_venue"])
+    @stale_pending_continuation_ignored = true if safe
+    safe
+  end
+
+  def stale_pending_continuation_ignored?
+    @stale_pending_continuation_ignored == true
+  end
+
+  def safe_readback_for_completed_route?(from:, to:)
+    snapshot = position.position_dashboard_snapshot
+    return false unless snapshot
+    return false unless snapshot.refresh_status == "ok"
+    return false unless snapshot.inside_tolerance == true
+    return false unless open_orders_zero?(snapshot)
+
+    !target_nado_waiting_for_source_close?(snapshot: snapshot, from: from, to: to)
+  end
+
+  def open_orders_zero?(snapshot)
+    snapshot.open_orders_count_extended.to_i.zero?
+  end
+
+  def target_nado_waiting_for_source_close?(snapshot:, from:, to:)
+    return false unless to == "nado"
+
+    venue_short(snapshot, "nado").positive? && venue_short(snapshot, from).positive?
+  end
+
+  def venue_short(snapshot, venue)
+    decimal(snapshot.public_send("#{venue}_short_eth"))
+  end
+
+  def decimal(value)
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    BigDecimal("0")
   end
 
   def pending_nado_target_event?(event)

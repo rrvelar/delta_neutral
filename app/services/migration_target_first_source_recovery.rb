@@ -180,6 +180,10 @@ class MigrationTargetFirstSourceRecovery
     return unless position.hedge
 
     position.hedge.update!(execution_venue: to)
+    ActiveVenueAutoPolicy.new(position: position).enable_venue!(
+      venue: to,
+      reason: "source-close recovery finalized production venue"
+    )
     context[:production_venue_finalized] = true
     context[:finalized_hedge_id] = position.hedge.id
   end
