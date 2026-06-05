@@ -243,7 +243,7 @@ class RandomRotationSetupWizard
     return default_execution_plan(next_route_for(readiness_report: readiness_report, routes: routes, pending: pending)) if pending
     return { next_missing_proof_route: nil, next_executable_route: nil, source_reposition_required: false, source_reposition_route: nil, executable_route_role: "enable_random" } if proof_report.fetch(:missing_route_proofs).empty?
 
-    missing = route_hash(preferred_dry_run_route(routes)) || route_hash(readiness_report[:next_recommended_canary]) || route_hash(preferred_missing_route(routes, current_venue)) ||
+    missing = route_hash(preferred_unready_setup_route(routes)) || route_hash(preferred_missing_route(routes, current_venue)) || route_hash(readiness_report[:next_recommended_canary]) ||
       route_hash(routes.find { |route| route[:status] != MigrationRouteProofRegistry::STATUSES[:ready] })
     return default_execution_plan(nil) unless missing
     return default_execution_plan(missing).merge(next_missing_proof_route: missing, executable_route_role: "proof") if executable_source_route?(missing)
@@ -443,10 +443,24 @@ class RandomRotationSetupWizard
     candidates.first
   end
 
-  def preferred_dry_run_route(routes)
-    dry_routes = routes.select { |route| route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run] }
-    dry_routes.find { |route| route[:from_venue] == current_venue && venue_short(route[:from_venue]).positive? } ||
-      dry_routes.first
+  def preferred_unready_setup_route(routes)
+    unready = routes.reject { |route| route[:status] == MigrationRouteProofRegistry::STATUSES[:ready] }
+    actionable = unready.select { |route| source_sensitive_setup_status?(route[:status]) }
+    actionable.find { |route| executable_source_route?(route) } || actionable.first
+  end
+
+  def source_sensitive_setup_status?(status)
+    status.to_s.in?([
+      MigrationRouteProofRegistry::STATUSES[:dry_run],
+      MigrationRouteProofRegistry::STATUSES[:live],
+      MigrationRouteProofRegistry::STATUSES[:recovery],
+      MigrationRouteProofRegistry::STATUSES[:stale],
+      MigrationRouteProofRegistry::STATUSES[:failed],
+      "READY_FOR_DRY_RUN",
+      "PREVIEW_BLOCKED",
+      "LIVE_CANARY_REQUIRED",
+      "TARGET_ONLY_CONFIRMED"
+    ])
   end
 
   def executable_source_route?(route)
@@ -465,7 +479,7 @@ class RandomRotationSetupWizard
   def source_reposition_reason(missing, reposition)
     missing_label = "#{HedgeVenues.label(missing[:from_venue])} -> #{HedgeVenues.label(missing[:to_venue])}"
     blockers = []
-    blockers << "#{missing_label} cannot run because current production venue is #{HedgeVenues.label(current_venue)}" unless missing[:from_venue] == current_venue
+    blockers << "#{missing_label} cannot be prepared or run until #{HedgeVenues.label(missing[:from_venue])} is the current source; current production venue is #{HedgeVenues.label(current_venue)}" unless missing[:from_venue] == current_venue
     blockers << "#{HedgeVenues.label(missing[:from_venue])} has no source short" unless venue_short(missing[:from_venue]).positive?
     if reposition
       blockers << "Move production hedge #{HedgeVenues.label(reposition[:from_venue])} -> #{HedgeVenues.label(reposition[:to_venue])} first using an already READY_FOR_RANDOM route."

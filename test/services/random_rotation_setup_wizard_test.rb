@@ -122,8 +122,55 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     assert_equal "extended", report.fetch(:next_executable_route).fetch(:from_venue)
     assert_equal "ethereal", report.fetch(:next_executable_route).fetch(:to_venue)
     assert_equal "source_reposition", report.fetch(:executable_route_role)
-    assert_match "Ethereal -> Nado cannot run", report.fetch(:source_reposition_reason)
+    assert_match "Ethereal -> Nado cannot be prepared or run", report.fetch(:source_reposition_reason)
     assert_equal MigrationManualLiveCanaryRunner::CONFIRMATION, report.fetch(:required_confirmation_phrase)
+  end
+
+  test "failed repair route with flat non current source repositions first" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_ready_route(dir: dir, position: position, from: "nado", to: "extended")
+    write_failed_route(dir: dir, position: position, from: "ethereal", to: "nado")
+    write_dry_run_route(dir: dir, position: position, from: "nado", to: "ethereal")
+    readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
+
+    report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:source_reposition_required], report.fetch(:status)
+    assert_equal "move_to_required_source_venue", report.fetch(:next_action)
+    assert_equal "ethereal", report.fetch(:next_missing_proof_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_missing_proof_route).fetch(:to_venue)
+    assert_equal "FAILED_NEEDS_REPAIR", report.fetch(:next_missing_proof_route).fetch(:status)
+    assert_equal true, report.fetch(:source_reposition_required)
+    assert_equal "extended", report.fetch(:source_reposition_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:source_reposition_route).fetch(:to_venue)
+    assert_equal "extended", report.fetch(:next_executable_route).fetch(:from_venue)
+    assert_equal "ethereal", report.fetch(:next_executable_route).fetch(:to_venue)
+    assert_equal "source_reposition", report.fetch(:executable_route_role)
+    assert_match "Ethereal -> Nado cannot be prepared or run", report.fetch(:source_reposition_reason)
+  end
+
+  test "failed repair route with current source can be repaired" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
+    write_ready_route(dir: dir, position: position, from: "ethereal", to: "extended")
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_ready_route(dir: dir, position: position, from: "nado", to: "extended")
+    write_failed_route(dir: dir, position: position, from: "ethereal", to: "nado")
+
+    report = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
+
+    assert_equal "prepare_next_route", report.fetch(:next_action)
+    assert_equal "Prepare Next Route", report.fetch(:next_action_label)
+    assert_equal "ethereal", report.fetch(:next_route).fetch(:from_venue)
+    assert_equal "nado", report.fetch(:next_route).fetch(:to_venue)
+    assert_equal false, report.fetch(:source_reposition_required)
   end
 
   test "dry run proof runs when current production venue matches source" do
@@ -156,6 +203,23 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
 
     report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
+
+    assert_equal RandomRotationSetupWizard::STATES[:source_reposition_blocked], report.fetch(:status)
+    assert_equal "source_reposition_unavailable", report.fetch(:next_action)
+    assert_nil report.fetch(:next_executable_route)
+    assert_nil report.fetch(:source_reposition_route)
+    assert_match "No READY_FOR_RANDOM route is available from Extended to Ethereal", report.fetch(:source_reposition_reason)
+    assert_equal false, report.fetch(:next_action_live)
+  end
+
+  test "failed repair source reposition is blocked when no ready route reaches required source" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
+    registry = isolated_registry(base_dir: dir)
+    write_ready_route(dir: dir, position: position, from: "extended", to: "nado")
+    write_failed_route(dir: dir, position: position, from: "ethereal", to: "nado")
+
+    report = RandomRotationSetupWizard.new(position: position, proof_registry: registry).report
 
     assert_equal RandomRotationSetupWizard::STATES[:source_reposition_blocked], report.fetch(:status)
     assert_equal "source_reposition_unavailable", report.fetch(:next_action)
@@ -459,6 +523,22 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
+    )
+  end
+
+  def write_failed_route(dir:, position:, from:, to:)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      final_status: "BLOCKED_BEFORE_SUBMIT",
+      manual_action_required: true,
+      blockers: [ "test repair required" ],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
     )
   end
 

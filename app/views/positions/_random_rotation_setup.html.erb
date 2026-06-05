@@ -49,7 +49,7 @@
     <div class="mt-4 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3">
       <p class="text-xs uppercase tracking-wide text-yellow-200">Next required setup move</p>
       <p class="mt-1 text-sm text-yellow-100">
-        <%= HedgeVenues.label(missing_proof_route[:from_venue]) %> -> <%= HedgeVenues.label(missing_proof_route[:to_venue]) %> is <%= missing_proof_route[:status].to_s.downcase.tr("_", " ") %>, but cannot run yet because the current production venue is <%= setup[:current_venue_label] %> and <%= HedgeVenues.label(missing_proof_route[:from_venue]) %> is flat.
+        <%= HedgeVenues.label(missing_proof_route[:from_venue]) %> -> <%= HedgeVenues.label(missing_proof_route[:to_venue]) %> is <%= missing_proof_route[:status].to_s.downcase.tr("_", " ") %>, but cannot be prepared/run until <%= HedgeVenues.label(missing_proof_route[:from_venue]) %> is current source.
       </p>
       <% if reposition_route.present? %>
         <p class="mt-2 text-sm text-white">Next: move production hedge <%= HedgeVenues.label(reposition_route[:from_venue]) %> -> <%= HedgeVenues.label(reposition_route[:to_venue]) %> using the already READY_FOR_RANDOM route.</p>

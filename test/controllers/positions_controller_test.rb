@@ -952,8 +952,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       refreshed_at: Time.current,
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
 
-    get position_path(position, hedge_venue: "extended", tab: "migration")
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
 
     assert_response :success
     assert_match "Random Rotation Setup", response.body
@@ -972,6 +976,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Hyperliquid -&gt;", response.body
     assert_no_match "Random rotation setup did not load", response.body
     assert_no_match "0 ready / 0 total", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
   test "random rotation setup renders out of tolerance blocker with route matrix" do
@@ -994,8 +1000,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       drift_eth: "0.082279624519602",
       inside_tolerance: false
     )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
 
-    get position_path(position, hedge_venue: "extended", tab: "migration")
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
 
     assert_response :success
     assert_match "Setup blocked / current hedge out of tolerance", response.body
@@ -1008,6 +1018,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Rebalance current hedge first", response.body
     assert_no_match "Random rotation setup did not load", response.body
     assert_no_match "0 ready / 0 total", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
   test "random rotation setup tolerates readiness slower than old 300ms timeout" do
@@ -1073,9 +1085,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       refreshed_at: Time.current,
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
 
-    MigrationRandomReadiness.stub(:new, ->(**) { raise "random readiness failed in test" }) do
-      get position_path(position, hedge_venue: "extended", tab: "migration")
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      MigrationRandomReadiness.stub(:new, ->(**) { raise "random readiness failed in test" }) do
+        get position_path(position, hedge_venue: "extended", tab: "migration")
+      end
     end
 
     assert_response :success
@@ -1085,6 +1101,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Random readiness refresh needed", response.body
     assert_no_match "0 ready / 0 total", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
   test "random rotation setup shows live canary CTA after dry run proof" do
@@ -1178,6 +1196,46 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Ethereal", response.body
     assert_match "Nado", response.body
     assert_match "using the already READY_FOR_RANDOM route", response.body
+    assert_no_match "Run Supervised Live Canary", response.body
+    assert_no_match "Prepare Next Route", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
+  end
+
+  test "random rotation setup repositions before failed repair route with flat non-current source" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_ready_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "ethereal", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "extended", to: "nado", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "nado", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_failed_route_proof(position, from: "ethereal", to: "nado", receipt_dir: registry_dir.join("canaries"))
+    write_dry_run_route_proof(position, from: "nado", to: "ethereal", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      get position_path(position, hedge_venue: "extended", tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "4 / 6 READY_FOR_RANDOM", response.body
+    assert_match "Next required setup move", response.body
+    assert_match "Move to required source venue", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "Ethereal", response.body
+    assert_match "Nado", response.body
+    assert_match "cannot be prepared/run until Ethereal is current source", response.body
+    assert_match "FAILED_NEEDS_REPAIR", response.body
     assert_no_match "Run Supervised Live Canary", response.body
     assert_no_match "Prepare Next Route", response.body
   ensure
@@ -3778,6 +3836,24 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       orders_submitted: 1,
       orders_placed: 1,
       signatures_created: 1,
+      cancels_submitted: 0
+    )
+  end
+
+  def write_failed_route_proof(position, from:, to:, receipt_dir:)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: receipt_dir).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      route: "#{from}->#{to}",
+      final_status: "BLOCKED_BEFORE_SUBMIT",
+      manual_action_required: true,
+      blockers: [ "test repair required" ],
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
       cancels_submitted: 0
     )
   end
