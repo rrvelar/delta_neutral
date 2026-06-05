@@ -264,6 +264,15 @@
 
   <details class="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
     <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-gray-500">Advanced details</summary>
+    <div class="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
+      <div><span class="text-gray-500">next_missing_proof_route</span><p class="text-white"><%= missing_proof_route[:from_venue].present? ? "#{HedgeVenues.label(missing_proof_route[:from_venue])} -> #{HedgeVenues.label(missing_proof_route[:to_venue])}" : "none" %></p></div>
+      <div><span class="text-gray-500">next_executable_route</span><p class="text-white"><%= next_route[:from_venue].present? ? "#{HedgeVenues.label(next_route[:from_venue])} -> #{HedgeVenues.label(next_route[:to_venue])}" : "none" %></p></div>
+      <div><span class="text-gray-500">source_reposition_required</span><p class="text-white"><%= setup[:source_reposition_required] ? "true" : "false" %></p></div>
+      <div><span class="text-gray-500">source_reposition_route</span><p class="text-white"><%= reposition_route[:from_venue].present? ? "#{HedgeVenues.label(reposition_route[:from_venue])} -> #{HedgeVenues.label(reposition_route[:to_venue])}" : "none" %></p></div>
+      <div><span class="text-gray-500">limited_diagnostics</span><p class="text-white"><%= setup[:limited_diagnostics] ? "true" : "false" %></p></div>
+      <div><span class="text-gray-500">fallback_used</span><p class="text-white"><%= setup[:fallback_used] ? "true" : "false" %></p></div>
+      <div class="md:col-span-2"><span class="text-gray-500">fallback_reason</span><p class="break-words text-white"><%= setup[:fallback_reason].presence || "none" %></p></div>
+    </div>
     <div class="mt-3 overflow-x-auto">
       <table class="min-w-full text-left text-xs">
         <thead class="text-gray-500"><tr><th class="py-2 pr-3">Route</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Last proof</th></tr></thead>

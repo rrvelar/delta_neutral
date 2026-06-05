@@ -1242,6 +1242,48 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
+  test "limited diagnostics fallback repositions before failed repair route with flat non-current source" do
+    position = create_aerodrome_position
+    clear_migration_receipts_for_position(position.id)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "1.25",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      refreshed_at: Time.current,
+      extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
+    )
+    registry_dir = Rails.root.join("tmp/random-rotation-controller-#{SecureRandom.hex(4)}")
+    registry = isolated_route_registry(registry_dir)
+    write_ready_route_proof(position, from: "extended", to: "ethereal", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "ethereal", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "extended", to: "nado", receipt_dir: registry_dir.join("canaries"))
+    write_ready_route_proof(position, from: "nado", to: "extended", receipt_dir: registry_dir.join("canaries"))
+    write_failed_route_proof(position, from: "ethereal", to: "nado", receipt_dir: registry_dir.join("canaries"))
+    write_dry_run_route_proof(position, from: "nado", to: "ethereal", receipt_dir: registry_dir.join("random"))
+
+    MigrationRouteProofRegistry.stub(:new, registry) do
+      MigrationRandomReadiness.stub(:new, ->(**) { raise "random readiness failed in test" }) do
+        get position_path(position, hedge_venue: "extended", tab: "migration")
+      end
+    end
+
+    assert_response :success
+    assert_match "Setup loaded with limited diagnostics", response.body
+    assert_match "Move to required source venue", response.body
+    assert_match "Extended -&gt; Ethereal", response.body
+    assert_match "cannot be prepared/run until Ethereal is current source", response.body
+    assert_match "limited_diagnostics", response.body
+    assert_match "fallback_used", response.body
+    assert_match "source_reposition_required", response.body
+    assert_match "true", response.body
+    assert_no_match "Run Supervised Live Canary", response.body
+    assert_no_match "Prepare Next Route", response.body
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
+  end
+
   test "random rotation prepare next route is dry run only and preserves migration tab" do
     position = create_aerodrome_position
     clear_migration_receipts_for_position(position.id)

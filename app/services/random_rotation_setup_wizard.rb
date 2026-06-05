@@ -90,6 +90,9 @@ class RandomRotationSetupWizard
       enable_blockers: enable_blockers(readiness_report, proof_report, pending),
       reconciliation: reconciliation_payload(reconciliation),
       stale_pending_continuation_ignored: readiness_report[:stale_pending_continuation_ignored] == true,
+      limited_diagnostics: readiness_report[:limited_diagnostics] == true,
+      fallback_used: readiness_report[:fallback_used] == true,
+      fallback_reason: readiness_report[:fallback_reason],
       counters: {
         orders_submitted: 0,
         orders_placed: 0,
@@ -108,19 +111,24 @@ class RandomRotationSetupWizard
     proof_report = registry.report(position: position)
     readiness_report = degraded_readiness(position: position, proof_report: proof_report, message: message)
     routes = proof_report.fetch(:routes)
-    next_route = readiness_report[:next_recommended_canary]
-    fallback_status = status || fallback_status_for(position: position, proof_report: proof_report, next_route: next_route)
+    wizard = new(position: position, readiness: readiness_report, proof_registry: registry, env: env)
+    execution = wizard.send(:execution_plan_for, readiness_report: readiness_report, proof_report: proof_report, routes: routes, pending: nil)
+    next_route = execution[:next_executable_route]
+    fallback_status = status || wizard.send(:status_for, readiness_report: readiness_report, proof_report: proof_report, pending: nil, next_route: next_route, execution: execution)
+    fallback_label = status_label || (status ? nil : "Setup loaded with limited diagnostics")
 
-    new(position: position, readiness: readiness_report, proof_registry: registry, env: env).base_report(
+    wizard.base_report(
       readiness_report: readiness_report,
       proof_report: proof_report,
       routes: routes,
       next_route: next_route,
       status: fallback_status,
-      status_label_override: status_label
+      status_label_override: fallback_label,
+      execution: execution
     )
   rescue => e
     canonical_routes = canonical_route_statuses
+    next_route = canonical_routes.find { |route| route[:from_venue] == HedgeVenues.normalize(position.hedge&.execution_venue) } || canonical_routes.first
     {
       action: "random_rotation_setup",
       position_id: position.id,
@@ -139,7 +147,13 @@ class RandomRotationSetupWizard
       all_routes_ready: false,
       setup_progress: {},
       random_enablement: { ready_routes: 0, total_routes: canonical_routes.size, blockers: [ message ] },
-      next_route: canonical_routes.find { |route| route[:from_venue] == HedgeVenues.normalize(position.hedge&.execution_venue) } || canonical_routes.first,
+      next_missing_proof_route: next_route,
+      next_executable_route: next_route,
+      source_reposition_required: false,
+      source_reposition_route: nil,
+      source_reposition_reason: nil,
+      executable_route_role: "fallback_refresh",
+      next_route: next_route,
       next_action: "refresh",
       next_action_label: "Refresh Random Readiness",
       next_action_live: false,
@@ -147,6 +161,9 @@ class RandomRotationSetupWizard
       plan: {},
       blockers: [ message, "#{e.class}: #{e.message}" ],
       enable_blockers: [ message ],
+      limited_diagnostics: true,
+      fallback_used: true,
+      fallback_reason: message,
       counters: {
         orders_submitted: 0,
         orders_placed: 0,
@@ -184,18 +201,13 @@ class RandomRotationSetupWizard
       stale_route_proofs: proof_report.fetch(:stale_route_proofs),
       pending_nado_target_continuation: nil,
       blockers: [ message ],
+      limited_diagnostics: true,
+      fallback_used: true,
+      fallback_reason: message,
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0
     }
-  end
-
-  def self.fallback_status_for(position:, proof_report:, next_route:)
-    return "blocked_hedge_health" if position.position_dashboard_snapshot&.inside_tolerance == false
-    return STATES[:ready_for_random] if proof_report.fetch(:missing_route_proofs).empty?
-    return STATES[:dry_run_proven] if next_route && next_route[:status] == MigrationRouteProofRegistry::STATUSES[:dry_run]
-
-    "degraded"
   end
 
   def self.hedge_health_for(position)
