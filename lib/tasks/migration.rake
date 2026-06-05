@@ -196,6 +196,56 @@ namespace :migration do
     )
   end
 
+  desc "Run supervised bounded random rotation burn-in with JSONL logging"
+  task random_burn_in: :environment do
+    position = migration_position_from_env(action: "migration_random_burn_in")
+    next unless position
+
+    live = ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"])
+    disable_after = ENV["disable_after"].present? || ENV["DISABLE_AFTER"].present? ? ActiveModel::Type::Boolean.new.cast(ENV["disable_after"].presence || ENV["DISABLE_AFTER"]) : true
+    result = MigrationRandomBurnInRunner.new(
+      position: position,
+      duration_minutes: (ENV["duration_minutes"].presence || ENV["DURATION_MINUTES"].presence || 30),
+      interval_seconds: (ENV["interval_seconds"].presence || ENV["INTERVAL_SECONDS"].presence || 120),
+      max_cycles: (ENV["max_cycles"].presence || ENV["MAX_CYCLES"].presence || 12),
+      live: live,
+      disable_after: disable_after,
+      confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
+      rebalance_before_cycle: ActiveModel::Type::Boolean.new.cast(ENV["rebalance_before_cycle"].presence || ENV["REBALANCE_BEFORE_CYCLE"]),
+      max_target_change_per_cycle_eth: (ENV["max_target_change_per_cycle_eth"].presence || ENV["MAX_TARGET_CHANGE_PER_CYCLE_ETH"].presence || "0.15")
+    ).run
+    puts JSON.pretty_generate(result.summary.merge(action: "migration_random_burn_in", receipt_path: result.receipt_path))
+    abort("migration_random_burn_in #{result.status}") unless result.status == "success"
+  end
+
+  desc "Show latest supervised random burn-in log path and final event"
+  task random_burn_in_status: :environment do
+    position = migration_position_from_env(action: "migration_random_burn_in_status")
+    next unless position
+
+    path = MigrationRandomBurnInRunner::LOG_DIR.join("latest_position_#{position.id}.jsonl")
+    unless File.exist?(path)
+      puts JSON.pretty_generate(action: "migration_random_burn_in_status", position_id: position.id, status: "missing", log_path: path.to_s)
+      next
+    end
+    last = File.readlines(path).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.first
+    puts JSON.pretty_generate(action: "migration_random_burn_in_status", position_id: position.id, status: "ok", log_path: path.to_s, latest_event: last)
+  end
+
+  desc "Print the latest supervised random burn-in JSONL log"
+  task random_burn_in_tail: :environment do
+    position = migration_position_from_env(action: "migration_random_burn_in_tail")
+    next unless position
+
+    path = MigrationRandomBurnInRunner::LOG_DIR.join("latest_position_#{position.id}.jsonl")
+    lines = (ENV["lines"].presence || ENV["LINES"].presence || 100).to_i
+    unless File.exist?(path)
+      puts JSON.pretty_generate(action: "migration_random_burn_in_tail", position_id: position.id, status: "missing", log_path: path.to_s)
+      next
+    end
+    puts File.readlines(path).last(lines).join
+  end
+
   desc "Show read-only random rotation virtual state for a position"
   task random_rotation_state: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence

@@ -547,6 +547,317 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(random_dir) if random_dir
   end
 
+  test "random burn-in dry run writes JSONL and submits no orders" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = burn_in(position: position, live: false, log_dir: dir).run
+    events = read_jsonl(result.receipt_path)
+
+    assert_equal "success", result.status
+    assert_equal [ "burn_in_started", "cycle", "burn_in_finished" ], events.map { |event| event.fetch("event") }
+    assert_equal 0, events.last.fetch("orders_submitted")
+    assert_equal 0, events.last.fetch("signatures_created")
+    assert_equal "ethereal", events[1].fetch("from_venue")
+    assert events[1].key?("before")
+    assert events[1].key?("execution")
+    assert events[1].key?("after")
+    assert events[1].key?("pre_cycle_target")
+    assert events[1].key?("post_cycle_target")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in refreshes LP target before every cycle and after migration" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal %w[preflight pre_cycle post_cycle], refresher.stages
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops if LP target refresh fails before cycle" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(fail_on: "pre_cycle")
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "blocked_stale_or_unavailable_lp_target", cycle.fetch("status")
+    assert_equal 0, cycle.fetch("execution").fetch("orders_submitted")
+    assert_equal 0, cycle.fetch("execution").fetch("signatures_created")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops when target changes more than max allowed" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "post_cycle" => "1.40" })
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher, max_target_change_per_cycle_eth: "0.15").run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "stopped_target_changed_too_much", cycle.fetch("status")
+    assert_equal "0.22", cycle.fetch("post_cycle_target").fetch("target_delta_eth")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops before migration when current hedge is outside tolerance and rebalance disabled" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "pre_cycle" => "1.30" })
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher, rebalance_before_cycle: false).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "blocked_before_cycle_out_of_tolerance", cycle.fetch("status")
+    assert_equal 0, cycle.fetch("execution").fetch("orders_submitted")
+    assert_match "recommended_rebalance_eth", cycle.fetch("blockers").join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in does not reuse stale dashboard snapshot target" do
+    position = migration_position("ethereal")
+    position.position_dashboard_snapshot.update!(target_short_eth: "0.75")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.18", "pre_cycle" => "1.19", "post_cycle" => "1.19" })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "1.19", cycle.fetch("pre_cycle_target").fetch("target_short_eth")
+    assert_equal "1.19", cycle.fetch("post_cycle_target").fetch("target_short_eth")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in completes multiple dry-run cycles when target changes slightly inside tolerance" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_sequence: [ "1.18", "1.18", "1.19", "1.19", "1.20" ])
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, max_cycles: 2).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 2, result.summary.fetch(:cycles_succeeded)
+    assert_equal "1.18", result.summary.fetch(:initial_target_short_eth)
+    assert_equal BigDecimal("1.20"), BigDecimal(result.summary.fetch(:final_target_short_eth))
+    assert_equal "0.01", result.summary.fetch(:max_target_delta_eth)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops if app production venue and actual exposure disagree" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(exposure_by_stage: {
+      "pre_cycle" => { "extended" => "0", "ethereal" => "0", "nado" => "1.18" }
+    })
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "blocked_unexpected_venue_exposure", cycle.fetch("status")
+    assert_includes cycle.fetch("blockers"), "app production venue and actual venue exposure disagree"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops if more than one venue has non-zero short" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(exposure_by_stage: {
+      "pre_cycle" => { "extended" => "0", "ethereal" => "1.18", "nado" => "0.10" }
+    })
+
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "blocked_before_cycle_out_of_tolerance", cycle.fetch("status")
+    assert_includes cycle.fetch("blockers"), "more than one venue has exposure"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in final summary includes target stats" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "post_cycle" => "1.19" })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    final = read_jsonl(result.receipt_path).last
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "1.18", final.fetch("initial_target_short_eth")
+    assert_equal "1.19", final.fetch("final_target_short_eth")
+    assert_equal "0.01", final.fetch("max_target_delta_eth")
+    assert_equal 0, final.fetch("target_refresh_failures")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in live requires exact confirmation" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = burn_in(position: position, live: true, confirmation: "wrong", log_dir: dir).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "submitted confirmation must equal #{MigrationRandomBurnInRunner::CONFIRMATION}"
+    assert_equal "blocked_before_start", read_jsonl(result.receipt_path).first.fetch("status")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in refuses to start if all routes are not ready" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    registry = BurnInProofRegistry.new(missing: [ { route: "nado->ethereal", from_venue: "nado", to_venue: "ethereal", status: "DRY_RUN_PROVEN" } ])
+
+    result = burn_in(position: position, live: false, proof_registry: registry, log_dir: dir).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "all route proofs must be READY_FOR_RANDOM"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in refuses to start when hedge is outside tolerance" do
+    position = migration_position("ethereal")
+    position.position_dashboard_snapshot.update!(inside_tolerance: false)
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.30" })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "current hedge must be inside tolerance"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in selects only routes from current production venue" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = burn_in(position: position, live: false, selector: ->(routes) { routes.last.fetch(:route) }, log_dir: dir).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "ethereal", cycle.fetch("from_venue")
+    assert_includes %w[extended nado], cycle.fetch("to_venue")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops when after readback source is not flat" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(after: ->(pos, from, to) {
+      update_burn_in_snapshot(pos, production_venue: to, shorts: { from => "1.18", to => "1.18" })
+    })
+
+    result = burn_in(position: position, live: true, executor: executor, log_dir: dir).run
+
+    assert_equal "stopped", result.status, result.blockers.inspect
+    assert_match "source venue ethereal is not flat", result.blockers.join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops when target is not confirmed" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(after: ->(pos, from, to) {
+      update_burn_in_snapshot(pos, production_venue: to, shorts: { from => "0", to => "0" })
+    })
+
+    result = burn_in(position: position, live: true, executor: executor, log_dir: dir).run
+
+    assert_equal "stopped", result.status, result.blockers.inspect
+    assert_match "target venue", result.blockers.join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops when open orders are non-zero after migration" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(after: ->(pos, from, to) {
+      update_burn_in_snapshot(pos, production_venue: to, shorts: { from => "0", to => "1.18" }, open_orders: 1)
+    })
+
+    result = burn_in(position: position, live: true, executor: executor, log_dir: dir).run
+
+    assert_equal "stopped", result.status, result.blockers.inspect
+    assert_includes result.blockers, "open orders are non-zero after migration"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in switches active venue auto to target after finalization" do
+    OperationalSetting.delete_all
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = burn_in(position: position, live: true, disable_after: false, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in disable after disables random auto and Nado live gates" do
+    OperationalSetting.delete_all
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = burn_in(position: position, live: true, disable_after: true, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks while migration lock is active" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+
+    result = nil
+    MigrationExecutionLock.with_lock(position) do
+      result = burn_in(position: position, live: false, log_dir: dir).run
+    end
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "migration lock is already active for this position"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   private
 
   def random_planner(route_matrix: ready_matrix, selector: nil)
@@ -593,7 +904,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       nado_status: venue == "nado" ? "active" : "flat",
       extended_source_status: "ok",
       ethereal_source_status: "ok",
-      nado_source_status: "ok"
+      nado_source_status: "ok",
+      signer_status: "ok",
+      open_orders_count_extended: 0
     )
     position
   end
@@ -625,6 +938,61 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   def write_event(dir, event)
     FileUtils.mkdir_p(dir)
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
+  end
+
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15")
+    MigrationRandomBurnInRunner.new(
+      position: position,
+      duration_minutes: 30,
+      interval_seconds: 0,
+      max_cycles: max_cycles,
+      live: live,
+      disable_after: disable_after,
+      confirmation: confirmation,
+      proof_registry: proof_registry,
+      executor_factory: -> { executor },
+      selector: selector,
+      log_dir: log_dir,
+      stdout: StringIO.new,
+      snapshot_refresher: snapshot_refresher,
+      rebalance_before_cycle: rebalance_before_cycle,
+      max_target_change_per_cycle_eth: max_target_change_per_cycle_eth,
+      readiness_factory: ->(**) {
+        {
+          pending_nado_target_continuation: nil,
+          pending_nado_target_continuation_blocking: false,
+          stale_pending_continuation_ignored: false,
+          blockers: []
+        }
+      }
+    )
+  end
+
+  def read_jsonl(path)
+    File.readlines(path).map { |line| JSON.parse(line) }
+  end
+
+  def update_burn_in_snapshot(position, production_venue:, shorts:, open_orders: 0, target: "1.18")
+    combined = shorts.values.map { |value| BigDecimal(value.to_s) }.sum(BigDecimal("0"))
+    drift = BigDecimal(target.to_s) - combined
+    inside = drift.abs <= BigDecimal(target.to_s) * BigDecimal("0.03")
+    attrs = {
+      production_venue: production_venue,
+      selected_venue: production_venue,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      target_short_eth: target,
+      tolerance_abs_eth: (BigDecimal(target.to_s) * BigDecimal("0.03")).to_s("F"),
+      combined_short_eth: combined.to_s("F"),
+      drift_eth: drift.to_s("F"),
+      inside_tolerance: inside,
+      open_orders_count_extended: open_orders
+    }
+    shorts.each { |venue, value| attrs["#{venue}_short_eth"] = value }
+    position.hedge.update!(execution_venue: production_venue)
+    position.position_dashboard_snapshot.update!(attrs)
+    ActiveVenueAutoPolicy.new(position: position).enable_venue!(venue: production_venue, reason: "test burn-in executor finalized")
   end
 
   def live_canary_event(position:, from:, to:, timestamp: Time.current, final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS, production_venue: to, orders_submitted: 0, signatures_created: 0)
@@ -743,6 +1111,131 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         missing_route_proofs: MigrationLiveRouteCapability::ROUTES.map { |from, to| { route: "#{from}->#{to}", from_venue: from, to_venue: to, status: "NOT_STARTED" } },
         stale_route_proofs: []
       }
+    end
+  end
+
+  class BurnInProofRegistry
+    def initialize(missing: [])
+      @missing = missing
+    end
+
+    def report(position:)
+      routes = MigrationLiveRouteCapability::ROUTES.map do |from, to|
+        missing_route = @missing.find { |route| route[:from_venue] == from && route[:to_venue] == to }
+        missing_route || { route: "#{from}->#{to}", from_venue: from, to_venue: to, status: "READY_FOR_RANDOM", blockers: [] }
+      end
+      {
+        routes: routes,
+        completed_route_proofs: routes.select { |route| route[:status] == "READY_FOR_RANDOM" },
+        missing_route_proofs: @missing,
+        stale_route_proofs: [],
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0
+      }
+    end
+  end
+
+  class BurnInSnapshotRefresher
+    attr_reader :stages
+
+    def initialize(fail_on: nil, target_by_stage: {}, target_sequence: nil, exposure_by_stage: {})
+      @fail_on = fail_on
+      @target_by_stage = target_by_stage
+      @target_sequence = target_sequence&.dup
+      @exposure_by_stage = exposure_by_stage
+      @stages = []
+    end
+
+    def call(position:, stage:)
+      @stages << stage
+      raise "LP target unavailable" if stage == @fail_on
+
+      target = next_target(stage, position)
+      exposure = @exposure_by_stage.fetch(stage, nil)
+      apply_target(position, target: target, exposure: exposure)
+      position.position_dashboard_snapshot.reload
+    end
+
+    private
+
+    def next_target(stage, position)
+      return @target_by_stage.fetch(stage) if @target_by_stage.key?(stage)
+      return @target_sequence.shift if @target_sequence&.any?
+
+      position.position_dashboard_snapshot.target_short_eth.to_s("F")
+    end
+
+    def apply_target(position, target:, exposure:)
+      snapshot = position.position_dashboard_snapshot
+      shorts = exposure || {
+        "extended" => snapshot.extended_short_eth,
+        "ethereal" => snapshot.ethereal_short_eth,
+        "nado" => snapshot.nado_short_eth
+      }
+      combined = shorts.values.map { |value| BigDecimal(value.to_s) }.sum(BigDecimal("0"))
+      target_decimal = BigDecimal(target.to_s)
+      tolerance = target_decimal * BigDecimal(position.hedge.tolerance.to_s)
+      drift = target_decimal - combined
+      position.update!(asset0_amount: target_decimal, asset1_amount: position.asset1_amount || BigDecimal("0"))
+      snapshot.update!(
+        refreshed_at: Time.current,
+        refresh_status: "ok",
+        stale: false,
+        target_short_eth: target_decimal,
+        tolerance_abs_eth: tolerance,
+        combined_short_eth: combined,
+        drift_eth: drift,
+        inside_tolerance: drift.abs <= tolerance,
+        extended_short_eth: shorts.fetch("extended", BigDecimal("0")),
+        ethereal_short_eth: shorts.fetch("ethereal", BigDecimal("0")),
+        nado_short_eth: shorts.fetch("nado", BigDecimal("0")),
+        signer_status: "ok",
+        open_orders_count_extended: snapshot.open_orders_count_extended || 0
+      )
+    end
+  end
+
+  class BurnInExecutor
+    def initialize(after: nil, status: "success")
+      @after = after
+      @status = status
+    end
+
+    def run(position:, from_venue:, to_venue:, **)
+      if @after
+        @after.call(position, from_venue, to_venue)
+      else
+        position.position_dashboard_snapshot.update!(target_short_eth: "1.18")
+        attrs = { from_venue => "0", to_venue => "1.18" }
+        position.hedge.update!(execution_venue: to_venue)
+        position.position_dashboard_snapshot.update!(
+          production_venue: to_venue,
+          selected_venue: to_venue,
+          extended_short_eth: attrs.fetch("extended", "0"),
+          ethereal_short_eth: attrs.fetch("ethereal", "0"),
+          nado_short_eth: attrs.fetch("nado", "0"),
+          combined_short_eth: "1.18",
+          drift_eth: "0",
+          inside_tolerance: true,
+          open_orders_count_extended: 0
+        )
+        ActiveVenueAutoPolicy.new(position: position).enable_venue!(venue: to_venue, reason: "test burn-in executor finalized")
+      end
+      HedgeVenueMigrationExecutor::Result.new(
+        @status,
+        [],
+        [],
+        {
+          from_venue: from_venue,
+          to_venue: to_venue,
+          final_status: @status,
+          orders_submitted: 2,
+          orders_placed: 2,
+          signatures_created: 2,
+          receipt_path: "tmp/test-burn-in-executor.jsonl"
+        }
+      )
     end
   end
 end
