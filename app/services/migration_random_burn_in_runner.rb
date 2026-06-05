@@ -39,6 +39,10 @@ class MigrationRandomBurnInRunner
     @max_target_delta_eth = BigDecimal("0")
     @target_refresh_failures = 0
     @last_readiness_report = {}
+    @snapshot_refresh_status = nil
+    @snapshot_accepted_for_burn_in = false
+    @snapshot_warnings = []
+    @snapshot_blockers = []
     @started_at = @now.call
     @receipt_path = @log_dir.join("#{@started_at.utc.strftime('%Y%m%d_%H%M%S')}_position_#{position.id}.jsonl")
   end
@@ -85,7 +89,8 @@ class MigrationRandomBurnInRunner
     :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
-    :last_readiness_report
+    :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
+    :snapshot_blockers
 
   def live?
     @live
@@ -115,8 +120,10 @@ class MigrationRandomBurnInRunner
     blockers.concat(refresh_blockers)
     blockers << "dashboard snapshot must be present" unless snapshot
     if snapshot
+      snapshot_report = burn_in_snapshot_report(snapshot)
+      record_snapshot_report(snapshot_report)
+      blockers.concat(snapshot_report.fetch(:blockers))
       blockers << outside_tolerance_blocker(snapshot) unless snapshot.inside_tolerance == true
-      blockers << "dashboard snapshot refresh_status must be ok" unless snapshot.refresh_status == "ok"
       blockers << "dashboard snapshot must not be stale" if snapshot.respond_to?(:stale_now?) && snapshot.stale_now?
       blockers << "exactly one venue must have a real short" unless active_short_venues(snapshot).one?
       blockers << "current production venue must hold the only real short" unless active_short_venues(snapshot) == [ current ]
@@ -306,6 +313,10 @@ class MigrationRandomBurnInRunner
       blocker_status: preflight_status(blockers),
       stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
       pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
+      snapshot_refresh_status: snapshot_refresh_status || snapshot&.refresh_status,
+      snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
+      snapshot_warnings: snapshot_warnings,
+      snapshot_blockers: snapshot_blockers,
       initial_target_short_eth: decimal_string(initial_target_short_eth),
       final_target_short_eth: decimal_string(final_target_short_eth || snapshot&.target_short_eth),
       max_target_delta_eth: decimal_string(max_target_delta_eth),
@@ -371,7 +382,9 @@ class MigrationRandomBurnInRunner
     blockers = Array(refresh_blockers)
     return [ blockers, "blocked_stale_or_unavailable_lp_target" ] if blockers.any?
 
-    blockers << "LP target is stale or unavailable" unless trusted_snapshot?(snapshot)
+    snapshot_report = burn_in_snapshot_report(snapshot)
+    record_snapshot_report(snapshot_report)
+    blockers.concat(snapshot_report.fetch(:blockers))
     blockers << outside_tolerance_blocker(snapshot) if snapshot&.inside_tolerance != true && !rebalance_before_cycle
     active = snapshot ? active_short_venues(snapshot) : []
     blockers << "more than one venue has exposure" if active.size > 1
@@ -384,12 +397,7 @@ class MigrationRandomBurnInRunner
   end
 
   def trusted_snapshot?(snapshot)
-    return false unless snapshot
-    return false unless snapshot.refresh_status == "ok"
-    return false unless snapshot.target_short_eth.present? && decimal(snapshot.target_short_eth).positive?
-    return false if snapshot.respond_to?(:stale_now?) && snapshot.stale_now?
-
-    true
+    burn_in_snapshot_report(snapshot).fetch(:accepted)
   end
 
   def active_short_venues(snapshot)
@@ -401,7 +409,7 @@ class MigrationRandomBurnInRunner
   end
 
   def open_orders_zero?(snapshot)
-    snapshot.open_orders_count_extended.to_i.zero?
+    !snapshot.open_orders_count_extended.nil? && snapshot.open_orders_count_extended.to_i.zero?
   end
 
   def pre_cycle_status(blockers)
@@ -440,6 +448,66 @@ class MigrationRandomBurnInRunner
     position.mellow_autopilot? ? "dashboard_snapshot_fresh_mellow_exposure" : "dashboard_snapshot_position_asset0_amount"
   end
 
+  def burn_in_snapshot_report(snapshot)
+    blockers = []
+    warnings = []
+    unless snapshot
+      return { refresh_status: nil, accepted: false, warnings: warnings, blockers: [ "dashboard snapshot must be present" ] }
+    end
+
+    blockers << "LP target is stale or unavailable" unless snapshot.target_short_eth.present? && decimal(snapshot.target_short_eth).positive?
+    blockers << "production venue is unavailable in dashboard snapshot" if snapshot.production_venue.blank?
+    VENUES.each do |venue|
+      blockers << "critical #{venue.capitalize} readback failed" if critical_venue_failed?(snapshot, venue)
+      blockers << "#{venue} short amount is unknown" if snapshot.public_send("#{venue}_short_eth").nil?
+    end
+    blockers << "combined hedge cannot be computed" if snapshot.combined_short_eth.nil?
+    blockers << "inside tolerance readback is unavailable" if snapshot.inside_tolerance.nil?
+    blockers << "open orders cannot be confirmed zero" if snapshot.open_orders_count_extended.nil?
+    blockers << "signer must be healthy" unless snapshot.signer_status.to_s.in?(%w[ok healthy pass ready])
+    critical_source_errors(snapshot).each { |message| blockers << message }
+    if extended_optional_warning?(snapshot)
+      warnings << "extended optional account state timed out; critical position readback ok"
+    end
+
+    {
+      refresh_status: snapshot.refresh_status,
+      accepted: blockers.empty?,
+      warnings: warnings,
+      blockers: blockers.uniq
+    }
+  end
+
+  def record_snapshot_report(report)
+    self.snapshot_refresh_status = report.fetch(:refresh_status)
+    self.snapshot_accepted_for_burn_in = report.fetch(:accepted)
+    self.snapshot_warnings = report.fetch(:warnings)
+    self.snapshot_blockers = report.fetch(:blockers)
+  end
+
+  def critical_venue_failed?(snapshot, venue)
+    source_status = snapshot.public_send("#{venue}_source_status").to_s
+    return true unless source_status == "ok"
+    return snapshot.extended_critical_read_status.to_s != "ok" if venue == "extended"
+
+    false
+  end
+
+  def critical_source_errors(snapshot)
+    snapshot.source_errors_hash.filter_map do |key, value|
+      next if key.to_s == "extended_optional"
+
+      "#{key} source error: #{value}"
+    end
+  end
+
+  def extended_optional_warning?(snapshot)
+    return false unless snapshot.extended_critical_read_status.to_s == "ok"
+    return false unless snapshot.extended_optional_read_status.to_s.in?(%w[error timed_out timeout])
+
+    snapshot.source_errors_hash.fetch("extended_optional", "").to_s.match?(/Timeout/i)
+  end
+
   def outside_tolerance_blocker(snapshot)
     drift = decimal(snapshot&.drift_eth)
     side = drift.positive? ? "increase_short" : "decrease_short"
@@ -453,7 +521,11 @@ class MigrationRandomBurnInRunner
     {
       stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
       pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
-      pending_nado_target_continuation: last_readiness_report[:pending_nado_target_continuation]
+      pending_nado_target_continuation: last_readiness_report[:pending_nado_target_continuation],
+      snapshot_refresh_status: snapshot_refresh_status,
+      snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
+      snapshot_warnings: snapshot_warnings,
+      snapshot_blockers: snapshot_blockers
     }
   end
 

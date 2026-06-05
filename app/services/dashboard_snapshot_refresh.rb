@@ -135,7 +135,8 @@ class DashboardSnapshotRefresh
     )
   rescue Timeout::Error, StandardError => e
     if defined?(critical) && critical&.dig(:result)
-      normalize_venue_result("extended", critical.fetch(:result), {}).merge(
+      previous_optional = previous_extended_optional_account_state(position.position_dashboard_snapshot)
+      normalize_venue_result("extended", critical.fetch(:result), previous_optional).merge(
         critical_read_duration_ms: critical.fetch(:duration_ms),
         critical_read_status: "ok",
         optional_read_duration_ms: duration_ms_from(defined?(optional_started) ? optional_started : nil),

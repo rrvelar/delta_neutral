@@ -1048,6 +1048,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
             missing_route_proofs: proof_report.fetch(:missing_route_proofs),
             stale_route_proofs: [],
             pending_nado_target_continuation: nil,
+            pending_nado_target_continuation_blocking: false,
+            stale_pending_continuation_ignored: false,
             blockers: [
               "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true",
               "MIGRATION_LIVE_ENABLED must be true",

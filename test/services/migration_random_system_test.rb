@@ -581,6 +581,119 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in proceeds when snapshot is partial only because Extended optional account state timed out" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    optional_timeout = {
+      refresh_status: "partial",
+      extended_critical_read_status: "ok",
+      extended_optional_read_status: "error",
+      source_errors: JSON.generate({ extended_optional: "Timeout::Error: execution expired" }),
+      open_orders_count_extended: 0
+    }
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => optional_timeout,
+      "pre_cycle" => optional_timeout,
+      "post_cycle" => optional_timeout
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    final = read_jsonl(result.receipt_path).last
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "partial", final.fetch("snapshot_refresh_status")
+    assert_equal true, final.fetch("snapshot_accepted_for_burn_in")
+    assert_includes final.fetch("snapshot_warnings"), "extended optional account state timed out; critical position readback ok"
+    assert_empty final.fetch("snapshot_blockers")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks when production venue critical readback fails" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => {
+        refresh_status: "partial",
+        ethereal_source_status: "error",
+        source_errors: JSON.generate({ ethereal: "ethereal read failed" })
+      }
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.summary.fetch(:snapshot_blockers), "critical Ethereal readback failed"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks when any venue short is unknown" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => { refresh_status: "partial", nado_short_eth: nil }
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.summary.fetch(:snapshot_blockers), "nado short amount is unknown"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks when combined hedge cannot be computed" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => { refresh_status: "partial", combined_short_eth: nil }
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.summary.fetch(:snapshot_blockers), "combined hedge cannot be computed"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks when open orders cannot be confirmed zero" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => { refresh_status: "partial", open_orders_count_extended: nil }
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.summary.fetch(:snapshot_blockers), "open orders cannot be confirmed zero"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocked start logs snapshot acceptance diagnostics" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(snapshot_attrs_by_stage: {
+      "preflight" => { refresh_status: "partial", nado_short_eth: nil }
+    })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    start = read_jsonl(result.receipt_path).first
+    final = read_jsonl(result.receipt_path).last
+
+    assert_equal "partial", start.fetch("snapshot_refresh_status")
+    assert_equal false, start.fetch("snapshot_accepted_for_burn_in")
+    assert_equal [ "nado short amount is unknown" ], start.fetch("snapshot_blockers")
+    assert_equal "partial", final.fetch("snapshot_refresh_status")
+    assert_equal false, final.fetch("snapshot_accepted_for_burn_in")
+    assert_equal [ "nado short amount is unknown" ], final.fetch("snapshot_blockers")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in stops if LP target refresh fails before cycle" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -967,7 +1080,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       ethereal_source_status: "ok",
       nado_source_status: "ok",
       signer_status: "ok",
-      open_orders_count_extended: 0
+      open_orders_count_extended: 0,
+      extended_critical_read_status: "ok",
+      extended_optional_read_status: "ok"
     )
     position
   end
@@ -1200,11 +1315,12 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   class BurnInSnapshotRefresher
     attr_reader :stages
 
-    def initialize(fail_on: nil, target_by_stage: {}, target_sequence: nil, exposure_by_stage: {})
+    def initialize(fail_on: nil, target_by_stage: {}, target_sequence: nil, exposure_by_stage: {}, snapshot_attrs_by_stage: {})
       @fail_on = fail_on
       @target_by_stage = target_by_stage
       @target_sequence = target_sequence&.dup
       @exposure_by_stage = exposure_by_stage
+      @snapshot_attrs_by_stage = snapshot_attrs_by_stage
       @stages = []
     end
 
@@ -1215,6 +1331,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       target = next_target(stage, position)
       exposure = @exposure_by_stage.fetch(stage, nil)
       apply_target(position, target: target, exposure: exposure)
+      position.position_dashboard_snapshot.update!(@snapshot_attrs_by_stage.fetch(stage, {}))
       position.position_dashboard_snapshot.reload
     end
 
@@ -1252,7 +1369,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         ethereal_short_eth: shorts.fetch("ethereal", BigDecimal("0")),
         nado_short_eth: shorts.fetch("nado", BigDecimal("0")),
         signer_status: "ok",
-        open_orders_count_extended: snapshot.open_orders_count_extended || 0
+        open_orders_count_extended: snapshot.open_orders_count_extended || 0,
+        extended_critical_read_status: snapshot.extended_critical_read_status || "ok",
+        extended_optional_read_status: snapshot.extended_optional_read_status || "ok"
       )
     end
   end
