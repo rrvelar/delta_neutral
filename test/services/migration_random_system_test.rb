@@ -609,6 +609,59 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "dedicated burn-in preflight blocks if Extended position readback fails" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(position, venues: { "extended" => DirectBurnInVenue.new(position_error: "timeout") })
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_match "Extended position readback failed", report.fetch(:blockers).join(" ")
+  end
+
+  test "dedicated burn-in preflight blocks if open orders cannot be confirmed zero" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(position, venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18", open_orders_count: nil) })
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_includes report.fetch(:blockers), "ethereal open orders could not be confirmed zero"
+  end
+
+  test "dedicated burn-in preflight blocks if multiple venues have exposure" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(position, venues: {
+      "ethereal" => DirectBurnInVenue.new(short: "1.18"),
+      "nado" => DirectBurnInVenue.new(short: "0.1")
+    })
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_includes report.fetch(:blockers), "more than one venue has exposure"
+  end
+
+  test "dedicated burn-in preflight blocks if current hedge is outside tolerance" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(position, target: "1.30", venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") })
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_match "current hedge outside tolerance", report.fetch(:blockers).join(" ")
+  end
+
+  test "dedicated burn-in preflight proceeds when all direct checks pass" do
+    position = migration_position("ethereal")
+    report = direct_preflight(position).report
+
+    assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
+    assert_equal "dedicated_burn_in_preflight", report.fetch(:preflight_source)
+    assert_equal BigDecimal("1.18"), report.fetch(:target).fetch(:target_short_eth)
+    assert_equal BigDecimal("1.18"), report.dig(:venues, "ethereal", :short_eth)
+  end
+
   test "random burn-in blocks when production venue critical readback fails" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -979,7 +1032,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     result = burn_in(position: position, live: true, executor: executor, log_dir: dir).run
 
     assert_equal "stopped", result.status, result.blockers.inspect
-    assert_includes result.blockers, "open orders are non-zero after migration"
+    assert_includes result.blockers, "extended open orders could not be confirmed zero"
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -1116,7 +1169,20 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil)
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil)
+    readiness = ->(**) {
+      readiness_report || {
+        pending_nado_target_continuation: nil,
+        pending_nado_target_continuation_blocking: false,
+        stale_pending_continuation_ignored: false,
+        blockers: []
+      }
+    }
+    direct_preflight = preflight_factory || BurnInDirectPreflightFactory.new(
+      refresher: snapshot_refresher,
+      proof_registry: proof_registry,
+      readiness_factory: readiness
+    )
     MigrationRandomBurnInRunner.new(
       position: position,
       duration_minutes: 30,
@@ -1130,11 +1196,28 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       selector: selector,
       log_dir: log_dir,
       stdout: StringIO.new,
-      snapshot_refresher: snapshot_refresher,
+      snapshot_refresher: BurnInDashboardRefresher.new,
+      preflight_factory: direct_preflight,
       rebalance_before_cycle: rebalance_before_cycle,
       max_target_change_per_cycle_eth: max_target_change_per_cycle_eth,
+      readiness_factory: readiness
+    )
+  end
+
+  def direct_preflight(position, target: "1.18", venues: {})
+    defaults = {
+      "extended" => DirectBurnInVenue.new(short: "0"),
+      "ethereal" => DirectBurnInVenue.new(short: "1.18"),
+      "nado" => DirectBurnInVenue.new(short: "0")
+    }
+    MigrationRandomBurnInPreflight.new(
+      position: position,
+      proof_registry: BurnInProofRegistry.new,
+      venue_builder: DirectBurnInVenueBuilder.new(defaults.merge(venues)),
+      signer_client: DirectBurnInSigner.new,
+      fresh_target_factory: ->(_) { DirectBurnInTarget.new(target: target) },
       readiness_factory: ->(**) {
-        readiness_report || {
+        {
           pending_nado_target_continuation: nil,
           pending_nado_target_continuation_blocking: false,
           stale_pending_continuation_ignored: false,
@@ -1312,6 +1395,63 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     end
   end
 
+  class DirectBurnInTarget
+    def initialize(target:)
+      @target = target
+    end
+
+    def resolve(refresh_if_stale:)
+      {
+        status: "ok",
+        target_short_eth: BigDecimal(@target.to_s),
+        target_source: "test_direct_target",
+        target_fresh: true,
+        exposure_source: "test",
+        exposure_refreshed_at: Time.current.utc.iso8601,
+        blockers: [],
+        orders_submitted: 0,
+        signatures_created: 0
+      }
+    end
+  end
+
+  class DirectBurnInSigner
+    def health
+      { ok: true, supported_exchanges: %w[Extended Ethereal Nado], supported_actions: %w[place_order sign_extended_order] }
+    end
+  end
+
+  class DirectBurnInVenueBuilder
+    def initialize(venues)
+      @venues = venues
+    end
+
+    def build(venue, **)
+      @venues.fetch(venue)
+    end
+  end
+
+  class DirectBurnInVenue
+    def initialize(short: "0", open_orders_count: 0, position_error: nil)
+      @short = short
+      @open_orders_count = open_orders_count
+      @position_error = position_error
+    end
+
+    def read_position(symbol:)
+      raise @position_error if @position_error
+
+      short = BigDecimal(@short.to_s)
+      return nil if short.zero?
+
+      { short_size: short.to_s("F"), size: (-short).to_s("F") }
+    end
+
+    def account_state
+      { open_orders_count: @open_orders_count }
+    end
+  end
+
   class BurnInSnapshotRefresher
     attr_reader :stages
 
@@ -1373,6 +1513,115 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         extended_critical_read_status: snapshot.extended_critical_read_status || "ok",
         extended_optional_read_status: snapshot.extended_optional_read_status || "ok"
       )
+    end
+  end
+
+  class BurnInDashboardRefresher
+    def call(position:, stage:)
+      position.position_dashboard_snapshot.reload
+    end
+  end
+
+  class BurnInDirectPreflightFactory
+    def initialize(refresher:, proof_registry:, readiness_factory:)
+      @refresher = refresher
+      @proof_registry = proof_registry
+      @readiness_factory = readiness_factory
+    end
+
+    def call(position:, stage:)
+      snapshot = @refresher.call(position: position, stage: stage)
+      report_from_snapshot(position, snapshot)
+    rescue => e
+      {
+        preflight_source: "dedicated_burn_in_preflight",
+        accepted: false,
+        blockers: [ "fresh LP target refresh failed: #{e.class}: #{e.message}" ],
+        warnings: [],
+        production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
+        target: { target_short_eth: nil, target_fresh: false },
+        venues: {},
+        combined_short_eth: nil,
+        drift_eth: nil,
+        tolerance_abs_eth: nil,
+        inside_tolerance: nil,
+        active_short_venues: [],
+        proof_report: @proof_registry.report(position: position),
+        readiness: @readiness_factory.call(position: position, proof_registry: @proof_registry),
+        signer: { status: "ok", payload: { ok: true } }
+      }
+    end
+
+    private
+
+    def report_from_snapshot(position, snapshot)
+      target = BigDecimal(snapshot.target_short_eth.to_s)
+      combined = snapshot.combined_short_eth && BigDecimal(snapshot.combined_short_eth.to_s)
+      tolerance = snapshot.tolerance_abs_eth && BigDecimal(snapshot.tolerance_abs_eth.to_s)
+      drift = target && combined ? target - combined : nil
+      venues = %w[extended ethereal nado].to_h do |venue|
+        short = snapshot.public_send("#{venue}_short_eth")
+        open_orders_count = venue == "extended" ? snapshot.open_orders_count_extended : 0
+        [ venue, {
+          short_eth: short.nil? ? nil : BigDecimal(short.to_s),
+          position_status: snapshot.public_send("#{venue}_source_status") == "error" ? "error" : "ok",
+          error: snapshot.public_send("#{venue}_source_status") == "error" ? "#{venue} read failed" : nil,
+          open_orders_count: open_orders_count,
+          open_orders_status: open_orders_count.nil? ? "unknown" : (open_orders_count.to_i.zero? ? "zero" : "blocked"),
+          open_orders_message: open_orders_count.nil? ? "#{venue} open orders unavailable" : nil
+        } ]
+      end
+      proof_report = @proof_registry.report(position: position)
+      readiness = @readiness_factory.call(position: position, proof_registry: @proof_registry)
+      blockers = []
+      blockers << "fresh LP target is unavailable" unless target.positive?
+      blockers << "all route proofs must be READY_FOR_RANDOM" unless proof_report.fetch(:missing_route_proofs).empty?
+      blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
+      blockers << "pending target=Nado migration continuation must be completed before burn-in" if readiness[:pending_nado_target_continuation_blocking]
+      blockers << "migration lock is already active for this position" if MigrationExecutionLock.locked?(position)
+      venues.each do |venue, details|
+        blockers << "#{HedgeVenues.label(venue)} position readback failed: #{details[:error]}" unless details[:position_status] == "ok"
+        blockers << "#{venue} short amount is unknown" if details[:short_eth].nil?
+        blockers << "#{venue} open orders could not be confirmed zero" unless details[:open_orders_status] == "zero"
+      end
+      blockers << "combined hedge cannot be computed" unless combined
+      blockers << outside_tolerance_blocker(target, combined, drift, tolerance) if drift && tolerance && drift.abs > tolerance
+      active = venues.select { |_venue, details| details[:short_eth] && details[:short_eth] > BigDecimal("0.001") }.keys
+      current = HedgeVenues.normalize(position.hedge.execution_venue)
+      blockers << "more than one venue has exposure" if active.size > 1
+      blockers << "no venue has the production hedge" if active.empty?
+      blockers << "app production venue and actual venue exposure disagree" if active.one? && active.first != current
+      blockers << "current production venue has no real short" if venues[current]&.fetch(:short_eth).to_d <= BigDecimal("0.001")
+
+      {
+        preflight_source: "dedicated_burn_in_preflight",
+        accepted: blockers.empty?,
+        blockers: blockers.uniq,
+        warnings: [],
+        production_venue: current,
+        target: {
+          target_short_eth: target,
+          target_source: "test_direct_preflight",
+          target_fresh: true,
+          exposure_refreshed_at: Time.current.utc.iso8601
+        },
+        venues: venues,
+        combined_short_eth: combined,
+        drift_eth: drift,
+        tolerance_abs_eth: tolerance,
+        inside_tolerance: drift && tolerance ? drift.abs <= tolerance : nil,
+        active_short_venues: active,
+        proof_report: proof_report,
+        readiness: readiness,
+        signer: { status: "ok", payload: { ok: true } }
+      }
+    end
+
+    def outside_tolerance_blocker(target, combined, drift, tolerance)
+      side = drift.positive? ? "increase_short" : "decrease_short"
+      "current hedge outside tolerance: target_short_eth=#{target.to_s('F')} current_short_eth=#{combined.to_s('F')} " \
+        "drift_eth=#{drift.to_s('F')} tolerance_abs_eth=#{tolerance.to_s('F')} recommended_rebalance_side=#{side} " \
+        "recommended_rebalance_size_eth=#{drift.abs.to_s('F')}"
     end
   end
 

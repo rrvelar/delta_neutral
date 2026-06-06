@@ -9,7 +9,7 @@ class MigrationRandomBurnInRunner
                  confirmation: nil, env: ENV, proof_registry: nil, executor_factory: nil, now: -> { Time.current },
                  sleeper: ->(seconds) { sleep(seconds) }, selector: nil, log_dir: LOG_DIR, stdout: $stdout,
                  readiness_factory: nil, snapshot_refresher: nil, rebalance_before_cycle: false,
-                 max_target_change_per_cycle_eth: "0.15")
+                 max_target_change_per_cycle_eth: "0.15", preflight_factory: nil)
     @position = position
     @duration_minutes = duration_minutes.to_i
     @interval_seconds = interval_seconds.to_i
@@ -27,6 +27,7 @@ class MigrationRandomBurnInRunner
     @stdout = stdout
     @readiness_factory = readiness_factory
     @snapshot_refresher = snapshot_refresher
+    @preflight_factory = preflight_factory
     @rebalance_before_cycle = ActiveModel::Type::Boolean.new.cast(rebalance_before_cycle)
     @max_target_change_per_cycle_eth = decimal(max_target_change_per_cycle_eth)
     @orders_submitted = 0
@@ -43,6 +44,7 @@ class MigrationRandomBurnInRunner
     @snapshot_accepted_for_burn_in = false
     @snapshot_warnings = []
     @snapshot_blockers = []
+    @last_direct_preflight_report = {}
     @started_at = @now.call
     @receipt_path = @log_dir.join("#{@started_at.utc.strftime('%Y%m%d_%H%M%S')}_position_#{position.id}.jsonl")
   end
@@ -86,11 +88,12 @@ class MigrationRandomBurnInRunner
 
   attr_reader :position, :duration_minutes, :interval_seconds, :max_cycles, :confirmation, :env, :proof_registry,
     :executor_factory, :now, :sleeper, :selector, :log_dir, :stdout, :started_at, :receipt_path, :disable_after,
-    :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth
+    :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth,
+    :preflight_factory
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
-    :snapshot_blockers
+    :snapshot_blockers, :last_direct_preflight_report
 
   def live?
     @live
@@ -104,32 +107,14 @@ class MigrationRandomBurnInRunner
 
   def preflight_blockers
     position.reload
-    proof_report = proof_registry.report(position: position)
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
     blockers = []
     blockers << "submitted confirmation must equal #{CONFIRMATION}" if live? && confirmation != CONFIRMATION
-    blockers << "all route proofs must be READY_FOR_RANDOM" unless proof_report.fetch(:missing_route_proofs).empty?
-    blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
     blockers << "current production venue must be extended, ethereal, or nado" unless VENUES.include?(current)
-    readiness = readiness_report
-    self.last_readiness_report = readiness
-    blockers << "pending target=Nado migration continuation must be completed before burn-in" if readiness[:pending_nado_target_continuation_blocking]
-    blockers << "migration lock is already active for this position" if MigrationExecutionLock.locked?(position)
-
-    snapshot, refresh_blockers = refresh_snapshot("preflight")
-    blockers.concat(refresh_blockers)
-    blockers << "dashboard snapshot must be present" unless snapshot
-    if snapshot
-      snapshot_report = burn_in_snapshot_report(snapshot)
-      record_snapshot_report(snapshot_report)
-      blockers.concat(snapshot_report.fetch(:blockers))
-      blockers << outside_tolerance_blocker(snapshot) unless snapshot.inside_tolerance == true
-      blockers << "dashboard snapshot must not be stale" if snapshot.respond_to?(:stale_now?) && snapshot.stale_now?
-      blockers << "exactly one venue must have a real short" unless active_short_venues(snapshot).one?
-      blockers << "current production venue must hold the only real short" unless active_short_venues(snapshot) == [ current ]
-      blockers << "open orders must be zero before burn-in" unless open_orders_zero?(snapshot)
-      blockers << "signer must be healthy" unless snapshot.signer_status.to_s.in?(%w[ok healthy pass ready])
-    end
+    direct = direct_preflight("preflight")
+    record_direct_preflight(direct)
+    blockers.concat(direct.fetch(:blockers))
+    refresh_dashboard_snapshot_for_diagnostics("preflight")
     blockers.uniq
   end
 
@@ -165,10 +150,12 @@ class MigrationRandomBurnInRunner
 
   def run_cycle(cycle)
     self.cycles_attempted += 1
-    pre_snapshot, pre_refresh_blockers = refresh_snapshot("pre_cycle")
-    pre_target = target_payload(pre_snapshot, lp_refreshed: pre_refresh_blockers.empty?)
-    pre_hedge = hedge_payload(pre_snapshot)
-    pre_blockers, pre_status = pre_cycle_blockers(pre_snapshot, pre_refresh_blockers)
+    pre_report = direct_preflight("pre_cycle")
+    record_direct_preflight(pre_report)
+    refresh_dashboard_snapshot_for_diagnostics("pre_cycle")
+    pre_target = target_payload(pre_report)
+    pre_hedge = hedge_payload(pre_report)
+    pre_blockers, pre_status = pre_cycle_blockers(pre_report)
     if pre_blockers.any?
       event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: nil, execution: zero_execution(status: "blocked"), post_target: nil, post_hedge: nil, status: pre_status, blockers: pre_blockers)
       write_event(event)
@@ -202,10 +189,12 @@ class MigrationRandomBurnInRunner
       execution = zero_execution(status: "dry_run")
     end
 
-    post_snapshot, post_refresh_blockers = refresh_snapshot("post_cycle")
-    post_target = target_payload(post_snapshot, lp_refreshed: post_refresh_blockers.empty?, previous_target: decimal_or_nil(pre_target[:target_short_eth]))
-    post_hedge = hedge_payload(post_snapshot)
-    blockers, status = cycle_blockers(route: route, execution: execution, post_snapshot: post_snapshot, post_target: post_target, post_refresh_blockers: post_refresh_blockers)
+    post_report = direct_preflight("post_cycle")
+    record_direct_preflight(post_report)
+    refresh_dashboard_snapshot_for_diagnostics("post_cycle")
+    post_target = target_payload(post_report, previous_target: decimal_or_nil(pre_target[:target_short_eth]))
+    post_hedge = hedge_payload(post_report)
+    blockers, status = cycle_blockers(route: route, execution: execution, post_report: post_report, post_target: post_target)
     self.orders_submitted += execution.fetch(:orders_submitted)
     self.orders_placed += execution.fetch(:orders_placed)
     self.signatures_created += execution.fetch(:signatures_created)
@@ -232,22 +221,17 @@ class MigrationRandomBurnInRunner
     HedgeVenueMigrationExecutor.new(env: env)
   end
 
-  def cycle_blockers(route:, execution:, post_snapshot:, post_target:, post_refresh_blockers:)
-    blockers = []
-    blockers.concat(post_refresh_blockers)
-    return [ blockers, "stopped_stale_or_unavailable_lp_target" ] if blockers.any?
-
+  def cycle_blockers(route:, execution:, post_report:, post_target:)
+    blockers = Array(post_report.fetch(:blockers))
     target_delta = decimal_or_nil(post_target[:target_delta_eth]) || BigDecimal("0")
     self.max_target_delta_eth = [ max_target_delta_eth, target_delta ].max
     blockers << "target changed #{target_delta.to_s('F')} ETH during cycle; max allowed is #{max_target_change_per_cycle_eth.to_s('F')} ETH" if target_delta > max_target_change_per_cycle_eth
-    blockers << "combined hedge is outside tolerance after migration" unless post_snapshot&.inside_tolerance == true
-    blockers << "open orders are non-zero after migration" unless post_snapshot && open_orders_zero?(post_snapshot)
     if live?
       blockers << "migration result status is #{execution[:status]}" unless execution[:status].to_s.in?(%w[success MIGRATION_FINALIZED])
-      blockers << "source venue #{route.fetch(:from_venue)} is not flat after migration" unless venue_short(post_snapshot, route.fetch(:from_venue)).zero?
-      blockers << "target venue #{route.fetch(:to_venue)} does not hold expected short after migration" unless venue_short(post_snapshot, route.fetch(:to_venue)).positive?
+      blockers << "source venue #{route.fetch(:from_venue)} is not flat after migration" unless venue_short(post_report, route.fetch(:from_venue)).zero?
+      blockers << "target venue #{route.fetch(:to_venue)} does not hold expected short after migration" unless venue_short(post_report, route.fetch(:to_venue)).positive?
       third = (VENUES - [ route.fetch(:from_venue), route.fetch(:to_venue) ]).first
-      blockers << "third venue #{third} is not flat after migration" unless venue_short(post_snapshot, third).zero?
+      blockers << "third venue #{third} is not flat after migration" unless venue_short(post_report, third).zero?
       blockers << "app production venue was not finalized to #{route.fetch(:to_venue)}" unless HedgeVenues.normalize(position.hedge&.execution_venue) == route.fetch(:to_venue)
       blockers << "route result is partial" if execution[:status].to_s.match?(/partial|pending|unknown|blocked/i)
     end
@@ -309,16 +293,22 @@ class MigrationRandomBurnInRunner
       orders_placed: orders_placed,
       signatures_created: signatures_created,
       final_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
-      final_combined_inside_tolerance: snapshot&.inside_tolerance == true,
+      final_combined_inside_tolerance: last_direct_preflight_report[:inside_tolerance] == true,
       blocker_status: preflight_status(blockers),
       stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
       pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
+      preflight_source: "dedicated_burn_in_preflight",
+      direct_preflight_blockers: Array(last_direct_preflight_report[:blockers]),
+      direct_preflight_warnings: Array(last_direct_preflight_report[:warnings]),
+      direct_venue_shorts: direct_venue_shorts(last_direct_preflight_report),
+      direct_open_orders: direct_open_orders(last_direct_preflight_report),
+      fresh_target: serializable_target(last_direct_preflight_report[:target]),
       snapshot_refresh_status: snapshot_refresh_status || snapshot&.refresh_status,
       snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
       snapshot_warnings: snapshot_warnings,
       snapshot_blockers: snapshot_blockers,
       initial_target_short_eth: decimal_string(initial_target_short_eth),
-      final_target_short_eth: decimal_string(final_target_short_eth || snapshot&.target_short_eth),
+      final_target_short_eth: decimal_string(final_target_short_eth),
       max_target_delta_eth: decimal_string(max_target_delta_eth),
       target_refresh_failures: target_refresh_failures,
       disable_after: disable_after,
@@ -332,23 +322,23 @@ class MigrationRandomBurnInRunner
     Result.new(status, blockers, [], receipt_path.to_s, final_summary(status: status, blockers: blockers))
   end
 
-  def hedge_payload(snapshot)
+  def hedge_payload(report)
     {
-      production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
-      extended_short_eth: decimal_string(snapshot&.extended_short_eth),
-      ethereal_short_eth: decimal_string(snapshot&.ethereal_short_eth),
-      nado_short_eth: decimal_string(snapshot&.nado_short_eth),
-      target_short_eth: decimal_string(snapshot&.target_short_eth),
-      combined_short_eth: decimal_string(snapshot&.combined_short_eth),
-      inside_tolerance: snapshot&.inside_tolerance == true,
-      open_orders_count: snapshot&.open_orders_count_extended.to_i,
-      drift_eth: decimal_string(snapshot&.drift_eth),
-      recommended_rebalance_eth: decimal_string(snapshot&.drift_eth)
+      production_venue: report[:production_venue],
+      extended_short_eth: decimal_string(report.dig(:venues, "extended", :short_eth)),
+      ethereal_short_eth: decimal_string(report.dig(:venues, "ethereal", :short_eth)),
+      nado_short_eth: decimal_string(report.dig(:venues, "nado", :short_eth)),
+      target_short_eth: decimal_string(report.dig(:target, :target_short_eth)),
+      combined_short_eth: decimal_string(report[:combined_short_eth]),
+      inside_tolerance: report[:inside_tolerance] == true,
+      open_orders_count: report.fetch(:venues, {}).values.filter_map { |venue| venue[:open_orders_count] }.sum,
+      drift_eth: decimal_string(report[:drift_eth]),
+      recommended_rebalance_eth: decimal_string(report[:drift_eth])
     }
   end
 
-  def target_payload(snapshot, lp_refreshed:, previous_target: nil)
-    current_target = decimal_or_nil(snapshot&.target_short_eth)
+  def target_payload(report, previous_target: nil)
+    current_target = decimal_or_nil(report.dig(:target, :target_short_eth))
     self.initial_target_short_eth ||= current_target
     self.final_target_short_eth = current_target if current_target
     target_delta = current_target && previous_target ? (current_target - previous_target).abs : nil
@@ -356,10 +346,10 @@ class MigrationRandomBurnInRunner
     {
       asset0_amount: decimal_string(position.asset0_amount),
       asset1_amount: decimal_string(position.asset1_amount),
-      target_short_eth: decimal_string(snapshot&.target_short_eth),
-      target_source: target_source(snapshot),
-      exposure_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
-      lp_refreshed: lp_refreshed,
+      target_short_eth: decimal_string(current_target),
+      target_source: report.dig(:target, :target_source),
+      exposure_refreshed_at: report.dig(:target, :exposure_refreshed_at),
+      lp_refreshed: report.dig(:target, :target_fresh) == true,
       target_changed_during_cycle: target_delta&.positive?,
       target_delta_eth: decimal_string(target_delta)
     }
@@ -378,21 +368,33 @@ class MigrationRandomBurnInRunner
     [ position.position_dashboard_snapshot, [ "#{stage} LP target refresh failed: #{e.class}: #{e.message}" ] ]
   end
 
-  def pre_cycle_blockers(snapshot, refresh_blockers)
-    blockers = Array(refresh_blockers)
-    return [ blockers, "blocked_stale_or_unavailable_lp_target" ] if blockers.any?
+  def refresh_dashboard_snapshot_for_diagnostics(stage)
+    snapshot, blockers = refresh_snapshot(stage)
+    report = burn_in_snapshot_report(snapshot)
+    warnings = report.fetch(:warnings) + blockers.map { |blocker| "dashboard snapshot refresh warning: #{blocker}" }
+    record_snapshot_report(report.merge(warnings: warnings))
+  end
 
-    snapshot_report = burn_in_snapshot_report(snapshot)
-    record_snapshot_report(snapshot_report)
-    blockers.concat(snapshot_report.fetch(:blockers))
-    blockers << outside_tolerance_blocker(snapshot) if snapshot&.inside_tolerance != true && !rebalance_before_cycle
-    active = snapshot ? active_short_venues(snapshot) : []
-    blockers << "more than one venue has exposure" if active.size > 1
-    blockers << "no venue has the production hedge" if active.empty?
-    blockers << "open orders are non-zero before cycle" if snapshot && !open_orders_zero?(snapshot)
-    current = HedgeVenues.normalize(position.hedge&.execution_venue)
-    blockers << "app production venue and actual venue exposure disagree" if active.one? && active.first != current
-    blockers << "current production venue has no real short" if current.present? && snapshot && !venue_short(snapshot, current).positive?
+  def direct_preflight(stage)
+    if preflight_factory
+      preflight_factory.call(position: position, stage: stage)
+    else
+      MigrationRandomBurnInPreflight.new(
+        position: position,
+        env: env,
+        proof_registry: proof_registry,
+        readiness_factory: readiness_factory
+      ).report
+    end
+  end
+
+  def record_direct_preflight(report)
+    self.last_direct_preflight_report = report
+    self.last_readiness_report = report[:readiness] || {}
+  end
+
+  def pre_cycle_blockers(report)
+    blockers = Array(report.fetch(:blockers))
     [ blockers.uniq, pre_cycle_status(blockers) ]
   end
 
@@ -400,12 +402,8 @@ class MigrationRandomBurnInRunner
     burn_in_snapshot_report(snapshot).fetch(:accepted)
   end
 
-  def active_short_venues(snapshot)
-    VENUES.select { |venue| decimal(snapshot.public_send("#{venue}_short_eth")).positive? }
-  end
-
-  def venue_short(snapshot, venue)
-    decimal(snapshot&.public_send("#{venue}_short_eth"))
+  def venue_short(report, venue)
+    decimal(report.dig(:venues, venue, :short_eth))
   end
 
   def open_orders_zero?(snapshot)
@@ -519,14 +517,41 @@ class MigrationRandomBurnInRunner
 
   def readiness_diagnostics
     {
+      preflight_source: "dedicated_burn_in_preflight",
       stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
       pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
       pending_nado_target_continuation: last_readiness_report[:pending_nado_target_continuation],
+      direct_preflight_blockers: Array(last_direct_preflight_report[:blockers]),
+      direct_preflight_warnings: Array(last_direct_preflight_report[:warnings]),
+      direct_venue_shorts: direct_venue_shorts(last_direct_preflight_report),
+      direct_open_orders: direct_open_orders(last_direct_preflight_report),
+      fresh_target: serializable_target(last_direct_preflight_report[:target]),
       snapshot_refresh_status: snapshot_refresh_status,
       snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
       snapshot_warnings: snapshot_warnings,
       snapshot_blockers: snapshot_blockers
     }
+  end
+
+  def direct_venue_shorts(report)
+    VENUES.to_h { |venue| [ venue, decimal_string(report.dig(:venues, venue, :short_eth)) ] }
+  end
+
+  def direct_open_orders(report)
+    VENUES.to_h do |venue|
+      details = report.dig(:venues, venue) || {}
+      [ venue, {
+        status: details[:open_orders_status],
+        count: details[:open_orders_count],
+        message: details[:open_orders_message]
+      }.compact ]
+    end
+  end
+
+  def serializable_target(target)
+    return {} unless target
+
+    target.merge(target_short_eth: decimal_string(target[:target_short_eth]))
   end
 
   def decimal(value)
