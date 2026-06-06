@@ -160,7 +160,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_empty receipt.fetch("blockers")
   end
 
-  test "daily live random skips disabled Nado target route" do
+  test "daily live random can use source-first Nado target route after route proof is ready" do
     OperationalSetting.delete_all
     position = migration_position
     fake_snapshot_refresh_class.new(position: position).refresh
@@ -183,9 +183,9 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
 
     assert_equal "ok", result.status
-    assert_equal "extended", receipt.fetch("selected_target_venue")
-    assert_equal "extended", position.hedge.reload.execution_venue
-    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+    assert_equal "nado", receipt.fetch("selected_target_venue")
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
   end
 
   test "daily live random records target-open source-still-open as manual action" do

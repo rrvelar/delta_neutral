@@ -83,7 +83,7 @@ class AutoTaskTest < ActiveSupport::TestCase
 
   test "auto disable all clears auto and migration loops" do
     position = ethereal_position
-    OperationalSettings::ALLOWED_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: true) }
+    OperationalSettings::BOOLEAN_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: true) }
 
     with_env(
       "position_id" => position.id.to_s,
@@ -93,7 +93,7 @@ class AutoTaskTest < ActiveSupport::TestCase
       payload = JSON.parse(out)
 
       assert_equal true, payload.fetch("ok")
-      assert OperationalSettings::ALLOWED_KEYS.none? { |key| OperationalSettings.enabled?(key) }
+      assert OperationalSettings::BOOLEAN_KEYS.none? { |key| OperationalSettings.enabled?(key) }
       assert_equal 0, payload.fetch("orders_submitted")
       assert_equal 0, payload.fetch("signatures_created")
     end

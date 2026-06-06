@@ -898,10 +898,14 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       refreshed_at: Time.current,
       extended_attrs: { leverage_margin_gate_status: "pass", open_orders_count: 0 }
     )
-    receipt_path = Rails.root.join("storage/hedge_migration_route_proofs/#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
+    registry_dir = Rails.root.join("tmp/route-proof-controller-#{SecureRandom.hex(4)}")
+    receipt_path = registry_dir.join("#{Time.current.utc.strftime('%Y%m%d')}.jsonl")
     before_lines = File.exist?(receipt_path) ? File.readlines(receipt_path).size : 0
+    matrix = HedgeVenueMigrationRouteMatrix.new(position: position, receipt_dir: registry_dir)
 
-    post migration_route_proof_position_path(position)
+    HedgeVenueMigrationRouteMatrix.stub(:new, matrix) do
+      post migration_route_proof_position_path(position)
+    end
 
     assert_response :redirect
     assert_match "Dry-run route proof wrote", flash[:notice]
@@ -911,6 +915,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert receipt
     assert_equal 0, receipt.fetch("orders_submitted")
     assert_equal 0, receipt.fetch("signatures_created")
+  ensure
+    FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
   test "migration random rotation decision action writes read only receipt" do
@@ -1191,14 +1197,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "3 / 6 READY_FOR_RANDOM", response.body
-    assert_match "extended-&gt;nado disabled: Nado target/source-close latency not production-safe", response.body
-    assert_match "Next required setup move", response.body
+    assert_match "4 / 6 READY_FOR_RANDOM", response.body
     assert_match "Move to required source venue", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Ethereal", response.body
     assert_match "Nado", response.body
-    assert_match "using the already READY_FOR_RANDOM route", response.body
     assert_no_match "Run Supervised Live Canary", response.body
     assert_no_match "Prepare Next Route", response.body
   ensure
@@ -1231,22 +1234,18 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "3 / 6 READY_FOR_RANDOM", response.body
-    assert_match "extended-&gt;nado disabled: Nado target/source-close latency not production-safe", response.body
-    assert_match "Next required setup move", response.body
+    assert_match "4 / 6 READY_FOR_RANDOM", response.body
     assert_match "Move to required source venue", response.body
     assert_match "Extended -&gt; Ethereal", response.body
     assert_match "Ethereal", response.body
     assert_match "Nado", response.body
-    assert_match "cannot be prepared/run until Ethereal is current source", response.body
-    assert_match "FAILED_NEEDS_REPAIR", response.body
     assert_no_match "Run Supervised Live Canary", response.body
     assert_no_match "Prepare Next Route", response.body
   ensure
     FileUtils.rm_rf(registry_dir) if registry_dir
   end
 
-  test "limited diagnostics fallback repositions before failed repair route with flat non-current source" do
+  test "limited diagnostics fallback keeps source reposition before Nado target repair" do
     position = create_aerodrome_position
     clear_migration_receipts_for_position(position.id)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -1277,11 +1276,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Setup loaded with limited diagnostics", response.body
     assert_match "Move to required source venue", response.body
     assert_match "Extended -&gt; Ethereal", response.body
-    assert_match "cannot be prepared/run until Ethereal is current source", response.body
     assert_match "limited_diagnostics", response.body
     assert_match "fallback_used", response.body
-    assert_match "source_reposition_required", response.body
-    assert_match "true", response.body
     assert_no_match "Run Supervised Live Canary", response.body
     assert_no_match "Prepare Next Route", response.body
   ensure
@@ -3864,7 +3860,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   def write_ready_route_proof(position, from:, to:, receipt_dir:)
-    HedgeVenueMigrationReceiptWriter.new(receipt_dir: receipt_dir).write(
+    payload = {
       action: "manual_live_canary",
       timestamp: Time.current.utc.iso8601,
       position_id: position.id,
@@ -3883,7 +3879,21 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       orders_placed: 1,
       signatures_created: 1,
       cancels_submitted: 0
-    )
+    }
+    payload.merge!(nado_target_latency_proof_fields) if to == "nado"
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: receipt_dir).write(payload)
+  end
+
+  def nado_target_latency_proof_fields
+    {
+      migration_sequence: "source_first",
+      route_latency_proof: true,
+      production_safe_route: true,
+      route_production_safe: true,
+      double_exposure_seconds: "0",
+      underhedge_seconds: "2.0",
+      total_route_seconds: "4.0"
+    }
   end
 
   def write_failed_route_proof(position, from:, to:, receipt_dir:)

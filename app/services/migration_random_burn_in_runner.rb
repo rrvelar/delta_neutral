@@ -195,7 +195,7 @@ class MigrationRandomBurnInRunner
           dry_run: false,
           confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
           full_migration_allowed: true,
-          migration_sequence: "target_first",
+          migration_sequence: route.fetch(:migration_sequence, "target_first"),
           execution_preflight: pre_report
         )
       end

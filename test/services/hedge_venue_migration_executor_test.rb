@@ -1048,11 +1048,11 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       migration_sequence: "source_first"
     )
 
-    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
+    assert_equal "MANUAL_ACTION_REQUIRED_SOURCE_FLAT_TARGET_NOT_OPEN", result.status
     assert_equal true, result.receipt.fetch(:manual_action_required)
     assert_equal "extended", calls.first.fetch(:venue)
     assert_equal "ethereal", calls.second.fetch(:venue)
-    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
+    assert_match "sequence=source_first", result.receipt.fetch(:recovery_command)
   end
 
   test "live execution pauses source auto instead of blocking migration" do

@@ -166,8 +166,13 @@ class MigrationRandomReadiness
     route = proof_report.fetch(:routes).find do |entry|
       entry[:from_venue] == event["from_venue"] && entry[:to_venue] == event["to_venue"]
     end
-    safe = route&.fetch(:status, nil).in?([ MigrationRouteProofRegistry::STATUSES[:ready], MigrationRouteProofRegistry::STATUSES[:not_safe_latency] ]) &&
+    safe = if route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:ready]
       safe_readback_for_completed_route?(from: event["from_venue"], to: event["to_venue"])
+    elsif route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:not_safe_latency]
+      finalized_route_readback_summary?(route)
+    else
+      false
+    end
     @stale_pending_continuation_ignored = true if safe
     safe
   end
@@ -189,6 +194,13 @@ class MigrationRandomReadiness
     return false unless open_orders_zero?(snapshot)
 
     !target_nado_waiting_for_source_close?(snapshot: snapshot, from: from, to: to)
+  end
+
+  def finalized_route_readback_summary?(route)
+    summary = route[:final_readback_summary] || {}
+    summary[:source_flat_after] == true &&
+      summary[:target_holds_expected_short] == true &&
+      summary[:final_inside_tolerance] == true
   end
 
   def open_orders_zero?(snapshot)

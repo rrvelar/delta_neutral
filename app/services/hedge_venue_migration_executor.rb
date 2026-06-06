@@ -61,6 +61,8 @@ class HedgeVenueMigrationExecutor
 
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
+    return execute_source_first(position: position, receipt: receipt, confirmation: confirmation) if receipt[:migration_sequence] == "source_first"
+
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
     mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
@@ -163,6 +165,82 @@ class HedgeVenueMigrationExecutor
     end
 
     execute_receipt(position: position, receipt: receipt, confirmation: confirmation)
+  end
+
+  def execute_source_first(position:, receipt:, confirmation:)
+    source_leg_plan = receipt.fetch(:planned_first_leg)
+    target_leg_plan = receipt.fetch(:planned_second_leg)
+    receipt[:lifecycle_state] = "READY_FOR_SOURCE_FIRST"
+    mark_time!(receipt, :source_close_submit_started_at)
+    source_leg = @leg_runner.call(source_leg_plan, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :source_close_submit_finished_at)
+    receipt[:first_leg_execution] = sanitize_sensitive(source_leg)
+    receipt[:from_leg_execution] = sanitize_sensitive(source_leg)
+    receipt[:leg_readbacks] << source_leg[:readback] if source_leg[:readback]
+    receipt[:orders_placed] = leg_order_count(source_leg)
+    receipt[:orders_submitted] = receipt[:orders_placed]
+    receipt[:signatures_created] = leg_signature_count(source_leg)
+    receipt[:exchange_order_ids] = [ source_leg[:exchange_order_id] ].compact
+    receipt[:source_leg_status] = leg_lifecycle_status(leg: source_leg, planned_leg: source_leg_plan, role: "source")
+    receipt[:source_leg_submitted] = leg_order_count(source_leg).positive?
+    receipt[:source_leg_exchange_order_id] = source_leg[:exchange_order_id]
+    receipt[:source_close_order_id] = source_leg[:exchange_order_id]
+    record_source_close_timing!(receipt, source_leg, source_leg_plan)
+    receipt[:source_readback_attempts] = source_leg[:readback]
+
+    unless leg_confirmed?(source_leg)
+      receipt[:final_status] = "MANUAL_ACTION_REQUIRED_SOURCE_CLOSE_NOT_CONFIRMED"
+      receipt[:lifecycle_state] = receipt[:final_status]
+      receipt[:manual_action_required] = true
+      receipt[:blockers] = Array(source_leg[:blockers]).presence || [ "Source-first source close did not confirm; target venue was not opened." ]
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+
+    mark_time!(receipt, :source_close_flat_confirmed_at)
+    compute_source_close_latency!(receipt)
+    receipt[:underhedge_started_at] = receipt[:source_close_flat_confirmed_at]
+    receipt[:lifecycle_state] = "SOURCE_CLOSE_CONFIRMED_TARGET_OPEN_PENDING"
+
+    mark_time!(receipt, :target_leg_submit_started_at)
+    target_leg = @leg_runner.call(target_leg_plan, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :target_leg_submit_finished_at)
+    receipt[:second_leg_execution] = sanitize_sensitive(target_leg)
+    receipt[:to_leg_execution] = sanitize_sensitive(target_leg)
+    receipt[:leg_readbacks] << target_leg[:readback] if target_leg[:readback]
+    receipt[:orders_placed] += leg_order_count(target_leg)
+    receipt[:orders_submitted] = receipt[:orders_placed]
+    receipt[:signatures_created] += leg_signature_count(target_leg)
+    receipt[:exchange_order_ids] << target_leg[:exchange_order_id] if target_leg[:exchange_order_id]
+    record_target_acceptance_timing!(receipt, target_leg, target_leg_plan)
+    receipt[:target_leg_status] = leg_lifecycle_status(leg: target_leg, planned_leg: target_leg_plan, role: "target")
+    receipt[:target_readback_attempts] = target_leg[:readback]
+    mark_time!(receipt, :target_readback_confirmed_at) if leg_confirmed?(target_leg)
+    receipt[:underhedge_ended_at] = receipt[:target_readback_confirmed_at] || receipt[:target_leg_submit_finished_at] if leg_order_count(target_leg).positive?
+    compute_underhedge_latency!(receipt)
+
+    unless leg_confirmed?(target_leg)
+      apply_source_first_target_failed_manual_action!(position, receipt, Array(target_leg[:blockers]).presence || [ "Source-first target open did not confirm after source was closed." ])
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+
+    receipt.merge!(final_readback_status(position: position, receipt: receipt))
+    finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
+    annotate_migration_latency!(receipt)
+    apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
+    receipt[:route_latency_proof] = true
+    receipt[:production_safe_route] = receipt[:final_status] == "success" || receipt[:final_status] == "MIGRATION_FINALIZED"
+    receipt[:route_production_safe] = receipt[:production_safe_route]
+    receipt[:lifecycle_state] = if receipt[:final_status] == "NOT_PRODUCTION_SAFE_LATENCY"
+      "NOT_PRODUCTION_SAFE_LATENCY"
+    elsif receipt[:production_venue_finalized]
+      "MIGRATION_FINALIZED"
+    else
+      receipt[:final_status]
+    end
+    write_receipt(receipt)
+    Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
   class FailClosedLegRunner
@@ -431,6 +509,8 @@ class HedgeVenueMigrationExecutor
   def execute_receipt(position:, receipt:, confirmation:)
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
+    return execute_source_first(position: position, receipt: receipt, confirmation: confirmation) if receipt[:migration_sequence] == "source_first"
+
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
     mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
@@ -571,6 +651,14 @@ class HedgeVenueMigrationExecutor
     receipt[:source_close_readback_latency_seconds] ||= receipt[:source_close_submit_to_flat_seconds]
   end
 
+  def compute_underhedge_latency!(receipt)
+    return unless receipt[:migration_sequence].to_s == "source_first"
+    return unless receipt[:underhedge_started_at].present?
+
+    receipt[:underhedge_seconds] ||= seconds_between(receipt[:underhedge_started_at], receipt[:underhedge_ended_at])
+    receipt[:double_exposure_seconds] ||= "0"
+  end
+
   def double_exposure_exceeds_threshold?(receipt)
     seconds = receipt[:double_exposure_seconds]
     seconds.present? && BigDecimal(seconds.to_s) > max_double_exposure_seconds
@@ -578,8 +666,28 @@ class HedgeVenueMigrationExecutor
     false
   end
 
+  def latency_safety_exceeds_threshold?(receipt)
+    double_exposure_exceeds_threshold?(receipt) ||
+      latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds) ||
+      latency_exceeds?(receipt[:total_migration_latency_seconds], max_total_route_seconds)
+  end
+
+  def latency_exceeds?(value, threshold)
+    value.present? && BigDecimal(value.to_s) > threshold
+  rescue ArgumentError
+    false
+  end
+
   def max_double_exposure_seconds
-    decimal_env("MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS", "10")
+    decimal_env("MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS", "5")
+  end
+
+  def max_unhedged_seconds
+    decimal_env("MIGRATION_MAX_UNHEDGED_SECONDS", "10")
+  end
+
+  def max_total_route_seconds
+    decimal_env("MIGRATION_MAX_TOTAL_ROUTE_SECONDS", "30")
   end
 
   def apply_latency_incident!(position, receipt)
@@ -595,6 +703,19 @@ class HedgeVenueMigrationExecutor
     receipt[:random_and_auto_paused] = true
     receipt[:warnings] = (Array(receipt[:warnings]) + [
       "Route finalized safely but source close was too slow for production random; route must be re-proven with acceptable double-exposure latency."
+    ]).uniq
+  end
+
+  def apply_source_first_target_failed_manual_action!(position, receipt, blockers)
+    pause_autonomous_migration!(position)
+    receipt[:final_status] = "MANUAL_ACTION_REQUIRED_SOURCE_FLAT_TARGET_NOT_OPEN"
+    receipt[:lifecycle_state] = receipt[:final_status]
+    receipt[:manual_action_required] = true
+    receipt[:blockers] = blockers
+    receipt[:recovery_command] = "bin/rails migration:run_manual_live_canary position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} sequence=source_first confirmation=#{MigrationManualLiveCanaryRunner::CONFIRMATION}"
+    receipt[:random_and_auto_paused] = true
+    receipt[:warnings] = (Array(receipt[:warnings]) + [
+      "Source-first route closed source but target venue did not confirm; hedge may be underhedged. Manual action required."
     ]).uniq
   end
 
@@ -952,9 +1073,15 @@ class HedgeVenueMigrationExecutor
     receipt[:target_venue] ||= receipt[:to_venue]
     receipt[:source_venue] ||= receipt[:from_venue]
     receipt[:source_close_submit_start_after_target_confirm_seconds] ||= receipt[:target_confirm_to_source_close_submit_latency_seconds]
-    receipt[:total_migration_latency_seconds] ||= seconds_between(
-      receipt[:target_leg_submit_started_at],
+    started_at = receipt[:migration_sequence] == "source_first" ? receipt[:source_close_submit_started_at] : receipt[:target_leg_submit_started_at]
+    ended_at = if receipt[:migration_sequence] == "source_first"
+      receipt[:target_readback_confirmed_at] || receipt[:target_leg_submit_finished_at]
+    else
       receipt[:source_close_flat_confirmed_at] || receipt[:source_close_submit_finished_at] || receipt[:target_leg_submit_finished_at]
+    end
+    receipt[:total_migration_latency_seconds] ||= seconds_between(
+      started_at,
+      ended_at
     )
     exceeded = latency_threshold_exceeded_entries(receipt)
     return if exceeded.empty?

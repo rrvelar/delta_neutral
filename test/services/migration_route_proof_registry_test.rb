@@ -2,8 +2,7 @@ require "test_helper"
 
 class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
   test "readback reconciliation receipt marks route ready with zero safety counters" do
-    position = position_with_snapshot("nado")
-    OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED", enabled: true)
+    position = position_with_snapshot("ethereal")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
@@ -11,7 +10,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       timestamp: Time.current.utc.iso8601,
       position_id: position.id,
       from_venue: "extended",
-      to_venue: "nado",
+      to_venue: "ethereal",
       final_status: "STALE_ACTION_IGNORED_ROUTE_ALREADY_COMPLETE",
       target_leg_readback_confirmed: true,
       source_leg_readback_confirmed: true,
@@ -26,10 +25,10 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       cancels_submitted: 0
     )
 
-    route = registry.route_status(position: position, from: "extended", to: "nado")
+    route = registry.route_status(position: position, from: "extended", to: "ethereal")
 
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
-    assert_equal "nado", route.fetch(:final_venue)
+    assert_equal "ethereal", route.fetch(:final_venue)
     assert_equal 0, route.fetch(:orders_submitted)
     assert_equal 0, route.fetch(:orders_placed)
     assert_equal 0, route.fetch(:signatures_created)
@@ -62,11 +61,11 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
     route = registry.route_status(position: position, from: "extended", to: "nado")
 
-    assert_not_equal "READY_FOR_RANDOM", route.fetch(:status)
-    assert_includes route.fetch(:blockers), "extended->nado route proof has not started."
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
+    assert_includes route.fetch(:blockers), "extended->nado temporarily disabled pending latency fix/proof."
   end
 
-  test "safe finalized recovery receipt marks route ready for random" do
+  test "safe finalized Nado target recovery still requires latency proof for random" do
     position = position_with_snapshot("nado")
     OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
@@ -95,10 +94,10 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     report = registry.report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "ethereal->nado" }
 
-    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
-    assert_empty route.fetch(:blockers)
-    assert_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "ethereal->nado"
-    assert_not report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "ethereal->nado" }
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
+    assert_includes route.fetch(:blockers), "ethereal->nado temporarily disabled pending latency fix/proof."
+    assert_not_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "ethereal->nado"
+    assert report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "ethereal->nado" }
   ensure
     FileUtils.rm_rf(dir) if dir
   end

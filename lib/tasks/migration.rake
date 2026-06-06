@@ -324,6 +324,79 @@ namespace :migration do
     puts JSON.pretty_generate(result.receipt)
   end
 
+  desc "Prove route latency safety for a migration route"
+  task prove_route_latency: :environment do
+    position = migration_position_from_env(action: "prove_route_latency")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    strategy = ENV["strategy"].presence || ENV["STRATEGY"].presence || MigrationRouteOperationalPolicy.new.route_strategy(from: from, to: to)
+    live = ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"])
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    expected_confirmation = "I_UNDERSTAND_THIS_RUNS_LIVE_ROUTE_LATENCY_PROOF"
+    if live && confirmation != expected_confirmation
+      payload = {
+        action: "prove_route_latency",
+        status: "blocked_before_submit",
+        blockers: [ "confirmation must equal #{expected_confirmation}" ],
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0,
+        cancels_submitted: 0
+      }
+      puts JSON.pretty_generate(payload)
+      next
+    end
+
+    if live
+      result = HedgeVenueMigrationExecutor.new.run(
+        position: position,
+        from_venue: from,
+        to_venue: to,
+        mode: "full",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        migration_sequence: strategy
+      )
+      receipt = result.receipt.merge(
+        action: "prove_route_latency",
+        strategy: strategy,
+        route_latency_proof: true,
+        production_safe: result.status.to_s.in?(%w[success MIGRATION_FINALIZED]) && result.receipt[:route_production_safe] != false
+      )
+      if receipt[:production_safe]
+        OperationalSettings.set!(key: OperationalSettings.route_key_for(from, to), enabled: true, reason: "route latency proof passed")
+        OperationalSettings.set!(key: OperationalSettings.route_strategy_key_for(from, to), enabled: strategy, reason: "route latency proof strategy")
+      end
+      puts JSON.pretty_generate(receipt)
+    else
+      result = HedgeVenueMigrationExecutor.new.run(
+        position: position,
+        from_venue: from,
+        to_venue: to,
+        mode: "full",
+        dry_run: true,
+        full_migration_allowed: true,
+        migration_sequence: strategy
+      )
+      receipt = result.receipt.merge(
+        action: "prove_route_latency",
+        strategy: strategy,
+        route_latency_proof: false,
+        production_safe: false,
+        double_exposure_seconds: strategy == "source_first" ? "0" : nil,
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0,
+        cancels_submitted: 0
+      )
+      path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_route_latency_proofs")).write(receipt)
+      puts JSON.pretty_generate(receipt.merge(receipt_path: path&.to_s))
+    end
+  end
+
   desc "Rehearse a migration route without signing or submitting"
   task rehearse_route: :environment do
     position = migration_position_from_env(action: "migration_rehearse_route")

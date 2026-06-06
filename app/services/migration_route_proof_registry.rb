@@ -82,8 +82,13 @@ class MigrationRouteProofRegistry
       route_enabled: route_policy_status.fetch(:enabled),
       route_disabled_reason: route_policy_status[:disabled_reason],
       route_policy_key: route_policy_status[:key],
+      route_strategy_key: route_policy_status[:strategy_key],
+      route_strategy: route_policy_status[:strategy],
+      migration_sequence: route_policy_status[:migration_sequence],
       route_production_safe: production_safe_latency?(proof_event),
       double_exposure_seconds: proof_event&.fetch("double_exposure_seconds", nil),
+      underhedge_seconds: proof_event&.fetch("underhedge_seconds", nil),
+      total_route_seconds: proof_event&.fetch("total_route_seconds", nil) || proof_event&.fetch("total_migration_latency_seconds", nil),
       orders_submitted: proof_event&.fetch("orders_submitted", 0).to_i,
       orders_placed: proof_event&.fetch("orders_placed", 0).to_i,
       signatures_created: proof_event&.fetch("signatures_created", 0).to_i,
@@ -100,10 +105,9 @@ class MigrationRouteProofRegistry
     route = route_status(position: position, from: from, to: to)
     return false unless route[:status].in?([ STATUSES[:ready], STATUSES[:not_safe_latency] ])
     return true if finalized_route_readback?(route, to: to)
-    return false unless route[:continuation_receipt].present?
 
     continuation_events(position: position, from: from, to: to).any? do |event|
-      continuation_proof?(event) && continuation_matches_pending?(continuation: event, pending: pending_event)
+      continuation_finalized_route?(event) && continuation_matches_pending?(continuation: event, pending: pending_event)
     end
   end
 
@@ -131,6 +135,8 @@ class MigrationRouteProofRegistry
     return stale?(recovery) ? STATUSES[:stale] : STATUSES[:recovery] if recovery
 
     if failed && event_time(failed) == event_time(latest)
+      return stale?(failed) ? STATUSES[:stale] : STATUSES[:not_safe_latency] if latency_unsafe?(failed)
+
       return stale?(failed) ? STATUSES[:stale] : STATUSES[:failed]
     end
 
@@ -258,15 +264,20 @@ class MigrationRouteProofRegistry
 
   def continuation_proof?(event)
     event["action"] == "continue_target_first_after_nado_confirmed" &&
+      continuation_finalized_route?(event) &&
+      !manual_exchange_intervention?(event) &&
+      production_safe_latency?(event)
+  end
+
+  def continuation_finalized_route?(event)
+    event["action"] == "continue_target_first_after_nado_confirmed" &&
       event["final_status"].to_s.in?(%w[MIGRATION_FINALIZED SOURCE_CLOSE_RECOVERY_CONFIRMED]) &&
       event["continuation_of_accepted_nado_target"] == true &&
       event["nado_target_digest"].present? &&
       event["target_confirmed"] == true &&
       (event["source_close_confirmed"] == true || event["source_already_flat"] == true) &&
       event["final_inside_tolerance"] == true &&
-      event["production_venue_finalized"] == true &&
-      !manual_exchange_intervention?(event) &&
-      production_safe_latency?(event)
+      event["production_venue_finalized"] == true
   end
 
   def failed_proof?(event)
@@ -288,16 +299,52 @@ class MigrationRouteProofRegistry
     return true if event["latency_incident"] == true
     return true if event["route_production_safe"] == false || event["production_safe_route"] == false
 
-    seconds = event["double_exposure_seconds"]
-    seconds.present? && BigDecimal(seconds.to_s) > max_double_exposure_seconds
+    return true if nado_target_without_latency_proof?(event)
+    return true if latency_value_exceeds?(event["double_exposure_seconds"], max_double_exposure_seconds)
+    return true if latency_value_exceeds?(event["underhedge_seconds"], max_unhedged_seconds)
+    return true if latency_value_exceeds?(event["total_route_seconds"] || event["total_migration_latency_seconds"], max_total_route_seconds)
+
+    false
   rescue ArgumentError, TypeError
     false
   end
 
+  def nado_target_without_latency_proof?(event)
+    event["to_venue"].to_s == "nado" &&
+      finalized_latency_proof_required_event?(event) &&
+      event["double_exposure_seconds"].blank? &&
+      event["underhedge_seconds"].blank? &&
+      event["route_latency_proof"] != true &&
+      event["production_safe_route"] != true &&
+      event["route_production_safe"] != true
+  end
+
+  def finalized_latency_proof_required_event?(event)
+    status = event["final_status"].to_s
+    clean_live_final_status?(status) ||
+      status.in?(%w[MIGRATION_FINALIZED SOURCE_CLOSE_RECOVERY_CONFIRMED SOURCE_ALREADY_FLAT_FINALIZED_BY_READBACK])
+  end
+
+  def latency_value_exceeds?(value, threshold)
+    value.present? && BigDecimal(value.to_s) > threshold
+  end
+
   def max_double_exposure_seconds
-    BigDecimal(env.fetch("MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS", "10").to_s)
+    BigDecimal(env.fetch("MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS", "5").to_s)
+  rescue ArgumentError
+    BigDecimal("5")
+  end
+
+  def max_unhedged_seconds
+    BigDecimal(env.fetch("MIGRATION_MAX_UNHEDGED_SECONDS", "10").to_s)
   rescue ArgumentError
     BigDecimal("10")
+  end
+
+  def max_total_route_seconds
+    BigDecimal(env.fetch("MIGRATION_MAX_TOTAL_ROUTE_SECONDS", "30").to_s)
+  rescue ArgumentError
+    BigDecimal("30")
   end
 
   def later_than?(event, other)
@@ -340,7 +387,7 @@ class MigrationRouteProofRegistry
     case status
     when STATUSES[:ready] then []
     when STATUSES[:not_safe_latency]
-      [ "#{route} latest live proof exceeded production latency limits#{latency_detail(proof_event)}." ]
+      [ "#{route} temporarily disabled pending latency fix/proof#{latency_detail(proof_event)}." ]
     when STATUSES[:not_started] then [ "#{route} route proof has not started." ]
     when STATUSES[:dry_run] then [ "#{route} supervised live canary is required." ]
     when STATUSES[:recovery] then [ "#{route} recovery-proven; optional clean rerun required for READY_FOR_RANDOM." ]
@@ -394,6 +441,10 @@ class MigrationRouteProofRegistry
       double_exposure_started_at: event["double_exposure_started_at"],
       double_exposure_ended_at: event["double_exposure_ended_at"],
       double_exposure_seconds: event["double_exposure_seconds"],
+      underhedge_started_at: event["underhedge_started_at"],
+      underhedge_ended_at: event["underhedge_ended_at"],
+      underhedge_seconds: event["underhedge_seconds"],
+      total_route_seconds: event["total_route_seconds"] || event["total_migration_latency_seconds"],
       source_close_order_submitted_at: event["source_close_order_submitted_at"],
       source_close_exchange_latency_seconds: event["source_close_exchange_latency_seconds"],
       source_close_readback_latency_seconds: event["source_close_readback_latency_seconds"],

@@ -184,11 +184,11 @@ class MigrationRandomRotationDailyRunner
         to_venue: route.fetch(:to_venue),
         mode: "full",
         dry_run: false,
-        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
-        full_migration_allowed: true,
-        migration_sequence: "target_first",
-        execution_preflight: direct
-      )
+          confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+          full_migration_allowed: true,
+          migration_sequence: route.fetch(:migration_sequence, "target_first"),
+          execution_preflight: direct
+        )
     end
     receipt = live_receipt(
       position: position.reload,

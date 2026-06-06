@@ -35,7 +35,18 @@ class OperationalSettings
     "ethereal->extended" => "MIGRATION_ROUTE_ETHEREAL_TO_EXTENDED_ENABLED"
   }.freeze
   ROUTE_KEYS = ROUTE_KEYS_BY_ROUTE.values.freeze
-  ALLOWED_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS + ROUTE_KEYS).freeze
+  ROUTE_STRATEGY_KEYS_BY_ROUTE = {
+    "extended->nado" => "MIGRATION_ROUTE_EXTENDED_TO_NADO_STRATEGY",
+    "ethereal->nado" => "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY",
+    "nado->extended" => "MIGRATION_ROUTE_NADO_TO_EXTENDED_STRATEGY",
+    "nado->ethereal" => "MIGRATION_ROUTE_NADO_TO_ETHEREAL_STRATEGY",
+    "extended->ethereal" => "MIGRATION_ROUTE_EXTENDED_TO_ETHEREAL_STRATEGY",
+    "ethereal->extended" => "MIGRATION_ROUTE_ETHEREAL_TO_EXTENDED_STRATEGY"
+  }.freeze
+  ROUTE_STRATEGY_KEYS = ROUTE_STRATEGY_KEYS_BY_ROUTE.values.freeze
+  ROUTE_STRATEGIES = %w[target_first source_first manual_only disabled disabled_pending_latency_proof].freeze
+  BOOLEAN_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS + ROUTE_KEYS).freeze
+  ALLOWED_KEYS = (BOOLEAN_KEYS + ROUTE_STRATEGY_KEYS).freeze
 
   Result = Data.define(:ok, :setting, :errors, :audit)
   Value = Data.define(:key, :enabled, :source, :raw_value)
@@ -46,6 +57,14 @@ class OperationalSettings
 
   def self.valid_value?(value)
     %w[true false].include?(normalize_value(value))
+  end
+
+  def self.valid_value_for_key?(key, value)
+    if ROUTE_STRATEGY_KEYS.include?(key.to_s)
+      ROUTE_STRATEGIES.include?(value.to_s)
+    else
+      valid_value?(value)
+    end
   end
 
   def self.get(key, env: ENV)
@@ -67,9 +86,9 @@ class OperationalSettings
 
   def self.set!(key:, enabled:, updated_by: nil, reason: nil)
     key = key.to_s
-    value = normalize_value(enabled)
     return Result.new(false, nil, [ "invalid operational setting key" ], nil) unless allowed_key?(key)
-    return Result.new(false, nil, [ "invalid operational setting value" ], nil) unless valid_value?(value)
+    value = ROUTE_STRATEGY_KEYS.include?(key) ? enabled.to_s : normalize_value(enabled)
+    return Result.new(false, nil, [ "invalid operational setting value" ], nil) unless valid_value_for_key?(key, value)
 
     current = OperationalSetting.find_by(key: key)
     old_value = current&.value
@@ -100,6 +119,10 @@ class OperationalSettings
 
   def self.route_key_for(from, to)
     ROUTE_KEYS_BY_ROUTE["#{HedgeVenues.normalize(from)}->#{HedgeVenues.normalize(to)}"]
+  end
+
+  def self.route_strategy_key_for(from, to)
+    ROUTE_STRATEGY_KEYS_BY_ROUTE["#{HedgeVenues.normalize(from)}->#{HedgeVenues.normalize(to)}"]
   end
 
   def self.enable_confirmation_for(venue)

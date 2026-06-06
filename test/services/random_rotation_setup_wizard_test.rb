@@ -27,7 +27,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     registry = isolated_registry(base_dir: dir)
     writer = HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries"))
     MigrationRouteProofRegistry::ROUTES.each do |from, to|
-      writer.write(
+      payload = {
         action: "manual_live_canary",
         timestamp: Time.current.utc.iso8601,
         position_id: position.id,
@@ -43,7 +43,9 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
         orders_submitted: 1,
         orders_placed: 1,
         signatures_created: 1
-      )
+      }
+      payload.merge!(nado_target_latency_proof_fields) if to == "nado"
+      writer.write(payload)
     end
     readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
 
@@ -328,8 +330,8 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
     report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
     route = registry.report(position: position).fetch(:routes).find { |item| item[:route] == "extended->nado" }
 
-    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
-    assert_equal 3, report.fetch(:random_enablement).fetch(:ready_routes)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
+    assert_equal 2, report.fetch(:random_enablement).fetch(:ready_routes)
     assert_equal "prepare_next_route", report.fetch(:next_action)
     assert_equal "nado", report.fetch(:next_route).fetch(:from_venue)
     assert_equal "ethereal", report.fetch(:next_route).fetch(:to_venue)
@@ -350,7 +352,8 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
       route = registry.report(position: position).fetch(:routes).find { |item| item[:route] == "#{from}->#{to}" }
 
-      assert_equal "READY_FOR_RANDOM", route.fetch(:status), "#{from}->#{to}"
+      expected_status = to == "nado" ? "NOT_PRODUCTION_SAFE_LATENCY" : "READY_FOR_RANDOM"
+      assert_equal expected_status, route.fetch(:status), "#{from}->#{to}"
       assert_not_equal "run_live_canary", report.fetch(:next_action), "#{from}->#{to}"
       assert_equal 0, report.fetch(:counters).fetch(:orders_submitted), "#{from}->#{to}"
       assert_equal 0, report.fetch(:counters).fetch(:orders_placed), "#{from}->#{to}"
@@ -552,7 +555,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
   end
 
   def write_ready_route(dir:, position:, from:, to:)
-    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+    payload = {
       action: "manual_live_canary",
       timestamp: Time.current.utc.iso8601,
       position_id: position.id,
@@ -568,7 +571,21 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
-    )
+    }
+    payload.merge!(nado_target_latency_proof_fields) if to == "nado"
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(payload)
+  end
+
+  def nado_target_latency_proof_fields
+    {
+      migration_sequence: "source_first",
+      route_latency_proof: true,
+      production_safe_route: true,
+      route_production_safe: true,
+      double_exposure_seconds: "0",
+      underhedge_seconds: "2.0",
+      total_route_seconds: "4.0"
+    }
   end
 
   def write_failed_route(dir:, position:, from:, to:)

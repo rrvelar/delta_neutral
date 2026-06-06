@@ -13,6 +13,6 @@ class OperationalSetting < ApplicationRecord
   end
 
   def value_allowed
-    errors.add(:value, "is invalid") unless OperationalSettings.valid_value?(value)
+    errors.add(:value, "is invalid") unless OperationalSettings.valid_value_for_key?(key, value)
   end
 end

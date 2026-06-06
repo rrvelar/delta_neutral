@@ -27,14 +27,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_empty excluded.select { |candidate| candidate.fetch(:route) == "ethereal->nado" }
   end
 
-  test "random planner skips disabled Nado target route from Extended" do
+  test "random planner can select source-first Nado target route from Extended" do
     matrix = { routes: [ route("extended", "nado"), route("extended", "ethereal") ] }
     result = random_planner(route_matrix: matrix, selector: ->(_) { "extended->nado" }).plan(position: migration_position("extended"))
 
-    assert_equal [ "extended->ethereal" ], result.receipt.fetch(:eligible_routes).map { |route| route.fetch(:route) }
-    excluded = result.receipt.fetch(:excluded_routes).find { |route| route.fetch(:route) == "extended->nado" }
-    assert_equal false, excluded.fetch(:route_enabled)
-    assert_includes excluded.fetch(:reasons), "extended->nado disabled: Nado target/source-close latency not production-safe"
+    selected = result.receipt.fetch(:selected_route)
+    assert_equal "extended->nado", selected.fetch(:route)
+    assert_equal "source_first", selected.fetch(:migration_sequence)
+    assert_equal true, selected.fetch(:route_enabled)
   end
 
   test "random rehearsal builds target-first plan and writes no-live receipt" do
@@ -77,7 +77,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(canary_dir) if canary_dir
   end
 
-  test "Nado target route is not ready for production random when operationally disabled" do
+  test "Nado target route is not ready for production random until latency proof is present" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
     write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado"))
@@ -86,8 +86,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     route = report.fetch(:routes).find { |entry| entry[:route] == "extended->nado" }
 
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
-    assert_equal false, route.fetch(:route_enabled)
-    assert_includes route.fetch(:blockers), "extended->nado disabled: Nado target/source-close latency not production-safe"
+    assert_equal true, route.fetch(:route_enabled)
+    assert_equal "source_first", route.fetch(:route_strategy)
+    assert_includes route.fetch(:blockers), "extended->nado temporarily disabled pending latency fix/proof."
     assert_not_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "extended->nado"
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
@@ -339,7 +340,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
     assert_match(%r{test-continuation-proofs}, route.fetch(:finalization_receipt))
     assert_equal "nado", route.fetch(:final_venue)
-    assert_includes route.fetch(:blockers), "ethereal->nado disabled: Nado target/source-close latency not production-safe"
+    assert_includes route.fetch(:blockers), "ethereal->nado temporarily disabled pending latency fix/proof."
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
@@ -1051,14 +1052,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
-  test "random burn-in skips disabled Nado target route" do
+  test "random burn-in can select source-first Nado target route when proof registry reports it ready" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     result = burn_in(position: position, live: false, log_dir: dir, selector: ->(_) { "ethereal->nado" }).run
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "success", result.status, result.blockers.inspect
-    assert_equal "ethereal->extended", cycle.fetch("route")
+    assert_equal "ethereal->nado", cycle.fetch("route")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
