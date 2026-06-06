@@ -52,6 +52,8 @@ class MigrationRandomBurnInRunner
     @snapshot_blockers = []
     @last_direct_preflight_report = {}
     @last_blocker_status = nil
+    @last_manual_action_execution = nil
+    @last_manual_action_route = nil
     @started_at = @now.call
     @receipt_path = @log_dir.join("#{@started_at.utc.strftime('%Y%m%d_%H%M%S')}_position_#{position.id}.jsonl")
   end
@@ -102,7 +104,8 @@ class MigrationRandomBurnInRunner
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
-    :snapshot_blockers, :last_direct_preflight_report, :last_blocker_status
+    :snapshot_blockers, :last_direct_preflight_report, :last_blocker_status,
+    :last_manual_action_execution, :last_manual_action_route
 
   def live?
     @live
@@ -211,6 +214,7 @@ class MigrationRandomBurnInRunner
     self.orders_submitted += execution.fetch(:orders_submitted)
     self.orders_placed += execution.fetch(:orders_placed)
     self.signatures_created += execution.fetch(:signatures_created)
+    record_manual_action(route: route, execution: execution) if target_open_source_still_open?(execution)
     self.cycles_succeeded += 1 if status == "success"
     event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers)
     write_event(event)
@@ -240,6 +244,10 @@ class MigrationRandomBurnInRunner
     self.max_target_delta_eth = [ max_target_delta_eth, target_delta ].max
     blockers << "target changed #{target_delta.to_s('F')} ETH during cycle; max allowed is #{max_target_change_per_cycle_eth.to_s('F')} ETH" if target_delta > max_target_change_per_cycle_eth
     if live?
+      if target_open_source_still_open?(execution)
+        blockers = (Array(execution[:blockers]) + blockers).uniq
+        return [ blockers, "manual_action_required" ]
+      end
       if blocked_before_submit?(execution)
         blockers = (Array(execution[:blockers]) + blockers).uniq
         return [ blockers, "blocked_before_submit" ]
@@ -264,7 +272,13 @@ class MigrationRandomBurnInRunner
       signatures_created: receipt.fetch(:signatures_created, 0).to_i,
       receipt_path: receipt[:receipt_path],
       blockers: Array(result.blockers)
-    }
+    }.merge(
+      recovery_command: receipt[:recovery_command],
+      recommended_action: receipt[:recommended_action],
+      source_venue: receipt[:source_venue],
+      target_venue: receipt[:target_venue],
+      random_and_auto_paused: receipt[:random_and_auto_paused]
+    ).compact
   end
 
   def zero_execution(status:)
@@ -276,6 +290,15 @@ class MigrationRandomBurnInRunner
       execution.fetch(:orders_submitted).to_i.zero? &&
       execution.fetch(:orders_placed).to_i.zero? &&
       execution.fetch(:signatures_created).to_i.zero?
+  end
+
+  def target_open_source_still_open?(execution)
+    execution[:status].to_s == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
+  end
+
+  def record_manual_action(route:, execution:)
+    self.last_manual_action_route = route
+    self.last_manual_action_execution = execution
   end
 
   def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:)
@@ -340,7 +363,7 @@ class MigrationRandomBurnInRunner
       migration_live_enabled_final: OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED"),
       migration_auto_enabled_final: OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED"),
       migration_random_rotation_live_enabled_final: OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
-    }
+    }.merge(manual_action_summary_fields).compact
   end
 
   def result(status, blockers)
@@ -460,7 +483,22 @@ class MigrationRandomBurnInRunner
   end
 
   def burn_in_status_for_cycle(status)
+    return "manual_action_required" if status.to_s == "manual_action_required"
     status.to_s == "blocked_before_submit" ? "blocked" : "stopped"
+  end
+
+  def manual_action_summary_fields
+    execution = last_manual_action_execution
+    route = last_manual_action_route
+    return {} unless execution
+
+    {
+      blocker_status: "target_open_source_still_open",
+      source_venue: execution[:source_venue] || route&.fetch(:from_venue, nil),
+      target_venue: execution[:target_venue] || route&.fetch(:to_venue, nil),
+      recommended_action: execution[:recommended_action] || "close source venue reduce-only",
+      recovery_command: execution[:recovery_command]
+    }
   end
 
   def enable_route_live_gates(route)

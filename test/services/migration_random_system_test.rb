@@ -1231,6 +1231,39 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in reports target-open source-still-open as manual action" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(
+      status: "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN",
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1,
+      blockers: [ "Extended source short is not flat" ],
+      recovery_command: "bin/rails migration:recover_target_first_source_close position_id=#{position.id} from=extended to=nado live=true confirmation=I_UNDERSTAND_THIS_CLOSES_SOURCE_AFTER_TARGET_CONFIRMED",
+      recommended_action: "close source venue reduce-only",
+      source_venue: "extended",
+      target_venue: "nado"
+    )
+
+    result = burn_in(position: position, live: true, executor: executor, selector: ->(_) { "extended->nado" }, log_dir: dir).run
+    events = read_jsonl(result.receipt_path)
+    cycle = events.find { |event| event["event"] == "cycle" }
+    final = events.last
+
+    assert_equal "manual_action_required", result.status
+    assert_equal "manual_action_required", cycle.fetch("status")
+    assert_equal "target_open_source_still_open", final.fetch("blocker_status")
+    assert_equal "extended", final.fetch("source_venue")
+    assert_equal "nado", final.fetch("target_venue")
+    assert_equal "close source venue reduce-only", final.fetch("recommended_action")
+    assert_match "migration:recover_target_first_source_close", final.fetch("recovery_command")
+    assert_equal 1, final.fetch("orders_submitted")
+    assert_equal 1, final.fetch("signatures_created")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in disable after disables random auto and Nado live gates" do
     OperationalSetting.delete_all
     position = migration_position("ethereal")
@@ -1850,7 +1883,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   class BurnInExecutor
     attr_reader :called
 
-    def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false)
+    def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false, recovery_command: nil, recommended_action: nil, source_venue: nil, target_venue: nil)
       @after = after
       @status = status
       @orders_submitted = orders_submitted
@@ -1858,6 +1891,10 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       @signatures_created = signatures_created
       @blockers = blockers
       @assert_nado_gates = assert_nado_gates
+      @recovery_command = recovery_command
+      @recommended_action = recommended_action
+      @source_venue = source_venue
+      @target_venue = target_venue
       @called = false
     end
 
@@ -1905,8 +1942,13 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           orders_submitted: @orders_submitted,
           orders_placed: @orders_placed,
           signatures_created: @signatures_created,
-          receipt_path: "tmp/test-burn-in-executor.jsonl"
-        }
+          receipt_path: "tmp/test-burn-in-executor.jsonl",
+          recovery_command: @recovery_command,
+          recommended_action: @recommended_action,
+          source_venue: @source_venue,
+          target_venue: @target_venue,
+          random_and_auto_paused: @status == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
+        }.compact
       )
     end
   end

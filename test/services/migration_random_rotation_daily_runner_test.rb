@@ -158,6 +158,36 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_empty receipt.fetch("blockers")
   end
 
+  test "daily live random records target-open source-still-open as manual action" do
+    OperationalSetting.delete_all
+    position = migration_position
+    fake_snapshot_refresh_class.new(position: position).refresh
+    position.hedge.update!(execution_venue: "ethereal")
+    dirs = receipt_dirs
+    executor = live_executor(status: "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", orders_submitted: 1, signatures_created: 1)
+
+    runner(
+      **dirs,
+      env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
+        "MIGRATION_AUTO_ENABLED" => "true",
+        "MIGRATION_LIVE_ENABLED" => "true",
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      },
+      preflight_factory: live_preflight_factory,
+      executor_factory: -> { executor }
+    ).call(position_id: position.id, force: true, seed: "seed-live")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+
+    assert_equal "daily_random_rotation_live", receipt.fetch("action")
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", receipt.fetch("status")
+    assert_equal false, receipt.fetch("would_migrate")
+    assert_includes receipt.fetch("blockers"), "source still open after target accepted"
+    assert_equal 1, receipt.fetch("orders_submitted")
+    assert_equal 1, receipt.fetch("signatures_created")
+  end
+
   private
 
   def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil)
@@ -398,30 +428,36 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     }
   end
 
-  def live_executor
+  def live_executor(status: "success", orders_submitted: 2, signatures_created: 2)
     Class.new do
+      define_method(:initialize) do |configured_status, configured_orders, configured_signatures|
+        @configured_status = configured_status
+        @configured_orders = configured_orders
+        @configured_signatures = configured_signatures
+      end
+
       attr_reader :received_direct_preflight, :nado_gates_enabled
 
       def run(position:, from_venue:, to_venue:, execution_preflight:, **)
         @received_direct_preflight = execution_preflight[:accepted] == true
         @nado_gates_enabled = OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED") &&
           OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
-        position.hedge.update!(execution_venue: to_venue)
+        position.hedge.update!(execution_venue: to_venue) if @configured_status == "success"
         HedgeVenueMigrationExecutor::Result.new(
-          "success",
-          [],
+          @configured_status,
+          @configured_status == "success" ? [] : [ "source still open after target accepted" ],
           [],
           {
             from_venue: from_venue,
             to_venue: to_venue,
-            final_status: "success",
-            orders_submitted: 2,
-            orders_placed: 2,
-            signatures_created: 2,
+            final_status: @configured_status,
+            orders_submitted: @configured_orders,
+            orders_placed: @configured_orders,
+            signatures_created: @configured_signatures,
             receipt_path: "tmp/daily-live-executor.jsonl"
           }
         )
       end
-    end.new
+    end.new(status, orders_submitted, signatures_created)
   end
 end

@@ -89,7 +89,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
     assert_equal 1, calls.size
   end
 
@@ -119,8 +119,8 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
-    assert_equal 1, calls.size
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal 2, calls.size
     assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
     assert_match "from=extended to=ethereal", result.receipt.fetch(:recovery_command)
   end
@@ -566,7 +566,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
           mode: "full"
         )
 
-        assert_equal "partial_migration_manual_action_required", result.status
+        assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
         assert_equal 1, extended_service.close_calls.size
         assert_equal false, result.receipt.fetch(:source_leg_submitted)
         assert_nil result.receipt.fetch(:source_leg_exchange_order_id)
@@ -646,6 +646,59 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "target first Nado accepted and confirmed by readback immediately continues to source close" do
+    position = migration_position
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      if calls.size == 1
+        {
+          status: "submitted_pending_readback",
+          confirmed: false,
+          orders_placed: 1,
+          signatures_created: 1,
+          after_short_eth: "0.8",
+          exchange_order_id: "0xnado-target",
+          readback: { short_size: "0.8" }
+        }
+      else
+        {
+          status: "confirmed",
+          confirmed: true,
+          orders_placed: 1,
+          signatures_created: 1,
+          after_short_eth: "0",
+          exchange_order_id: "extended-close",
+          readback: { short_size: "0" }
+        }
+      end
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      leg_runner: runner,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 2, calls.size
+    assert_equal "TARGET_CONFIRMED_BY_CONTINUATION_READBACK", result.receipt.fetch(:target_leg_status)
+    assert_equal "extended", calls.second.fetch(:venue)
+    assert_equal "buy", calls.second.fetch(:side)
+    assert_equal true, calls.second.fetch(:reduce_only)
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal [ "0xnado-target", "extended-close" ], result.receipt.fetch(:exchange_order_ids)
+  end
+
   test "accepted Nado target remains pending without duplicate submit when reconciliation never confirms" do
     position = migration_position
     fake_venue = Class.new do
@@ -713,15 +766,15 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
         mode: "full"
       )
 
-      assert_equal "TARGET_ACCEPTED_AWAITING_CONTINUATION", result.status
+      assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
       assert_equal 1, fake_service.submit_count
       assert_equal 3, fake_service.reconcile_count
       assert_equal 1, calls
       assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
-      assert_equal true, result.receipt.fetch(:continuation_pending)
-      assert_equal false, result.receipt.key?(:source_leg_submitted)
+      assert_equal true, result.receipt.fetch(:manual_action_required)
+      assert_equal false, result.receipt.fetch(:source_leg_submitted, false)
       assert_equal "0xpendingnado", result.receipt.fetch(:nado_target_digest)
-      assert_match "migration:continue_target_first_after_nado_confirmed", result.receipt.fetch(:continuation_command)
+      assert_equal "close source venue reduce-only", result.receipt.fetch(:recommended_action)
       assert_equal 1, result.receipt.fetch(:orders_submitted)
       assert_equal 1, result.receipt.fetch(:signatures_created)
       assert_equal [ "0xpendingnado" ], result.receipt.fetch(:exchange_order_ids)
@@ -750,8 +803,8 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "TARGET_SUBMITTED_BUT_NOT_CONFIRMED", result.status
-    assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:lifecycle_state)
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.receipt.fetch(:lifecycle_state)
     assert_equal "TARGET_SUBMITTED_PENDING_READBACK", result.receipt.fetch(:target_leg_status)
     assert_equal 1, result.receipt.fetch(:orders_submitted)
     assert_equal 1, result.receipt.fetch(:orders_placed)
@@ -784,7 +837,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
     assert_equal 2, calls.size
     assert_equal 2, result.receipt.fetch(:orders_placed)
     assert_equal 1, result.receipt.fetch(:signatures_created)
@@ -968,8 +1021,8 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
       mode: "full"
     )
 
-    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.status
-    assert_equal "FINAL_READBACK_RECHECK_REQUIRED", result.receipt.fetch(:lifecycle_state)
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.receipt.fetch(:lifecycle_state)
     assert_equal 2, result.receipt.fetch(:orders_submitted)
     assert_equal 2, result.receipt.fetch(:signatures_created)
     assert_equal [ "order-ethereal", "order-extended" ], result.receipt.fetch(:exchange_order_ids)

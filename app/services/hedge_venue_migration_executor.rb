@@ -71,23 +71,17 @@ class HedgeVenueMigrationExecutor
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
     unless leg_confirmed?(first_leg)
-      receipt[:orders_placed] = leg_order_count(first_leg)
-      receipt[:orders_submitted] = receipt[:orders_placed]
-      receipt[:signatures_created] = leg_signature_count(first_leg)
-      receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
-      receipt[:submitted] = receipt[:orders_placed].positive?
-      receipt[:would_execute_live] = receipt[:submitted]
-      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      apply_nado_target_continuation!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
-      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
-      receipt[:manual_action_required] = true
-      receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
-      write_receipt(receipt)
-      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+      if target_leg_confirmed_for_source_close?(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
+        first_leg = first_leg.merge(status: "confirmed_by_target_readback", confirmed: true)
+        receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
+        receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+        receipt[:target_leg_status] = "TARGET_CONFIRMED_BY_CONTINUATION_READBACK"
+      else
+        return stop_after_unconfirmed_first_leg(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
+      end
     end
 
-    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : "TARGET_SUBMITTED_AND_CONFIRMED"
+    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : receipt[:target_leg_status]
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
@@ -106,23 +100,19 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
+        apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
+      end
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
       receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
         "MIGRATION_FINALIZED"
       elsif receipt[:final_status] == "success"
         "SOURCE_CLOSE_CONFIRMED"
       else
-        "FINAL_READBACK_RECHECK_REQUIRED"
+        receipt[:final_status]
       end
     else
-      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
-      receipt[:final_status] = "partial_migration_manual_action_required"
-      receipt[:manual_action_required] = true
-      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
-      receipt[:recovery_command] = recovery_command(receipt) if receipt[:migration_sequence] == "target_first"
-      if receipt[:migration_sequence] == "source_first"
-        receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
-      end
+      apply_target_open_source_still_open_manual_action!(position, receipt, Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ])
     end
     write_receipt(receipt)
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
@@ -415,23 +405,17 @@ class HedgeVenueMigrationExecutor
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
     unless leg_confirmed?(first_leg)
-      receipt[:orders_placed] = leg_order_count(first_leg)
-      receipt[:orders_submitted] = receipt[:orders_placed]
-      receipt[:signatures_created] = leg_signature_count(first_leg)
-      receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
-      receipt[:submitted] = receipt[:orders_placed].positive?
-      receipt[:would_execute_live] = receipt[:submitted]
-      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      receipt[:final_status] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_BUT_NOT_CONFIRMED" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-      apply_nado_target_continuation!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
-      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
-      receipt[:manual_action_required] = true
-      receipt[:recovery_command] = recovery_command(receipt) if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
-      write_receipt(receipt)
-      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+      if target_leg_confirmed_for_source_close?(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
+        first_leg = first_leg.merge(status: "confirmed_by_target_readback", confirmed: true)
+        receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
+        receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
+        receipt[:target_leg_status] = "TARGET_CONFIRMED_BY_CONTINUATION_READBACK"
+      else
+        return stop_after_unconfirmed_first_leg(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
+      end
     end
 
-    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : "TARGET_SUBMITTED_AND_CONFIRMED"
+    receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : receipt[:target_leg_status]
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
@@ -450,26 +434,132 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
+        apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
+      end
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
       receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
         "MIGRATION_FINALIZED"
       elsif receipt[:final_status] == "success"
         "SOURCE_CLOSE_CONFIRMED"
       else
-        "FINAL_READBACK_RECHECK_REQUIRED"
+        receipt[:final_status]
       end
     else
-      receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "SOURCE_CLOSE_PENDING_READBACK" : "RECOVERY_REQUIRED"
-      receipt[:final_status] = "partial_migration_manual_action_required"
-      receipt[:manual_action_required] = true
-      receipt[:blockers] = Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ]
-      receipt[:recovery_command] = recovery_command(receipt) if receipt[:migration_sequence] == "target_first"
+      apply_target_open_source_still_open_manual_action!(position, receipt, Array(second_leg[:blockers]).presence || [ "Second migration leg was not confirmed after first leg succeeded." ])
       if receipt[:migration_sequence] == "source_first"
         receipt[:warnings] = (Array(receipt[:warnings]) + [ "Source close confirmed but target open did not; hedge may be temporarily unhedged. Manual action required." ]).uniq
       end
     end
     write_receipt(receipt)
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+  end
+
+  def target_leg_confirmed_for_source_close?(position:, receipt:, first_leg:, first_planned_leg:)
+    return false unless first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    return false unless leg_order_count(first_leg).positive?
+
+    readback_short = target_short_from_readback(first_leg[:readback])
+    if target_short_matches?(readback_short, receipt)
+      receipt[:target_continuation_readback] = { source: "first_leg_readback", target_confirmed: true, target_short_eth: readback_short.to_s("F") }
+      return true
+    end
+
+    verification = final_verifier(position: position, receipt: receipt).verify
+    receipt[:target_continuation_verification] = verification
+    latest = verification.fetch(:latest_attempt)
+    if verification[:target_confirmed]
+      receipt[:target_continuation_readback] = {
+        source: latest[:readback_source],
+        target_confirmed: true,
+        target_short_eth: latest[:target_venue_short_eth],
+        source_short_eth: latest[:source_short_eth],
+        third_venue_shorts: latest[:third_venue_shorts],
+        open_orders_count: latest[:open_orders_count]
+      }
+      return true
+    end
+
+    false
+  end
+
+  def stop_after_unconfirmed_first_leg(position:, receipt:, first_leg:, first_planned_leg:)
+    receipt[:orders_placed] = leg_order_count(first_leg)
+    receipt[:orders_submitted] = receipt[:orders_placed]
+    receipt[:signatures_created] = leg_signature_count(first_leg)
+    receipt[:exchange_order_ids] = [ first_leg[:exchange_order_id] ].compact
+    receipt[:submitted] = receipt[:orders_placed].positive?
+    receipt[:would_execute_live] = receipt[:submitted]
+    receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
+    if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
+      apply_nado_manual_action_digest!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
+      apply_target_open_source_still_open_manual_action!(
+        position,
+        receipt,
+        Array(first_leg[:blockers]).presence || [ "Target leg was submitted but target readback did not confirm enough to safely close source." ]
+      )
+    else
+      receipt[:final_status] = "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
+      receipt[:manual_action_required] = true
+    end
+    write_receipt(receipt)
+    Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+  end
+
+  def apply_target_open_source_still_open_manual_action!(position, receipt, blockers)
+    pause_autonomous_migration!(position)
+    receipt[:final_status] = "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
+    receipt[:lifecycle_state] = "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
+    receipt[:manual_action_required] = true
+    receipt[:blockers] = Array(blockers).uniq
+    receipt[:recommended_action] = "close source venue reduce-only"
+    receipt[:source_venue] = receipt[:from_venue]
+    receipt[:target_venue] = receipt[:to_venue]
+    receipt[:recovery_command] = recovery_command(receipt)
+    receipt[:random_and_auto_paused] = true
+    receipt[:warnings] = (Array(receipt[:warnings]) + [
+      "Target-first migration has target exposure with source not confirmed flat; autonomous random/auto loops paused until recovery finalizes."
+    ]).uniq
+  end
+
+  def apply_nado_manual_action_digest!(receipt, first_leg:, first_planned_leg:)
+    return unless first_planned_leg.fetch(:venue) == "nado"
+    return unless first_planned_leg.fetch(:venue) == receipt[:to_venue]
+
+    receipt[:nado_target_digest] = first_leg[:exchange_order_id]
+    receipt[:nado_target_exchange_order_id] = first_leg[:exchange_order_id]
+    receipt[:target_confirmation_attempts] = first_leg.dig(:receipt, :migration_target_reconciliation_attempts) || []
+    receipt[:pending_migration_id] = Digest::SHA256.hexdigest([ receipt[:position_id], receipt[:from_venue], receipt[:to_venue], first_leg[:exchange_order_id] ].join(":"))[0, 16]
+  end
+
+  def target_short_from_readback(readback)
+    payload = readback.is_a?(Array) ? readback.last : readback
+    return nil unless payload.respond_to?(:dig)
+
+    value = payload[:short_size] || payload["short_size"] ||
+      payload[:current_short_eth] || payload["current_short_eth"] ||
+      payload[:actual_short_eth] || payload["actual_short_eth"]
+    return nil if value.nil?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
+  end
+
+  def target_short_matches?(actual, receipt)
+    return false unless actual
+
+    expected = decimal(receipt[:target_short])
+    tolerance = [ decimal(receipt[:tolerance_abs_eth]), MigrationTargetFirstFinalVerifier::FLAT_TOLERANCE_ETH ].max
+    expected.positive? && (actual - expected).abs <= tolerance
+  end
+
+  def pause_autonomous_migration!(position)
+    ActiveVenueAutoPolicy.new(position: position).disable_all!(reason: "migration executor pauses after target-open source-still-open manual action")
+    %w[MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
+      OperationalSettings.set!(key: key, enabled: false, reason: "migration executor pauses after target-open source-still-open manual action")
+    end
   end
 
   def live_blockers(position:, receipt:, dry_run:, confirmation:, execution_preflight: nil)
