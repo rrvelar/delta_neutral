@@ -9,7 +9,9 @@ class MigrationRandomBurnInRunner
                  confirmation: nil, env: ENV, proof_registry: nil, executor_factory: nil, now: -> { Time.current },
                  sleeper: ->(seconds) { sleep(seconds) }, selector: nil, log_dir: LOG_DIR, stdout: $stdout,
                  readiness_factory: nil, snapshot_refresher: nil, rebalance_before_cycle: false,
-                 max_target_change_per_cycle_eth: "0.15", preflight_factory: nil)
+                 max_target_change_per_cycle_eth: "0.15", preflight_factory: nil,
+                 burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0",
+                 burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
     @position = position
     @duration_minutes = duration_minutes.to_i
     @interval_seconds = interval_seconds.to_i
@@ -30,6 +32,10 @@ class MigrationRandomBurnInRunner
     @preflight_factory = preflight_factory
     @rebalance_before_cycle = ActiveModel::Type::Boolean.new.cast(rebalance_before_cycle)
     @max_target_change_per_cycle_eth = decimal(max_target_change_per_cycle_eth)
+    @burn_in_tolerance_multiplier = decimal(burn_in_tolerance_multiplier)
+    @burn_in_extra_tolerance_eth = decimal(burn_in_extra_tolerance_eth)
+    @burn_in_max_allowed_drift_eth = decimal(burn_in_max_allowed_drift_eth)
+    @burn_in_max_allowed_drift_ratio = decimal(burn_in_max_allowed_drift_ratio)
     @orders_submitted = 0
     @orders_placed = 0
     @signatures_created = 0
@@ -89,7 +95,8 @@ class MigrationRandomBurnInRunner
   attr_reader :position, :duration_minutes, :interval_seconds, :max_cycles, :confirmation, :env, :proof_registry,
     :executor_factory, :now, :sleeper, :selector, :log_dir, :stdout, :started_at, :receipt_path, :disable_after,
     :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth,
-    :preflight_factory
+    :preflight_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
+    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
@@ -110,6 +117,7 @@ class MigrationRandomBurnInRunner
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
     blockers = []
     blockers << "submitted confirmation must equal #{CONFIRMATION}" if live? && confirmation != CONFIRMATION
+    blockers << "rebalance_before_cycle=true is not supported for random burn-in yet; rerun with rebalance_before_cycle=false" if rebalance_before_cycle
     blockers << "current production venue must be extended, ethereal, or nado" unless VENUES.include?(current)
     direct = direct_preflight("preflight")
     record_direct_preflight(direct)
@@ -303,6 +311,7 @@ class MigrationRandomBurnInRunner
       direct_venue_shorts: direct_venue_shorts(last_direct_preflight_report),
       direct_open_orders: direct_open_orders(last_direct_preflight_report),
       fresh_target: serializable_target(last_direct_preflight_report[:target]),
+      tolerance_policy: tolerance_policy_payload(last_direct_preflight_report),
       snapshot_refresh_status: snapshot_refresh_status || snapshot&.refresh_status,
       snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
       snapshot_warnings: snapshot_warnings,
@@ -333,7 +342,18 @@ class MigrationRandomBurnInRunner
       inside_tolerance: report[:inside_tolerance] == true,
       open_orders_count: report.fetch(:venues, {}).values.filter_map { |venue| venue[:open_orders_count] }.sum,
       drift_eth: decimal_string(report[:drift_eth]),
-      recommended_rebalance_eth: decimal_string(report[:drift_eth])
+      recommended_rebalance_eth: decimal_string(report[:drift_eth]),
+      strict_inside_tolerance: report[:strict_inside_tolerance],
+      burn_in_inside_tolerance: report[:burn_in_inside_tolerance],
+      strict_tolerance_eth: decimal_string(report[:strict_tolerance_eth]),
+      effective_burn_in_tolerance_eth: decimal_string(report[:effective_burn_in_tolerance_eth]),
+      burn_in_tolerance_multiplier: decimal_string(report[:burn_in_tolerance_multiplier]),
+      burn_in_extra_tolerance_eth: decimal_string(report[:burn_in_extra_tolerance_eth]),
+      burn_in_max_allowed_drift_eth: decimal_string(report[:burn_in_max_allowed_drift_eth]),
+      burn_in_max_allowed_drift_ratio: decimal_string(report[:burn_in_max_allowed_drift_ratio]),
+      drift_ratio: decimal_string(report[:drift_ratio]),
+      recommended_rebalance_side: report[:recommended_rebalance_side],
+      recommended_rebalance_size_eth: decimal_string(report[:recommended_rebalance_size_eth])
     }
   end
 
@@ -383,7 +403,11 @@ class MigrationRandomBurnInRunner
         position: position,
         env: env,
         proof_registry: proof_registry,
-        readiness_factory: readiness_factory
+        readiness_factory: readiness_factory,
+        burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
+        burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
+        burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+        burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio
       ).report
     end
   end
@@ -413,7 +437,7 @@ class MigrationRandomBurnInRunner
   def pre_cycle_status(blockers)
     return "success" if blockers.empty?
     return "blocked_stale_or_unavailable_lp_target" if blockers.any? { |blocker| blocker.match?(/LP target|refresh failed|stale/i) }
-    return "blocked_before_cycle_out_of_tolerance" if blockers.any? { |blocker| blocker.include?("outside tolerance") }
+    return "blocked_before_cycle_out_of_burn_in_tolerance" if blockers.any? { |blocker| blocker.include?("out_of_burn_in_tolerance") }
     return "blocked_open_orders_nonzero" if blockers.any? { |blocker| blocker.include?("open orders") }
 
     "blocked_unexpected_venue_exposure"
@@ -421,7 +445,7 @@ class MigrationRandomBurnInRunner
 
   def preflight_status(blockers)
     return "success" if blockers.empty?
-    return "blocked_before_cycle_out_of_tolerance" if blockers.any? { |blocker| blocker.include?("current hedge outside tolerance") }
+    return "blocked_before_cycle_out_of_burn_in_tolerance" if blockers.any? { |blocker| blocker.include?("out_of_burn_in_tolerance") }
     return "blocked_stale_or_unavailable_lp_target" if blockers.any? { |blocker| blocker.match?(/LP target|refresh failed|stale/i) }
     return "blocked_open_orders_nonzero" if blockers.any? { |blocker| blocker.include?("open orders") }
 
@@ -431,7 +455,7 @@ class MigrationRandomBurnInRunner
   def post_cycle_status(blockers)
     return "success" if blockers.empty?
     return "stopped_target_changed_too_much" if blockers.any? { |blocker| blocker.include?("target changed") }
-    return "stopped_post_migration_out_of_tolerance" if blockers.any? { |blocker| blocker.include?("outside tolerance") }
+    return "stopped_post_cycle_out_of_burn_in_tolerance" if blockers.any? { |blocker| blocker.include?("out_of_burn_in_tolerance") }
     return "stopped_open_orders_nonzero" if blockers.any? { |blocker| blocker.include?("open orders") }
     return "stopped_source_not_flat" if blockers.any? { |blocker| blocker.include?("source venue") }
     return "stopped_target_not_confirmed" if blockers.any? { |blocker| blocker.include?("target venue") }
@@ -526,6 +550,7 @@ class MigrationRandomBurnInRunner
       direct_venue_shorts: direct_venue_shorts(last_direct_preflight_report),
       direct_open_orders: direct_open_orders(last_direct_preflight_report),
       fresh_target: serializable_target(last_direct_preflight_report[:target]),
+      tolerance_policy: tolerance_policy_payload(last_direct_preflight_report),
       snapshot_refresh_status: snapshot_refresh_status,
       snapshot_accepted_for_burn_in: snapshot_accepted_for_burn_in,
       snapshot_warnings: snapshot_warnings,
@@ -552,6 +577,23 @@ class MigrationRandomBurnInRunner
     return {} unless target
 
     target.merge(target_short_eth: decimal_string(target[:target_short_eth]))
+  end
+
+  def tolerance_policy_payload(report)
+    {
+      strict_inside_tolerance: report[:strict_inside_tolerance],
+      burn_in_inside_tolerance: report[:burn_in_inside_tolerance],
+      strict_tolerance_eth: decimal_string(report[:strict_tolerance_eth]),
+      effective_burn_in_tolerance_eth: decimal_string(report[:effective_burn_in_tolerance_eth]),
+      burn_in_tolerance_multiplier: decimal_string(report[:burn_in_tolerance_multiplier] || burn_in_tolerance_multiplier),
+      burn_in_extra_tolerance_eth: decimal_string(report[:burn_in_extra_tolerance_eth] || burn_in_extra_tolerance_eth),
+      burn_in_max_allowed_drift_eth: decimal_string(report[:burn_in_max_allowed_drift_eth] || burn_in_max_allowed_drift_eth),
+      burn_in_max_allowed_drift_ratio: decimal_string(report[:burn_in_max_allowed_drift_ratio] || burn_in_max_allowed_drift_ratio),
+      drift_eth: decimal_string(report[:drift_eth]),
+      drift_ratio: decimal_string(report[:drift_ratio]),
+      recommended_rebalance_side: report[:recommended_rebalance_side],
+      recommended_rebalance_size_eth: decimal_string(report[:recommended_rebalance_size_eth])
+    }
   end
 
   def decimal(value)

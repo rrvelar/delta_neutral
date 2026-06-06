@@ -212,7 +212,11 @@ namespace :migration do
       disable_after: disable_after,
       confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
       rebalance_before_cycle: ActiveModel::Type::Boolean.new.cast(ENV["rebalance_before_cycle"].presence || ENV["REBALANCE_BEFORE_CYCLE"]),
-      max_target_change_per_cycle_eth: (ENV["max_target_change_per_cycle_eth"].presence || ENV["MAX_TARGET_CHANGE_PER_CYCLE_ETH"].presence || "0.15")
+      max_target_change_per_cycle_eth: (ENV["max_target_change_per_cycle_eth"].presence || ENV["MAX_TARGET_CHANGE_PER_CYCLE_ETH"].presence || "0.15"),
+      burn_in_tolerance_multiplier: (ENV["burn_in_tolerance_multiplier"].presence || ENV["BURN_IN_TOLERANCE_MULTIPLIER"].presence || "1.0"),
+      burn_in_extra_tolerance_eth: (ENV["burn_in_extra_tolerance_eth"].presence || ENV["BURN_IN_EXTRA_TOLERANCE_ETH"].presence || "0"),
+      burn_in_max_allowed_drift_eth: (ENV["burn_in_max_allowed_drift_eth"].presence || ENV["BURN_IN_MAX_ALLOWED_DRIFT_ETH"].presence || "0.15"),
+      burn_in_max_allowed_drift_ratio: (ENV["burn_in_max_allowed_drift_ratio"].presence || ENV["BURN_IN_MAX_ALLOWED_DRIFT_RATIO"].presence || "0.08")
     ).run
     puts JSON.pretty_generate(result.summary.merge(action: "migration_random_burn_in", receipt_path: result.receipt_path))
     abort("migration_random_burn_in #{result.status}") unless result.status == "success"

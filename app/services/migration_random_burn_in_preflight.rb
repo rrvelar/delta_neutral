@@ -3,7 +3,9 @@ class MigrationRandomBurnInPreflight
   FLAT_EPSILON = BigDecimal("0.001")
 
   def initialize(position:, env: ENV, proof_registry: nil, venue_builder: HedgeVenues, signer_client: nil,
-                 fresh_target_factory: nil, readiness_factory: nil)
+                 fresh_target_factory: nil, readiness_factory: nil, burn_in_tolerance_multiplier: "1.0",
+                 burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15",
+                 burn_in_max_allowed_drift_ratio: "0.08")
     @position = position
     @env = env
     @proof_registry = proof_registry || MigrationRouteProofRegistry.new
@@ -11,6 +13,10 @@ class MigrationRandomBurnInPreflight
     @signer_client = signer_client || ExtendedStarkSignerClient.new(env: env)
     @fresh_target_factory = fresh_target_factory || ->(position) { HedgeFreshTarget.new(position: position, env: env) }
     @readiness_factory = readiness_factory
+    @burn_in_tolerance_multiplier = decimal_or_nil(burn_in_tolerance_multiplier) || BigDecimal("1.0")
+    @burn_in_extra_tolerance_eth = decimal_or_nil(burn_in_extra_tolerance_eth) || BigDecimal("0")
+    @burn_in_max_allowed_drift_eth = decimal_or_nil(burn_in_max_allowed_drift_eth) || BigDecimal("0.15")
+    @burn_in_max_allowed_drift_ratio = decimal_or_nil(burn_in_max_allowed_drift_ratio) || BigDecimal("0.08")
   end
 
   def report
@@ -18,8 +24,12 @@ class MigrationRandomBurnInPreflight
     target = fresh_target_report
     venue_reports = VENUES.to_h { |venue| [ venue, venue_report(venue) ] }
     combined = combined_short(venue_reports)
-    tolerance = target[:target_short_eth] && position.hedge ? target[:target_short_eth] * position.hedge.tolerance : nil
+    strict_tolerance = target[:target_short_eth] && position.hedge ? target[:target_short_eth] * position.hedge.tolerance : nil
+    effective_tolerance = effective_burn_in_tolerance(strict_tolerance)
     drift = target[:target_short_eth] && combined ? target[:target_short_eth] - combined : nil
+    drift_ratio = target[:target_short_eth]&.positive? && drift ? drift.abs / target[:target_short_eth] : nil
+    strict_inside = drift && strict_tolerance ? drift.abs <= strict_tolerance : nil
+    burn_in_inside = drift && effective_tolerance ? drift.abs <= effective_tolerance : nil
     active = active_short_venues(venue_reports)
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
     proof_report = proof_registry.report(position: position)
@@ -41,8 +51,16 @@ class MigrationRandomBurnInPreflight
       blockers << "#{venue} open orders could not be confirmed zero" unless report[:open_orders_status] == "zero"
     end
     blockers << "combined hedge cannot be computed" unless combined
-    blockers << outside_tolerance_blocker(target: target[:target_short_eth], combined: combined, drift: drift, tolerance: tolerance) if drift && tolerance && drift.abs > tolerance
-    blockers << "inside tolerance cannot be confirmed" unless drift && tolerance
+    if drift && target[:target_short_eth]&.positive?
+      blockers << "burn-in max allowed drift exceeded: drift_eth=#{decimal_string(drift.abs)} max=#{decimal_string(burn_in_max_allowed_drift_eth)}" if drift.abs > burn_in_max_allowed_drift_eth
+      blockers << "burn-in max allowed drift ratio exceeded: drift_ratio=#{decimal_string(drift_ratio)} max=#{decimal_string(burn_in_max_allowed_drift_ratio)}" if drift_ratio && drift_ratio > burn_in_max_allowed_drift_ratio
+    end
+    if burn_in_inside == false
+      blockers << outside_tolerance_blocker(target: target[:target_short_eth], combined: combined, drift: drift, tolerance: effective_tolerance, status: "out_of_burn_in_tolerance")
+    elsif strict_inside == false && burn_in_inside == true
+      warnings << "strict tolerance exceeded but within burn-in tolerance buffer"
+    end
+    blockers << "inside tolerance cannot be confirmed" unless !drift.nil? && !strict_tolerance.nil? && !effective_tolerance.nil?
     blockers << "more than one venue has exposure" if active.size > 1
     blockers << "no venue has the production hedge" if active.empty?
     blockers << "app production venue and actual venue exposure disagree" if active.one? && active.first != current
@@ -59,8 +77,19 @@ class MigrationRandomBurnInPreflight
       venues: venue_reports,
       combined_short_eth: combined,
       drift_eth: drift,
-      tolerance_abs_eth: tolerance,
-      inside_tolerance: drift && tolerance ? drift.abs <= tolerance : nil,
+      tolerance_abs_eth: strict_tolerance,
+      strict_inside_tolerance: strict_inside,
+      burn_in_inside_tolerance: burn_in_inside,
+      inside_tolerance: burn_in_inside,
+      strict_tolerance_eth: strict_tolerance,
+      effective_burn_in_tolerance_eth: effective_tolerance,
+      burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
+      burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
+      burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+      burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
+      drift_ratio: drift_ratio,
+      recommended_rebalance_side: drift&.positive? ? "increase_short" : "decrease_short",
+      recommended_rebalance_size_eth: drift&.abs,
       active_short_venues: active,
       proof_report: proof_report,
       readiness: readiness,
@@ -70,7 +99,9 @@ class MigrationRandomBurnInPreflight
 
   private
 
-  attr_reader :position, :env, :proof_registry, :venue_builder, :signer_client, :fresh_target_factory, :readiness_factory
+  attr_reader :position, :env, :proof_registry, :venue_builder, :signer_client, :fresh_target_factory,
+    :readiness_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
+    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
 
   def fresh_target_report
     result = fresh_target_factory.call(position).resolve(refresh_if_stale: true)
@@ -170,9 +201,19 @@ class MigrationRandomBurnInPreflight
     size&.negative? ? size.abs : BigDecimal("0")
   end
 
-  def outside_tolerance_blocker(target:, combined:, drift:, tolerance:)
+  def effective_burn_in_tolerance(strict_tolerance)
+    return nil unless strict_tolerance
+
+    [
+      strict_tolerance,
+      strict_tolerance * burn_in_tolerance_multiplier,
+      strict_tolerance + burn_in_extra_tolerance_eth
+    ].max
+  end
+
+  def outside_tolerance_blocker(target:, combined:, drift:, tolerance:, status:)
     side = drift.positive? ? "increase_short" : "decrease_short"
-    "current hedge outside tolerance: target_short_eth=#{decimal_string(target)} current_short_eth=#{decimal_string(combined)} " \
+    "current hedge #{status}: target_short_eth=#{decimal_string(target)} current_short_eth=#{decimal_string(combined)} " \
       "drift_eth=#{decimal_string(drift)} tolerance_abs_eth=#{decimal_string(tolerance)} recommended_rebalance_side=#{side} " \
       "recommended_rebalance_size_eth=#{decimal_string(drift.abs)}"
   end

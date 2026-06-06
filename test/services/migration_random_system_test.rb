@@ -649,7 +649,138 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = preflight.report
 
     assert_equal false, report.fetch(:accepted)
-    assert_match "current hedge outside tolerance", report.fetch(:blockers).join(" ")
+    assert_match "out_of_burn_in_tolerance", report.fetch(:blockers).join(" ")
+  end
+
+  test "burn-in tolerance default behavior is unchanged" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(position, target: "1.30", venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") })
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_equal BigDecimal("0.039"), report.fetch(:strict_tolerance_eth)
+    assert_equal BigDecimal("0.039"), report.fetch(:effective_burn_in_tolerance_eth)
+    assert_equal false, report.fetch(:burn_in_inside_tolerance)
+  end
+
+  test "strict tolerance fail but burn-in buffer pass allows dry-run cycle" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.23", "pre_cycle" => "1.23", "post_cycle" => "1.23" })
+
+    result = burn_in(
+      position: position,
+      live: false,
+      log_dir: dir,
+      snapshot_refresher: refresher,
+      burn_in_tolerance_multiplier: "2.0",
+      burn_in_extra_tolerance_eth: "0"
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal false, cycle.fetch("pre_cycle_hedge").fetch("strict_inside_tolerance")
+    assert_equal true, cycle.fetch("pre_cycle_hedge").fetch("burn_in_inside_tolerance")
+    assert_includes result.summary.fetch(:direct_preflight_warnings), "strict tolerance exceeded but within burn-in tolerance buffer"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "burn-in buffer pass logs warning and recommended rebalance" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(
+      position,
+      target: "1.23",
+      venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") },
+      burn_in_tolerance_multiplier: "2.0"
+    )
+
+    report = preflight.report
+
+    assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
+    assert_equal false, report.fetch(:strict_inside_tolerance)
+    assert_equal true, report.fetch(:burn_in_inside_tolerance)
+    assert_includes report.fetch(:warnings), "strict tolerance exceeded but within burn-in tolerance buffer"
+    assert_equal "increase_short", report.fetch(:recommended_rebalance_side)
+    assert_equal BigDecimal("0.05"), report.fetch(:recommended_rebalance_size_eth)
+  end
+
+  test "burn-in stops if drift exceeds effective burn-in tolerance" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(
+      position,
+      target: "1.30",
+      venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") },
+      burn_in_tolerance_multiplier: "2.0"
+    )
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_match "out_of_burn_in_tolerance", report.fetch(:blockers).join(" ")
+  end
+
+  test "burn-in stops if drift exceeds max allowed drift eth" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(
+      position,
+      target: "1.40",
+      venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") },
+      burn_in_tolerance_multiplier: "10.0",
+      burn_in_max_allowed_drift_eth: "0.15"
+    )
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_match "burn-in max allowed drift exceeded", report.fetch(:blockers).join(" ")
+  end
+
+  test "burn-in stops if drift ratio exceeds max allowed ratio" do
+    position = migration_position("ethereal")
+    preflight = direct_preflight(
+      position,
+      target: "1.30",
+      venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") },
+      burn_in_tolerance_multiplier: "10.0",
+      burn_in_max_allowed_drift_eth: "1.0",
+      burn_in_max_allowed_drift_ratio: "0.05"
+    )
+
+    report = preflight.report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_match "burn-in max allowed drift ratio exceeded", report.fetch(:blockers).join(" ")
+  end
+
+  test "burn-in buffer does not modify DB hedge tolerance or dashboard health" do
+    position = migration_position("ethereal")
+    position.position_dashboard_snapshot.update!(inside_tolerance: false)
+    original_tolerance = position.hedge.tolerance
+    preflight = direct_preflight(
+      position,
+      target: "1.20",
+      venues: { "ethereal" => DirectBurnInVenue.new(short: "1.18") },
+      burn_in_tolerance_multiplier: "2.0"
+    )
+
+    assert_equal true, preflight.report.fetch(:accepted)
+    assert_equal original_tolerance, position.hedge.reload.tolerance
+    assert_equal false, position.position_dashboard_snapshot.reload.inside_tolerance
+  end
+
+  test "burn-in JSONL includes strict and effective tolerance fields" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.23", "pre_cycle" => "1.23", "post_cycle" => "1.23" })
+
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, burn_in_tolerance_multiplier: "2.0").run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "0.0369", cycle.fetch("pre_cycle_hedge").fetch("strict_tolerance_eth")
+    assert_equal "0.0738", cycle.fetch("pre_cycle_hedge").fetch("effective_burn_in_tolerance_eth")
+    assert_equal "2.0", cycle.fetch("pre_cycle_hedge").fetch("burn_in_tolerance_multiplier")
   end
 
   test "dedicated burn-in preflight proceeds when all direct checks pass" do
@@ -798,10 +929,10 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     assert_equal "blocked", result.status
     assert_equal "blocked_before_start", start.fetch("status")
-    assert_equal "blocked_before_cycle_out_of_tolerance", start.fetch("blocker_status")
+    assert_equal "blocked_before_cycle_out_of_burn_in_tolerance", start.fetch("blocker_status")
     assert_equal true, start.fetch("stale_pending_continuation_ignored")
     assert_equal false, start.fetch("pending_nado_target_continuation_blocking")
-    assert_match "current hedge outside tolerance", start.fetch("blockers").join(" ")
+    assert_match "out_of_burn_in_tolerance", start.fetch("blockers").join(" ")
     assert_no_match "pending target=Nado migration continuation", start.fetch("blockers").join(" ")
     assert_equal 0, result.summary.fetch(:orders_submitted)
     assert_equal 0, result.summary.fetch(:signatures_created)
@@ -819,7 +950,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     assert_equal "blocked", result.status
     assert_includes result.blockers, "all route proofs must be READY_FOR_RANDOM"
-    assert_match "current hedge outside tolerance", result.blockers.join(" ")
+    assert_match "out_of_burn_in_tolerance", result.blockers.join(" ")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -848,7 +979,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "stopped", result.status
-    assert_equal "blocked_before_cycle_out_of_tolerance", cycle.fetch("status")
+    assert_equal "blocked_before_cycle_out_of_burn_in_tolerance", cycle.fetch("status")
     assert_equal 0, cycle.fetch("execution").fetch("orders_submitted")
     assert_match "recommended_rebalance_size_eth", cycle.fetch("blockers").join(" ")
   ensure
@@ -915,7 +1046,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "stopped", result.status
-    assert_equal "blocked_before_cycle_out_of_tolerance", cycle.fetch("status")
+    assert_equal "blocked_before_cycle_out_of_burn_in_tolerance", cycle.fetch("status")
     assert_includes cycle.fetch("blockers"), "more than one venue has exposure"
   ensure
     FileUtils.rm_rf(dir) if dir
@@ -974,7 +1105,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
 
     assert_equal "blocked", result.status
-    assert_match "current hedge outside tolerance", result.blockers.join(" ")
+    assert_match "out_of_burn_in_tolerance", result.blockers.join(" ")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -1169,7 +1300,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil)
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
     readiness = ->(**) {
       readiness_report || {
         pending_nado_target_continuation: nil,
@@ -1181,7 +1312,11 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     direct_preflight = preflight_factory || BurnInDirectPreflightFactory.new(
       refresher: snapshot_refresher,
       proof_registry: proof_registry,
-      readiness_factory: readiness
+      readiness_factory: readiness,
+      burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
+      burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
+      burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+      burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio
     )
     MigrationRandomBurnInRunner.new(
       position: position,
@@ -1200,11 +1335,15 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       preflight_factory: direct_preflight,
       rebalance_before_cycle: rebalance_before_cycle,
       max_target_change_per_cycle_eth: max_target_change_per_cycle_eth,
+      burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
+      burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
+      burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+      burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
       readiness_factory: readiness
     )
   end
 
-  def direct_preflight(position, target: "1.18", venues: {})
+  def direct_preflight(position, target: "1.18", venues: {}, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
     defaults = {
       "extended" => DirectBurnInVenue.new(short: "0"),
       "ethereal" => DirectBurnInVenue.new(short: "1.18"),
@@ -1216,6 +1355,10 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       venue_builder: DirectBurnInVenueBuilder.new(defaults.merge(venues)),
       signer_client: DirectBurnInSigner.new,
       fresh_target_factory: ->(_) { DirectBurnInTarget.new(target: target) },
+      burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
+      burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
+      burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+      burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
       readiness_factory: ->(**) {
         {
           pending_nado_target_continuation: nil,
@@ -1523,10 +1666,16 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   end
 
   class BurnInDirectPreflightFactory
-    def initialize(refresher:, proof_registry:, readiness_factory:)
+    def initialize(refresher:, proof_registry:, readiness_factory:, burn_in_tolerance_multiplier: "1.0",
+                   burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15",
+                   burn_in_max_allowed_drift_ratio: "0.08")
       @refresher = refresher
       @proof_registry = proof_registry
       @readiness_factory = readiness_factory
+      @burn_in_tolerance_multiplier = BigDecimal(burn_in_tolerance_multiplier.to_s)
+      @burn_in_extra_tolerance_eth = BigDecimal(burn_in_extra_tolerance_eth.to_s)
+      @burn_in_max_allowed_drift_eth = BigDecimal(burn_in_max_allowed_drift_eth.to_s)
+      @burn_in_max_allowed_drift_ratio = BigDecimal(burn_in_max_allowed_drift_ratio.to_s)
     end
 
     def call(position:, stage:)
@@ -1557,8 +1706,16 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     def report_from_snapshot(position, snapshot)
       target = BigDecimal(snapshot.target_short_eth.to_s)
       combined = snapshot.combined_short_eth && BigDecimal(snapshot.combined_short_eth.to_s)
-      tolerance = snapshot.tolerance_abs_eth && BigDecimal(snapshot.tolerance_abs_eth.to_s)
+      strict_tolerance = target * BigDecimal(position.hedge.tolerance.to_s)
+      effective_tolerance = [
+        strict_tolerance,
+        strict_tolerance * @burn_in_tolerance_multiplier,
+        strict_tolerance + @burn_in_extra_tolerance_eth
+      ].max
       drift = target && combined ? target - combined : nil
+      drift_ratio = target.positive? && drift ? drift.abs / target : nil
+      strict_inside = drift && strict_tolerance ? drift.abs <= strict_tolerance : nil
+      burn_in_inside = drift && effective_tolerance ? drift.abs <= effective_tolerance : nil
       venues = %w[extended ethereal nado].to_h do |venue|
         short = snapshot.public_send("#{venue}_short_eth")
         open_orders_count = venue == "extended" ? snapshot.open_orders_count_extended : 0
@@ -1585,7 +1742,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         blockers << "#{venue} open orders could not be confirmed zero" unless details[:open_orders_status] == "zero"
       end
       blockers << "combined hedge cannot be computed" unless combined
-      blockers << outside_tolerance_blocker(target, combined, drift, tolerance) if drift && tolerance && drift.abs > tolerance
+      blockers << "burn-in max allowed drift exceeded: drift_eth=#{drift.abs.to_s('F')} max=#{@burn_in_max_allowed_drift_eth.to_s('F')}" if drift && drift.abs > @burn_in_max_allowed_drift_eth
+      blockers << "burn-in max allowed drift ratio exceeded: drift_ratio=#{drift_ratio.to_s('F')} max=#{@burn_in_max_allowed_drift_ratio.to_s('F')}" if drift_ratio && drift_ratio > @burn_in_max_allowed_drift_ratio
+      if burn_in_inside == false
+        blockers << outside_tolerance_blocker(target, combined, drift, effective_tolerance)
+      elsif strict_inside == false && burn_in_inside == true
+        warnings = [ "strict tolerance exceeded but within burn-in tolerance buffer" ]
+      end
+      warnings ||= []
       active = venues.select { |_venue, details| details[:short_eth] && details[:short_eth] > BigDecimal("0.001") }.keys
       current = HedgeVenues.normalize(position.hedge.execution_venue)
       blockers << "more than one venue has exposure" if active.size > 1
@@ -1597,7 +1761,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         preflight_source: "dedicated_burn_in_preflight",
         accepted: blockers.empty?,
         blockers: blockers.uniq,
-        warnings: [],
+        warnings: warnings,
         production_venue: current,
         target: {
           target_short_eth: target,
@@ -1608,8 +1772,19 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         venues: venues,
         combined_short_eth: combined,
         drift_eth: drift,
-        tolerance_abs_eth: tolerance,
-        inside_tolerance: drift && tolerance ? drift.abs <= tolerance : nil,
+        tolerance_abs_eth: strict_tolerance,
+        strict_inside_tolerance: strict_inside,
+        burn_in_inside_tolerance: burn_in_inside,
+        inside_tolerance: burn_in_inside,
+        strict_tolerance_eth: strict_tolerance,
+        effective_burn_in_tolerance_eth: effective_tolerance,
+        burn_in_tolerance_multiplier: @burn_in_tolerance_multiplier,
+        burn_in_extra_tolerance_eth: @burn_in_extra_tolerance_eth,
+        burn_in_max_allowed_drift_eth: @burn_in_max_allowed_drift_eth,
+        burn_in_max_allowed_drift_ratio: @burn_in_max_allowed_drift_ratio,
+        drift_ratio: drift_ratio,
+        recommended_rebalance_side: drift&.positive? ? "increase_short" : "decrease_short",
+        recommended_rebalance_size_eth: drift&.abs,
         active_short_venues: active,
         proof_report: proof_report,
         readiness: readiness,
@@ -1619,7 +1794,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     def outside_tolerance_blocker(target, combined, drift, tolerance)
       side = drift.positive? ? "increase_short" : "decrease_short"
-      "current hedge outside tolerance: target_short_eth=#{target.to_s('F')} current_short_eth=#{combined.to_s('F')} " \
+      "current hedge out_of_burn_in_tolerance: target_short_eth=#{target.to_s('F')} current_short_eth=#{combined.to_s('F')} " \
         "drift_eth=#{drift.to_s('F')} tolerance_abs_eth=#{tolerance.to_s('F')} recommended_rebalance_side=#{side} " \
         "recommended_rebalance_size_eth=#{drift.abs.to_s('F')}"
     end
