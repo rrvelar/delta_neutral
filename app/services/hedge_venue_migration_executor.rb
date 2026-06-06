@@ -206,7 +206,8 @@ class HedgeVenueMigrationExecutor
     mark_time!(receipt, :source_close_flat_confirmed_at)
     compute_source_close_latency!(receipt)
     receipt[:underhedge_started_at] = receipt[:source_close_flat_confirmed_at]
-    receipt[:lifecycle_state] = "SOURCE_CLOSE_CONFIRMED_TARGET_OPEN_PENDING"
+    receipt[:lifecycle_state] = "SOURCE_FIRST_SOURCE_FLAT_CONFIRMED"
+    configure_source_first_nado_reconciliation!(receipt, target_leg_plan)
 
     mark_time!(receipt, :target_leg_submit_started_at)
     target_leg = @leg_runner.call(target_leg_plan, context: leg_context(position, confirmation, receipt))
@@ -218,15 +219,25 @@ class HedgeVenueMigrationExecutor
     receipt[:orders_submitted] = receipt[:orders_placed]
     receipt[:signatures_created] += leg_signature_count(target_leg)
     receipt[:exchange_order_ids] << target_leg[:exchange_order_id] if target_leg[:exchange_order_id]
+    receipt[:submitted] = receipt[:orders_placed].positive?
+    receipt[:would_execute_live] = receipt[:submitted]
     record_target_acceptance_timing!(receipt, target_leg, target_leg_plan)
     receipt[:target_leg_status] = leg_lifecycle_status(leg: target_leg, planned_leg: target_leg_plan, role: "target")
     receipt[:target_readback_attempts] = target_leg[:readback]
-    mark_time!(receipt, :target_readback_confirmed_at) if leg_confirmed?(target_leg)
+    receipt[:nado_source_first_reconciliation_attempts] = target_leg.dig(:receipt, :migration_target_reconciliation_attempts) if source_first_nado_target?(receipt, target_leg_plan)
+    receipt[:target_late_reconciliation] = late_reconciled?(target_leg)
+    receipt[:target_readback_confirmed_at] ||= target_leg.dig(:timing, :readback_confirmed_at) if leg_confirmed?(target_leg)
+    mark_time!(receipt, :target_readback_confirmed_at) if leg_confirmed?(target_leg) && receipt[:target_readback_confirmed_at].blank?
     receipt[:underhedge_ended_at] = receipt[:target_readback_confirmed_at] || receipt[:target_leg_submit_finished_at] if leg_order_count(target_leg).positive?
+    annotate_source_first_nado_timing!(receipt, target_leg_plan)
     compute_underhedge_latency!(receipt)
 
     unless leg_confirmed?(target_leg)
-      apply_source_first_target_failed_manual_action!(position, receipt, Array(target_leg[:blockers]).presence || [ "Source-first target open did not confirm after source was closed." ])
+      if source_first_nado_target_accepted?(receipt, target_leg_plan, target_leg)
+        apply_source_first_nado_ambiguous_manual_action!(position, receipt, target_leg)
+      else
+        apply_source_first_target_failed_manual_action!(position, receipt, Array(target_leg[:blockers]).presence || [ "Source-first target open did not confirm after source was closed." ])
+      end
       write_receipt(receipt)
       return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
@@ -236,10 +247,17 @@ class HedgeVenueMigrationExecutor
     annotate_migration_latency!(receipt)
     apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
     receipt[:route_latency_proof] = true
-    receipt[:production_safe_route] = receipt[:final_status] == "success" || receipt[:final_status] == "MIGRATION_FINALIZED"
+    if source_first_nado_target?(receipt, target_leg_plan) && late_reconciled?(target_leg) && receipt[:production_venue_finalized] && receipt[:final_status] == "success"
+      receipt[:final_status] = "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK"
+      receipt[:lifecycle_state] = receipt[:final_status]
+      receipt[:manual_action_required] = false
+    end
+    receipt[:production_safe_route] = receipt[:final_status].in?(%w[success MIGRATION_FINALIZED SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK])
     receipt[:route_production_safe] = receipt[:production_safe_route]
     receipt[:lifecycle_state] = if receipt[:final_status] == "NOT_PRODUCTION_SAFE_LATENCY"
       "NOT_PRODUCTION_SAFE_LATENCY"
+    elsif receipt[:final_status] == "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK"
+      receipt[:final_status]
     elsif receipt[:production_venue_finalized]
       "MIGRATION_FINALIZED"
     else
@@ -409,6 +427,8 @@ class HedgeVenueMigrationExecutor
       route_tolerance = confirmation[:route_tolerance_eth] || context.dig(:receipt, :tolerance_abs_eth)
       {
         attempt: attempt,
+        timestamp: Time.current.utc.iso8601(6),
+        digest: result.receipt[:exchange_order_id],
         status: result.status,
         readback_confirmed: ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed]),
         exchange_order_id: result.receipt[:exchange_order_id],
@@ -422,6 +442,10 @@ class HedgeVenueMigrationExecutor
         confirmed_by_size_increment: confirmation[:confirmed_by_size_increment],
         confirmed_by_route_tolerance: confirmation[:confirmed_by_route_tolerance],
         confirmed: confirmation.fetch(:confirmed, ActiveModel::Type::Boolean.new.cast(result.receipt[:readback_confirmed])),
+        reason: result.blockers.first || result.status,
+        position_readback: readback,
+        order_status_readback: result.receipt[:order_status_readback] || result.receipt[:pending_reconciliation_order_status],
+        fills_readback: result.receipt[:fills_readback] || result.receipt[:pending_reconciliation_fills],
         readback_source: readback.present? ? "nado_position_readback" : "unavailable",
         readback: readback
       }.compact
@@ -626,6 +650,7 @@ class HedgeVenueMigrationExecutor
 
     timing = leg[:timing] || {}
     receipt[:target_action_timing] = timing if timing.present?
+    receipt[:target_exchange_accept_at] ||= timing[:exchange_accept_at]
     receipt[:target_leg_accepted_at] ||= receipt[:target_leg_submit_finished_at]
     receipt[:target_leg_digest_or_order_id] ||= leg[:exchange_order_id]
     receipt[:target_readback_started_at] ||= receipt[:target_leg_submit_finished_at]
@@ -739,6 +764,73 @@ class HedgeVenueMigrationExecutor
     receipt[:warnings] = (Array(receipt[:warnings]) + [
       "Source-first route closed source but target venue did not confirm; hedge may be underhedged. Manual action required."
     ]).uniq
+  end
+
+  def configure_source_first_nado_reconciliation!(receipt, target_leg_plan)
+    return unless source_first_nado_target?(receipt, target_leg_plan)
+
+    receipt[:lifecycle_state] = "SOURCE_FIRST_SOURCE_FLAT_CONFIRMED"
+    receipt[:nado_source_first_reconciliation_enabled] = true
+    receipt[:nado_target_reconciliation_attempts] ||= nado_source_first_reconciliation_attempts
+    receipt[:nado_target_reconciliation_interval_seconds] ||= nado_source_first_reconciliation_interval_seconds.to_s("F")
+    receipt[:nado_source_first_max_confirmation_seconds] ||= nado_source_first_max_confirmation_seconds.to_s("F")
+  end
+
+  def source_first_nado_target?(receipt, target_leg_plan)
+    receipt[:migration_sequence].to_s == "source_first" &&
+      HedgeVenues.normalize(target_leg_plan.fetch(:venue)) == "nado" &&
+      HedgeVenues.normalize(receipt[:to_venue]) == "nado"
+  end
+
+  def source_first_nado_target_accepted?(receipt, target_leg_plan, target_leg)
+    source_first_nado_target?(receipt, target_leg_plan) &&
+      (leg_order_count(target_leg).positive? || target_leg[:exchange_order_id].present? || receipt[:target_leg_digest_or_order_id].present?)
+  end
+
+  def apply_source_first_nado_ambiguous_manual_action!(position, receipt, target_leg)
+    pause_autonomous_migration!(position)
+    receipt[:final_status] = "SOURCE_FIRST_TARGET_AMBIGUOUS_AFTER_TIMEOUT"
+    receipt[:lifecycle_state] = receipt[:final_status]
+    receipt[:manual_action_required] = true
+    receipt[:pending_nado_source_first_digest_unresolved] = true
+    receipt[:nado_target_digest] ||= receipt[:target_leg_digest_or_order_id] || target_leg[:exchange_order_id]
+    receipt[:nado_target_exchange_order_id] ||= receipt[:nado_target_digest]
+    receipt[:blockers] = Array(target_leg[:blockers]).presence || [
+      "Nado accepted target digest after source was closed, but bounded reconciliation could not confirm target position."
+    ]
+    receipt[:recovery_guidance] = [
+      "refresh Nado readback",
+      "query accepted Nado digest/order/fills",
+      "if Nado target remains absent and it is safe, reopen source venue"
+    ]
+    receipt[:recovery_command] = "bin/rails migration:reconcile_nado_source_first position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} digest=#{receipt[:nado_target_digest]} dry_run=true"
+    receipt[:random_and_auto_paused] = true
+    receipt[:warnings] = (Array(receipt[:warnings]) + [
+      "Source-first route closed source and Nado accepted a target digest, but target readback remained ambiguous after the bounded reconciliation window. No duplicate Nado target order was submitted."
+    ]).uniq
+  end
+
+  def annotate_source_first_nado_timing!(receipt, target_leg_plan)
+    return unless source_first_nado_target?(receipt, target_leg_plan)
+
+    receipt[:source_flat_to_nado_submit_started_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_leg_submit_started_at])
+    receipt[:source_flat_to_nado_submit_finished_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_leg_submit_finished_at])
+    receipt[:nado_submit_to_accept_seconds] = seconds_between(receipt[:target_leg_submit_started_at], receipt[:target_leg_accepted_at])
+    receipt[:nado_accept_to_first_readback_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:target_readback_started_at])
+    receipt[:nado_accept_to_confirmed_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:target_readback_confirmed_at])
+    receipt[:source_flat_to_finalized_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_readback_confirmed_at])
+  end
+
+  def nado_source_first_reconciliation_attempts
+    [ @env.fetch("NADO_SOURCE_FIRST_RECONCILIATION_ATTEMPTS", "60").to_i, 1 ].max
+  end
+
+  def nado_source_first_reconciliation_interval_seconds
+    decimal_env("NADO_SOURCE_FIRST_RECONCILIATION_INTERVAL_SECONDS", "1")
+  end
+
+  def nado_source_first_max_confirmation_seconds
+    decimal_env("NADO_SOURCE_FIRST_MAX_CONFIRMATION_SECONDS", "75")
   end
 
   def target_confirm_to_source_close_exceeds_threshold?(receipt)
@@ -1037,6 +1129,8 @@ class HedgeVenueMigrationExecutor
       reason: "migration executor finalized production venue"
     )
     receipt[:production_venue_finalized] = true
+    mark_time!(receipt, :production_venue_finalized_at)
+    receipt[:source_flat_to_finalized_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:production_venue_finalized_at]) if receipt[:migration_sequence].to_s == "source_first"
     receipt[:finalized_hedge_id] = position.hedge.id
   end
 

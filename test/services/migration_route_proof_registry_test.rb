@@ -102,6 +102,47 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "source first Nado late readback finalization can mark route ready when latency proof is safe" do
+    position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      final_status: "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      manual_action_required: false,
+      route_production_safe: true,
+      source_flat_to_nado_submit_started_seconds: "0.02",
+      source_flat_to_nado_submit_finished_seconds: "0.15",
+      nado_accept_to_confirmed_seconds: "8",
+      underhedge_seconds: "8",
+      double_exposure_seconds: "0",
+      total_migration_latency_seconds: "12",
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2,
+      cancels_submitted: 0
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "nado")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   private
 
   def registry_for(dir)

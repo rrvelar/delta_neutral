@@ -1055,6 +1055,184 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_match "sequence=source_first", result.receipt.fetch(:recovery_command)
   end
 
+  test "source first Nado accepted digest finalizes after late Nado readback" do
+    position = migration_position_for("ethereal")
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      orders_submitted: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-source-first",
+      action_plan: { expected_after_short_eth: "0.8" },
+      post_submit_readback_poll_attempts: Array.new(12) { |index| { attempt: index + 1, position_present: false, confirmed: false } },
+      final_status: "submitted_but_readback_pending"
+    })
+    confirmed = NadoHedgeExecutionService::Result.new("rebalance_confirmed_late", [], [], {
+      submitted: true,
+      orders_placed: 1,
+      orders_submitted: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-source-first",
+      post_submit_readback: { short_size: BigDecimal("0.8") },
+      pending_reconciliation_readback: { short_size: BigDecimal("0.8") },
+      pending_reconciliation_confirmation: { confirmed: true, actual_short_eth: "0.8", expected_short_eth: "0.8" },
+      reconciled_after_pending: true,
+      readback_confirmed: true
+    })
+    fake_service = Class.new do
+      attr_reader :open_calls, :reconcile_calls
+
+      def initialize(pending, confirmed)
+        @pending = pending
+        @confirmed = confirmed
+        @open_calls = 0
+        @reconcile_calls = 0
+      end
+
+      def open_short(**_kwargs)
+        @open_calls += 1
+        @pending
+      end
+
+      def reconcile_pending_result(result, **_kwargs)
+        @reconcile_calls += 1
+        @reconcile_calls >= 13 ? @confirmed : result
+      end
+    end.new(pending, confirmed)
+    nado_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
+      ),
+      venue_builder: fake_builder,
+      sleeper: ->(_seconds) { }
+    )
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      if calls.size == 1
+        { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "ethereal-close", after_short_eth: "0", readback: { short_size: "0" } }
+      else
+        nado_runner.call(leg, context: context)
+      end
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge(
+          "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+          "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+          "NADO_SOURCE_FIRST_RECONCILIATION_ATTEMPTS" => "13",
+          "NADO_SOURCE_FIRST_RECONCILIATION_INTERVAL_SECONDS" => "0"
+        ),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        final_verifier_factory: final_verifier_factory(from: "ethereal", to: "nado"),
+        sleeper: ->(_seconds) { }
+      ).run(
+        position: position,
+        from_venue: "ethereal",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full",
+        migration_sequence: "source_first"
+      )
+
+      assert_equal "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK", result.status, result.blockers.inspect
+      assert_equal 1, fake_service.open_calls
+      assert_equal 13, fake_service.reconcile_calls
+      assert_equal "nado", position.hedge.reload.execution_venue
+      assert_equal false, result.receipt.fetch(:manual_action_required)
+      assert_equal true, result.receipt.fetch(:submitted)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+      assert_equal 2, result.receipt.fetch(:orders_placed)
+      assert_equal 2, result.receipt.fetch(:signatures_created)
+      assert_equal [ "ethereal-close", "0xnado-source-first" ], result.receipt.fetch(:exchange_order_ids)
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal 13, result.receipt.fetch(:nado_source_first_reconciliation_attempts).size
+      assert_equal "0xnado-source-first", result.receipt.fetch(:nado_source_first_reconciliation_attempts).last.fetch(:digest)
+      assert result.receipt.key?(:source_flat_to_nado_submit_started_seconds)
+      assert result.receipt.key?(:nado_accept_to_confirmed_seconds)
+      assert result.receipt.key?(:source_flat_to_finalized_seconds)
+    end
+  end
+
+  test "source first Nado accepted digest becomes bounded ambiguous state without duplicate submit" do
+    position = migration_position_for("ethereal")
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [ "target still not visible" ], [], {
+      submitted: true,
+      orders_placed: 1,
+      orders_submitted: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-ambiguous",
+      action_plan: { expected_after_short_eth: "0.8" },
+      final_status: "submitted_but_readback_pending"
+    })
+    fake_service = FakeNadoMigrationService.new(pending: pending, confirmed: pending)
+    nado_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
+      ),
+      venue_builder: fake_builder,
+      sleeper: ->(_seconds) { }
+    )
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      calls.size == 1 ? { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "ethereal-close", after_short_eth: "0" } : nado_runner.call(leg, context: context)
+    end
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge(
+          "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+          "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+          "NADO_SOURCE_FIRST_RECONCILIATION_ATTEMPTS" => "3",
+          "NADO_SOURCE_FIRST_RECONCILIATION_INTERVAL_SECONDS" => "0"
+        ),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        sleeper: ->(_seconds) { }
+      ).run(
+        position: position,
+        from_venue: "ethereal",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full",
+        migration_sequence: "source_first"
+      )
+
+      assert_equal "SOURCE_FIRST_TARGET_AMBIGUOUS_AFTER_TIMEOUT", result.status
+      assert_equal true, result.receipt.fetch(:manual_action_required)
+      assert_equal true, result.receipt.fetch(:pending_nado_source_first_digest_unresolved)
+      assert_equal 1, fake_service.open_calls
+      assert_equal 3, fake_service.reconcile_calls
+      assert_equal true, result.receipt.fetch(:submitted)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+      assert_equal "0xnado-ambiguous", result.receipt.fetch(:nado_target_digest)
+      assert_match "migration:reconcile_nado_source_first", result.receipt.fetch(:recovery_command)
+    end
+  end
+
   test "live execution pauses source auto instead of blocking migration" do
     position = migration_position(extended_auto_enabled: true)
     OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: true)

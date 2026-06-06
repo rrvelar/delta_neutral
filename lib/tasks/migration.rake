@@ -489,6 +489,39 @@ namespace :migration do
     puts JSON.pretty_generate(result.receipt)
   end
 
+  desc "Reconcile an accepted source-first Nado target digest by readback only"
+  task reconcile_nado_source_first: :environment do
+    position = migration_position_from_env(action: "reconcile_nado_source_first")
+    next unless position
+
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence || "nado"
+    digest = ENV["digest"].presence || ENV["DIGEST"].presence
+    reconciler = MigrationRouteCompletionReconciler.new(
+      position: position,
+      from: from,
+      to: to,
+      receipt_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR
+    )
+    current = reconciler.report
+    result = if current.route_complete_by_readback && current.production_venue_finalized
+      reconciler.write_ready_receipt!(status: "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK")
+    else
+      current
+    end
+    receipt = result.receipt.merge(
+      action: "reconcile_nado_source_first",
+      nado_target_digest: digest,
+      nado_target_exchange_order_id: digest,
+      submitted: false,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
+    puts JSON.pretty_generate(receipt)
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false, reason: "disabled" } unless refresh_snapshot_for_route_proof?
 
