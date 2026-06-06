@@ -40,6 +40,27 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
     assert_includes result.blockers, "Position dashboard snapshot is stale; refresh read-only data before planning migration."
   end
 
+  test "planner accepts direct execution preflight when dashboard snapshot is partial" do
+    position = migration_position(execution_venue: "ethereal")
+    snapshot_for(position, extended_short: "0", ethereal_short: "0.8", nado_short: "0", target: "0.8")
+    position.position_dashboard_snapshot.update!(refresh_status: "partial")
+
+    result = HedgeVenueMigrationPlanner.new.plan(
+      position: position,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      mode: "full",
+      full_migration_allowed: true,
+      execution_preflight: execution_preflight(position, current: "ethereal", target: "0.8")
+    )
+
+    assert_equal "preview", result.status, result.blockers.inspect
+    assert_equal "direct_execution_preflight", result.receipt.fetch(:planning_source)
+    assert_equal "0.8", result.receipt.fetch(:from_short_before)
+    assert_equal "0.0", result.receipt.fetch(:to_short_before)
+    assert_equal "0.8", result.receipt.fetch(:planned_target_leg).fetch(:size_eth)
+  end
+
   test "planner builds Ethereal to Extended plan" do
     position = migration_position(execution_venue: "ethereal")
     snapshot_for(position, extended_short: "0", ethereal_short: "0.8", nado_short: "0", target: "0.8")
@@ -225,5 +246,25 @@ class HedgeVenueMigrationPlannerTest < ActiveSupport::TestCase
       open_orders_count_extended: 0,
       leverage_margin_gate_status: "pass"
     )
+  end
+
+  def execution_preflight(position, current:, target:)
+    {
+      preflight_source: "dedicated_burn_in_preflight",
+      accepted: true,
+      blockers: [],
+      warnings: [],
+      production_venue: current,
+      target: { target_short_eth: BigDecimal(target), target_source: "test", target_fresh: true },
+      venues: {
+        "extended" => { short_eth: current == "extended" ? BigDecimal(target) : BigDecimal("0"), position_status: "ok", open_orders_status: "zero" },
+        "ethereal" => { short_eth: current == "ethereal" ? BigDecimal(target) : BigDecimal("0"), position_status: "ok", open_orders_status: "zero" },
+        "nado" => { short_eth: current == "nado" ? BigDecimal(target) : BigDecimal("0"), position_status: "ok", open_orders_status: "zero" }
+      },
+      combined_short_eth: BigDecimal(target),
+      drift_eth: BigDecimal("0"),
+      tolerance_abs_eth: BigDecimal(target) * BigDecimal(position.hedge.tolerance.to_s),
+      inside_tolerance: true
+    }
   end
 end

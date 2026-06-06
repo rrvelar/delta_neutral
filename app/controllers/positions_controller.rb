@@ -487,6 +487,9 @@ class PositionsController < ApplicationController
     %w[MIGRATION_LIVE_ENABLED MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
       OperationalSettings.set!(key: key, enabled: true, updated_by: Current.user, reason: "dashboard random rotation setup enable")
     end
+    %w[AERODROME_NADO_HEDGE_LIVE_ENABLED AERODROME_NADO_LIVE_MIGRATION_ENABLED].each do |key|
+      OperationalSettings.set!(key: key, enabled: true, updated_by: Current.user, reason: "dashboard random rotation setup enable Nado route support")
+    end
     ActiveVenueAutoPolicy.new(position: position, updated_by: Current.user).enable_current!(
       reason: "dashboard random rotation setup enable active venue auto"
     )

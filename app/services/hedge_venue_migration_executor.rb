@@ -17,9 +17,9 @@ class HedgeVenueMigrationExecutor
     @sleeper = sleeper
   end
 
-  def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false, migration_sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE)
+  def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false, migration_sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE, execution_preflight: nil)
     refreshed_snapshot = nil
-    if !dry_run && live_preflight_gate_open?(confirmation)
+    if !dry_run && live_preflight_gate_open?(confirmation) && execution_preflight.blank?
       refreshed_snapshot = @snapshot_refresher.call(position)
       position.reload
     end
@@ -31,7 +31,8 @@ class HedgeVenueMigrationExecutor
       mode: mode,
       step_size_eth: step_size_eth,
       full_migration_allowed: full_migration_allowed,
-      migration_sequence: migration_sequence
+      migration_sequence: migration_sequence,
+      execution_preflight: execution_preflight
     )
     receipt = plan.receipt.merge(
       action: "hedge_venue_migration",
@@ -49,7 +50,7 @@ class HedgeVenueMigrationExecutor
       final_status: dry_run ? plan.status : "blocked_before_submit"
     )
     pause_active_auto(position) unless dry_run
-    blockers = Array(plan.blockers) + live_blockers(position: position, receipt: receipt, dry_run: dry_run, confirmation: confirmation)
+    blockers = Array(plan.blockers) + live_blockers(position: position, receipt: receipt, dry_run: dry_run, confirmation: confirmation, execution_preflight: execution_preflight)
     if dry_run || blockers.any?
       receipt[:blockers] = blockers.uniq
       receipt[:final_status] = dry_run ? "dry_run" : "blocked_before_submit"
@@ -471,27 +472,35 @@ class HedgeVenueMigrationExecutor
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
-  def live_blockers(position:, receipt:, dry_run:, confirmation:)
+  def live_blockers(position:, receipt:, dry_run:, confirmation:, execution_preflight: nil)
     return [] if dry_run
 
+    direct = accepted_execution_preflight(execution_preflight)
     blockers = []
     blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
-    blockers << "Nado must be flat before dashboard migration." if ![ receipt[:from_venue], receipt[:to_venue] ].include?("nado") && !nado_flat?(position.position_dashboard_snapshot)
+    blockers << "Nado must be flat before dashboard migration." if ![ receipt[:from_venue], receipt[:to_venue] ].include?("nado") && !nado_flat?(position.position_dashboard_snapshot, direct)
     blockers << "position hedge execution_venue must be #{receipt[:from_venue]} before migration" unless HedgeVenues.normalize(position.hedge&.execution_venue) == receipt[:from_venue]
     blockers << "#{HedgeVenues.label(receipt[:from_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:from_venue])
     blockers << "#{HedgeVenues.label(receipt[:to_venue])} live gate must be enabled." unless venue_live_enabled?(receipt[:to_venue])
     blockers << "#{HedgeVenues.label(receipt[:from_venue])} auto must be disabled during migration." if venue_auto_enabled?(receipt[:from_venue])
     blockers << "#{HedgeVenues.label(receipt[:to_venue])} auto must be disabled during migration." if venue_auto_enabled?(receipt[:to_venue])
-    blockers << "target venue readiness failed or is not cached." unless target_readiness_cached?(position.position_dashboard_snapshot, receipt[:to_venue])
+    blockers << "target venue readiness failed or is not cached." unless target_readiness_cached?(position.position_dashboard_snapshot, receipt[:to_venue], direct)
     blockers << "source current position must exist." unless decimal(receipt[:from_short_before]).positive?
-    blockers << "target/source open orders must be zero." unless open_orders_clear?(position.position_dashboard_snapshot, receipt[:from_venue], receipt[:to_venue])
-    blockers << "dashboard snapshot must be fresh immediately before live migration." if position.position_dashboard_snapshot&.stale_now?
+    blockers << "target/source open orders must be zero." unless open_orders_clear?(position.position_dashboard_snapshot, receipt[:from_venue], receipt[:to_venue], direct)
+    blockers << "dashboard snapshot must be fresh immediately before live migration." if direct.blank? && position.position_dashboard_snapshot&.stale_now?
     blockers.concat(recent_rebalance_blockers(position, receipt[:from_venue], receipt[:to_venue]))
     blockers
   end
 
-  def target_readiness_cached?(snapshot, venue)
+  def accepted_execution_preflight(report)
+    return nil unless report.is_a?(Hash) && report[:accepted] == true
+
+    report
+  end
+
+  def target_readiness_cached?(snapshot, venue, direct = nil)
+    return true if direct && direct.dig(:venues, venue, :position_status).to_s == "ok"
     return false unless snapshot
     return true if venue == "ethereal"
     return true if venue == "nado"
@@ -500,7 +509,10 @@ class HedgeVenueMigrationExecutor
     snapshot.open_orders_count_extended.to_i.zero? && snapshot.leverage_margin_gate_status.to_s.in?(%w[ok pass passed ready confirmed])
   end
 
-  def open_orders_clear?(snapshot, from, to)
+  def open_orders_clear?(snapshot, from, to, direct = nil)
+    if direct
+      return [ from, to ].all? { |venue| direct.dig(:venues, venue, :open_orders_status).to_s == "zero" }
+    end
     return false unless snapshot
     return true unless [ from, to ].include?("extended")
 
@@ -537,7 +549,9 @@ class HedgeVenueMigrationExecutor
     blockers
   end
 
-  def nado_flat?(snapshot)
+  def nado_flat?(snapshot, direct = nil)
+    return decimal(direct.dig(:venues, "nado", :short_eth)).zero? if direct
+
     snapshot && BigDecimal(snapshot.nado_short_eth.to_s).zero?
   rescue ArgumentError
     false

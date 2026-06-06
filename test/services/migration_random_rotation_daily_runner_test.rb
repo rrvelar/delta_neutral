@@ -115,9 +115,52 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal "nado", state.fetch("virtual_current_venue")
   end
 
+  test "daily live random uses direct preflight and executor instead of dashboard optional partial" do
+    OperationalSetting.delete_all
+    position = migration_position
+    fake_snapshot_refresh_class.new(position: position).refresh
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      refresh_status: "partial",
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      extended_short_eth: "0",
+      ethereal_short_eth: "0.8",
+      nado_short_eth: "0",
+      extended_optional_read_status: "timed_out"
+    )
+    dirs = receipt_dirs
+    executor = live_executor
+
+    result = runner(
+      **dirs,
+      env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
+        "MIGRATION_AUTO_ENABLED" => "true",
+        "MIGRATION_LIVE_ENABLED" => "true",
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      },
+      preflight_factory: live_preflight_factory,
+      executor_factory: -> { executor }
+    ).call(position_id: position.id, force: true, seed: "seed-live")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+
+    assert_equal "ok", result.status
+    assert_equal "daily_random_rotation_live", receipt.fetch("action")
+    assert_equal "success", receipt.fetch("status")
+    assert_equal "nado", receipt.fetch("selected_target_venue")
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert_equal true, executor.received_direct_preflight
+    assert_equal true, executor.nado_gates_enabled
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+    assert_empty receipt.fetch("blockers")
+  end
+
   private
 
-  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class)
+  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil)
     MigrationRandomRotationDailyRunner.new(
       env: { "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "false", "MIGRATION_MIN_COOLDOWN_HOURS" => "0" }.merge(env),
       receipt_dir: receipt_dir || Rails.root.join("tmp/test-daily-random-#{SecureRandom.hex(4)}"),
@@ -126,6 +169,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
       state_dir: state_dir || Rails.root.join("tmp/test-random-state-#{SecureRandom.hex(4)}"),
       route_matrix_class: route_matrix_class,
       snapshot_refresh_class: fake_snapshot_refresh_class,
+      preflight_factory: preflight_factory,
+      executor_factory: executor_factory,
       now: -> { Time.zone.local(2026, 5, 28, 12, 0, 0) }
     )
   end
@@ -308,5 +353,75 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
       return receipt if receipt["position_id"] == position_id
     end
     nil
+  end
+
+  def live_preflight_factory
+    ->(position:, stage:) {
+      routes = MigrationLiveRouteCapability::ROUTES.map do |from, to|
+        { route: "#{from}->#{to}", from_venue: from, to_venue: to, status: "READY_FOR_RANDOM", blockers: [] }
+      end
+      {
+        preflight_source: "dedicated_burn_in_preflight",
+        accepted: true,
+        blockers: [],
+        warnings: [ "dashboard snapshot optional diagnostics ignored by direct preflight" ],
+        production_venue: "ethereal",
+        target: {
+          target_short_eth: BigDecimal("0.8"),
+          target_source: "test_direct_preflight",
+          target_fresh: true,
+          exposure_refreshed_at: Time.zone.local(2026, 5, 28, 12, 0, 0).utc.iso8601
+        },
+        venues: {
+          "extended" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 },
+          "ethereal" => { short_eth: BigDecimal("0.8"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 },
+          "nado" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 }
+        },
+        combined_short_eth: BigDecimal("0.8"),
+        drift_eth: BigDecimal("0"),
+        tolerance_abs_eth: BigDecimal("0.024"),
+        inside_tolerance: true,
+        proof_report: {
+          routes: routes,
+          completed_route_proofs: routes,
+          missing_route_proofs: [],
+          stale_route_proofs: []
+        },
+        readiness: {
+          pending_nado_target_continuation: nil,
+          pending_nado_target_continuation_blocking: false,
+          stale_pending_continuation_ignored: false,
+          blockers: []
+        },
+        signer: { status: "ok", payload: { ok: true } }
+      }
+    }
+  end
+
+  def live_executor
+    Class.new do
+      attr_reader :received_direct_preflight, :nado_gates_enabled
+
+      def run(position:, from_venue:, to_venue:, execution_preflight:, **)
+        @received_direct_preflight = execution_preflight[:accepted] == true
+        @nado_gates_enabled = OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED") &&
+          OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+        position.hedge.update!(execution_venue: to_venue)
+        HedgeVenueMigrationExecutor::Result.new(
+          "success",
+          [],
+          [],
+          {
+            from_venue: from_venue,
+            to_venue: to_venue,
+            final_status: "success",
+            orders_submitted: 2,
+            orders_placed: 2,
+            signatures_created: 2,
+            receipt_path: "tmp/daily-live-executor.jsonl"
+          }
+        )
+      end
+    end.new
   end
 end

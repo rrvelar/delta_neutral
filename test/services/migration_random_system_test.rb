@@ -1184,6 +1184,53 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in enables Nado live gates before executor call for route to Nado" do
+    OperationalSetting.delete_all
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(assert_nado_gates: true)
+
+    result = burn_in(position: position, live: true, disable_after: false, executor: executor, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, executor.called
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocked before submit does not run post migration assertions" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = BurnInExecutor.new(
+      status: "blocked_before_submit",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      blockers: [
+        "Position dashboard snapshot refresh_status=partial; refresh read-only data before planning migration.",
+        "source current position must exist."
+      ]
+    )
+
+    result = burn_in(position: position, live: true, executor: executor, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+    events = read_jsonl(result.receipt_path)
+    cycle = events.find { |event| event["event"] == "cycle" }
+    final = events.last
+
+    assert_equal "blocked", result.status
+    assert_equal "blocked_before_submit", cycle.fetch("status")
+    assert_equal "blocked_before_submit", final.fetch("blocker_status")
+    assert_includes cycle.dig("execution", "blockers"), "source current position must exist."
+    assert_no_match(/source venue ethereal is not flat/, cycle.fetch("blockers").join(" "))
+    assert_no_match(/target venue nado does not hold expected short/, cycle.fetch("blockers").join(" "))
+    assert_equal 0, final.fetch("orders_submitted")
+    assert_equal 0, final.fetch("signatures_created")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in disable after disables random auto and Nado live gates" do
     OperationalSetting.delete_all
     position = migration_position("ethereal")
@@ -1801,12 +1848,29 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   end
 
   class BurnInExecutor
-    def initialize(after: nil, status: "success")
+    attr_reader :called
+
+    def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false)
       @after = after
       @status = status
+      @orders_submitted = orders_submitted
+      @orders_placed = orders_placed
+      @signatures_created = signatures_created
+      @blockers = blockers
+      @assert_nado_gates = assert_nado_gates
+      @called = false
     end
 
     def run(position:, from_venue:, to_venue:, **)
+      @called = true
+      if @assert_nado_gates && [ from_venue, to_venue ].include?("nado")
+        raise "Nado live migration gate was not enabled" unless OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+        raise "Nado hedge live gate was not enabled" unless OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+      end
+      if @status == "blocked_before_submit"
+        return result(from_venue: from_venue, to_venue: to_venue)
+      end
+
       if @after
         @after.call(position, from_venue, to_venue)
       else
@@ -1826,17 +1890,21 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         )
         ActiveVenueAutoPolicy.new(position: position).enable_venue!(venue: to_venue, reason: "test burn-in executor finalized")
       end
+      result(from_venue: from_venue, to_venue: to_venue)
+    end
+
+    def result(from_venue:, to_venue:)
       HedgeVenueMigrationExecutor::Result.new(
         @status,
-        [],
+        @blockers,
         [],
         {
           from_venue: from_venue,
           to_venue: to_venue,
           final_status: @status,
-          orders_submitted: 2,
-          orders_placed: 2,
-          signatures_created: 2,
+          orders_submitted: @orders_submitted,
+          orders_placed: @orders_placed,
+          signatures_created: @signatures_created,
           receipt_path: "tmp/test-burn-in-executor.jsonl"
         }
       )

@@ -15,29 +15,33 @@ class HedgeVenueMigrationPlanner
     @now = now
   end
 
-  def plan(position:, from_venue:, to_venue:, mode: "preview", step_size_eth: nil, full_migration_allowed: false, migration_sequence: DEFAULT_SEQUENCE)
+  def plan(position:, from_venue:, to_venue:, mode: "preview", step_size_eth: nil, full_migration_allowed: false, migration_sequence: DEFAULT_SEQUENCE, execution_preflight: nil)
     from = HedgeVenues.normalize(from_venue)
     to = HedgeVenues.normalize(to_venue)
     mode = normalized_mode(mode)
     sequence = normalized_sequence(migration_sequence)
     snapshot = position.position_dashboard_snapshot
-    blockers = snapshot_blockers(snapshot)
+    critical_source = execution_preflight_source(execution_preflight)
+    blockers = snapshot_blockers(snapshot, critical_source: critical_source)
     blockers << "from_venue and to_venue must differ" if from == to
     blockers << "Migration direction #{from} -> #{to} is not supported yet." unless SUPPORTED_DIRECTIONS.include?([ from, to ])
 
-    receipt = base_receipt(position: position, snapshot: snapshot, from_venue: from, to_venue: to, mode: mode, sequence: sequence)
+    receipt = base_receipt(position: position, snapshot: snapshot, from_venue: from, to_venue: to, mode: mode, sequence: sequence, critical_source: critical_source)
     if blockers.any?
       receipt[:blockers] = blockers.uniq
       return Result.new("blocked", receipt[:blockers], receipt[:warnings], receipt)
     end
 
-    target = snapshot.target_short_eth || BigDecimal("0")
-    from_short = venue_short(snapshot, from)
-    to_short = venue_short(snapshot, to)
+    target = target_short(critical_source || snapshot)
+    from_short = venue_short(critical_source || snapshot, from)
+    to_short = venue_short(critical_source || snapshot, to)
+    combined_short = combined_short(critical_source || snapshot)
+    tolerance_abs = tolerance_abs(critical_source || snapshot)
+    drift = drift_eth(critical_source || snapshot)
     step_size = decimal_or_nil(step_size_eth)
     full = mode == "full" || full_migration_allowed
     migration_size = planned_size(target: target, from_short: from_short, to_short: to_short, step_size: step_size, full: full)
-    blockers << "target short is unavailable in dashboard snapshot" unless target.positive?
+    blockers << "target short is unavailable in migration planning source" unless target.positive?
     blockers << "source venue #{HedgeVenues.label(from)} has no current short to migrate" unless from_short.positive?
     blockers << "planned migration size is zero" unless migration_size.positive?
     blockers << "full migration requires full_migration_allowed=true" if mode == "full" && !full_migration_allowed
@@ -49,12 +53,12 @@ class HedgeVenueMigrationPlanner
     expected_to = to_short + BigDecimal(to_leg.fetch(:size_eth).to_s)
     expected_from = [ from_short - BigDecimal(from_leg.fetch(:size_eth).to_s), BigDecimal("0") ].max
     temporary_combined = if sequence == "source_first"
-      snapshot.combined_short_eth.to_d - BigDecimal(from_leg.fetch(:size_eth).to_s)
+      combined_short - BigDecimal(from_leg.fetch(:size_eth).to_s)
     else
-      snapshot.combined_short_eth.to_d + BigDecimal(to_leg.fetch(:size_eth).to_s)
+      combined_short + BigDecimal(to_leg.fetch(:size_eth).to_s)
     end
     temporary_drift = target - temporary_combined
-    expected_combined = expected_from + expected_to + other_venue_short(snapshot, from, to)
+    expected_combined = expected_from + expected_to + other_venue_short(critical_source || snapshot, from, to)
     expected_drift = target - expected_combined
 
     warnings = receipt[:warnings]
@@ -70,20 +74,24 @@ class HedgeVenueMigrationPlanner
     receipt.merge!(
       current_production_venue: position.hedge&.execution_venue,
       production_venue: position.hedge&.execution_venue,
-      source_snapshot_id: snapshot.id,
-      source_snapshot_refreshed_at: snapshot.refreshed_at&.utc&.iso8601,
-      extended_short_before: decimal_string(venue_short(snapshot, "extended")),
-      ethereal_short_before: decimal_string(venue_short(snapshot, "ethereal")),
-      nado_short_before: decimal_string(venue_short(snapshot, "nado")),
+      source_snapshot_id: snapshot&.id,
+      source_snapshot_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
+      planning_source: critical_source ? "direct_execution_preflight" : "position_dashboard_snapshot",
+      execution_preflight_source: critical_source&.fetch(:preflight_source, nil),
+      execution_preflight_accepted: critical_source&.fetch(:accepted, nil),
+      execution_preflight_warnings: Array(critical_source&.fetch(:warnings, nil)),
+      extended_short_before: decimal_string(venue_short(critical_source || snapshot, "extended")),
+      ethereal_short_before: decimal_string(venue_short(critical_source || snapshot, "ethereal")),
+      nado_short_before: decimal_string(venue_short(critical_source || snapshot, "nado")),
       from_short_before: decimal_string(from_short),
       to_short_before: decimal_string(to_short),
       target_short: decimal_string(target),
       target_short_eth: decimal_string(target),
-      tolerance_abs_eth: decimal_string(snapshot.tolerance_abs_eth),
-      combined_before: decimal_string(snapshot.combined_short_eth),
-      combined_short_before: decimal_string(snapshot.combined_short_eth),
-      drift_before: decimal_string(snapshot.drift_eth),
-      source_inside_tolerance_before: snapshot.inside_tolerance,
+      tolerance_abs_eth: decimal_string(tolerance_abs),
+      combined_before: decimal_string(combined_short),
+      combined_short_before: decimal_string(combined_short),
+      drift_before: decimal_string(drift),
+      source_inside_tolerance_before: inside_tolerance(critical_source || snapshot),
       planned_from_leg: from_leg,
       planned_to_leg: to_leg,
       planned_source_leg: from_leg,
@@ -103,9 +111,9 @@ class HedgeVenueMigrationPlanner
       expected_combined_short_after: decimal_string(expected_combined),
       expected_final_combined: decimal_string(expected_combined),
       expected_final_drift: decimal_string(expected_drift),
-      final_expected_inside_tolerance: snapshot.tolerance_abs_eth.present? ? expected_drift.abs <= snapshot.tolerance_abs_eth : nil,
+      final_expected_inside_tolerance: tolerance_abs.present? ? expected_drift.abs <= tolerance_abs : nil,
       full_migration_allowed: full_migration_allowed,
-      finalize_available: full && expected_from.zero? && snapshot.tolerance_abs_eth.present? && expected_drift.abs <= snapshot.tolerance_abs_eth,
+      finalize_available: full && expected_from.zero? && tolerance_abs.present? && expected_drift.abs <= tolerance_abs,
       required_gates: required_gates(from: from, to: to, mode: mode),
       live_gates: required_gates(from: from, to: to, mode: mode),
       blockers: blockers.uniq,
@@ -133,7 +141,7 @@ class HedgeVenueMigrationPlanner
     DEFAULT_SEQUENCE
   end
 
-  def base_receipt(position:, snapshot:, from_venue:, to_venue:, mode:, sequence:)
+  def base_receipt(position:, snapshot:, from_venue:, to_venue:, mode:, sequence:, critical_source:)
     {
       action: "hedge_venue_migration_preview",
       position_id: position.id,
@@ -146,6 +154,7 @@ class HedgeVenueMigrationPlanner
       timestamp: @now.call.utc.iso8601,
       snapshot_id: snapshot&.id,
       snapshot_refreshed_at: snapshot&.refreshed_at&.utc&.iso8601,
+      planning_source: critical_source ? "direct_execution_preflight" : "position_dashboard_snapshot",
       blockers: [],
       warnings: [],
       orders_placed: 0,
@@ -154,7 +163,8 @@ class HedgeVenueMigrationPlanner
     }
   end
 
-  def snapshot_blockers(snapshot)
+  def snapshot_blockers(snapshot, critical_source:)
+    return Array(critical_source[:blockers]).uniq if critical_source
     return [ "Position dashboard snapshot is missing; refresh read-only data before planning migration." ] unless snapshot
 
     blockers = []
@@ -195,14 +205,58 @@ class HedgeVenueMigrationPlanner
     }
   end
 
-  def venue_short(snapshot, venue)
-    BigDecimal(snapshot.public_send("#{venue}_short_eth").to_s)
-  rescue ArgumentError, NoMethodError
+  def execution_preflight_source(report)
+    return nil unless report.is_a?(Hash) && report[:accepted] == true
+
+    report
+  end
+
+  def target_short(source)
+    return BigDecimal(source.dig(:target, :target_short_eth).to_s) if source.is_a?(Hash)
+
+    BigDecimal(source.target_short_eth.to_s)
+  rescue ArgumentError, TypeError, NoMethodError
     BigDecimal("0")
   end
 
-  def other_venue_short(snapshot, from, to)
-    (%w[extended ethereal nado] - [ from, to ]).sum { |venue| venue_short(snapshot, venue) }
+  def venue_short(source, venue)
+    if source.is_a?(Hash)
+      return BigDecimal(source.dig(:venues, venue, :short_eth).to_s)
+    end
+
+    BigDecimal(source.public_send("#{venue}_short_eth").to_s)
+  rescue ArgumentError, TypeError, NoMethodError
+    BigDecimal("0")
+  end
+
+  def combined_short(source)
+    return BigDecimal(source[:combined_short_eth].to_s) if source.is_a?(Hash)
+
+    BigDecimal(source.combined_short_eth.to_s)
+  rescue ArgumentError, TypeError, NoMethodError
+    BigDecimal("0")
+  end
+
+  def tolerance_abs(source)
+    return decimal_or_nil(source[:tolerance_abs_eth]) if source.is_a?(Hash)
+
+    decimal_or_nil(source.tolerance_abs_eth)
+  end
+
+  def drift_eth(source)
+    return decimal_or_nil(source[:drift_eth]) if source.is_a?(Hash)
+
+    decimal_or_nil(source.drift_eth)
+  end
+
+  def inside_tolerance(source)
+    return source[:inside_tolerance] if source.is_a?(Hash)
+
+    source.inside_tolerance
+  end
+
+  def other_venue_short(source, from, to)
+    (%w[extended ethereal nado] - [ from, to ]).sum { |venue| venue_short(source, venue) }
   end
 
   def required_gates(from:, to:, mode:)

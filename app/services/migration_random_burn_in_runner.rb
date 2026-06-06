@@ -51,6 +51,7 @@ class MigrationRandomBurnInRunner
     @snapshot_warnings = []
     @snapshot_blockers = []
     @last_direct_preflight_report = {}
+    @last_blocker_status = nil
     @started_at = @now.call
     @receipt_path = @log_dir.join("#{@started_at.utc.strftime('%Y%m%d_%H%M%S')}_position_#{position.id}.jsonl")
   end
@@ -73,7 +74,8 @@ class MigrationRandomBurnInRunner
     while cycles_attempted < max_cycles && now.call < deadline
       cycle_result = run_cycle(cycles_attempted + 1)
       blockers = Array(cycle_result[:blockers])
-      status = cycle_result[:status] == "success" ? "success" : "stopped"
+      status = cycle_result[:status] == "success" ? "success" : burn_in_status_for_cycle(cycle_result[:status])
+      self.last_blocker_status = cycle_result[:status] unless cycle_result[:status] == "success"
       break unless cycle_result[:status] == "success"
       break if cycles_attempted >= max_cycles || now.call >= deadline
 
@@ -100,7 +102,7 @@ class MigrationRandomBurnInRunner
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
-    :snapshot_blockers, :last_direct_preflight_report
+    :snapshot_blockers, :last_direct_preflight_report, :last_blocker_status
 
   def live?
     @live
@@ -133,6 +135,7 @@ class MigrationRandomBurnInRunner
     set_setting("MIGRATION_MANUAL_LIVE_CANARY_ENABLED", false, "random burn-in start")
     set_setting("MIGRATION_FULL_ALLOWED", false, "random burn-in start")
     set_setting("MIGRATION_TARGET_FIRST_SOURCE_RECOVERY_ENABLED", false, "random burn-in start")
+    enable_nado_live_gates(reason: "random burn-in start nado route support")
     ActiveVenueAutoPolicy.new(position: position).enable_current!(reason: "random burn-in start active venue auto")
   end
 
@@ -180,6 +183,7 @@ class MigrationRandomBurnInRunner
     if live?
       result = nil
       MigrationExecutionLock.with_lock(position) do
+        enable_route_live_gates(route)
         result = executor.run(
           position: position,
           from_venue: route.fetch(:from_venue),
@@ -188,7 +192,8 @@ class MigrationRandomBurnInRunner
           dry_run: false,
           confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
           full_migration_allowed: true,
-          migration_sequence: "target_first"
+          migration_sequence: "target_first",
+          execution_preflight: pre_report
         )
       end
       execution = execution_payload(result)
@@ -235,6 +240,10 @@ class MigrationRandomBurnInRunner
     self.max_target_delta_eth = [ max_target_delta_eth, target_delta ].max
     blockers << "target changed #{target_delta.to_s('F')} ETH during cycle; max allowed is #{max_target_change_per_cycle_eth.to_s('F')} ETH" if target_delta > max_target_change_per_cycle_eth
     if live?
+      if blocked_before_submit?(execution)
+        blockers = (Array(execution[:blockers]) + blockers).uniq
+        return [ blockers, "blocked_before_submit" ]
+      end
       blockers << "migration result status is #{execution[:status]}" unless execution[:status].to_s.in?(%w[success MIGRATION_FINALIZED])
       blockers << "source venue #{route.fetch(:from_venue)} is not flat after migration" unless venue_short(post_report, route.fetch(:from_venue)).zero?
       blockers << "target venue #{route.fetch(:to_venue)} does not hold expected short after migration" unless venue_short(post_report, route.fetch(:to_venue)).positive?
@@ -260,6 +269,13 @@ class MigrationRandomBurnInRunner
 
   def zero_execution(status:)
     { status: status, orders_submitted: 0, orders_placed: 0, signatures_created: 0, receipt_path: nil, blockers: [] }
+  end
+
+  def blocked_before_submit?(execution)
+    execution[:status].to_s == "blocked_before_submit" &&
+      execution.fetch(:orders_submitted).to_i.zero? &&
+      execution.fetch(:orders_placed).to_i.zero? &&
+      execution.fetch(:signatures_created).to_i.zero?
   end
 
   def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:)
@@ -302,7 +318,7 @@ class MigrationRandomBurnInRunner
       signatures_created: signatures_created,
       final_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       final_combined_inside_tolerance: last_direct_preflight_report[:inside_tolerance] == true,
-      blocker_status: preflight_status(blockers),
+      blocker_status: last_blocker_status || preflight_status(blockers),
       stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
       pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
       preflight_source: "dedicated_burn_in_preflight",
@@ -441,6 +457,21 @@ class MigrationRandomBurnInRunner
     return "blocked_open_orders_nonzero" if blockers.any? { |blocker| blocker.include?("open orders") }
 
     "blocked_unexpected_venue_exposure"
+  end
+
+  def burn_in_status_for_cycle(status)
+    status.to_s == "blocked_before_submit" ? "blocked" : "stopped"
+  end
+
+  def enable_route_live_gates(route)
+    return unless [ route.fetch(:from_venue), route.fetch(:to_venue) ].include?("nado")
+
+    enable_nado_live_gates(reason: "random burn-in route #{route.fetch(:route)}")
+  end
+
+  def enable_nado_live_gates(reason:)
+    set_setting("AERODROME_NADO_HEDGE_LIVE_ENABLED", true, reason)
+    set_setting("AERODROME_NADO_LIVE_MIGRATION_ENABLED", true, reason)
   end
 
   def preflight_status(blockers)
