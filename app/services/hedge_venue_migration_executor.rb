@@ -62,11 +62,14 @@ class HedgeVenueMigrationExecutor
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
+    mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :target_leg_submit_finished_at)
     receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
+    record_target_acceptance_timing!(receipt, first_leg, first_planned_leg)
     receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
@@ -79,10 +82,21 @@ class HedgeVenueMigrationExecutor
       else
         return stop_after_unconfirmed_first_leg(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
       end
+    else
+      mark_time!(receipt, :target_readback_confirmed_at)
     end
+    receipt[:target_confirmation_polling_latency_seconds] = seconds_between(receipt[:target_readback_started_at], receipt[:target_readback_confirmed_at])
 
     receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : receipt[:target_leg_status]
+    if target_confirm_to_source_close_exceeds_threshold?(receipt)
+      apply_target_open_source_still_open_manual_action!(position, receipt, [ "target confirmation to source close submit latency exceeded #{target_to_source_close_latency_threshold_seconds.to_s('F')}s before source close submit" ])
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+    mark_time!(receipt, :source_close_submit_started_at)
+    compute_target_to_source_latency!(receipt)
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :source_close_submit_finished_at)
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
@@ -96,10 +110,14 @@ class HedgeVenueMigrationExecutor
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
     receipt[:source_leg_submitted] = leg_order_count(second_leg).positive?
     receipt[:source_leg_exchange_order_id] = second_leg[:exchange_order_id]
+    receipt[:source_close_order_id] = second_leg[:exchange_order_id]
+    record_source_close_timing!(receipt, second_leg, second_planned_leg)
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
+      compute_source_close_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
         apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
       end
@@ -282,15 +300,15 @@ class HedgeVenueMigrationExecutor
     end
 
     def nado_target_reconciliation_attempts(context)
-      value = context.dig(:receipt, :nado_target_reconciliation_attempts) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS"] || 30
+      value = context.dig(:receipt, :nado_target_reconciliation_attempts) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_ATTEMPTS"] || 6
       [ value.to_i, 1 ].max
     end
 
     def nado_target_reconciliation_interval(context)
-      value = context.dig(:receipt, :nado_target_reconciliation_interval_seconds) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS"] || 2
+      value = context.dig(:receipt, :nado_target_reconciliation_interval_seconds) || @env["MIGRATION_NADO_TARGET_RECONCILIATION_INTERVAL_SECONDS"] || "0.5"
       BigDecimal(value.to_s).to_f
     rescue ArgumentError
-      2
+      0.5
     end
 
     def nado_reconciliation_attempt_payload(result:, leg:, context:, attempt:)
@@ -396,11 +414,14 @@ class HedgeVenueMigrationExecutor
     first_planned_leg = receipt.fetch(:planned_first_leg)
     second_planned_leg = receipt.fetch(:planned_second_leg)
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
+    mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :target_leg_submit_finished_at)
     receipt[:first_leg_execution] = sanitize_sensitive(first_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
+    record_target_acceptance_timing!(receipt, first_leg, first_planned_leg)
     receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
@@ -413,10 +434,21 @@ class HedgeVenueMigrationExecutor
       else
         return stop_after_unconfirmed_first_leg(position: position, receipt: receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
       end
+    else
+      mark_time!(receipt, :target_readback_confirmed_at)
     end
+    receipt[:target_confirmation_polling_latency_seconds] = seconds_between(receipt[:target_readback_started_at], receipt[:target_readback_confirmed_at])
 
     receipt[:lifecycle_state] = late_reconciled?(first_leg) ? "TARGET_CONFIRMED_LATE_BY_RECONCILIATION" : receipt[:target_leg_status]
+    if target_confirm_to_source_close_exceeds_threshold?(receipt)
+      apply_target_open_source_still_open_manual_action!(position, receipt, [ "target confirmation to source close submit latency exceeded #{target_to_source_close_latency_threshold_seconds.to_s('F')}s before source close submit" ])
+      write_receipt(receipt)
+      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+    end
+    mark_time!(receipt, :source_close_submit_started_at)
+    compute_target_to_source_latency!(receipt)
     second_leg = @leg_runner.call(second_planned_leg, context: leg_context(position, confirmation, receipt))
+    mark_time!(receipt, :source_close_submit_finished_at)
     receipt[:second_leg_execution] = sanitize_sensitive(second_leg)
     receipt[:to_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:from_leg_execution] = sanitize_sensitive(second_leg) if second_planned_leg.fetch(:venue) == receipt[:from_venue]
@@ -430,10 +462,14 @@ class HedgeVenueMigrationExecutor
     receipt[:source_leg_status] = leg_lifecycle_status(leg: second_leg, planned_leg: second_planned_leg, role: "source")
     receipt[:source_leg_submitted] = leg_order_count(second_leg).positive?
     receipt[:source_leg_exchange_order_id] = second_leg[:exchange_order_id]
+    receipt[:source_close_order_id] = second_leg[:exchange_order_id]
+    record_source_close_timing!(receipt, second_leg, second_planned_leg)
     receipt[:source_readback_attempts] = second_leg[:readback] if second_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
+      compute_source_close_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
         apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
       end
@@ -455,12 +491,65 @@ class HedgeVenueMigrationExecutor
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
   end
 
+  def mark_time!(receipt, key)
+    time = @now.call
+    receipt[key] = time.utc.iso8601(6)
+  end
+
+  def record_target_acceptance_timing!(receipt, leg, planned_leg)
+    return unless planned_leg.fetch(:venue) == receipt[:to_venue]
+    return unless leg_order_count(leg).positive?
+
+    receipt[:target_leg_accepted_at] ||= receipt[:target_leg_submit_finished_at]
+    receipt[:target_leg_digest_or_order_id] ||= leg[:exchange_order_id]
+    receipt[:target_readback_started_at] ||= receipt[:target_leg_submit_finished_at]
+    receipt[:target_leg_submit_latency_seconds] = seconds_between(receipt[:target_leg_submit_started_at], receipt[:target_leg_submit_finished_at])
+    receipt[:target_confirmation_polling_latency_seconds] = seconds_between(receipt[:target_readback_started_at], receipt[:target_readback_confirmed_at]) if receipt[:target_readback_confirmed_at]
+  end
+
+  def record_source_close_timing!(receipt, leg, planned_leg)
+    return unless planned_leg.fetch(:venue) == receipt[:from_venue]
+
+    receipt[:source_close_submit_latency_seconds] = seconds_between(receipt[:source_close_submit_started_at], receipt[:source_close_submit_finished_at])
+    receipt[:source_close_readback_started_at] ||= receipt[:source_close_submit_finished_at] if leg_order_count(leg).positive?
+  end
+
+  def compute_target_to_source_latency!(receipt)
+    receipt[:target_to_source_close_submit_latency_seconds] = seconds_between(receipt[:target_leg_submit_finished_at], receipt[:source_close_submit_started_at])
+    receipt[:target_accept_to_source_close_submit_latency_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:source_close_submit_started_at])
+    receipt[:target_confirm_to_source_close_submit_latency_seconds] = seconds_between(receipt[:target_readback_confirmed_at], receipt[:source_close_submit_started_at])
+  end
+
+  def compute_source_close_latency!(receipt)
+    receipt[:source_close_submit_to_flat_seconds] = seconds_between(receipt[:source_close_submit_finished_at], receipt[:source_close_flat_confirmed_at])
+  end
+
+  def target_confirm_to_source_close_exceeds_threshold?(receipt)
+    latency = seconds_between(receipt[:target_readback_confirmed_at], @now.call.utc.iso8601(6))
+    latency && BigDecimal(latency.to_s) > target_to_source_close_latency_threshold_seconds
+  end
+
+  def target_to_source_close_latency_threshold_seconds
+    BigDecimal(@env.fetch("MIGRATION_TARGET_TO_SOURCE_CLOSE_MAX_LATENCY_SECONDS", "10").to_s)
+  rescue ArgumentError
+    BigDecimal("10")
+  end
+
+  def seconds_between(start_at, finish_at)
+    return nil if start_at.blank? || finish_at.blank?
+
+    (Time.zone.parse(finish_at.to_s) - Time.zone.parse(start_at.to_s)).round(6)
+  rescue ArgumentError, TypeError
+    nil
+  end
+
   def target_leg_confirmed_for_source_close?(position:, receipt:, first_leg:, first_planned_leg:)
     return false unless first_planned_leg.fetch(:venue) == receipt[:to_venue]
     return false unless leg_order_count(first_leg).positive?
 
     readback_short = target_short_from_readback(first_leg[:readback])
     if target_short_matches?(readback_short, receipt)
+      mark_time!(receipt, :target_readback_confirmed_at)
       receipt[:target_continuation_readback] = { source: "first_leg_readback", target_confirmed: true, target_short_eth: readback_short.to_s("F") }
       return true
     end
@@ -469,6 +558,7 @@ class HedgeVenueMigrationExecutor
     receipt[:target_continuation_verification] = verification
     latest = verification.fetch(:latest_attempt)
     if verification[:target_confirmed]
+      receipt[:target_readback_confirmed_at] = latest[:timestamp] || @now.call.utc.iso8601(6)
       receipt[:target_continuation_readback] = {
         source: latest[:readback_source],
         target_confirmed: true,

@@ -155,6 +155,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal true, executor.nado_gates_enabled
     assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
     assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+    assert_equal "0.5", receipt.dig("migration_timing", "target_accept_to_source_close_submit_latency_seconds")
     assert_empty receipt.fetch("blockers")
   end
 
@@ -454,7 +455,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
             orders_submitted: @configured_orders,
             orders_placed: @configured_orders,
             signatures_created: @configured_signatures,
-            receipt_path: "tmp/daily-live-executor.jsonl"
+            receipt_path: "tmp/daily-live-executor.jsonl",
+            target_accept_to_source_close_submit_latency_seconds: "0.5"
           }
         )
       end

@@ -649,6 +649,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
   test "target first Nado accepted and confirmed by readback immediately continues to source close" do
     position = migration_position
     calls = []
+    snapshot_refreshes = 0
     runner = ->(leg, context:) do
       calls << leg
       if calls.size == 1
@@ -677,7 +678,10 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     result = HedgeVenueMigrationExecutor.new(
       env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
       leg_runner: runner,
-      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      snapshot_refresher: ->(item) {
+        snapshot_refreshes += 1
+        item.position_dashboard_snapshot
+      },
       final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
     ).run(
       position: position,
@@ -690,6 +694,7 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     )
 
     assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 1, snapshot_refreshes
     assert_equal 2, calls.size
     assert_equal "TARGET_CONFIRMED_BY_CONTINUATION_READBACK", result.receipt.fetch(:target_leg_status)
     assert_equal "extended", calls.second.fetch(:venue)
@@ -697,6 +702,64 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal true, calls.second.fetch(:reduce_only)
     assert_equal "nado", position.hedge.reload.execution_venue
     assert_equal [ "0xnado-target", "extended-close" ], result.receipt.fetch(:exchange_order_ids)
+    assert result.receipt.fetch(:target_leg_submit_started_at)
+    assert result.receipt.fetch(:target_leg_submit_finished_at)
+    assert result.receipt.fetch(:target_leg_accepted_at)
+    assert_equal "0xnado-target", result.receipt.fetch(:target_leg_digest_or_order_id)
+    assert result.receipt.fetch(:target_readback_confirmed_at)
+    assert result.receipt.fetch(:source_close_submit_started_at)
+    assert result.receipt.fetch(:source_close_submit_finished_at)
+    assert_equal "extended-close", result.receipt.fetch(:source_close_order_id)
+    assert_operator BigDecimal(result.receipt.fetch(:target_accept_to_source_close_submit_latency_seconds).to_s), :<=, BigDecimal("10")
+    assert_operator BigDecimal(result.receipt.fetch(:target_confirm_to_source_close_submit_latency_seconds).to_s), :<=, BigDecimal("10")
+  end
+
+  test "target confirmation to source close latency beyond threshold returns manual action before source submit" do
+    position = migration_position
+    calls = []
+    current_time = Time.zone.local(2026, 6, 6, 12, 0, 0)
+    now = -> {
+      value = current_time
+      current_time += 2.seconds
+      value
+    }
+    runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "submitted_pending_readback",
+        confirmed: false,
+        orders_placed: 1,
+        signatures_created: 1,
+        after_short_eth: "0.8",
+        exchange_order_id: "0xnado-target",
+        readback: { short_size: "0.8" }
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_TARGET_TO_SOURCE_CLOSE_MAX_LATENCY_SECONDS" => "1"
+      ),
+      leg_runner: runner,
+      now: now,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot }
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal 1, calls.size
+    assert_nil result.receipt[:source_close_submit_started_at]
+    assert_includes result.blockers.join(" "), "target confirmation to source close submit latency exceeded"
+    assert_match "migration:recover_target_first_source_close", result.receipt.fetch(:recovery_command)
   end
 
   test "accepted Nado target remains pending without duplicate submit when reconciliation never confirms" do

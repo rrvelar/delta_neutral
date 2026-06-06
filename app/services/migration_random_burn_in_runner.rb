@@ -271,7 +271,8 @@ class MigrationRandomBurnInRunner
       orders_placed: receipt.fetch(:orders_placed, 0).to_i,
       signatures_created: receipt.fetch(:signatures_created, 0).to_i,
       receipt_path: receipt[:receipt_path],
-      blockers: Array(result.blockers)
+      blockers: Array(result.blockers),
+      timing: migration_timing_payload(receipt)
     }.merge(
       recovery_command: receipt[:recovery_command],
       recommended_action: receipt[:recommended_action],
@@ -283,6 +284,30 @@ class MigrationRandomBurnInRunner
 
   def zero_execution(status:)
     { status: status, orders_submitted: 0, orders_placed: 0, signatures_created: 0, receipt_path: nil, blockers: [] }
+  end
+
+  def migration_timing_payload(receipt)
+    keys = %i[
+      target_leg_submit_started_at
+      target_leg_submit_finished_at
+      target_leg_accepted_at
+      target_leg_digest_or_order_id
+      target_readback_started_at
+      target_readback_confirmed_at
+      source_close_submit_started_at
+      source_close_submit_finished_at
+      source_close_order_id
+      source_close_readback_started_at
+      source_close_flat_confirmed_at
+      target_to_source_close_submit_latency_seconds
+      target_accept_to_source_close_submit_latency_seconds
+      target_confirm_to_source_close_submit_latency_seconds
+      source_close_submit_to_flat_seconds
+      target_leg_submit_latency_seconds
+      target_confirmation_polling_latency_seconds
+      source_close_submit_latency_seconds
+    ]
+    keys.index_with { |key| receipt[key] }.compact
   end
 
   def blocked_before_submit?(execution)

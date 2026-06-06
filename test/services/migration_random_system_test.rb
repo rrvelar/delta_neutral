@@ -1258,6 +1258,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "nado", final.fetch("target_venue")
     assert_equal "close source venue reduce-only", final.fetch("recommended_action")
     assert_match "migration:recover_target_first_source_close", final.fetch("recovery_command")
+    assert_equal "0.5", cycle.dig("execution", "timing", "target_accept_to_source_close_submit_latency_seconds")
     assert_equal 1, final.fetch("orders_submitted")
     assert_equal 1, final.fetch("signatures_created")
   ensure
@@ -1947,7 +1948,8 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           recommended_action: @recommended_action,
           source_venue: @source_venue,
           target_venue: @target_venue,
-          random_and_auto_paused: @status == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
+          random_and_auto_paused: @status == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN",
+          target_accept_to_source_close_submit_latency_seconds: "0.5"
         }.compact
       )
     end

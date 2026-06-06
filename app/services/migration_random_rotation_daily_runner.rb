@@ -234,6 +234,7 @@ class MigrationRandomRotationDailyRunner
         exposure_refreshed_at: direct.dig(:target, :exposure_refreshed_at)
       },
       migration_receipt_path: migration_receipt[:receipt_path],
+      migration_timing: migration_timing_payload(migration_receipt),
       orders_submitted: migration_receipt.fetch(:orders_submitted, 0).to_i,
       orders_placed: migration_receipt.fetch(:orders_placed, 0).to_i,
       signatures_created: migration_receipt.fetch(:signatures_created, 0).to_i
@@ -311,6 +312,30 @@ class MigrationRandomRotationDailyRunner
 
   def write_daily_receipt(receipt)
     HedgeVenueMigrationReceiptWriter.new(now: now, receipt_dir: receipt_dir).write(receipt)
+  end
+
+  def migration_timing_payload(receipt)
+    keys = %i[
+      target_leg_submit_started_at
+      target_leg_submit_finished_at
+      target_leg_accepted_at
+      target_leg_digest_or_order_id
+      target_readback_started_at
+      target_readback_confirmed_at
+      source_close_submit_started_at
+      source_close_submit_finished_at
+      source_close_order_id
+      source_close_readback_started_at
+      source_close_flat_confirmed_at
+      target_to_source_close_submit_latency_seconds
+      target_accept_to_source_close_submit_latency_seconds
+      target_confirm_to_source_close_submit_latency_seconds
+      source_close_submit_to_flat_seconds
+      target_leg_submit_latency_seconds
+      target_confirmation_polling_latency_seconds
+      source_close_submit_latency_seconds
+    ]
+    keys.index_with { |key| receipt[key] }.compact
   end
 
   def direct_preflight(position)
