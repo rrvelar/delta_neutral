@@ -1,6 +1,17 @@
 class MigrationRouteOperationalPolicy
   TEMPORARY_DISABLED_REASON = "temporarily disabled pending latency fix/proof".freeze
   MANUAL_ONLY_REASON = "manual-only pending latency proof".freeze
+  CHANGE_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_ROUTE_POLICY".freeze
+  RESTORE_CONFIRMATION = "I_UNDERSTAND_THIS_RESTORES_ROUTE_POLICIES".freeze
+  DEFAULT_STRATEGIES = {
+    "extended->ethereal" => "target_first",
+    "ethereal->extended" => "target_first",
+    "nado->extended" => "target_first",
+    "nado->ethereal" => "target_first",
+    "extended->nado" => "source_first",
+    "ethereal->nado" => "source_first"
+  }.freeze
+  Result = Data.define(:ok, :errors, :settings, :payload)
 
   def initialize(env: ENV)
     @env = env
@@ -43,6 +54,79 @@ class MigrationRouteOperationalPolicy
     }.compact
   end
 
+  def report
+    routes = OperationalSettings::ROUTE_KEYS_BY_ROUTE.keys.map do |route|
+      from, to = route.split("->")
+      route_status(from: from, to: to)
+    end
+    disabled = routes.reject { |route| route.fetch(:production_execution_enabled) }
+    {
+      route_policy_health: health_for(routes),
+      routes: routes,
+      disabled_routes: disabled.map { |route| route.fetch(:route) },
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    }
+  end
+
+  def restore_defaults!(confirmation:, updated_by: nil)
+    return result(false, [ "confirmation must equal #{RESTORE_CONFIRMATION}" ], []) unless confirmation.to_s == RESTORE_CONFIRMATION
+
+    applied = []
+    ActiveRecord::Base.transaction do
+      DEFAULT_STRATEGIES.each do |route, strategy|
+        from, to = route.split("->")
+        applied << OperationalSettings.set!(
+          key: OperationalSettings.route_key_for(from, to),
+          enabled: true,
+          updated_by: updated_by,
+          reason: "restore default migration route policy"
+        )
+        applied << OperationalSettings.set!(
+          key: OperationalSettings.route_strategy_key_for(from, to),
+          enabled: strategy,
+          updated_by: updated_by,
+          reason: "restore default migration route strategy"
+        )
+      end
+    end
+    errors = applied.flat_map(&:errors).uniq
+    result(errors.empty?, errors, applied.select(&:ok).map(&:setting))
+  end
+
+  def set_route!(from:, to:, enabled:, strategy:, confirmation:, updated_by: nil)
+    return result(false, [ "confirmation must equal #{CHANGE_CONFIRMATION}" ], []) unless confirmation.to_s == CHANGE_CONFIRMATION
+
+    from = HedgeVenues.normalize(from)
+    to = HedgeVenues.normalize(to)
+    route_key = OperationalSettings.route_key_for(from, to)
+    strategy_key = OperationalSettings.route_strategy_key_for(from, to)
+    return result(false, [ "unknown migration route" ], []) unless route_key && strategy_key
+
+    strategy = strategy.to_s.presence || default_strategy(to)
+    return result(false, [ "invalid route strategy" ], []) unless OperationalSettings::ROUTE_STRATEGIES.include?(strategy)
+
+    applied = []
+    ActiveRecord::Base.transaction do
+      applied << OperationalSettings.set!(
+        key: route_key,
+        enabled: enabled,
+        updated_by: updated_by,
+        reason: "set migration route policy"
+      )
+      applied << OperationalSettings.set!(
+        key: strategy_key,
+        enabled: strategy,
+        updated_by: updated_by,
+        reason: "set migration route strategy"
+      )
+    end
+    errors = applied.flat_map(&:errors).uniq
+    result(errors.empty?, errors, applied.select(&:ok).map(&:setting))
+  end
+
   private
 
   attr_reader :env
@@ -74,6 +158,22 @@ class MigrationRouteOperationalPolicy
 
   def default_strategy(to)
     to == "nado" ? "source_first" : "target_first"
+  end
+
+  def health_for(routes)
+    return "all_disabled" if routes.all? { |route| !route.fetch(:production_execution_enabled) }
+    return "partial_disabled" if routes.any? { |route| !route.fetch(:production_execution_enabled) }
+
+    "ok"
+  end
+
+  def result(ok, errors, settings)
+    Result.new(
+      ok,
+      errors,
+      settings,
+      report.merge(settings: settings.map { |setting| { key: setting.key, value: setting.value } })
+    )
   end
 
   def disabled_reason(strategy)

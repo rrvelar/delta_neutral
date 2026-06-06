@@ -522,6 +522,60 @@ namespace :migration do
     puts JSON.pretty_generate(receipt)
   end
 
+  desc "List migration route policy settings"
+  task route_policy_list: :environment do
+    position = migration_position_from_env(action: "route_policy_list")
+    next unless position
+
+    report = MigrationRouteOperationalPolicy.new.report.merge(
+      action: "route_policy_list",
+      position_id: position.id
+    )
+    puts JSON.pretty_generate(report)
+  end
+
+  desc "Restore default migration route policy settings"
+  task route_policy_restore_defaults: :environment do
+    position = migration_position_from_env(action: "route_policy_restore_defaults")
+    next unless position
+
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationRouteOperationalPolicy.new.restore_defaults!(confirmation: confirmation)
+    puts JSON.pretty_generate(
+      result.payload.merge(
+        action: "route_policy_restore_defaults",
+        position_id: position.id,
+        ok: result.ok,
+        errors: result.errors
+      )
+    )
+    abort("route_policy_restore_defaults blocked") unless result.ok
+  end
+
+  desc "Set a single migration route policy"
+  task route_policy_set: :environment do
+    position = migration_position_from_env(action: "route_policy_set")
+    next unless position
+
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationRouteOperationalPolicy.new.set_route!(
+      from: ENV["from"].presence || ENV["FROM"].presence,
+      to: ENV["to"].presence || ENV["TO"].presence,
+      enabled: ENV["enabled"].presence || ENV["ENABLED"].presence,
+      strategy: ENV["strategy"].presence || ENV["STRATEGY"].presence,
+      confirmation: confirmation
+    )
+    puts JSON.pretty_generate(
+      result.payload.merge(
+        action: "route_policy_set",
+        position_id: position.id,
+        ok: result.ok,
+        errors: result.errors
+      )
+    )
+    abort("route_policy_set blocked") unless result.ok
+  end
+
   def refresh_snapshot_for_route_proof(position)
     return { refreshed: false, reason: "disabled" } unless refresh_snapshot_for_route_proof?
 

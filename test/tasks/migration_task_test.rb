@@ -23,6 +23,9 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:prove_route_latency"].reenable if Rake::Task.task_defined?("migration:prove_route_latency")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
     Rake::Task["migration:continue_target_first_after_nado_confirmed"].reenable if Rake::Task.task_defined?("migration:continue_target_first_after_nado_confirmed")
+    Rake::Task["migration:route_policy_list"].reenable if Rake::Task.task_defined?("migration:route_policy_list")
+    Rake::Task["migration:route_policy_restore_defaults"].reenable if Rake::Task.task_defined?("migration:route_policy_restore_defaults")
+    Rake::Task["migration:route_policy_set"].reenable if Rake::Task.task_defined?("migration:route_policy_set")
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -517,6 +520,59 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("to")
     ENV.delete("strategy")
     ENV.delete("live")
+    ENV.delete("confirmation")
+  end
+
+  test "route policy restore defaults repairs all disabled routes without runtime gates" do
+    position = migration_position
+    OperationalSettings::ROUTE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: false) }
+    OperationalSettings::RUNTIME_GATE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: false) }
+    ENV["position_id"] = position.id.to_s
+    ENV["confirmation"] = MigrationRouteOperationalPolicy::RESTORE_CONFIRMATION
+
+    out, = capture_io { Rake::Task["migration:route_policy_restore_defaults"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal true, payload.fetch("ok")
+    assert_equal "ok", payload.fetch("route_policy_health")
+    assert OperationalSettings::ROUTE_KEYS.all? { |key| OperationalSettings.enabled?(key) }
+    assert_equal "source_first", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY").raw_value
+    assert_equal "target_first", OperationalSettings.get("MIGRATION_ROUTE_NADO_TO_ETHEREAL_STRATEGY").raw_value
+    assert OperationalSettings::RUNTIME_GATE_KEYS.none? { |key| OperationalSettings.enabled?(key) }
+    assert_equal 0, payload.fetch("orders_submitted")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("confirmation")
+  end
+
+  test "route policy set changes only selected route policy" do
+    position = migration_position
+    MigrationRouteOperationalPolicy.new.restore_defaults!(confirmation: MigrationRouteOperationalPolicy::RESTORE_CONFIRMATION)
+    before = OperationalSettings::ALLOWED_KEYS.to_h { |key| [ key, OperationalSettings.get(key).raw_value ] }
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "ethereal"
+    ENV["to"] = "nado"
+    ENV["enabled"] = "false"
+    ENV["strategy"] = "manual_only"
+    ENV["confirmation"] = MigrationRouteOperationalPolicy::CHANGE_CONFIRMATION
+
+    out, = capture_io { Rake::Task["migration:route_policy_set"].invoke }
+    payload = JSON.parse(out)
+
+    assert_equal true, payload.fetch("ok")
+    assert_equal "false", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED").raw_value
+    assert_equal "manual_only", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY").raw_value
+    changed = OperationalSettings::ALLOWED_KEYS.select { |key| before[key] != OperationalSettings.get(key).raw_value }
+    assert_equal %w[MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY], changed
+    assert_equal 0, payload.fetch("orders_placed")
+    assert_equal 0, payload.fetch("signatures_created")
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("enabled")
+    ENV.delete("strategy")
     ENV.delete("confirmation")
   end
 

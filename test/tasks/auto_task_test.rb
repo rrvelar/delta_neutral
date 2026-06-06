@@ -81,9 +81,14 @@ class AutoTaskTest < ActiveSupport::TestCase
     end
   end
 
-  test "auto disable all clears auto and migration loops" do
+  test "auto disable all clears runtime gates and preserves route policy" do
     position = ethereal_position
-    OperationalSettings::BOOLEAN_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: true) }
+    OperationalSettings::RUNTIME_GATE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: true) }
+    OperationalSettings::ROUTE_KEYS_BY_ROUTE.each do |route, key|
+      from, to = route.split("->")
+      OperationalSettings.set!(key: key, enabled: true)
+      OperationalSettings.set!(key: OperationalSettings.route_strategy_key_for(from, to), enabled: to == "nado" ? "source_first" : "target_first")
+    end
 
     with_env(
       "position_id" => position.id.to_s,
@@ -93,7 +98,9 @@ class AutoTaskTest < ActiveSupport::TestCase
       payload = JSON.parse(out)
 
       assert_equal true, payload.fetch("ok")
-      assert OperationalSettings::BOOLEAN_KEYS.none? { |key| OperationalSettings.enabled?(key) }
+      assert OperationalSettings::RUNTIME_GATE_KEYS.none? { |key| OperationalSettings.enabled?(key) }
+      assert OperationalSettings::ROUTE_KEYS.all? { |key| OperationalSettings.enabled?(key) }
+      assert_equal "source_first", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY").raw_value
       assert_equal 0, payload.fetch("orders_submitted")
       assert_equal 0, payload.fetch("signatures_created")
     end

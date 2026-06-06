@@ -1332,7 +1332,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
   test "random burn-in disable after disables random auto and Nado live gates" do
     OperationalSetting.delete_all
-    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    MigrationRouteOperationalPolicy.new.restore_defaults!(confirmation: MigrationRouteOperationalPolicy::RESTORE_CONFIRMATION)
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
 
@@ -1344,6 +1344,8 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+    assert OperationalSettings::ROUTE_KEYS.all? { |key| OperationalSettings.enabled?(key) }
+    assert_equal "source_first", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY").raw_value
   ensure
     FileUtils.rm_rf(dir) if dir
   end

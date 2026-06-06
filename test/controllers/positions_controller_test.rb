@@ -22,6 +22,29 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
+  test "dashboard random disable all preserves route policy settings" do
+    position = create_aerodrome_position
+    position.create_hedge!(target: "0.8", tolerance: "0.03", active: true, execution_venue: "ethereal")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "0",
+      nado_short_eth: "0",
+      ethereal_short_eth: "0.8"
+    )
+    OperationalSettings::RUNTIME_GATE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: true) }
+    MigrationRouteOperationalPolicy.new.restore_defaults!(confirmation: MigrationRouteOperationalPolicy::RESTORE_CONFIRMATION)
+
+    post random_rotation_disable_all_position_path(position), params: {
+      random_rotation_confirmation: OperationalSettings::DISABLE_ALL_CONFIRMATION
+    }
+
+    assert_response :redirect
+    assert_match position_path(position), response.location
+    assert OperationalSettings::RUNTIME_GATE_KEYS.none? { |key| OperationalSettings.enabled?(key) }
+    assert OperationalSettings::ROUTE_KEYS.all? { |key| OperationalSettings.enabled?(key) }
+    assert_equal "source_first", OperationalSettings.get("MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY").raw_value
+  end
+
   test "index displays Aerodrome monitor-only position safely" do
     position = create_aerodrome_position
 

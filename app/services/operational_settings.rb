@@ -45,7 +45,9 @@ class OperationalSettings
   }.freeze
   ROUTE_STRATEGY_KEYS = ROUTE_STRATEGY_KEYS_BY_ROUTE.values.freeze
   ROUTE_STRATEGIES = %w[target_first source_first manual_only disabled disabled_pending_latency_proof].freeze
-  BOOLEAN_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS + ROUTE_KEYS).freeze
+  RUNTIME_GATE_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS).freeze
+  ROUTE_POLICY_KEYS = (ROUTE_KEYS + ROUTE_STRATEGY_KEYS).freeze
+  BOOLEAN_KEYS = (RUNTIME_GATE_KEYS + ROUTE_KEYS).freeze
   ALLOWED_KEYS = (BOOLEAN_KEYS + ROUTE_STRATEGY_KEYS).freeze
 
   Result = Data.define(:ok, :setting, :errors, :audit)

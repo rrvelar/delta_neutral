@@ -68,6 +68,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
   test "safe finalized Nado target recovery still requires latency proof for random" do
     position = position_with_snapshot("nado")
     OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY", enabled: "source_first")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("recoveries")).write(
@@ -96,6 +97,9 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
     assert_includes route.fetch(:blockers), "ethereal->nado temporarily disabled pending latency fix/proof."
+    assert_equal true, route.fetch(:route_enabled)
+    assert_equal "source_first", route.fetch(:route_strategy)
+    assert_nil route[:route_disabled_reason]
     assert_not_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "ethereal->nado"
     assert report.fetch(:missing_route_proofs).any? { |entry| entry[:route] == "ethereal->nado" }
   ensure
@@ -141,6 +145,21 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_empty route.fetch(:blockers)
   ensure
     FileUtils.rm_rf(dir) if dir
+  end
+
+  test "route proof report diagnoses all route policies disabled" do
+    position = position_with_snapshot("ethereal")
+    OperationalSettings::ROUTE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: false) }
+    report = registry_for(Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")).report(position: position)
+
+    assert_equal "all_disabled", report.fetch(:route_policy_health)
+    assert_equal "Route policies are disabled. Use migration:route_policy_restore_defaults.", report.fetch(:route_policy_blocker)
+
+    MigrationRouteOperationalPolicy.new.restore_defaults!(confirmation: MigrationRouteOperationalPolicy::RESTORE_CONFIRMATION)
+    repaired = registry_for(Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")).report(position: position)
+
+    assert_equal "ok", repaired.fetch(:route_policy_health)
+    assert_nil repaired.fetch(:route_policy_blocker)
   end
 
   private

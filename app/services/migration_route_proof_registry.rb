@@ -26,10 +26,13 @@ class MigrationRouteProofRegistry
 
   def report(position:)
     routes = ROUTES.map { |from, to| route_status(position: position, from: from, to: to) }
+    route_policy_health = route_policy.report.fetch(:route_policy_health)
     {
       action: "migration_route_proofs",
       position_id: position.id,
       source_commit: source_commit,
+      route_policy_health: route_policy_health,
+      route_policy_blocker: route_policy_health == "all_disabled" ? "Route policies are disabled. Use migration:route_policy_restore_defaults." : nil,
       routes: routes,
       completed_route_proofs: routes.select { |route| route[:status] == STATUSES[:ready] },
       missing_route_proofs: routes.reject { |route| route[:status] == STATUSES[:ready] },
