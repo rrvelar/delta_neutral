@@ -2,6 +2,8 @@ class ExtendedMainnetLifecycleCheck
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_SUBMITS_LIVE_EXTENDED_MAINNET_ORDERS".freeze
   MODES = %w[open_only rebalance_delta close_only delta_round_trip close_reopen].freeze
+  DEFAULT_READBACK_ATTEMPTS = 6
+  DEFAULT_READBACK_INTERVAL_SECONDS = BigDecimal("0.5")
 
   def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
@@ -13,12 +15,15 @@ class ExtendedMainnetLifecycleCheck
 
   def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil, size_source: "probe_cap")
     mode = mode.to_s
+    timing = {}
+    mark_timing!(timing, :build_started_at)
     requested_size = requested_size_for(mode: mode, size_eth: size_eth, delta_eth: delta_eth)
     return missing_size_result(position: position, mode: mode, dry_run: dry_run, size_source: size_source) unless requested_size&.positive? || mode == "close_only"
 
     sizing = sizing_plan(mode: mode, requested_size: requested_size, size_source: size_source)
     current_position = @venue.read_position(symbol: "ETH")
     orders = build_orders(position: position, mode: mode, size_eth: sizing.fetch(:submitted_size), current_position: current_position, max_slippage: max_slippage, delta_eth: delta_eth)
+    mark_timing!(timing, :build_finished_at)
     dry_run_signer_health = signer_health_for_diagnostics if dry_run
     blockers = structural_blockers(mode: mode, orders: orders, dry_run: dry_run, signer_health: dry_run_signer_health)
 
@@ -32,7 +37,8 @@ class ExtendedMainnetLifecycleCheck
         current_position: current_position,
         orders: orders,
         signer_health: dry_run_signer_health,
-        sizing: sizing
+        sizing: sizing,
+        timing: finalized_timing(timing)
       )
     end
 
@@ -47,11 +53,14 @@ class ExtendedMainnetLifecycleCheck
         dry_run: false,
         current_position: current_position,
         orders: orders,
-        sizing: sizing
+        sizing: sizing,
+        timing: finalized_timing(timing)
       )
     end
 
+    mark_timing!(timing, :sign_started_at)
     signer_health = @signer_client.health
+    mark_timing!(timing, :sign_finished_at)
     blockers.concat(signer_health_blockers(signer_health))
 
     if blockers.any?
@@ -64,11 +73,12 @@ class ExtendedMainnetLifecycleCheck
         current_position: current_position,
         orders: orders,
         signer_health: signer_health,
-        sizing: sizing
+        sizing: sizing,
+        timing: finalized_timing(timing)
       )
     end
 
-    signed_result = mode == "delta_round_trip" ? sign_and_submit_sequence(orders: orders) : sign_and_submit(order_preview: orders.first, mode: mode)
+    signed_result = mode == "delta_round_trip" ? sign_and_submit_sequence(orders: orders, timing: timing) : sign_and_submit(order_preview: orders.first, mode: mode, timing: timing)
     final_status = signed_result.fetch(:final_status)
     result(
       status: final_status,
@@ -80,7 +90,8 @@ class ExtendedMainnetLifecycleCheck
       orders: orders,
       signer_health: signer_health,
       execution: signed_result,
-      sizing: sizing
+      sizing: sizing,
+      timing: signed_result[:timing] || finalized_timing(timing)
     )
   end
 
@@ -187,7 +198,7 @@ class ExtendedMainnetLifecycleCheck
     end
   end
 
-  def sign_and_submit_sequence(orders:)
+  def sign_and_submit_sequence(orders:, timing:)
     legs = []
 
     orders.each do |order_preview|
@@ -205,7 +216,7 @@ class ExtendedMainnetLifecycleCheck
       end
 
       leg_mode = order_preview[:probe_leg] == "close" ? "close_only" : "rebalance_delta"
-      leg_result = sign_and_submit(order_preview: order_preview, mode: leg_mode).merge(leg: order_preview[:probe_leg])
+      leg_result = sign_and_submit(order_preview: order_preview, mode: leg_mode, timing: {}).merge(leg: order_preview[:probe_leg])
       legs << leg_result
       break unless leg_result[:final_status] == "success"
     end
@@ -223,13 +234,16 @@ class ExtendedMainnetLifecycleCheck
       orders_placed: legs.sum { |leg| leg[:orders_placed].to_i },
       signatures_created: legs.sum { |leg| leg[:signatures_created].to_i },
       submitted: legs.any? { |leg| leg[:submitted] },
-      blockers: legs.flat_map { |leg| Array(leg[:blockers]) }.uniq
+      blockers: legs.flat_map { |leg| Array(leg[:blockers]) }.uniq,
+      timing: sequence_timing(timing, legs)
     }
   end
 
-  def sign_and_submit(order_preview:, mode:)
+  def sign_and_submit(order_preview:, mode:, timing:)
+    mark_timing!(timing, :sign_started_at) unless timing[:sign_started_at]
     unsigned_order = @venue.extended_live_order(preview: order_preview, now: @now.call)
     signer_response = @signer_client.sign_order(unsigned_order)
+    mark_timing!(timing, :sign_finished_at)
     unless signer_response[:status] == "signed"
       return {
         final_status: "blocked_before_submit",
@@ -240,15 +254,21 @@ class ExtendedMainnetLifecycleCheck
         readback_attempts: [],
         orders_placed: 0,
         signatures_created: 0,
-        submitted: false
+        submitted: false,
+        timing: finalized_timing(timing)
       }
     end
 
     submit_payload = signed_submit_payload(unsigned_order, signer_response)
     expected_short = expected_short_after(order_preview: order_preview, current_position: @venue.read_position(symbol: "ETH"))
+    mark_timing!(timing, :submit_started_at)
     submit_response = @venue.submit_order(submit_payload)
+    mark_timing!(timing, :submit_finished_at)
+    timing[:exchange_accept_at] = timing[:submit_finished_at] if exchange_order_id(submit_response, signer_response).present?
+    mark_timing!(timing, :readback_started_at)
     readback_attempts = mode == "close_only" ? poll_flat_readback : poll_short_readback(expected_size: expected_short)
     confirmed = readback_attempts.any? { |attempt| attempt[:confirmed] }
+    mark_timing!(timing, confirmed ? :readback_confirmed_at : :readback_finished_at)
     final_status = confirmed ? "success" : unconfirmed_status(readback_attempts: readback_attempts, expected_short: expected_short, mode: mode)
     {
       final_status: final_status,
@@ -263,11 +283,12 @@ class ExtendedMainnetLifecycleCheck
       readback_delta_eth: readback_delta(readback_attempts: readback_attempts, expected_short: expected_short)&.to_s("F"),
       orders_placed: 1,
       signatures_created: 1,
-      submitted: true
+      submitted: true,
+      timing: finalized_timing(timing, readback_attempts: readback_attempts, poll_interval_seconds: extended_readback_interval_seconds)
     }
   end
 
-  def result(status:, blockers:, position:, mode:, dry_run:, current_position:, orders:, signer_health: nil, execution: nil, sizing: nil)
+  def result(status:, blockers:, position:, mode:, dry_run:, current_position:, orders:, signer_health: nil, execution: nil, sizing: nil, timing: nil)
     first_payload = orders.first&.fetch(:payload, {}) || {}
     expected_after = execution&.fetch(:expected_after_short_eth, nil)
     readback_after = execution&.fetch(:readback_short_after_submit, nil)
@@ -305,6 +326,7 @@ class ExtendedMainnetLifecycleCheck
       submit_payload: execution && execution[:submit_payload],
       submit_response: execution && execution[:submit_response],
       exchange_order_id: execution && execution[:exchange_order_id],
+      execution_timing: execution && execution[:timing],
       leg_summaries: execution && execution[:legs]&.map { |leg| leg_summary(leg) },
       readback_attempts: execution ? execution[:readback_attempts] : [],
       orders_placed: execution ? execution[:orders_placed] : 0,
@@ -313,7 +335,7 @@ class ExtendedMainnetLifecycleCheck
       final_status: status,
       blockers: (blockers + Array(execution && execution[:blockers])).uniq,
       warnings: [ "Extended mainnet path is manual-only and controlled by explicit live gates." ]
-    }
+    }.merge(timing_payload(execution&.fetch(:timing, nil) || timing))
     Result.new(status, receipt[:blockers], receipt[:warnings], receipt)
   end
 
@@ -329,6 +351,7 @@ class ExtendedMainnetLifecycleCheck
       signer_response: leg[:signer_response],
       submit_payload: leg[:submit_payload],
       submit_response: leg[:submit_response],
+      execution_timing: leg[:timing],
       readback_attempts: leg[:readback_attempts],
       blockers: leg[:blockers]
     }.compact
@@ -469,15 +492,15 @@ class ExtendedMainnetLifecycleCheck
   end
 
   def poll_short_readback(expected_size:)
-    3.times.map do |index|
-      @sleeper.call(1) if index.positive?
+    extended_readback_attempts.times.map do |index|
+      @sleeper.call(extended_readback_interval_seconds.to_f) if index.positive?
       position = @venue.read_position(symbol: "ETH")
-      size = BigDecimal(position&.fetch(:short_size, 0).to_s)
+      size = position ? short_size(position) : nil
       {
         attempt: index + 1,
-        short_size: size.to_s("F"),
+        short_size: size&.to_s("F"),
         side: position&.fetch(:side, nil),
-        confirmed: position&.fetch(:side, nil) == "short" && (size - expected_size).abs <= BigDecimal("0.001")
+        confirmed: position&.fetch(:side, nil) == "short" && size && (size - expected_size).abs <= BigDecimal("0.001")
       }
     rescue ArgumentError
       { attempt: index + 1, confirmed: false }
@@ -518,14 +541,9 @@ class ExtendedMainnetLifecycleCheck
     end
   end
 
-  def rebalance_increase?(order)
-    payload = order&.fetch(:payload, {})
-    payload[:action].to_s == "increase_short" || (payload[:extended_side].to_s == "SELL" && payload[:reduce_only] == false)
-  end
-
   def poll_flat_readback
-    3.times.map do |index|
-      @sleeper.call(1) if index.positive?
+    extended_readback_attempts.times.map do |index|
+      @sleeper.call(extended_readback_interval_seconds.to_f) if index.positive?
       position = @venue.read_position(symbol: "ETH")
       size = short_size(position)
       {
@@ -537,6 +555,82 @@ class ExtendedMainnetLifecycleCheck
     rescue ArgumentError
       { attempt: index + 1, confirmed: false }
     end
+  end
+
+  def extended_readback_attempts
+    [ @env.fetch("EXTENDED_POST_SUBMIT_READBACK_ATTEMPTS", DEFAULT_READBACK_ATTEMPTS).to_i, 1 ].max
+  end
+
+  def extended_readback_interval_seconds
+    BigDecimal(@env.fetch("EXTENDED_POST_SUBMIT_READBACK_INTERVAL_SECONDS", DEFAULT_READBACK_INTERVAL_SECONDS).to_s)
+  rescue ArgumentError
+    DEFAULT_READBACK_INTERVAL_SECONDS
+  end
+
+  def mark_timing!(timing, key)
+    timing[key] = @now.call.utc.iso8601(6)
+  end
+
+  def timing_payload(timing)
+    finalized_timing(timing).slice(
+      :build_started_at, :build_finished_at, :sign_started_at, :sign_finished_at,
+      :submit_started_at, :submit_finished_at, :submit_latency_seconds,
+      :exchange_accept_at, :readback_started_at, :readback_confirmed_at,
+      :readback_latency_seconds, :total_action_latency_seconds, :poll_attempts,
+      :poll_interval_seconds, :slow_step
+    )
+  end
+
+  def finalized_timing(timing, readback_attempts: [], poll_interval_seconds: nil)
+    payload = (timing || {}).dup
+    payload[:submit_latency_seconds] ||= seconds_between(payload[:submit_started_at], payload[:submit_finished_at])
+    readback_finish = payload[:readback_confirmed_at] || payload[:readback_finished_at]
+    payload[:readback_latency_seconds] ||= seconds_between(payload[:readback_started_at], readback_finish)
+    payload[:total_action_latency_seconds] ||= seconds_between(payload[:build_started_at] || payload[:sign_started_at] || payload[:submit_started_at], readback_finish || payload[:submit_finished_at] || payload[:sign_finished_at] || payload[:build_finished_at])
+    payload[:poll_attempts] ||= Array(readback_attempts).size if readback_attempts
+    payload[:poll_interval_seconds] ||= poll_interval_seconds&.to_s("F") || extended_readback_interval_seconds.to_s("F")
+    payload[:slow_step] ||= slow_step(payload)
+    payload.compact
+  end
+
+  def sequence_timing(timing, legs)
+    first_leg_timing = legs.first&.fetch(:timing, nil) || {}
+    last_leg_timing = legs.last&.fetch(:timing, nil) || {}
+    finalized_timing(timing.merge(
+      sign_started_at: first_leg_timing[:sign_started_at],
+      sign_finished_at: last_leg_timing[:sign_finished_at],
+      submit_started_at: first_leg_timing[:submit_started_at],
+      submit_finished_at: last_leg_timing[:submit_finished_at],
+      readback_started_at: first_leg_timing[:readback_started_at],
+      readback_confirmed_at: last_leg_timing[:readback_confirmed_at],
+      readback_finished_at: last_leg_timing[:readback_finished_at],
+      poll_attempts: legs.sum { |leg| Array(leg[:readback_attempts]).size }
+    ))
+  end
+
+  def slow_step(timing)
+    durations = {
+      build: seconds_between(timing[:build_started_at], timing[:build_finished_at]),
+      sign: seconds_between(timing[:sign_started_at], timing[:sign_finished_at]),
+      submit: timing[:submit_latency_seconds],
+      readback: timing[:readback_latency_seconds]
+    }.compact
+    durations.max_by { |_step, seconds| BigDecimal(seconds.to_s) }&.first&.to_s || "unknown"
+  rescue ArgumentError
+    "unknown"
+  end
+
+  def seconds_between(start_at, finish_at)
+    return nil if start_at.blank? || finish_at.blank?
+
+    (Time.zone.parse(finish_at.to_s) - Time.zone.parse(start_at.to_s)).round(6)
+  rescue ArgumentError, TypeError
+    nil
+  end
+
+  def rebalance_increase?(order)
+    payload = order&.fetch(:payload, {})
+    payload[:action].to_s == "increase_short" || (payload[:extended_side].to_s == "SELL" && payload[:reduce_only] == false)
   end
 
   def exchange_order_id(submit_response, signer_response)

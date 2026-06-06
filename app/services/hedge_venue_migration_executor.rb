@@ -347,6 +347,7 @@ class HedgeVenueMigrationExecutor
 
     def normalize_service_result(result, leg)
       receipt = result.receipt
+      timing = service_action_timing(receipt)
       {
         status: result.status,
         confirmed: service_result_confirmed?(result),
@@ -357,8 +358,21 @@ class HedgeVenueMigrationExecutor
         after_short_eth: confirmed_short_from_receipt(receipt, leg),
         blockers: result.blockers,
         warnings: result.warnings,
+        timing: timing,
+        slow_step: timing[:slow_step],
         receipt: receipt
       }
+    end
+
+    def service_action_timing(receipt)
+      source = receipt[:execution_timing].presence || receipt.slice(
+        :build_started_at, :build_finished_at, :sign_started_at, :sign_finished_at,
+        :submit_started_at, :submit_finished_at, :submit_latency_seconds,
+        :exchange_accept_at, :readback_started_at, :readback_confirmed_at,
+        :readback_latency_seconds, :total_action_latency_seconds, :poll_attempts,
+        :poll_interval_seconds, :slow_step
+      )
+      source.to_h.compact
     end
 
     def service_result_confirmed?(result)
@@ -500,17 +514,29 @@ class HedgeVenueMigrationExecutor
     return unless planned_leg.fetch(:venue) == receipt[:to_venue]
     return unless leg_order_count(leg).positive?
 
+    timing = leg[:timing] || {}
+    receipt[:target_action_timing] = timing if timing.present?
     receipt[:target_leg_accepted_at] ||= receipt[:target_leg_submit_finished_at]
     receipt[:target_leg_digest_or_order_id] ||= leg[:exchange_order_id]
     receipt[:target_readback_started_at] ||= receipt[:target_leg_submit_finished_at]
     receipt[:target_leg_submit_latency_seconds] = seconds_between(receipt[:target_leg_submit_started_at], receipt[:target_leg_submit_finished_at])
+    receipt[:target_total_latency_seconds] = timing[:total_action_latency_seconds] || receipt[:target_leg_submit_latency_seconds]
+    receipt[:target_submit_latency_seconds] = timing[:submit_latency_seconds] || receipt[:target_leg_submit_latency_seconds]
+    receipt[:target_readback_latency_seconds] = timing[:readback_latency_seconds]
+    receipt[:target_slow_step] = timing[:slow_step]
     receipt[:target_confirmation_polling_latency_seconds] = seconds_between(receipt[:target_readback_started_at], receipt[:target_readback_confirmed_at]) if receipt[:target_readback_confirmed_at]
   end
 
   def record_source_close_timing!(receipt, leg, planned_leg)
     return unless planned_leg.fetch(:venue) == receipt[:from_venue]
 
+    timing = leg[:timing] || {}
+    receipt[:source_close_action_timing] = timing if timing.present?
     receipt[:source_close_submit_latency_seconds] = seconds_between(receipt[:source_close_submit_started_at], receipt[:source_close_submit_finished_at])
+    receipt[:source_close_total_latency_seconds] = timing[:total_action_latency_seconds] || receipt[:source_close_submit_latency_seconds]
+    receipt[:source_close_exchange_submit_latency_seconds] = timing[:submit_latency_seconds] || receipt[:source_close_submit_latency_seconds]
+    receipt[:source_close_readback_latency_seconds] = timing[:readback_latency_seconds]
+    receipt[:source_close_slow_step] = timing[:slow_step]
     receipt[:source_close_readback_started_at] ||= receipt[:source_close_submit_finished_at] if leg_order_count(leg).positive?
   end
 
@@ -522,6 +548,7 @@ class HedgeVenueMigrationExecutor
 
   def compute_source_close_latency!(receipt)
     receipt[:source_close_submit_to_flat_seconds] = seconds_between(receipt[:source_close_submit_finished_at], receipt[:source_close_flat_confirmed_at])
+    receipt[:source_close_submit_start_after_target_confirm_seconds] = receipt[:target_confirm_to_source_close_submit_latency_seconds]
   end
 
   def target_confirm_to_source_close_exceeds_threshold?(receipt)
@@ -869,7 +896,66 @@ class HedgeVenueMigrationExecutor
   end
 
   def write_receipt(receipt)
+    annotate_migration_latency!(receipt)
     @receipt_writer.write(sanitize_sensitive(receipt))
+  end
+
+  def annotate_migration_latency!(receipt)
+    receipt[:route] ||= "#{receipt[:from_venue]}->#{receipt[:to_venue]}"
+    receipt[:target_venue] ||= receipt[:to_venue]
+    receipt[:source_venue] ||= receipt[:from_venue]
+    receipt[:source_close_submit_start_after_target_confirm_seconds] ||= receipt[:target_confirm_to_source_close_submit_latency_seconds]
+    receipt[:total_migration_latency_seconds] ||= seconds_between(
+      receipt[:target_leg_submit_started_at],
+      receipt[:source_close_flat_confirmed_at] || receipt[:source_close_submit_finished_at] || receipt[:target_leg_submit_finished_at]
+    )
+    exceeded = latency_threshold_exceeded_entries(receipt)
+    return if exceeded.empty?
+
+    receipt[:latency_threshold_exceeded] = true
+    receipt[:latency_thresholds_exceeded] = exceeded
+    receipt[:warnings] = (Array(receipt[:warnings]) + exceeded.map do |entry|
+      "LATENCY_THRESHOLD_EXCEEDED: #{entry[:field]} #{entry[:actual_seconds]}s > #{entry[:threshold_seconds]}s"
+    end).uniq
+  end
+
+  def latency_threshold_exceeded_entries(receipt)
+    [
+      latency_threshold_entry(receipt, :target_total_latency_seconds, max_target_leg_latency_seconds),
+      latency_threshold_entry(receipt, :source_close_total_latency_seconds, max_source_close_latency_seconds),
+      latency_threshold_entry(receipt, :total_migration_latency_seconds, max_total_route_latency_seconds),
+      latency_threshold_entry(receipt, :target_confirm_to_source_close_submit_latency_seconds, target_to_source_close_latency_threshold_seconds)
+    ].compact
+  end
+
+  def latency_threshold_entry(receipt, field, threshold)
+    actual = receipt[field]
+    return nil if actual.blank?
+
+    actual_decimal = BigDecimal(actual.to_s)
+    return nil unless actual_decimal > threshold
+
+    { field: field, actual_seconds: actual_decimal.to_s("F"), threshold_seconds: threshold.to_s("F") }
+  rescue ArgumentError
+    nil
+  end
+
+  def max_target_leg_latency_seconds
+    decimal_env("MIGRATION_MAX_TARGET_LEG_LATENCY_SECONDS", "15")
+  end
+
+  def max_source_close_latency_seconds
+    decimal_env("MIGRATION_MAX_SOURCE_CLOSE_LATENCY_SECONDS", "15")
+  end
+
+  def max_total_route_latency_seconds
+    decimal_env("MIGRATION_MAX_TOTAL_ROUTE_LATENCY_SECONDS", "45")
+  end
+
+  def decimal_env(key, default)
+    BigDecimal(@env.fetch(key, default).to_s)
+  rescue ArgumentError
+    BigDecimal(default)
   end
 
   def sanitize_sensitive(value)

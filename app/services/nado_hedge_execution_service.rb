@@ -784,25 +784,35 @@ class NadoHedgeExecutionService
   end
 
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true)
+    timing = {}
+    mark_timing!(timing, :build_started_at)
     order = build_order_preview(position: position, action: action, size_eth: size_eth, max_slippage: max_slippage, current_position: current_position)
+    mark_timing!(timing, :build_finished_at)
     blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation)
-    return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil) if blockers.any?
+    return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil, timing: timing) if blockers.any?
 
+    mark_timing!(timing, :sign_started_at)
     signing = sign(order.fetch(:typed_data), order: order, action: action)
+    mark_timing!(timing, :sign_finished_at)
     unless signing[:status] == "signed"
-      return result("failed_before_submit", [ signing[:reason] || "Nado signer did not return a signature" ], order, position, action, current_position, nil, nil, nil)
+      return result("failed_before_submit", [ signing[:reason] || "Nado signer did not return a signature" ], order, position, action, current_position, nil, nil, nil, timing: timing)
     end
 
     payload = submit_payload(order: order, signature: signing.fetch(:signature))
+    mark_timing!(timing, :submit_started_at)
     response = post_execute(payload)
+    mark_timing!(timing, :submit_finished_at)
     parsed = parse_submit_response(response)
+    timing[:exchange_accept_at] = timing[:submit_finished_at] if parsed[:status] == "submitted"
     expected_short = expected_short_after(action: action, size_eth: size_eth, current_position: current_position)
+    mark_timing!(timing, :readback_started_at) if parsed[:status] == "submitted"
     readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: action, expected_short: expected_short) : { attempts: [], position: nil }
+    mark_timing!(timing, readback_poll[:confirmed] ? :readback_confirmed_at : :readback_finished_at) if parsed[:status] == "submitted"
     post_position = readback_poll.fetch(:position)
     status = final_status(parsed, post_position: post_position, action: action, expected_short: expected_short, confirmed: readback_poll[:confirmed])
-    result(status, [], order, position, action, current_position, parsed, post_position, readback_poll)
+    result(status, [], order, position, action, current_position, parsed, post_position, readback_poll, timing: timing)
   rescue => e
-    result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil)
+    result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil, timing: timing)
   end
 
   def reconcile_pending_result(result, expected_short: nil, target_short: nil, tolerance_eth: nil)
@@ -874,7 +884,8 @@ class NadoHedgeExecutionService
     blockers.uniq
   end
 
-  def result(status, blockers, order, position, action, pre_position, submit_result, post_position, readback_poll)
+  def result(status, blockers, order, position, action, pre_position, submit_result, post_position, readback_poll, timing: nil)
+    timing = finalized_timing(timing, readback_poll: readback_poll, action: action)
     receipt = {
       timestamp: @now.call.utc.iso8601,
       action: action,
@@ -897,6 +908,22 @@ class NadoHedgeExecutionService
       final_message: final_message(status, submit_result),
       manual_action_required: manual_action_required?(status),
       next_manual_instruction: manual_instruction(status),
+      execution_timing: timing,
+      build_started_at: timing[:build_started_at],
+      build_finished_at: timing[:build_finished_at],
+      sign_started_at: timing[:sign_started_at],
+      sign_finished_at: timing[:sign_finished_at],
+      submit_started_at: timing[:submit_started_at],
+      submit_finished_at: timing[:submit_finished_at],
+      submit_latency_seconds: timing[:submit_latency_seconds],
+      exchange_accept_at: timing[:exchange_accept_at],
+      readback_started_at: timing[:readback_started_at],
+      readback_confirmed_at: timing[:readback_confirmed_at],
+      readback_latency_seconds: timing[:readback_latency_seconds],
+      total_action_latency_seconds: timing[:total_action_latency_seconds],
+      poll_attempts: timing[:poll_attempts],
+      poll_interval_seconds: timing[:poll_interval_seconds],
+      slow_step: timing[:slow_step],
       orders_submitted: submit_result&.dig(:status) == "submitted" ? 1 : 0,
       orders_placed: submit_result&.dig(:status) == "submitted" ? 1 : 0,
       signatures_created: submit_result.present? ? 1 : 0,
@@ -904,6 +931,42 @@ class NadoHedgeExecutionService
       warnings: order.fetch(:warnings, [])
     }
     Result.new(status, blockers, order.fetch(:warnings, []), receipt)
+  end
+
+  def mark_timing!(timing, key)
+    timing[key] = @now.call.utc.iso8601(6)
+  end
+
+  def finalized_timing(timing, readback_poll:, action:)
+    payload = (timing || {}).dup
+    payload[:submit_latency_seconds] ||= seconds_between(payload[:submit_started_at], payload[:submit_finished_at])
+    readback_finish = payload[:readback_confirmed_at] || payload[:readback_finished_at]
+    payload[:readback_latency_seconds] ||= seconds_between(payload[:readback_started_at], readback_finish)
+    payload[:total_action_latency_seconds] ||= seconds_between(payload[:build_started_at] || payload[:sign_started_at] || payload[:submit_started_at], readback_finish || payload[:submit_finished_at] || payload[:sign_finished_at] || payload[:build_finished_at])
+    payload[:poll_attempts] ||= Array(readback_poll&.fetch(:attempts, [])).size
+    payload[:poll_interval_seconds] ||= readback_delay_seconds(action).to_s
+    payload[:slow_step] ||= slow_step(payload)
+    payload.compact
+  end
+
+  def slow_step(timing)
+    durations = {
+      build: seconds_between(timing[:build_started_at], timing[:build_finished_at]),
+      sign: seconds_between(timing[:sign_started_at], timing[:sign_finished_at]),
+      submit: timing[:submit_latency_seconds],
+      readback: timing[:readback_latency_seconds]
+    }.compact
+    durations.max_by { |_step, seconds| BigDecimal(seconds.to_s) }&.first&.to_s || "unknown"
+  rescue ArgumentError
+    "unknown"
+  end
+
+  def seconds_between(start_at, finish_at)
+    return nil if start_at.blank? || finish_at.blank?
+
+    (Time.zone.parse(finish_at.to_s) - Time.zone.parse(start_at.to_s)).round(6)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def nado_execution_action_plan(action:, pre_position:, order:)

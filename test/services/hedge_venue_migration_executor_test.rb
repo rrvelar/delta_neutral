@@ -714,6 +714,72 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_operator BigDecimal(result.receipt.fetch(:target_confirm_to_source_close_submit_latency_seconds).to_s), :<=, BigDecimal("10")
   end
 
+  test "migration receipt promotes venue action timing and latency threshold warnings" do
+    position = migration_position
+    calls = []
+    target_timing = {
+      build_started_at: "2026-06-06T12:00:00.000000Z",
+      build_finished_at: "2026-06-06T12:00:00.200000Z",
+      sign_started_at: "2026-06-06T12:00:00.200000Z",
+      sign_finished_at: "2026-06-06T12:00:00.400000Z",
+      submit_started_at: "2026-06-06T12:00:00.400000Z",
+      submit_finished_at: "2026-06-06T12:00:01.400000Z",
+      submit_latency_seconds: 1.0,
+      exchange_accept_at: "2026-06-06T12:00:01.400000Z",
+      readback_started_at: "2026-06-06T12:00:01.400000Z",
+      readback_confirmed_at: "2026-06-06T12:01:01.700000Z",
+      readback_latency_seconds: 60.3,
+      total_action_latency_seconds: 61.7,
+      poll_attempts: 6,
+      poll_interval_seconds: "0.5",
+      slow_step: "readback"
+    }
+    source_timing = {
+      submit_latency_seconds: 0.3,
+      readback_latency_seconds: 0.4,
+      total_action_latency_seconds: 0.9,
+      slow_step: "readback"
+    }
+    runner = ->(leg, context:) do
+      calls << leg
+      if calls.size == 1
+        { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "0xnado-target", readback: { short_size: "0.8" }, timing: target_timing }
+      else
+        { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "extended-close", readback: { short_size: "0" }, timing: source_timing }
+      end
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_MAX_TARGET_LEG_LATENCY_SECONDS" => "15"
+      ),
+      leg_runner: runner,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 2, calls.size
+    assert_equal 61.7, result.receipt.fetch(:target_total_latency_seconds)
+    assert_equal 1.0, result.receipt.fetch(:target_submit_latency_seconds)
+    assert_equal 60.3, result.receipt.fetch(:target_readback_latency_seconds)
+    assert_equal "readback", result.receipt.fetch(:target_slow_step)
+    assert_equal 0.9, result.receipt.fetch(:source_close_total_latency_seconds)
+    assert_equal true, result.receipt.fetch(:latency_threshold_exceeded)
+    assert_includes result.receipt.fetch(:warnings).join(" "), "LATENCY_THRESHOLD_EXCEEDED"
+    assert_includes result.receipt.fetch(:latency_thresholds_exceeded).map { |entry| entry[:field] }, :target_total_latency_seconds
+  end
+
   test "target confirmation to source close latency beyond threshold returns manual action before source submit" do
     position = migration_position
     calls = []
