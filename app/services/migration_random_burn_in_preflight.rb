@@ -20,81 +20,38 @@ class MigrationRandomBurnInPreflight
   end
 
   def report
-    position.reload
-    target = fresh_target_report
-    venue_reports = VENUES.to_h { |venue| [ venue, venue_report(venue) ] }
-    combined = combined_short(venue_reports)
-    strict_tolerance = target[:target_short_eth] && position.hedge ? target[:target_short_eth] * position.hedge.tolerance : nil
-    effective_tolerance = effective_burn_in_tolerance(strict_tolerance)
-    drift = target[:target_short_eth] && combined ? target[:target_short_eth] - combined : nil
-    drift_ratio = target[:target_short_eth]&.positive? && drift ? drift.abs / target[:target_short_eth] : nil
-    strict_inside = drift && strict_tolerance ? drift.abs <= strict_tolerance : nil
-    burn_in_inside = drift && effective_tolerance ? drift.abs <= effective_tolerance : nil
-    active = active_short_venues(venue_reports)
-    current = HedgeVenues.normalize(position.hedge&.execution_venue)
-    proof_report = proof_registry.report(position: position)
-    readiness = readiness_report
-    signer = signer_health
-    blockers = []
-    warnings = []
-
-    blockers.concat(Array(target[:blockers]))
-    blockers << "fresh LP target is unavailable" unless target[:target_short_eth]&.positive? && target[:target_fresh] == true
-    blockers << "all enabled route proofs must be READY_FOR_RANDOM" if enabled_missing_route_proofs(proof_report).present?
-    blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
-    blockers << "pending target=Nado migration continuation must be completed before burn-in" if readiness[:pending_nado_target_continuation_blocking]
-    blockers << "migration lock is already active for this position" if MigrationExecutionLock.locked?(position)
-    VENUES.each do |venue|
-      report = venue_reports.fetch(venue)
-      blockers << "#{HedgeVenues.label(venue)} position readback failed: #{report[:error]}" unless report[:position_status] == "ok"
-      blockers << "#{venue} short amount is unknown" if report[:short_eth].nil?
-      blockers << "#{venue} open orders could not be confirmed zero" unless report[:open_orders_status] == "zero"
+    report = MigrationExecutionPreflight.new(
+      position: position,
+      env: env,
+      proof_registry: proof_registry,
+      venue_builder: venue_builder,
+      signer_client: signer_client,
+      fresh_target_factory: fresh_target_factory,
+      readiness_factory: readiness_factory,
+      require_route_proofs: true,
+      require_random_readiness: true,
+      tolerance_multiplier: burn_in_tolerance_multiplier,
+      extra_tolerance_eth: burn_in_extra_tolerance_eth,
+      max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
+      max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio
+    ).report
+    warnings = Array(report[:warnings]).map do |warning|
+      warning == "strict tolerance exceeded but within migration preflight tolerance buffer" ? "strict tolerance exceeded but within burn-in tolerance buffer" : warning
     end
-    blockers << "combined hedge cannot be computed" unless combined
-    if drift && target[:target_short_eth]&.positive?
-      blockers << "burn-in max allowed drift exceeded: drift_eth=#{decimal_string(drift.abs)} max=#{decimal_string(burn_in_max_allowed_drift_eth)}" if drift.abs > burn_in_max_allowed_drift_eth
-      blockers << "burn-in max allowed drift ratio exceeded: drift_ratio=#{decimal_string(drift_ratio)} max=#{decimal_string(burn_in_max_allowed_drift_ratio)}" if drift_ratio && drift_ratio > burn_in_max_allowed_drift_ratio
-    end
-    if burn_in_inside == false
-      blockers << outside_tolerance_blocker(target: target[:target_short_eth], combined: combined, drift: drift, tolerance: effective_tolerance, status: "out_of_burn_in_tolerance")
-    elsif strict_inside == false && burn_in_inside == true
-      warnings << "strict tolerance exceeded but within burn-in tolerance buffer"
-    end
-    blockers << "inside tolerance cannot be confirmed" unless !drift.nil? && !strict_tolerance.nil? && !effective_tolerance.nil?
-    blockers << "more than one venue has exposure" if active.size > 1
-    blockers << "no venue has the production hedge" if active.empty?
-    blockers << "app production venue and actual venue exposure disagree" if active.one? && active.first != current
-    blockers << "current production venue has no real short" if current.present? && venue_reports[current]&.fetch(:short_eth, nil).to_d <= FLAT_EPSILON
-    blockers << "signer must be healthy" unless signer[:status] == "ok"
-
-    {
-      preflight_source: "dedicated_burn_in_preflight",
-      accepted: blockers.empty?,
-      blockers: blockers.uniq,
+    blockers = Array(report[:blockers]).map { |blocker| burn_in_blocker_label(blocker) }
+    report.merge(
       warnings: warnings,
-      production_venue: current,
-      target: target,
-      venues: venue_reports,
-      combined_short_eth: combined,
-      drift_eth: drift,
-      tolerance_abs_eth: strict_tolerance,
-      strict_inside_tolerance: strict_inside,
-      burn_in_inside_tolerance: burn_in_inside,
-      inside_tolerance: burn_in_inside,
-      strict_tolerance_eth: strict_tolerance,
-      effective_burn_in_tolerance_eth: effective_tolerance,
+      blockers: blockers,
+      hard_blockers: blockers,
+      burn_in_inside_tolerance: report[:inside_tolerance],
+      effective_burn_in_tolerance_eth: report[:effective_tolerance_eth],
       burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
       burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
       burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
       burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
-      drift_ratio: drift_ratio,
-      recommended_rebalance_side: drift&.positive? ? "increase_short" : "decrease_short",
-      recommended_rebalance_size_eth: drift&.abs,
-      active_short_venues: active,
-      proof_report: proof_report,
-      readiness: readiness,
-      signer: signer
-    }
+      recommended_rebalance_side: report[:drift_eth]&.positive? ? "increase_short" : "decrease_short",
+      recommended_rebalance_size_eth: report[:drift_eth]&.abs
+    )
   end
 
   private
@@ -102,6 +59,15 @@ class MigrationRandomBurnInPreflight
   attr_reader :position, :env, :proof_registry, :venue_builder, :signer_client, :fresh_target_factory,
     :readiness_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
     :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
+
+  def burn_in_blocker_label(blocker)
+    text = blocker.to_s
+    return text.sub("max allowed drift exceeded", "burn-in max allowed drift exceeded") if text.start_with?("max allowed drift exceeded")
+    return text.sub("max allowed drift ratio exceeded", "burn-in max allowed drift ratio exceeded") if text.start_with?("max allowed drift ratio exceeded")
+    return text.sub("current hedge outside tolerance", "current hedge out_of_burn_in_tolerance") if text.start_with?("current hedge outside tolerance")
+
+    text
+  end
 
   def enabled_missing_route_proofs(proof_report)
     policy = MigrationRouteOperationalPolicy.new(env: env)

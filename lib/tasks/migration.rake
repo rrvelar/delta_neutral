@@ -350,6 +350,17 @@ namespace :migration do
     end
 
     if live
+      preflight = MigrationExecutionPreflight.new(
+        position: position,
+        from: from,
+        to: to,
+        strategy: strategy,
+        live: true,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        expected_confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        require_migration_live_gate: true,
+        require_venue_live_gates: true
+      ).report
       result = HedgeVenueMigrationExecutor.new.run(
         position: position,
         from_venue: from,
@@ -358,7 +369,8 @@ namespace :migration do
         dry_run: false,
         confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
         full_migration_allowed: true,
-        migration_sequence: strategy
+        migration_sequence: strategy,
+        execution_preflight: preflight
       )
       receipt = result.receipt.merge(
         action: "prove_route_latency",
@@ -404,8 +416,15 @@ namespace :migration do
 
     from = ENV["from"].presence || ENV["FROM"].presence
     to = ENV["to"].presence || ENV["TO"].presence
-    sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || "target_first"
-    plan = MigrationManualCanaryPlanner.new(position: position, from: from, to: to, sequence: sequence).report
+    sequence = ENV["sequence"].presence || ENV["SEQUENCE"].presence || MigrationRouteOperationalPolicy.new.route_strategy(from: from, to: to)
+    preflight = MigrationExecutionPreflight.new(
+      position: position,
+      from: from,
+      to: to,
+      strategy: sequence,
+      live: false
+    ).report
+    plan = MigrationManualCanaryPlanner.new(position: position, from: from, to: to, sequence: sequence, execution_preflight: preflight).report
     receipt = plan.merge(
       action: "migration_rehearse_route",
       dry_run: true,

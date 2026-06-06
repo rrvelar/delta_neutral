@@ -838,7 +838,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = direct_preflight(position).report
 
     assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
-    assert_equal "dedicated_burn_in_preflight", report.fetch(:preflight_source)
+    assert_equal "migration_execution_preflight", report.fetch(:preflight_source)
     assert_equal BigDecimal("1.18"), report.fetch(:target).fetch(:target_short_eth)
     assert_equal BigDecimal("1.18"), report.dig(:venues, "ethereal", :short_eth)
   end

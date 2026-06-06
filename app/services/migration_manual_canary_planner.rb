@@ -17,7 +17,7 @@ class MigrationManualCanaryPlanner
     [ "nado", "ethereal" ]
   ].freeze
 
-  def initialize(position:, from:, to:, env: ENV, target_preflight: nil, fresh_target: nil, sequence: "target_first", now: -> { Time.current })
+  def initialize(position:, from:, to:, env: ENV, target_preflight: nil, fresh_target: nil, sequence: "target_first", now: -> { Time.current }, execution_preflight: nil)
     @position = position
     @from = HedgeVenues.normalize(from)
     @to = HedgeVenues.normalize(to)
@@ -26,6 +26,7 @@ class MigrationManualCanaryPlanner
     @fresh_target = fresh_target
     @sequence = sequence.to_s.presence || "target_first"
     @now = now
+    @execution_preflight = execution_preflight
   end
 
   def report
@@ -92,7 +93,7 @@ class MigrationManualCanaryPlanner
 
   private
 
-  attr_reader :position, :from, :to, :env, :sequence, :now
+  attr_reader :position, :from, :to, :env, :sequence, :now, :execution_preflight
 
   def canonical_blockers(target)
     blockers = []
@@ -102,9 +103,12 @@ class MigrationManualCanaryPlanner
     blockers.concat(full_migration_gate_blockers)
     blockers.concat(live_env_gate_blockers)
     blockers.concat(auto_enabled_blockers)
-    blockers << "position hedge execution_venue must be #{from} before migration" unless production_venue == from
-    blockers << "source venue must have a real short before canary." unless source_short.positive?
-    blockers.concat(Array(target[:blockers]))
+    blockers.concat(Array(execution_preflight&.fetch(:hard_blockers, nil) || execution_preflight&.fetch(:blockers, nil)))
+    unless execution_preflight
+      blockers << "position hedge execution_venue must be #{from} before migration" unless production_venue == from
+      blockers << "source venue must have a real short before canary." unless source_short.positive?
+      blockers.concat(Array(target[:blockers]))
+    end
     blockers << "fresh Mellow target is required before supervised canary." unless target[:status] == "ok"
     blockers << "Nado must be flat before supervised canary." if ![ from, to ].include?("nado") && !nado_flat?
     blockers.concat(source_first_blockers(target))
@@ -314,6 +318,21 @@ class MigrationManualCanaryPlanner
   end
 
   def fresh_target_report
+    if execution_preflight
+      target = execution_preflight.fetch(:target)
+      return {
+        status: target[:status],
+        target_short_eth: target[:target_short_eth],
+        target_source: target[:target_source],
+        exposure_source: target[:exposure_source],
+        exposure_refreshed_at: target[:exposure_refreshed_at],
+        exposure_stale: target[:target_fresh] != true,
+        blockers: Array(execution_preflight[:hard_blockers] || execution_preflight[:blockers]),
+        orders_submitted: 0,
+        signatures_created: 0
+      }
+    end
+
     @fresh_target_report ||= (@fresh_target || HedgeFreshTarget.new(position: position, env: env)).resolve(refresh_if_stale: true)
   rescue => e
     {
@@ -374,6 +393,10 @@ class MigrationManualCanaryPlanner
   end
 
   def venue_short(venue)
+    if execution_preflight
+      return BigDecimal(execution_preflight.dig(:venues, venue, :short_eth).to_s)
+    end
+
     BigDecimal(snapshot&.public_send("#{venue}_short_eth").to_s)
   rescue ArgumentError, NoMethodError
     BigDecimal("0")

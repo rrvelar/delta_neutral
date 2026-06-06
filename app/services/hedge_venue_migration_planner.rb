@@ -22,7 +22,7 @@ class HedgeVenueMigrationPlanner
     sequence = normalized_sequence(migration_sequence)
     snapshot = position.position_dashboard_snapshot
     critical_source = execution_preflight_source(execution_preflight)
-    blockers = snapshot_blockers(snapshot, critical_source: critical_source)
+    blockers = snapshot_blockers(snapshot, execution_preflight: execution_preflight, critical_source: critical_source)
     blockers << "from_venue and to_venue must differ" if from == to
     blockers << "Migration direction #{from} -> #{to} is not supported yet." unless SUPPORTED_DIRECTIONS.include?([ from, to ])
 
@@ -163,8 +163,9 @@ class HedgeVenueMigrationPlanner
     }
   end
 
-  def snapshot_blockers(snapshot, critical_source:)
+  def snapshot_blockers(snapshot, execution_preflight:, critical_source:)
     return Array(critical_source[:blockers]).uniq if critical_source
+    return Array(execution_preflight[:hard_blockers] || execution_preflight[:blockers]).uniq if execution_preflight.is_a?(Hash) && execution_preflight[:accepted] == false
     return [ "Position dashboard snapshot is missing; refresh read-only data before planning migration." ] unless snapshot
 
     blockers = []

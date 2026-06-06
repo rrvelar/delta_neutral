@@ -20,6 +20,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:next_canary"].reenable if Rake::Task.task_defined?("migration:next_canary")
     Rake::Task["migration:rehearse_next_canary"].reenable if Rake::Task.task_defined?("migration:rehearse_next_canary")
     Rake::Task["migration:rehearse_route"].reenable if Rake::Task.task_defined?("migration:rehearse_route")
+    Rake::Task["migration:prove_route_latency"].reenable if Rake::Task.task_defined?("migration:prove_route_latency")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
     Rake::Task["migration:continue_target_first_after_nado_confirmed"].reenable if Rake::Task.task_defined?("migration:continue_target_first_after_nado_confirmed")
   end
@@ -438,6 +439,84 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("position_id")
     ENV.delete("from")
     ENV.delete("to")
+    ENV.delete("confirmation")
+  end
+
+  test "prove route latency uses shared preflight and ignores optional dashboard partial" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "ethereal")
+    position.position_dashboard_snapshot.update!(
+      refresh_status: "partial",
+      production_venue: "ethereal",
+      selected_venue: "ethereal",
+      extended_short_eth: "0",
+      ethereal_short_eth: "0.8",
+      nado_short_eth: "0",
+      source_errors: [ "extended optional account state timed_out=true timeout_seconds=8.0" ]
+    )
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "ethereal"
+    ENV["to"] = "nado"
+    ENV["strategy"] = "source_first"
+    ENV["live"] = "true"
+    ENV["confirmation"] = "I_UNDERSTAND_THIS_RUNS_LIVE_ROUTE_LATENCY_PROOF"
+
+    preflight = {
+      status: "ready",
+      accepted: true,
+      can_submit: true,
+      hard_blockers: [],
+      blockers: [],
+      warnings: [ "dashboard snapshot refresh_status=partial treated as diagnostic; direct migration preflight readbacks are authoritative" ],
+      diagnostics: {},
+      target: { target_short_eth: BigDecimal("0.8"), target_fresh: true, status: "ok" },
+      venues: {
+        "extended" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero" },
+        "ethereal" => { short_eth: BigDecimal("0.8"), position_status: "ok", open_orders_status: "zero" },
+        "nado" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero" }
+      }
+    }
+    fake_preflight = Object.new.tap { |object| object.define_singleton_method(:report) { preflight } }
+    fake_executor = Object.new.tap do |object|
+      object.define_singleton_method(:run) do |execution_preflight:, **|
+        raise "missing shared preflight" unless execution_preflight == preflight
+
+        HedgeVenueMigrationExecutor::Result.new(
+          "blocked_before_submit",
+          [],
+          preflight[:warnings],
+          {
+            final_status: "blocked_before_submit",
+            preflight_status: execution_preflight.fetch(:status),
+            preflight_hard_blockers: execution_preflight.fetch(:hard_blockers),
+            preflight_warnings: execution_preflight.fetch(:warnings),
+            blockers: [],
+            orders_submitted: 0,
+            orders_placed: 0,
+            signatures_created: 0,
+            cancels_submitted: 0
+          }
+        )
+      end
+    end
+
+    MigrationExecutionPreflight.stub(:new, fake_preflight) do
+      HedgeVenueMigrationExecutor.stub(:new, fake_executor) do
+        out, = capture_io { Rake::Task["migration:prove_route_latency"].invoke }
+        payload = JSON.parse(out)
+
+        assert_equal "prove_route_latency", payload.fetch("action")
+        assert_equal "ready", payload.fetch("preflight_status")
+        assert_empty payload.fetch("preflight_hard_blockers")
+        assert_includes payload.fetch("preflight_warnings"), "dashboard snapshot refresh_status=partial treated as diagnostic; direct migration preflight readbacks are authoritative"
+      end
+    end
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("strategy")
+    ENV.delete("live")
     ENV.delete("confirmation")
   end
 

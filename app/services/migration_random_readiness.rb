@@ -90,10 +90,11 @@ class MigrationRandomReadiness
   end
 
   def commands_for(from, to)
+    strategy = MigrationRouteOperationalPolicy.new(env: @env).route_strategy(from: from, to: to)
     {
-      next_canary_dry_run: "bin/rails migration:rehearse_route position_id=#{position.id} from=#{from} to=#{to} mode=full sequence=target_first dry_run=true",
-      next_canary_live: "bin/rails migration:run_manual_live_canary position_id=#{position.id} from=#{from} to=#{to} sequence=target_first confirmation=#{MigrationManualLiveCanaryRunner::CONFIRMATION}",
-      nado_target_continuation: to == "nado" ? "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{from} to=#{to} dry_run=true" : nil,
+      next_canary_dry_run: "bin/rails migration:rehearse_route position_id=#{position.id} from=#{from} to=#{to} mode=full sequence=#{strategy} dry_run=true",
+      next_canary_live: "bin/rails migration:run_manual_live_canary position_id=#{position.id} from=#{from} to=#{to} sequence=#{strategy} confirmation=#{MigrationManualLiveCanaryRunner::CONFIRMATION}",
+      nado_target_continuation: to == "nado" && strategy == "target_first" ? "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{from} to=#{to} dry_run=true" : nil,
       recovery: "bin/rails migration:recover_target_first_source_close position_id=#{position.id} from=#{from} to=#{to} dry_run=true"
     }.compact
   end

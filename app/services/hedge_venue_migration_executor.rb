@@ -4,7 +4,7 @@ class HedgeVenueMigrationExecutor
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   CONFIRMATION = "I_UNDERSTAND_THIS_MIGRATES_HEDGE_BETWEEN_VENUES".freeze
 
-  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil, receipt_writer: nil, final_verifier_factory: nil, final_reconciliation_attempts: nil, final_reconciliation_interval: nil, sleeper: ->(seconds) { sleep(seconds) })
+  def initialize(env: ENV, planner: HedgeVenueMigrationPlanner.new, leg_runner: nil, now: -> { Time.current }, snapshot_refresher: nil, receipt_writer: nil, final_verifier_factory: nil, final_reconciliation_attempts: nil, final_reconciliation_interval: nil, sleeper: ->(seconds) { sleep(seconds) }, execution_preflight_factory: nil)
     @env = env
     @planner = planner
     @leg_runner = leg_runner || DefaultLegRunner.new(env: env)
@@ -15,10 +15,12 @@ class HedgeVenueMigrationExecutor
     @final_reconciliation_attempts = final_reconciliation_attempts || env.fetch("MIGRATION_FINAL_RECONCILIATION_ATTEMPTS", MigrationTargetFirstFinalVerifier::DEFAULT_ATTEMPTS)
     @final_reconciliation_interval = final_reconciliation_interval || env.fetch("MIGRATION_FINAL_RECONCILIATION_INTERVAL_SECONDS", MigrationTargetFirstFinalVerifier::DEFAULT_INTERVAL_SECONDS)
     @sleeper = sleeper
+    @execution_preflight_factory = execution_preflight_factory
   end
 
   def run(position:, from_venue:, to_venue:, mode: "preview", dry_run: true, confirmation: nil, step_size_eth: nil, full_migration_allowed: false, migration_sequence: HedgeVenueMigrationPlanner::DEFAULT_SEQUENCE, execution_preflight: nil)
     refreshed_snapshot = nil
+    execution_preflight ||= live_execution_preflight(position: position, from_venue: from_venue, to_venue: to_venue, confirmation: confirmation, migration_sequence: migration_sequence) if !dry_run && live_preflight_gate_open?(confirmation) && @execution_preflight_factory
     if !dry_run && live_preflight_gate_open?(confirmation) && execution_preflight.blank?
       refreshed_snapshot = @snapshot_refresher.call(position)
       position.reload
@@ -41,6 +43,10 @@ class HedgeVenueMigrationExecutor
       source_snapshot_id: refreshed_snapshot&.id || plan.receipt[:source_snapshot_id],
       source_snapshot_refreshed_at: refreshed_snapshot&.refreshed_at&.utc&.iso8601 || plan.receipt[:source_snapshot_refreshed_at],
       confirmation_type: confirmation == CONFIRMATION ? "dashboard_migration_confirmation" : (confirmation.present? ? "invalid_confirmation" : "missing_confirmation"),
+      preflight_status: execution_preflight&.fetch(:status, nil),
+      preflight_hard_blockers: Array(execution_preflight&.fetch(:hard_blockers, nil)),
+      preflight_warnings: Array(execution_preflight&.fetch(:warnings, nil)),
+      preflight_diagnostics: execution_preflight&.fetch(:diagnostics, nil),
       orders_placed: 0,
       signatures_created: 0,
       exchange_order_ids: [],
@@ -494,6 +500,22 @@ class HedgeVenueMigrationExecutor
     bool_env("MIGRATION_LIVE_ENABLED") && confirmation == CONFIRMATION
   end
 
+  def live_execution_preflight(position:, from_venue:, to_venue:, confirmation:, migration_sequence:)
+    factory = @execution_preflight_factory || ->(**kwargs) { MigrationExecutionPreflight.new(**kwargs).report }
+    factory.call(
+      position: position,
+      from: from_venue,
+      to: to_venue,
+      strategy: migration_sequence,
+      env: @env,
+      live: true,
+      confirmation: confirmation,
+      expected_confirmation: CONFIRMATION,
+      require_migration_live_gate: true,
+      require_venue_live_gates: true
+    )
+  end
+
   def refresh_dashboard_snapshot(position)
     DashboardSnapshotRefresh.new(position: position, force: true).refresh
   end
@@ -849,6 +871,7 @@ class HedgeVenueMigrationExecutor
 
   def live_blockers(position:, receipt:, dry_run:, confirmation:, execution_preflight: nil)
     return [] if dry_run
+    return [] if execution_preflight.is_a?(Hash) && execution_preflight[:accepted] == false
 
     direct = accepted_execution_preflight(execution_preflight)
     blockers = []
