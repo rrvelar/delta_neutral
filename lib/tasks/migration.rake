@@ -497,14 +497,18 @@ namespace :migration do
     from = ENV["from"].presence || ENV["FROM"].presence
     to = ENV["to"].presence || ENV["TO"].presence || "nado"
     digest = ENV["digest"].presence || ENV["DIGEST"].presence
-    reconciler = MigrationRouteCompletionReconciler.new(
+    snapshot = position.position_dashboard_snapshot
+    readback = NadoMigrationReadback.confirm_target_short(
       position: position,
       from: from,
       to: to,
-      receipt_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR
+      expected_target_short: snapshot&.target_short_eth,
+      tolerance_eth: snapshot&.tolerance_abs_eth,
+      env: ENV
     )
+    reconciler = MigrationRouteCompletionReconciler.new(position: position, from: from, to: to, receipt_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR)
     current = reconciler.report
-    result = if current.route_complete_by_readback && current.production_venue_finalized
+    result = if readback.fetch(:confirmed) && current.route_complete_by_readback && current.production_venue_finalized
       reconciler.write_ready_receipt!(status: "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK")
     else
       current
@@ -513,6 +517,8 @@ namespace :migration do
       action: "reconcile_nado_source_first",
       nado_target_digest: digest,
       nado_target_exchange_order_id: digest,
+      canonical_nado_readback: readback.except(:verification),
+      canonical_nado_verification: readback[:verification],
       submitted: false,
       orders_submitted: 0,
       orders_placed: 0,

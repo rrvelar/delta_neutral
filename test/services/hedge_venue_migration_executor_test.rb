@@ -1166,6 +1166,111 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "source first Nado accepted digest uses canonical recovery readback when service reconciliation misses target" do
+    position = migration_position_for("ethereal")
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [ "target still not visible through Nado service poll" ], [], {
+      submitted: true,
+      orders_placed: 1,
+      orders_submitted: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-canonical",
+      action_plan: { expected_after_short_eth: "0.8" },
+      final_status: "submitted_but_readback_pending"
+    })
+    fake_service = FakeNadoMigrationService.new(pending: pending, confirmed: pending)
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    nado_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
+      ),
+      venue_builder: fake_builder,
+      sleeper: ->(_seconds) { }
+    )
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      calls.size == 1 ? { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "ethereal-close", after_short_eth: "0" } : nado_runner.call(leg, context: context)
+    end
+
+    canonical_readback = {
+      status: "confirmed",
+      confirmed: true,
+      target_confirmed: true,
+      source_flat: true,
+      third_venue_flat: true,
+      combined_inside_tolerance: true,
+      open_orders_clear: true,
+      target_short_eth: "0.8",
+      source_short_eth: "0",
+      combined_short_eth: "0.8",
+      expected_target_short_eth: "0.8",
+      tolerance_eth: "0.024",
+      latest_attempt: {
+        timestamp: Time.current.utc.iso8601,
+        source_short_eth: "0",
+        target_venue_short_eth: "0.8",
+        combined_short_eth: "0.8",
+        expected_target_short_eth: "0.8",
+        tolerance_eth: "0.024",
+        source_flat: true,
+        target_confirmed: true,
+        third_venue_flat: true,
+        combined_inside_tolerance: true,
+        open_orders_clear: true,
+        blockers: []
+      },
+      verification: { confirmed: true, latest_attempt: {}, blockers: [] },
+      blockers: [],
+      readback_source: "canonical_nado_migration_readback"
+    }
+    canonical_calls = []
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      NadoMigrationReadback.stub(:confirm_target_short, ->(**kwargs) { canonical_calls << kwargs; canonical_readback }) do
+      result = HedgeVenueMigrationExecutor.new(
+        env: live_env.merge(
+          "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+          "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+          "NADO_SOURCE_FIRST_RECONCILIATION_ATTEMPTS" => "2",
+          "NADO_SOURCE_FIRST_RECONCILIATION_INTERVAL_SECONDS" => "0"
+        ),
+        leg_runner: runner,
+        snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+        final_verifier_factory: final_verifier_factory(from: "ethereal", to: "nado"),
+        sleeper: ->(_seconds) { }
+      ).run(
+        position: position,
+        from_venue: "ethereal",
+        to_venue: "nado",
+        dry_run: false,
+        confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+        full_migration_allowed: true,
+        mode: "full",
+        migration_sequence: "source_first"
+      )
+
+      assert_equal "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK", result.status, result.blockers.inspect
+      assert_equal 1, canonical_calls.size
+      assert_equal "ethereal", canonical_calls.first.fetch(:from)
+      assert_equal "nado", canonical_calls.first.fetch(:to)
+      assert_equal 1, fake_service.open_calls
+      assert_equal 2, fake_service.reconcile_calls
+      assert_equal "nado", position.hedge.reload.execution_venue
+      assert_equal true, result.receipt.fetch(:nado_source_first_canonical_readback).fetch(:confirmed)
+      assert_equal "TARGET_CONFIRMED_LATE_BY_RECONCILIATION", result.receipt.fetch(:target_leg_status)
+      assert_equal [ "ethereal-close", "0xnado-canonical" ], result.receipt.fetch(:exchange_order_ids)
+      assert_equal true, result.receipt.fetch(:submitted)
+      assert_equal 2, result.receipt.fetch(:orders_submitted)
+    end
+    end
+  end
+
   test "source first Nado accepted digest becomes bounded ambiguous state without duplicate submit" do
     position = migration_position_for("ethereal")
     fake_venue = Class.new do

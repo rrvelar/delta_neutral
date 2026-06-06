@@ -348,18 +348,37 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   end
 
   test "random readiness blocks while Nado target continuation is pending and shows command" do
-    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    base_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    canary_dir = base_dir.join("canaries")
+    registry = MigrationRouteProofRegistry.new(
+      route_proof_dir: base_dir.join("route_proofs"),
+      canary_dir: canary_dir,
+      recovery_dir: base_dir.join("recoveries"),
+      continuation_dir: base_dir.join("continuations"),
+      random_dir: base_dir.join("random")
+    )
+    planner = MigrationRandomPlanner.new(route_matrix: ready_matrix, proof_registry: registry, random_seed: "seed")
     position = migration_position("ethereal")
-    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal"))
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY", enabled: "target_first")
+    position.position_dashboard_snapshot.update!(
+      nado_short_eth: "0.8",
+      combined_short_eth: "1.6",
+      inside_tolerance: false
+    )
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal").merge(
+      nado_target_digest: "0xpending-unresolved",
+      exchange_order_ids: [ "0xpending-unresolved" ]
+    ))
 
-    report = MigrationRandomReadiness.new(position: position, planner: random_planner, canary_dir: canary_dir).report
+    report = MigrationRandomReadiness.new(position: position, planner: planner, proof_registry: registry, canary_dir: canary_dir).report
 
     assert_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
     pending = report.fetch(:pending_nado_target_continuation)
     assert_equal "ethereal->nado", pending.fetch(:route)
     assert_match "migration:continue_target_first_after_nado_confirmed", pending.fetch(:continuation_command)
   ensure
-    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(base_dir) if base_dir
   end
 
   test "random readiness suppresses pending Nado continuation when route proof is ready by continuation" do

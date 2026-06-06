@@ -234,12 +234,29 @@ class HedgeVenueMigrationExecutor
 
     unless leg_confirmed?(target_leg)
       if source_first_nado_target_accepted?(receipt, target_leg_plan, target_leg)
-        apply_source_first_nado_ambiguous_manual_action!(position, receipt, target_leg)
+        canonical = confirm_source_first_nado_target_by_canonical_readback(position: position, receipt: receipt)
+        if canonical[:confirmed]
+          target_leg = mark_source_first_nado_target_confirmed_by_canonical_readback(target_leg, canonical)
+          receipt[:second_leg_execution] = sanitize_sensitive(target_leg)
+          receipt[:to_leg_execution] = sanitize_sensitive(target_leg)
+          receipt[:target_leg_status] = leg_lifecycle_status(leg: target_leg, planned_leg: target_leg_plan, role: "target")
+          receipt[:target_late_reconciliation] = true
+          receipt[:target_readback_attempts] = canonical[:latest_attempt]
+          receipt[:leg_readbacks] << canonical[:latest_attempt]
+          receipt[:target_readback_confirmed_at] = canonical.dig(:latest_attempt, :timestamp) || @now.call.utc.iso8601(6)
+          receipt[:underhedge_ended_at] = receipt[:target_readback_confirmed_at]
+          annotate_source_first_nado_timing!(receipt, target_leg_plan)
+          compute_underhedge_latency!(receipt)
+        else
+          apply_source_first_nado_ambiguous_manual_action!(position, receipt, target_leg)
+          write_receipt(receipt)
+          return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+        end
       else
         apply_source_first_target_failed_manual_action!(position, receipt, Array(target_leg[:blockers]).presence || [ "Source-first target open did not confirm after source was closed." ])
+        write_receipt(receipt)
+        return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
       end
-      write_receipt(receipt)
-      return Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
     end
 
     receipt.merge!(final_readback_status(position: position, receipt: receipt))
@@ -808,6 +825,48 @@ class HedgeVenueMigrationExecutor
     receipt[:warnings] = (Array(receipt[:warnings]) + [
       "Source-first route closed source and Nado accepted a target digest, but target readback remained ambiguous after the bounded reconciliation window. No duplicate Nado target order was submitted."
     ]).uniq
+  end
+
+  def confirm_source_first_nado_target_by_canonical_readback(position:, receipt:)
+    result = NadoMigrationReadback.confirm_target_short(
+      position: position,
+      from: receipt[:from_venue],
+      to: receipt[:to_venue],
+      expected_target_short: receipt[:target_short],
+      tolerance_eth: receipt[:tolerance_abs_eth],
+      env: @env,
+      attempts: nado_source_first_reconciliation_attempts,
+      interval_seconds: nado_source_first_reconciliation_interval_seconds,
+      sleeper: @sleeper,
+      now: @now
+    )
+    receipt[:nado_source_first_canonical_readback] = result.except(:verification)
+    receipt[:nado_source_first_canonical_verification] = result[:verification]
+    result
+  end
+
+  def mark_source_first_nado_target_confirmed_by_canonical_readback(target_leg, canonical)
+    leg_receipt = (target_leg[:receipt] || {}).merge(
+      reconciled_after_pending: true,
+      readback_confirmed: true,
+      pending_reconciliation_readback: canonical[:latest_attempt],
+      pending_reconciliation_confirmation: {
+        confirmed: true,
+        actual_short_eth: canonical[:target_short_eth],
+        expected_short_eth: canonical[:expected_target_short_eth],
+        route_tolerance_eth: canonical[:tolerance_eth],
+        confirmed_by_route_tolerance: canonical[:target_confirmed]
+      },
+      final_status: "SOURCE_FIRST_TARGET_CONFIRMED_BY_CANONICAL_READBACK",
+      lifecycle_state: "NADO_TARGET_CONFIRMED_LATE"
+    )
+    target_leg.merge(
+      status: "confirmed_by_canonical_nado_readback",
+      confirmed: true,
+      readback: canonical[:latest_attempt],
+      receipt: leg_receipt,
+      blockers: []
+    )
   end
 
   def annotate_source_first_nado_timing!(receipt, target_leg_plan)

@@ -23,6 +23,7 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:prove_route_latency"].reenable if Rake::Task.task_defined?("migration:prove_route_latency")
     Rake::Task["migration:recover_target_first_source_close"].reenable if Rake::Task.task_defined?("migration:recover_target_first_source_close")
     Rake::Task["migration:continue_target_first_after_nado_confirmed"].reenable if Rake::Task.task_defined?("migration:continue_target_first_after_nado_confirmed")
+    Rake::Task["migration:reconcile_nado_source_first"].reenable if Rake::Task.task_defined?("migration:reconcile_nado_source_first")
     Rake::Task["migration:route_policy_list"].reenable if Rake::Task.task_defined?("migration:route_policy_list")
     Rake::Task["migration:route_policy_restore_defaults"].reenable if Rake::Task.task_defined?("migration:route_policy_restore_defaults")
     Rake::Task["migration:route_policy_set"].reenable if Rake::Task.task_defined?("migration:route_policy_set")
@@ -574,6 +575,60 @@ class MigrationTaskTest < ActiveSupport::TestCase
     ENV.delete("enabled")
     ENV.delete("strategy")
     ENV.delete("confirmation")
+  end
+
+  test "reconcile nado source first task uses canonical readback helper" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "nado")
+    position.position_dashboard_snapshot.update!(
+      production_venue: "nado",
+      selected_venue: "nado",
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0.8",
+      combined_short_eth: "0.8",
+      inside_tolerance: true
+    )
+    ENV["position_id"] = position.id.to_s
+    ENV["from"] = "ethereal"
+    ENV["to"] = "nado"
+    ENV["digest"] = "0xnado-task"
+    calls = []
+    readback = {
+      status: "confirmed",
+      confirmed: true,
+      target_confirmed: true,
+      source_flat: true,
+      third_venue_flat: true,
+      combined_inside_tolerance: true,
+      open_orders_clear: true,
+      target_short_eth: "0.8",
+      source_short_eth: "0",
+      combined_short_eth: "0.8",
+      expected_target_short_eth: "0.8",
+      tolerance_eth: "0.024",
+      latest_attempt: {},
+      verification: { confirmed: true },
+      blockers: []
+    }
+
+    NadoMigrationReadback.stub(:confirm_target_short, ->(**kwargs) { calls << kwargs; readback }) do
+      out, = capture_io { Rake::Task["migration:reconcile_nado_source_first"].invoke }
+      payload = JSON.parse(out)
+
+      assert_equal 1, calls.size
+      assert_equal "ethereal", calls.first.fetch(:from)
+      assert_equal "nado", calls.first.fetch(:to)
+      assert_equal "0xnado-task", payload.fetch("nado_target_digest")
+      assert_equal true, payload.fetch("canonical_nado_readback").fetch("confirmed")
+      assert_equal 0, payload.fetch("orders_submitted")
+      assert_equal 0, payload.fetch("signatures_created")
+    end
+  ensure
+    ENV.delete("position_id")
+    ENV.delete("from")
+    ENV.delete("to")
+    ENV.delete("digest")
   end
 
   test "recover target first source close task outputs safe blocked counters" do
