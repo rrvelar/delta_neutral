@@ -3,6 +3,7 @@ require "test_helper"
 class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
   test "readback reconciliation receipt marks route ready with zero safety counters" do
     position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED", enabled: true)
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
@@ -67,6 +68,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
   test "safe finalized recovery receipt marks route ready for random" do
     position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("recoveries")).write(

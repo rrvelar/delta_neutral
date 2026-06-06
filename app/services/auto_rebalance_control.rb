@@ -84,7 +84,7 @@ class AutoRebalanceControl
 
     applied = []
     ActiveRecord::Base.transaction do
-      (OperationalSettings::AUTO_KEYS_BY_VENUE.values + OperationalSettings::MIGRATION_KEYS).each do |key|
+      OperationalSettings::ALLOWED_KEYS.each do |key|
         applied << OperationalSettings.set!(
           key: key,
           enabled: false,

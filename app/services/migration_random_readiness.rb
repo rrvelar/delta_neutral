@@ -53,7 +53,7 @@ class MigrationRandomReadiness
     blockers = []
     blockers << "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
     blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
-    blockers << "all route proofs must be READY_FOR_RANDOM" unless proof_report.fetch(:missing_route_proofs).empty?
+    blockers << "all enabled route proofs must be READY_FOR_RANDOM" if enabled_missing_route_proofs(proof_report).present?
     blockers << "no eligible proven route from current production venue" if live_plan.fetch(:selected_route).blank?
     blockers << "pending ShortRebalance must be resolved before random migration" if pending_rebalance?
     blockers << "pending recovery must be resolved before random migration" if pending_recovery?
@@ -166,7 +166,7 @@ class MigrationRandomReadiness
     route = proof_report.fetch(:routes).find do |entry|
       entry[:from_venue] == event["from_venue"] && entry[:to_venue] == event["to_venue"]
     end
-    safe = route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:ready] &&
+    safe = route&.fetch(:status, nil).in?([ MigrationRouteProofRegistry::STATUSES[:ready], MigrationRouteProofRegistry::STATUSES[:not_safe_latency] ]) &&
       safe_readback_for_completed_route?(from: event["from_venue"], to: event["to_venue"])
     @stale_pending_continuation_ignored = true if safe
     safe
@@ -249,6 +249,13 @@ class MigrationRandomReadiness
     return OperationalSettings.enabled?(key, env: env) if OperationalSettings.allowed_key?(key)
 
     ActiveModel::Type::Boolean.new.cast(env[key])
+  end
+
+  def enabled_missing_route_proofs(proof_report)
+    policy = MigrationRouteOperationalPolicy.new(env: env)
+    proof_report.fetch(:missing_route_proofs).reject do |route|
+      !policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
+    end
   end
 
   def env

@@ -401,6 +401,7 @@ class RandomRotationSetupWizard
       MigrationRouteProofRegistry::STATUSES[:dry_run] => "dry-run proven, live canary required",
       MigrationRouteProofRegistry::STATUSES[:live] => "target canary confirmed, source close may be required",
       MigrationRouteProofRegistry::STATUSES[:ready] => "ready for random rotation",
+      MigrationRouteProofRegistry::STATUSES[:not_safe_latency] => "not production-safe: source close latency",
       MigrationRouteProofRegistry::STATUSES[:not_started] => "dry-run proof required"
     }.fetch(status, status.to_s.tr("_", " ").downcase)
   end

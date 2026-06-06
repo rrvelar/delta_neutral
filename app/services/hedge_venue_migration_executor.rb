@@ -118,11 +118,15 @@ class HedgeVenueMigrationExecutor
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
       mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
       compute_source_close_latency!(receipt)
+      compute_double_exposure_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
         apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
       end
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
-      receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
+      apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && double_exposure_exceeds_threshold?(receipt)
+      receipt[:lifecycle_state] = if receipt[:final_status] == "NOT_PRODUCTION_SAFE_LATENCY"
+        "NOT_PRODUCTION_SAFE_LATENCY"
+      elsif receipt[:production_venue_finalized]
         "MIGRATION_FINALIZED"
       elsif receipt[:final_status] == "success"
         "SOURCE_CLOSE_CONFIRMED"
@@ -484,11 +488,15 @@ class HedgeVenueMigrationExecutor
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
       mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
       compute_source_close_latency!(receipt)
+      compute_double_exposure_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
         apply_target_open_source_still_open_manual_action!(position, receipt, Array(receipt[:blockers]).presence || [ "Source close did not confirm after target was opened." ])
       end
       finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
-      receipt[:lifecycle_state] = if receipt[:production_venue_finalized]
+      apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && double_exposure_exceeds_threshold?(receipt)
+      receipt[:lifecycle_state] = if receipt[:final_status] == "NOT_PRODUCTION_SAFE_LATENCY"
+        "NOT_PRODUCTION_SAFE_LATENCY"
+      elsif receipt[:production_venue_finalized]
         "MIGRATION_FINALIZED"
       elsif receipt[:final_status] == "success"
         "SOURCE_CLOSE_CONFIRMED"
@@ -549,6 +557,45 @@ class HedgeVenueMigrationExecutor
   def compute_source_close_latency!(receipt)
     receipt[:source_close_submit_to_flat_seconds] = seconds_between(receipt[:source_close_submit_finished_at], receipt[:source_close_flat_confirmed_at])
     receipt[:source_close_submit_start_after_target_confirm_seconds] = receipt[:target_confirm_to_source_close_submit_latency_seconds]
+  end
+
+  def compute_double_exposure_latency!(receipt)
+    return unless receipt[:migration_sequence].to_s == "target_first"
+    return unless receipt[:target_leg_accepted_at].present?
+
+    receipt[:double_exposure_started_at] ||= receipt[:target_leg_accepted_at]
+    receipt[:source_close_order_submitted_at] ||= receipt[:source_close_submit_finished_at]
+    receipt[:double_exposure_ended_at] ||= receipt[:source_close_flat_confirmed_at] if receipt[:source_flat_after]
+    receipt[:double_exposure_seconds] ||= seconds_between(receipt[:double_exposure_started_at], receipt[:double_exposure_ended_at])
+    receipt[:source_close_exchange_latency_seconds] ||= receipt[:source_close_exchange_submit_latency_seconds] || receipt[:source_close_submit_latency_seconds]
+    receipt[:source_close_readback_latency_seconds] ||= receipt[:source_close_submit_to_flat_seconds]
+  end
+
+  def double_exposure_exceeds_threshold?(receipt)
+    seconds = receipt[:double_exposure_seconds]
+    seconds.present? && BigDecimal(seconds.to_s) > max_double_exposure_seconds
+  rescue ArgumentError
+    false
+  end
+
+  def max_double_exposure_seconds
+    decimal_env("MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS", "10")
+  end
+
+  def apply_latency_incident!(position, receipt)
+    pause_autonomous_migration!(position)
+    receipt[:final_status] = "NOT_PRODUCTION_SAFE_LATENCY"
+    receipt[:lifecycle_state] = "NOT_PRODUCTION_SAFE_LATENCY"
+    receipt[:manual_action_required] = true
+    receipt[:latency_incident] = true
+    receipt[:production_safe_route] = false
+    receipt[:route_production_safe] = false
+    receipt[:blockers] = [ "double exposure lasted #{receipt[:double_exposure_seconds]}s, exceeding MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS=#{max_double_exposure_seconds.to_s('F')}" ]
+    receipt[:recovery_command] ||= recovery_command(receipt)
+    receipt[:random_and_auto_paused] = true
+    receipt[:warnings] = (Array(receipt[:warnings]) + [
+      "Route finalized safely but source close was too slow for production random; route must be re-proven with acceptable double-exposure latency."
+    ]).uniq
   end
 
   def target_confirm_to_source_close_exceeds_threshold?(receipt)

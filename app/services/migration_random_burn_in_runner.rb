@@ -223,8 +223,11 @@ class MigrationRandomBurnInRunner
 
   def select_route
     current = HedgeVenues.normalize(position.hedge&.execution_venue)
+    policy = MigrationRouteOperationalPolicy.new(env: env)
     routes = proof_registry.report(position: position).fetch(:routes).select do |route|
-      route[:from_venue] == current && route[:status] == MigrationRouteProofRegistry::STATUSES[:ready]
+      route[:from_venue] == current &&
+        route[:status] == MigrationRouteProofRegistry::STATUSES[:ready] &&
+        policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
     end
     return nil if routes.empty?
     return routes.find { |route| route[:route] == selector.call(routes) } || routes.first if selector

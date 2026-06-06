@@ -348,8 +348,11 @@ class MigrationRandomRotationDailyRunner
 
   def live_route_from_preflight(direct, seed:)
     current = HedgeVenues.normalize(direct[:production_venue])
+    policy = MigrationRouteOperationalPolicy.new(env: env)
     routes = Array(direct.dig(:proof_report, :routes)).select do |route|
-      route[:from_venue] == current && route[:status] == MigrationRouteProofRegistry::STATUSES[:ready]
+      route[:from_venue] == current &&
+        route[:status] == MigrationRouteProofRegistry::STATUSES[:ready] &&
+        policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
     end
     return nil if routes.empty?
 

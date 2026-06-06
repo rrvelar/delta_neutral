@@ -26,7 +26,16 @@ class OperationalSettings
     AERODROME_NADO_LIVE_MIGRATION_ENABLED
     AERODROME_NADO_HEDGE_LIVE_ENABLED
   ].freeze
-  ALLOWED_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS).freeze
+  ROUTE_KEYS_BY_ROUTE = {
+    "extended->nado" => "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED",
+    "ethereal->nado" => "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED",
+    "nado->extended" => "MIGRATION_ROUTE_NADO_TO_EXTENDED_ENABLED",
+    "nado->ethereal" => "MIGRATION_ROUTE_NADO_TO_ETHEREAL_ENABLED",
+    "extended->ethereal" => "MIGRATION_ROUTE_EXTENDED_TO_ETHEREAL_ENABLED",
+    "ethereal->extended" => "MIGRATION_ROUTE_ETHEREAL_TO_EXTENDED_ENABLED"
+  }.freeze
+  ROUTE_KEYS = ROUTE_KEYS_BY_ROUTE.values.freeze
+  ALLOWED_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS + ROUTE_KEYS).freeze
 
   Result = Data.define(:ok, :setting, :errors, :audit)
   Value = Data.define(:key, :enabled, :source, :raw_value)
@@ -87,6 +96,10 @@ class OperationalSettings
 
   def self.auto_key_for(venue)
     AUTO_KEYS_BY_VENUE[HedgeVenues.normalize(venue)]
+  end
+
+  def self.route_key_for(from, to)
+    ROUTE_KEYS_BY_ROUTE["#{HedgeVenues.normalize(from)}->#{HedgeVenues.normalize(to)}"]
   end
 
   def self.enable_confirmation_for(venue)

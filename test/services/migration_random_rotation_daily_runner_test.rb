@@ -139,7 +139,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
         "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
         "MIGRATION_AUTO_ENABLED" => "true",
         "MIGRATION_LIVE_ENABLED" => "true",
-        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
+        "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED" => "true"
       },
       preflight_factory: live_preflight_factory,
       executor_factory: -> { executor }
@@ -157,6 +158,34 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
     assert_equal "0.5", receipt.dig("migration_timing", "target_accept_to_source_close_submit_latency_seconds")
     assert_empty receipt.fetch("blockers")
+  end
+
+  test "daily live random skips disabled Nado target route" do
+    OperationalSetting.delete_all
+    position = migration_position
+    fake_snapshot_refresh_class.new(position: position).refresh
+    position.hedge.update!(execution_venue: "ethereal")
+    dirs = receipt_dirs
+    executor = live_executor
+
+    result = runner(
+      **dirs,
+      env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
+        "MIGRATION_AUTO_ENABLED" => "true",
+        "MIGRATION_LIVE_ENABLED" => "true",
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      },
+      preflight_factory: live_preflight_factory,
+      executor_factory: -> { executor }
+    ).call(position_id: position.id, force: true, seed: "seed-live")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+
+    assert_equal "ok", result.status
+    assert_equal "extended", receipt.fetch("selected_target_venue")
+    assert_equal "extended", position.hedge.reload.execution_venue
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
   end
 
   test "daily live random records target-open source-still-open as manual action" do

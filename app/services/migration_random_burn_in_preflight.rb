@@ -40,7 +40,7 @@ class MigrationRandomBurnInPreflight
 
     blockers.concat(Array(target[:blockers]))
     blockers << "fresh LP target is unavailable" unless target[:target_short_eth]&.positive? && target[:target_fresh] == true
-    blockers << "all route proofs must be READY_FOR_RANDOM" unless proof_report.fetch(:missing_route_proofs).empty?
+    blockers << "all enabled route proofs must be READY_FOR_RANDOM" if enabled_missing_route_proofs(proof_report).present?
     blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
     blockers << "pending target=Nado migration continuation must be completed before burn-in" if readiness[:pending_nado_target_continuation_blocking]
     blockers << "migration lock is already active for this position" if MigrationExecutionLock.locked?(position)
@@ -102,6 +102,13 @@ class MigrationRandomBurnInPreflight
   attr_reader :position, :env, :proof_registry, :venue_builder, :signer_client, :fresh_target_factory,
     :readiness_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
     :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
+
+  def enabled_missing_route_proofs(proof_report)
+    policy = MigrationRouteOperationalPolicy.new(env: env)
+    proof_report.fetch(:missing_route_proofs).reject do |route|
+      !policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
+    end
+  end
 
   def fresh_target_report
     result = fresh_target_factory.call(position).resolve(refresh_if_stale: true)

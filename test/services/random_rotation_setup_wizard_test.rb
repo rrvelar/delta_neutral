@@ -22,6 +22,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
   test "all ready route proofs show enable random action" do
     position = position_with_snapshot("extended")
+    enable_nado_target_routes!
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
     registry = isolated_registry(base_dir: dir)
     writer = HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries"))
@@ -231,6 +232,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
   test "remaining setup flow advances through source move and final canary proofs" do
     position = position_with_snapshot("extended")
+    enable_nado_target_routes!
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
     registry = isolated_registry(base_dir: dir)
     %w[extended->ethereal ethereal->extended extended->nado nado->extended].each do |route|
@@ -271,6 +273,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
   test "successful Extended to Nado canary advances random readiness count" do
     position = position_with_snapshot("extended")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED", enabled: true)
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
     registry = isolated_registry(base_dir: dir)
     write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
@@ -312,6 +315,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
 
   test "completed Extended to Nado readback with app venue already target advances to Nado to Ethereal" do
     position = position_with_snapshot("extended")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED", enabled: true)
     dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
     registry = isolated_registry(base_dir: dir)
     write_ready_route(dir: dir, position: position, from: "extended", to: "ethereal")
@@ -335,6 +339,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
   test "all routes reconcile completed readback without showing duplicate canary" do
     MigrationRouteProofRegistry::ROUTES.each do |from, to|
       position = position_with_snapshot(from)
+      OperationalSettings.set!(key: OperationalSettings.route_key_for(from, to), enabled: true) if to == "nado"
       dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
       registry = isolated_registry(base_dir: dir)
       write_dry_run_route(dir: dir, position: position, from: from, to: to)
@@ -524,6 +529,11 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       continuation_dir: base_dir.join("continuations"),
       random_dir: base_dir.join("random")
     )
+  end
+
+  def enable_nado_target_routes!
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
   end
 
   def write_dry_run_route(dir:, position:, from:, to:)

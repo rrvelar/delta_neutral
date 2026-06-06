@@ -2,13 +2,14 @@ class MigrationRandomPlanner
   Result = Data.define(:status, :blockers, :warnings, :receipt)
   ROUTES = MigrationLiveRouteCapability::ROUTES
 
-  def initialize(env: ENV, route_matrix: nil, proof_registry: nil, now: -> { Time.current }, random_seed: nil, selector: nil)
+  def initialize(env: ENV, route_matrix: nil, proof_registry: nil, now: -> { Time.current }, random_seed: nil, selector: nil, route_policy: nil)
     @env = env
     @route_matrix = route_matrix
     @proof_registry = proof_registry
     @now = now
     @random_seed = random_seed || env["MIGRATION_RANDOM_SEED"]
     @selector = selector
+    @route_policy = route_policy || MigrationRouteOperationalPolicy.new(env: env)
   end
 
   def plan(position:, require_live_proofs: false)
@@ -48,10 +49,12 @@ class MigrationRandomPlanner
 
   private
 
-  attr_reader :env, :route_matrix, :now, :random_seed, :selector
+  attr_reader :env, :route_matrix, :now, :random_seed, :selector, :route_policy
 
   def candidate_for(position:, from:, to:, route:, proof:, require_live_proofs:)
     reasons = []
+    policy = route_policy.route_status(from: from, to: to)
+    reasons << policy.fetch(:blocker) unless policy.fetch(:enabled)
     reasons << "route missing from route matrix" unless route
     reasons << "route preview unavailable" unless route && route[:preview_available]
     reasons << "route is not READY_FOR_DRY_RUN" unless route && route[:route_status].to_s.in?(%w[READY_FOR_DRY_RUN READY_FOR_VIRTUAL_DRY_RUN])
@@ -70,6 +73,9 @@ class MigrationRandomPlanner
       route_status: route&.fetch(:route_status, nil),
       preview_available: route&.fetch(:preview_available, false) || false,
       proof_status: proof&.fetch(:status, "NOT_STARTED"),
+      route_enabled: policy.fetch(:enabled),
+      route_disabled_reason: policy[:disabled_reason],
+      route_policy_key: policy[:key],
       target_open_preview_available: route&.fetch(:target_open_preview_available, false) || false,
       source_close_preview_available: route&.fetch(:source_close_preview_available, false) || false,
       open_orders_status: route&.fetch(:open_orders_status, "unknown"),

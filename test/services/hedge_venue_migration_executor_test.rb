@@ -780,6 +780,58 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_includes result.receipt.fetch(:latency_thresholds_exceeded).map { |entry| entry[:field] }, :target_total_latency_seconds
   end
 
+  test "target first route records double exposure and marks late source flat as not production safe" do
+    position = migration_position
+    calls = []
+    current_time = Time.zone.local(2026, 6, 6, 12, 0, 0)
+    now = -> {
+      value = current_time
+      current_time += 3.seconds
+      value
+    }
+    runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: calls.size == 1 ? "0xnado-target" : "extended-close",
+        readback: { short_size: calls.size == 1 ? "0.8" : "0" }
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+        "MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS" => "1",
+        "MIGRATION_TARGET_TO_SOURCE_CLOSE_MAX_LATENCY_SECONDS" => "60"
+      ),
+      leg_runner: runner,
+      now: now,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", result.status
+    assert_equal "nado", position.hedge.reload.execution_venue
+    assert result.receipt.fetch(:double_exposure_started_at)
+    assert result.receipt.fetch(:double_exposure_ended_at)
+    assert_operator BigDecimal(result.receipt.fetch(:double_exposure_seconds).to_s), :>, BigDecimal("1")
+    assert_equal false, result.receipt.fetch(:route_production_safe)
+    assert_equal true, result.receipt.fetch(:latency_incident)
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+  end
+
   test "target confirmation to source close latency beyond threshold returns manual action before source submit" do
     position = migration_position
     calls = []

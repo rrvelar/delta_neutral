@@ -17,7 +17,7 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
 
     report = MigrationRandomReadiness.new(position: position, proof_registry: registry, canary_dir: canary_dir).report
 
-    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "ethereal->nado" }.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "ethereal->nado" }.fetch(:status)
     assert_nil report.fetch(:pending_nado_target_continuation)
     assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
     assert_equal true, report.fetch(:stale_pending_continuation_ignored)
@@ -53,7 +53,7 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
 
     report = MigrationRandomReadiness.new(position: position, proof_registry: registry, canary_dir: pending_dir).report
 
-    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
     assert_nil report.fetch(:pending_nado_target_continuation)
     assert_equal true, report.fetch(:stale_pending_continuation_ignored)
     assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)

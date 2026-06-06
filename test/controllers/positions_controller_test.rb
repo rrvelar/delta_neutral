@@ -1191,7 +1191,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "4 / 6 READY_FOR_RANDOM", response.body
+    assert_match "3 / 6 READY_FOR_RANDOM", response.body
+    assert_match "extended-&gt;nado disabled: Nado target/source-close latency not production-safe", response.body
     assert_match "Next required setup move", response.body
     assert_match "Move to required source venue", response.body
     assert_match "Extended -&gt; Ethereal", response.body
@@ -1230,7 +1231,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "4 / 6 READY_FOR_RANDOM", response.body
+    assert_match "3 / 6 READY_FOR_RANDOM", response.body
+    assert_match "extended-&gt;nado disabled: Nado target/source-close latency not production-safe", response.body
     assert_match "Next required setup move", response.body
     assert_match "Move to required source venue", response.body
     assert_match "Extended -&gt; Ethereal", response.body
@@ -1529,7 +1531,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Current venue:", response.body
     assert_match "Nado", response.body
-    assert_match "3 / 6 READY_FOR_RANDOM", response.body
+    assert_match "2 / 6 READY_FOR_RANDOM", response.body
     assert_match "Nado -&gt; Ethereal", response.body
     assert_match "Prepare Next Route", response.body
     assert_no_match "Run Supervised Live Canary", response.body

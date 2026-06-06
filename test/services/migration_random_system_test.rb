@@ -27,6 +27,16 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_empty excluded.select { |candidate| candidate.fetch(:route) == "ethereal->nado" }
   end
 
+  test "random planner skips disabled Nado target route from Extended" do
+    matrix = { routes: [ route("extended", "nado"), route("extended", "ethereal") ] }
+    result = random_planner(route_matrix: matrix, selector: ->(_) { "extended->nado" }).plan(position: migration_position("extended"))
+
+    assert_equal [ "extended->ethereal" ], result.receipt.fetch(:eligible_routes).map { |route| route.fetch(:route) }
+    excluded = result.receipt.fetch(:excluded_routes).find { |route| route.fetch(:route) == "extended->nado" }
+    assert_equal false, excluded.fetch(:route_enabled)
+    assert_includes excluded.fetch(:reasons), "extended->nado disabled: Nado target/source-close latency not production-safe"
+  end
+
   test "random rehearsal builds target-first plan and writes no-live receipt" do
     position = migration_position("nado")
     result = MigrationRandomRehearsal.new(planner: random_planner(selector: ->(_) { "nado->ethereal" })).run(position: position)
@@ -64,6 +74,45 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "NOT_STARTED", report.fetch(:routes).find { |route| route[:route] == "extended->ethereal" }.fetch(:status)
   ensure
     FileUtils.rm_rf(route_dir) if route_dir
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
+  test "Nado target route is not ready for production random when operationally disabled" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado"))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: canary_dir, route_proof_dir: canary_dir, random_dir: canary_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "extended->nado" }
+
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
+    assert_equal false, route.fetch(:route_enabled)
+    assert_includes route.fetch(:blockers), "extended->nado disabled: Nado target/source-close latency not production-safe"
+    assert_not_includes report.fetch(:completed_route_proofs).map { |entry| entry[:route] }, "extended->nado"
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
+  test "route proof with excessive double exposure is not ready for random even if final state is safe" do
+    canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended").merge(
+      double_exposure_seconds: "18.2",
+      double_exposure_started_at: 20.seconds.ago.iso8601,
+      double_exposure_ended_at: 2.seconds.ago.iso8601,
+      source_close_order_submitted_at: 19.seconds.ago.iso8601,
+      source_close_exchange_latency_seconds: "0.2",
+      source_close_readback_latency_seconds: "17.8"
+    ))
+
+    report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: canary_dir, route_proof_dir: canary_dir, random_dir: canary_dir).report(position: position)
+    route = report.fetch(:routes).find { |entry| entry[:route] == "nado->extended" }
+
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
+    assert_equal false, route.fetch(:route_production_safe)
+    assert_equal "18.2", route.fetch(:double_exposure_seconds)
+    assert_includes route.fetch(:blockers).join(" "), "double_exposure_seconds=18.2"
+  ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
   end
 
@@ -178,7 +227,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     MigrationLiveRouteCapability::ROUTES.each do |from, to|
       route = report.fetch(:routes).find { |entry| entry[:route] == "#{from}->#{to}" }
-      assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+      assert_equal(to == "nado" ? "NOT_PRODUCTION_SAFE_LATENCY" : "READY_FOR_RANDOM", route.fetch(:status))
       assert_equal to, route.fetch(:final_venue), "#{from}->#{to} final venue should be route target"
     end
   ensure
@@ -276,7 +325,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
-  test "route proof registry treats completed Nado target continuation as ready for random" do
+  test "route proof registry treats completed Nado target continuation as finalized but quarantined" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     continuation_dir = Rails.root.join("tmp/test-continuation-proofs-#{SecureRandom.hex(4)}")
@@ -287,10 +336,10 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, continuation_dir: continuation_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "ethereal->nado" }
 
-    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", route.fetch(:status)
     assert_match(%r{test-continuation-proofs}, route.fetch(:finalization_receipt))
     assert_equal "nado", route.fetch(:final_venue)
-    assert_empty route.fetch(:blockers)
+    assert_includes route.fetch(:blockers), "ethereal->nado disabled: Nado target/source-close latency not production-safe"
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
@@ -323,7 +372,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
 
-    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
     assert_nil report.fetch(:pending_nado_target_continuation)
     assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
   ensure
@@ -353,7 +402,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
 
-    assert_equal "READY_FOR_RANDOM", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
     assert_nil report.fetch(:pending_nado_target_continuation)
     assert_equal true, report.fetch(:stale_pending_continuation_ignored)
     assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
@@ -535,7 +584,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
     ethereal_nado = report.fetch(:route_proof_statuses).find { |entry| entry[:route] == "ethereal->nado" }
 
-    assert_equal "READY_FOR_RANDOM", ethereal_nado.fetch(:status)
+    assert_equal "NOT_PRODUCTION_SAFE_LATENCY", ethereal_nado.fetch(:status)
     assert_nil report.fetch(:pending_nado_target_continuation)
     assert_equal true, report.fetch(:stale_pending_continuation_ignored)
     assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
@@ -1002,6 +1051,18 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in skips disabled Nado target route" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    result = burn_in(position: position, live: false, log_dir: dir, selector: ->(_) { "ethereal->nado" }).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "ethereal->extended", cycle.fetch("route")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in completes multiple dry-run cycles when target changes slightly inside tolerance" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -1170,6 +1231,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
   test "random burn-in switches active venue auto to target after finalization" do
     OperationalSetting.delete_all
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
 
@@ -1186,6 +1248,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
   test "random burn-in enables Nado live gates before executor call for route to Nado" do
     OperationalSetting.delete_all
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     executor = BurnInExecutor.new(assert_nado_gates: true)
@@ -1201,6 +1264,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   end
 
   test "random burn-in blocked before submit does not run post migration assertions" do
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     executor = BurnInExecutor.new(
@@ -1267,6 +1331,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
   test "random burn-in disable after disables random auto and Nado live gates" do
     OperationalSetting.delete_all
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
 
@@ -1882,7 +1947,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   end
 
   class BurnInExecutor
-    attr_reader :called
+    attr_reader :called, :routes
 
     def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false, recovery_command: nil, recommended_action: nil, source_venue: nil, target_venue: nil)
       @after = after
@@ -1897,10 +1962,12 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       @source_venue = source_venue
       @target_venue = target_venue
       @called = false
+      @routes = []
     end
 
     def run(position:, from_venue:, to_venue:, **)
       @called = true
+      @routes << "#{from_venue}->#{to_venue}"
       if @assert_nado_gates && [ from_venue, to_venue ].include?("nado")
         raise "Nado live migration gate was not enabled" unless OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
         raise "Nado hedge live gate was not enabled" unless OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
