@@ -392,10 +392,26 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     write_event(continuation_dir, continuation_event(position: position, from: "extended"))
     registry = MigrationRouteProofRegistry.new(canary_dir: canary_dir, continuation_dir: continuation_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
 
-    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+    direct_report = direct_preflight(
+      position,
+      proof_registry: registry,
+      venues: {
+        "extended" => DirectBurnInVenue.new(short: "0"),
+        "ethereal" => DirectBurnInVenue.new(short: "0"),
+        "nado" => DirectBurnInVenue.new(short: "1.18")
+      },
+      canary_dir: canary_dir
+    ).report
+    report = MigrationRandomReadiness.new(
+      position: position,
+      planner: random_planner,
+      proof_registry: registry,
+      canary_dir: canary_dir,
+      execution_preflight_factory: ->(**) { direct_report }
+    ).report
 
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
-    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_nil report.fetch(:pending_nado_target_continuation), report.fetch(:pending_continuation_diagnostics).inspect
     assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
@@ -407,14 +423,15 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     proof_dir = Rails.root.join("tmp/test-ready-proofs-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
-    position = migration_position("extended")
+    position = migration_position("nado")
     write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "extended", timestamp: 10.minutes.ago))
     write_event(proof_dir, live_canary_event(position: position, from: "extended", to: "nado", timestamp: 5.minutes.ago, production_venue: "nado"))
     position.position_dashboard_snapshot.update!(
-      production_venue: "extended",
-      selected_venue: "extended",
-      extended_short_eth: "1.18",
-      nado_short_eth: "0",
+      production_venue: "nado",
+      selected_venue: "nado",
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "1.18",
       combined_short_eth: "1.18",
       drift_eth: "0",
       inside_tolerance: true,
@@ -422,10 +439,26 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     )
     registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
 
-    report = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+    direct_report = direct_preflight(
+      position,
+      proof_registry: registry,
+      venues: {
+        "extended" => DirectBurnInVenue.new(short: "0"),
+        "ethereal" => DirectBurnInVenue.new(short: "0"),
+        "nado" => DirectBurnInVenue.new(short: "1.18")
+      },
+      canary_dir: canary_dir
+    ).report
+    report = MigrationRandomReadiness.new(
+      position: position,
+      planner: random_planner,
+      proof_registry: registry,
+      canary_dir: canary_dir,
+      execution_preflight_factory: ->(**) { direct_report }
+    ).report
 
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
-    assert_nil report.fetch(:pending_nado_target_continuation)
+    assert_nil report.fetch(:pending_nado_target_continuation), report.fetch(:pending_continuation_diagnostics).inspect
     assert_equal true, report.fetch(:stale_pending_continuation_ignored)
     assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
   ensure
@@ -993,7 +1026,6 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     write_event(proof_dir, live_canary_event(position: position, from: "ethereal", to: "nado", production_venue: "nado", timestamp: 5.minutes.ago))
     registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
 
-    readiness = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
     burn_in = direct_preflight(
       position,
       proof_registry: registry,
@@ -1003,6 +1035,13 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       },
       canary_dir: canary_dir
     ).report
+    readiness = MigrationRandomReadiness.new(
+      position: position,
+      planner: random_planner,
+      proof_registry: registry,
+      canary_dir: canary_dir,
+      execution_preflight_factory: ->(**) { burn_in }
+    ).report
 
     assert_equal false, readiness.fetch(:pending_nado_target_continuation_blocking)
     assert_equal false, burn_in.fetch(:pending_nado_target_continuation_blocking)
@@ -1010,11 +1049,52 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal true, burn_in.fetch(:stale_pending_continuation_ignored)
     assert_equal "stale_artifact", readiness.fetch(:pending_continuation_classification)
     assert_equal "stale_artifact", burn_in.fetch(:pending_continuation_classification)
-    assert_equal readiness.fetch(:direct_open_orders).keys.sort, burn_in.fetch(:direct_open_orders).keys.sort
+    assert_equal burn_in.fetch(:direct_open_orders), readiness.fetch(:direct_open_orders)
   ensure
     FileUtils.rm_rf(canary_dir) if canary_dir
     FileUtils.rm_rf(proof_dir) if proof_dir
     FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "random execution preflight normalizes production shaped direct report before classification" do
+    canary_dir = Rails.root.join("tmp/test-execution-preflight-canary-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 3.days.ago))
+    routes = MigrationLiveRouteCapability::ROUTES.map do |from, to|
+      { "route" => "#{from}->#{to}", "from_venue" => from, "to_venue" => to, "status" => "READY_FOR_RANDOM" }
+    end
+    direct = {
+      "proof_report" => {
+        "routes" => routes,
+        "completed_route_proofs" => routes,
+        "missing_route_proofs" => [],
+        "stale_route_proofs" => []
+      },
+      "production_venue" => "nado",
+      "inside_tolerance" => true,
+      "blockers" => [],
+      "warnings" => [],
+      "venues" => {
+        "extended" => { "short_eth" => BigDecimal("0"), "open_orders_status" => "zero", "open_orders_count" => 0 },
+        "ethereal" => { "short_eth" => BigDecimal("0"), "open_orders_status" => "zero", "open_orders_count" => 0 },
+        "nado" => { "short_eth" => BigDecimal("2.237"), "open_orders_status" => "zero", "open_orders_count" => 0 }
+      }
+    }
+
+    report = MigrationRandomExecutionPreflight.new(
+      position: position,
+      proof_registry: BurnInProofRegistry.new,
+      canary_dir: canary_dir,
+      direct_preflight_factory: ->(**) { direct }
+    ).report
+
+    assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
+    assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal "stale_artifact", report.fetch(:pending_continuation_classification)
+    assert_equal({ status: "zero", count: 0 }, report.dig(:direct_open_orders, "extended"))
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
   end
 
   test "pending Nado classifier treats production-shaped safe direct state as stale artifact" do

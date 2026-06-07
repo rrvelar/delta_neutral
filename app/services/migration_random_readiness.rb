@@ -47,6 +47,7 @@ class MigrationRandomReadiness
       pending_nado_target_continuation_blocking: pending_continuation_blocking,
       stale_pending_continuation_ignored: pending_report[:stale_pending_continuation_ignored] == true,
       pending_continuation_classification: pending_report[:pending_continuation_classification],
+      pending_continuation_diagnostics: execution_preflight[:pending_continuation_diagnostics],
       preflight_source: execution_preflight[:preflight_source],
       direct_venue_shorts: execution_preflight[:direct_venue_shorts],
       direct_open_orders: execution_preflight[:direct_open_orders],
@@ -66,6 +67,13 @@ class MigrationRandomReadiness
       return @execution_preflight_factory.call(position: position, proof_registry: proof_registry)
     end
 
+    MigrationRandomExecutionPreflight.new(
+      position: position,
+      env: env,
+      proof_registry: proof_registry,
+      canary_dir: @canary_dir
+    ).report
+  rescue => e
     direct = snapshot_direct_report(proof_report)
     pending = MigrationPendingNadoContinuationClassifier.new(
       position: position,
@@ -85,7 +93,8 @@ class MigrationRandomReadiness
           count: details[:open_orders_count],
           message: details[:open_orders_message]
         }.compact ]
-      end
+      end,
+      warnings: Array(direct[:warnings]) + [ "direct random execution preflight unavailable for readiness diagnostics: #{e.class}: #{e.message}" ]
     )
   end
 

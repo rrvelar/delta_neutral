@@ -271,6 +271,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_equal true, route.fetch(:route_production_safe)
     assert_equal "passed", route.fetch(:latency_proof_status)
+    assert_equal "nado", route.fetch(:final_venue)
     assert_equal "archive_order", route.fetch(:target_confirmation_source)
     assert_equal "4.511719", route.fetch(:source_flat_to_execution_confirmed_seconds)
     assert_equal latency_path.to_s, route.fetch(:latency_proof_receipt)
@@ -615,6 +616,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_equal true, route.fetch(:route_production_safe)
+    assert_equal "nado", route.fetch(:final_venue)
     assert_equal "archive_order", route.fetch(:target_confirmation_source)
     assert_empty route.fetch(:blockers)
   ensure

@@ -573,6 +573,7 @@ class MigrationRouteProofRegistry
   def final_venue_for(event:, status:, to:)
     return nil unless event
     return to if status.in?([ STATUSES[:ready], STATUSES[:live] ]) && live_canary_proof?(event)
+    return to if source_first_nado_target_latency_proof?(event) && source_first_nado_target_finalized_safely?(event)
     return to if status == STATUSES[:not_safe_latency] && finalized_target_first_event?(event)
 
     event["final_venue"] || event["production_venue"] || event["to_venue"]

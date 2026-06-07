@@ -25,7 +25,7 @@ class MigrationRandomExecutionPreflight
 
   def report
     direct = direct_report
-    proof_report = direct.fetch(:proof_report)
+    proof_report = report_value(direct, :proof_report)
     pending = MigrationPendingNadoContinuationClassifier.new(
       position: position,
       proof_registry: proof_registry,
@@ -73,6 +73,7 @@ class MigrationRandomExecutionPreflight
       venue_builder: venue_builder,
       signer_client: signer_client,
       fresh_target_factory: fresh_target_factory,
+      readiness_factory: ->(**) { {} },
       require_route_proofs: true,
       require_random_readiness: false,
       tolerance_multiplier: tolerance_multiplier,
@@ -108,19 +109,38 @@ class MigrationRandomExecutionPreflight
 
   def direct_venue_shorts(report)
     %w[extended ethereal nado].to_h do |venue|
-      [ venue, report.dig(:venues, venue, :short_eth)&.to_s("F") ]
+      [ venue, venue_value(report, venue, :short_eth)&.to_s("F") ]
     end
   end
 
   def direct_open_orders(report)
     %w[extended ethereal nado].to_h do |venue|
-      details = report.dig(:venues, venue) || report.dig(:venues, venue.to_sym) || {}
+      details = venue_report(report, venue)
       [ venue, {
-        status: details[:open_orders_status] || details["open_orders_status"],
-        count: details[:open_orders_count] || details["open_orders_count"],
-        message: details[:open_orders_message] || details["open_orders_message"]
+        status: hash_value(details, :open_orders_status),
+        count: hash_value(details, :open_orders_count),
+        message: hash_value(details, :open_orders_message)
       }.compact ]
     end
+  end
+
+  def report_value(report, key)
+    hash_value(report, key)
+  end
+
+  def venue_value(report, venue, key)
+    hash_value(venue_report(report, venue), key)
+  end
+
+  def venue_report(report, venue)
+    venues = report_value(report, :venues) || {}
+    hash_value(venues, venue) || {}
+  end
+
+  def hash_value(hash, key)
+    return nil unless hash.respond_to?(:[])
+
+    hash[key] || hash[key.to_s]
   end
 
   def bool_env(key)
