@@ -370,9 +370,10 @@ class MigrationRandomBurnInRunner
       final_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       final_combined_inside_tolerance: last_direct_preflight_report[:inside_tolerance] == true,
       blocker_status: last_blocker_status || preflight_status(blockers),
-      stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
-      pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
-      preflight_source: "dedicated_burn_in_preflight",
+      stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
+      pending_nado_target_continuation_blocking: pending_nado_target_continuation_blocking?,
+      pending_continuation_classification: pending_continuation_classification,
+      preflight_source: last_direct_preflight_report[:preflight_source] || "migration_random_execution_preflight",
       direct_preflight_blockers: Array(last_direct_preflight_report[:blockers]),
       direct_preflight_warnings: Array(last_direct_preflight_report[:warnings]),
       direct_venue_shorts: direct_venue_shorts(last_direct_preflight_report),
@@ -638,9 +639,10 @@ class MigrationRandomBurnInRunner
 
   def readiness_diagnostics
     {
-      preflight_source: "dedicated_burn_in_preflight",
-      stale_pending_continuation_ignored: last_readiness_report[:stale_pending_continuation_ignored] == true,
-      pending_nado_target_continuation_blocking: last_readiness_report[:pending_nado_target_continuation_blocking] == true,
+      preflight_source: last_direct_preflight_report[:preflight_source] || "migration_random_execution_preflight",
+      stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
+      pending_nado_target_continuation_blocking: pending_nado_target_continuation_blocking?,
+      pending_continuation_classification: pending_continuation_classification,
       pending_nado_target_continuation: last_readiness_report[:pending_nado_target_continuation],
       direct_preflight_blockers: Array(last_direct_preflight_report[:blockers]),
       direct_preflight_warnings: Array(last_direct_preflight_report[:warnings]),
@@ -657,6 +659,21 @@ class MigrationRandomBurnInRunner
 
   def direct_venue_shorts(report)
     VENUES.to_h { |venue| [ venue, decimal_string(report.dig(:venues, venue, :short_eth)) ] }
+  end
+
+  def stale_pending_continuation_ignored?
+    last_direct_preflight_report[:stale_pending_continuation_ignored] == true ||
+      last_readiness_report[:stale_pending_continuation_ignored] == true
+  end
+
+  def pending_nado_target_continuation_blocking?
+    last_direct_preflight_report[:pending_nado_target_continuation_blocking] == true ||
+      last_readiness_report[:pending_nado_target_continuation_blocking] == true
+  end
+
+  def pending_continuation_classification
+    last_direct_preflight_report[:pending_continuation_classification] ||
+      last_readiness_report[:pending_continuation_classification]
   end
 
   def direct_open_orders(report)

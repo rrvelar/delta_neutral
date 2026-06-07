@@ -859,7 +859,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     report = direct_preflight(position).report
 
     assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
-    assert_equal "migration_execution_preflight", report.fetch(:preflight_source)
+    assert_equal "migration_random_execution_preflight", report.fetch(:preflight_source)
     assert_equal BigDecimal("1.18"), report.fetch(:target).fetch(:target_short_eth)
     assert_equal BigDecimal("1.18"), report.dig(:venues, "ethereal", :short_eth)
   end
@@ -982,6 +982,72 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal "burn_in_started", events.first.fetch("event")
   ensure
     FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random readiness and burn-in preflight agree on stale pending Nado continuation classification" do
+    canary_dir = Rails.root.join("tmp/test-burn-in-canary-#{SecureRandom.hex(4)}")
+    proof_dir = Rails.root.join("tmp/test-burn-in-proof-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-burn-in-recovery-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 10.minutes.ago))
+    write_event(proof_dir, live_canary_event(position: position, from: "ethereal", to: "nado", production_venue: "nado", timestamp: 5.minutes.ago))
+    registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    readiness = MigrationRandomReadiness.new(position: position, planner: random_planner, proof_registry: registry, canary_dir: canary_dir).report
+    burn_in = direct_preflight(
+      position,
+      proof_registry: registry,
+      venues: {
+        "ethereal" => DirectBurnInVenue.new(short: "0"),
+        "nado" => DirectBurnInVenue.new(short: "1.18")
+      },
+      canary_dir: canary_dir
+    ).report
+
+    assert_equal false, readiness.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal false, burn_in.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal true, readiness.fetch(:stale_pending_continuation_ignored)
+    assert_equal true, burn_in.fetch(:stale_pending_continuation_ignored)
+    assert_equal "stale_artifact", readiness.fetch(:pending_continuation_classification)
+    assert_equal "stale_artifact", burn_in.fetch(:pending_continuation_classification)
+    assert_equal readiness.fetch(:direct_open_orders).keys.sort, burn_in.fetch(:direct_open_orders).keys.sort
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(proof_dir) if proof_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
+  end
+
+  test "burn-in preflight blocks real pending Nado continuation when source and target exposure remain open" do
+    canary_dir = Rails.root.join("tmp/test-burn-in-canary-#{SecureRandom.hex(4)}")
+    proof_dir = Rails.root.join("tmp/test-burn-in-proof-#{SecureRandom.hex(4)}")
+    recovery_dir = Rails.root.join("tmp/test-burn-in-recovery-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 10.minutes.ago))
+    write_event(proof_dir, live_canary_event(position: position, from: "ethereal", to: "nado", production_venue: "nado", timestamp: 5.minutes.ago))
+    registry = MigrationRouteProofRegistry.new(canary_dir: proof_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir)
+
+    report = MigrationRandomBurnInPreflight.new(
+      position: position,
+      proof_registry: registry,
+      venue_builder: DirectBurnInVenueBuilder.new({
+        "extended" => DirectBurnInVenue.new(short: "0"),
+        "ethereal" => DirectBurnInVenue.new(short: "1.18"),
+        "nado" => DirectBurnInVenue.new(short: "1.18")
+      }),
+      signer_client: DirectBurnInSigner.new,
+      fresh_target_factory: ->(_) { DirectBurnInTarget.new(target: "2.36") },
+      canary_dir: canary_dir
+    ).report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_equal true, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal false, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal "real_unresolved_exchange_risk", report.fetch(:pending_continuation_classification)
+    assert_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before burn-in"
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+    FileUtils.rm_rf(proof_dir) if proof_dir
+    FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
   test "random burn-in blocked start reports stale continuation ignored and outside tolerance" do
@@ -1513,7 +1579,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     )
   end
 
-  def direct_preflight(position, target: "1.18", venues: {}, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
+  def direct_preflight(position, target: "1.18", venues: {}, proof_registry: BurnInProofRegistry.new, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
     defaults = {
       "extended" => DirectBurnInVenue.new(short: "0"),
       "ethereal" => DirectBurnInVenue.new(short: "1.18"),
@@ -1521,7 +1587,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     }
     MigrationRandomBurnInPreflight.new(
       position: position,
-      proof_registry: BurnInProofRegistry.new,
+      proof_registry: proof_registry,
       venue_builder: DirectBurnInVenueBuilder.new(defaults.merge(venues)),
       signer_client: DirectBurnInSigner.new,
       fresh_target_factory: ->(_) { DirectBurnInTarget.new(target: target) },
@@ -1529,6 +1595,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
       burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
       burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
+      canary_dir: canary_dir,
       readiness_factory: ->(**) {
         {
           pending_nado_target_continuation: nil,

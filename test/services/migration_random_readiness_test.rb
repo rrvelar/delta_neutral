@@ -29,7 +29,7 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
     FileUtils.rm_rf(random_dir) if random_dir
   end
 
-  test "route-ready stale Nado continuation is non-blocking even when hedge is outside tolerance" do
+  test "route-ready pending Nado continuation blocks when hedge is outside tolerance" do
     pending_dir = Rails.root.join("tmp/test-readiness-pending-#{SecureRandom.hex(4)}")
     proof_dir = Rails.root.join("tmp/test-readiness-ready-#{SecureRandom.hex(4)}")
     recovery_dir = Rails.root.join("tmp/test-readiness-recoveries-#{SecureRandom.hex(4)}")
@@ -54,10 +54,11 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
     report = MigrationRandomReadiness.new(position: position, proof_registry: registry, canary_dir: pending_dir).report
 
     assert_equal "NOT_PRODUCTION_SAFE_LATENCY", report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->nado" }.fetch(:status)
-    assert_nil report.fetch(:pending_nado_target_continuation)
-    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
-    assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
-    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
+    assert_equal "extended->nado", report.fetch(:pending_nado_target_continuation).fetch(:route)
+    assert_equal false, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal true, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal "real_unresolved_exchange_risk", report.fetch(:pending_continuation_classification)
+    assert_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before random migration"
   ensure
     FileUtils.rm_rf(pending_dir) if pending_dir
     FileUtils.rm_rf(proof_dir) if proof_dir

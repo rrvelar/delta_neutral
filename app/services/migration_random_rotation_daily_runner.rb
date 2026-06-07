@@ -343,7 +343,12 @@ class MigrationRandomRotationDailyRunner
       return preflight_factory.call(position: position, stage: "daily_random")
     end
 
-    MigrationRandomBurnInPreflight.new(position: position, env: env, proof_registry: proof_registry).report
+    MigrationRandomExecutionPreflight.new(
+      position: position,
+      env: env,
+      proof_registry: proof_registry,
+      live: true
+    ).report
   end
 
   def live_route_from_preflight(direct, seed:)

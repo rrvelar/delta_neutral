@@ -1,11 +1,12 @@
 class MigrationRandomReadiness
-  def initialize(position:, env: ENV, planner: nil, proof_registry: nil, dashboard_health: nil, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, now: -> { Time.current })
+  def initialize(position:, env: ENV, planner: nil, proof_registry: nil, dashboard_health: nil, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, now: -> { Time.current }, execution_preflight_factory: nil)
     @position = position
     @env = env
     @proof_registry = proof_registry || MigrationRouteProofRegistry.new(now: now)
     @planner = planner || MigrationRandomPlanner.new(env: env, proof_registry: @proof_registry, now: now)
     @dashboard_health = dashboard_health
     @canary_dir = Pathname(canary_dir)
+    @execution_preflight_factory = execution_preflight_factory
   end
 
   def report
@@ -13,8 +14,15 @@ class MigrationRandomReadiness
     plan = planner.plan(position: position, require_live_proofs: false).receipt
     live_plan = planner.plan(position: position, require_live_proofs: true).receipt
     next_canary = next_recommended_canary(proof_report)
-    pending_continuation = pending_nado_target_continuation(proof_report)
-    pending_continuation_blocking = pending_continuation.present? && !stale_pending_continuation_ignored?
+    execution_preflight = random_execution_preflight_report(proof_report)
+    pending_report = execution_preflight.slice(
+      :pending_nado_target_continuation,
+      :pending_nado_target_continuation_blocking,
+      :stale_pending_continuation_ignored,
+      :pending_continuation_classification
+    )
+    pending_continuation = pending_report[:pending_nado_target_continuation]
+    pending_continuation_blocking = pending_report[:pending_nado_target_continuation_blocking] == true
     blockers = live_blockers(proof_report: proof_report, live_plan: live_plan, pending_continuation: pending_continuation)
     blockers.delete("pending target=Nado migration continuation must be completed before random migration") unless pending_continuation_blocking
     {
@@ -37,7 +45,11 @@ class MigrationRandomReadiness
       random_live_gates: random_live_gates,
       pending_nado_target_continuation: pending_continuation,
       pending_nado_target_continuation_blocking: pending_continuation_blocking,
-      stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
+      stale_pending_continuation_ignored: pending_report[:stale_pending_continuation_ignored] == true,
+      pending_continuation_classification: pending_report[:pending_continuation_classification],
+      preflight_source: execution_preflight[:preflight_source],
+      direct_venue_shorts: execution_preflight[:direct_venue_shorts],
+      direct_open_orders: execution_preflight[:direct_open_orders],
       nado_auto_summary: nado_auto_summary,
       orders_submitted: 0,
       orders_placed: 0,
@@ -48,6 +60,65 @@ class MigrationRandomReadiness
   private
 
   attr_reader :position, :planner, :proof_registry
+
+  def random_execution_preflight_report(proof_report)
+    if @execution_preflight_factory
+      return @execution_preflight_factory.call(position: position, proof_registry: proof_registry)
+    end
+
+    direct = snapshot_direct_report(proof_report)
+    pending = MigrationPendingNadoContinuationClassifier.new(
+      position: position,
+      proof_registry: proof_registry,
+      proof_report: proof_report,
+      direct_report: direct,
+      canary_dir: @canary_dir
+    ).report
+    direct.merge(
+      pending,
+      preflight_source: "migration_random_execution_preflight",
+      direct_venue_shorts: %w[extended ethereal nado].to_h { |venue| [ venue, direct.dig(:venues, venue, :short_eth)&.to_s("F") ] },
+      direct_open_orders: %w[extended ethereal nado].to_h { |venue| [ venue, direct.dig(:venues, venue, :open_orders_status) ] }
+    )
+  end
+
+  def snapshot_direct_report(proof_report)
+    snapshot = position.position_dashboard_snapshot
+    venues = %w[extended ethereal nado].to_h do |venue|
+      short = snapshot&.public_send("#{venue}_short_eth")
+      open_orders_count = venue == "extended" ? snapshot&.open_orders_count_extended : 0
+      [ venue, {
+        short_eth: decimal_or_nil(short),
+        position_status: snapshot ? "ok" : "error",
+        open_orders_count: open_orders_count,
+        open_orders_status: open_orders_count.nil? ? "unknown" : (open_orders_count.to_i.zero? ? "zero" : "blocked")
+      } ]
+    end
+    active = venues.select { |_venue, report| report[:short_eth] && report[:short_eth] > BigDecimal("0.001") }.keys
+    blockers = []
+    blockers << "dashboard snapshot is unavailable for random readiness diagnostics" unless snapshot
+    blockers << "all enabled route proofs must be READY_FOR_RANDOM" if enabled_missing_route_proofs(proof_report).present?
+    blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
+    blockers << "more than one venue has exposure" if active.size > 1
+    blockers << "no venue has the production hedge" if snapshot && active.empty?
+    blockers << "app production venue and actual venue exposure disagree" if snapshot && active.one? && active.first != HedgeVenues.normalize(position.hedge&.execution_venue)
+    blockers << "inside tolerance cannot be confirmed" if snapshot&.inside_tolerance.nil?
+    blockers << "current hedge outside tolerance" if snapshot&.inside_tolerance == false
+    venues.each do |venue, report|
+      blockers << "#{venue} short amount is unknown" if report[:short_eth].nil?
+      blockers << "#{venue} open orders could not be confirmed zero" if report[:open_orders_status] == "unknown"
+      blockers << "#{venue} open orders must be zero" if report[:open_orders_status] == "blocked"
+    end
+    {
+      accepted: blockers.empty?,
+      blockers: blockers.uniq,
+      warnings: [],
+      production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
+      venues: venues,
+      inside_tolerance: snapshot&.inside_tolerance == true,
+      proof_report: proof_report
+    }
+  end
 
   def live_blockers(proof_report:, live_plan:, pending_continuation:)
     blockers = []
@@ -133,106 +204,10 @@ class MigrationRandomReadiness
     false
   end
 
-  def pending_nado_target_continuation(proof_report)
-    @pending_nado_target_continuation ||= begin
-      Dir.glob(@canary_dir.join("*.jsonl")).flat_map do |path|
-        File.readlines(path).filter_map do |line|
-          JSON.parse(line).merge("receipt_path" => path)
-        rescue JSON::ParserError
-          nil
-        end
-      rescue SystemCallError
-        []
-      end
-        .select { |event| pending_nado_target_event?(event) }
-        .reject { |event| resolved_nado_target_continuation?(event) }
-        .reject { |event| stale_nado_target_continuation?(event, proof_report) }
-        .max_by { |event| event_time(event) || Time.zone.at(0) }
-        &.then do |event|
-          {
-            route: "#{event['from_venue']}->#{event['to_venue']}",
-            from_venue: event["from_venue"],
-            to_venue: event["to_venue"],
-            pending_migration_id: event["pending_migration_id"],
-            nado_target_digest: event["nado_target_digest"] || Array(event["exchange_order_ids"]).first,
-            status: event["final_status"],
-            continuation_command: event["continuation_command"] || "bin/rails migration:continue_target_first_after_nado_confirmed position_id=#{position.id} from=#{event['from_venue']} to=#{event['to_venue']} dry_run=true",
-            receipt_path: event["receipt_path"]
-          }
-        end
-    end
-  end
+  def decimal_or_nil(value)
+    return nil if value.nil?
 
-  def stale_nado_target_continuation?(event, proof_report)
-    route = proof_report.fetch(:routes).find do |entry|
-      entry[:from_venue] == event["from_venue"] && entry[:to_venue] == event["to_venue"]
-    end
-    safe = if route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:ready]
-      safe_readback_for_completed_route?(from: event["from_venue"], to: event["to_venue"])
-    elsif route&.fetch(:status, nil) == MigrationRouteProofRegistry::STATUSES[:not_safe_latency]
-      finalized_route_readback_summary?(route)
-    else
-      false
-    end
-    @stale_pending_continuation_ignored = true if safe
-    safe
-  end
-
-  def resolved_nado_target_continuation?(event)
-    resolved = proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event)
-    @stale_pending_continuation_ignored = true if resolved
-    resolved
-  end
-
-  def stale_pending_continuation_ignored?
-    @stale_pending_continuation_ignored == true
-  end
-
-  def safe_readback_for_completed_route?(from:, to:)
-    snapshot = position.position_dashboard_snapshot
-    return false unless snapshot
-    return false unless snapshot.refresh_status == "ok"
-    return false unless open_orders_zero?(snapshot)
-
-    !target_nado_waiting_for_source_close?(snapshot: snapshot, from: from, to: to)
-  end
-
-  def finalized_route_readback_summary?(route)
-    summary = route[:final_readback_summary] || {}
-    summary[:source_flat_after] == true &&
-      summary[:target_holds_expected_short] == true &&
-      summary[:final_inside_tolerance] == true
-  end
-
-  def open_orders_zero?(snapshot)
-    snapshot.open_orders_count_extended.to_i.zero?
-  end
-
-  def target_nado_waiting_for_source_close?(snapshot:, from:, to:)
-    return false unless to == "nado"
-
-    venue_short(snapshot, "nado").positive? && venue_short(snapshot, from).positive?
-  end
-
-  def venue_short(snapshot, venue)
-    decimal(snapshot.public_send("#{venue}_short_eth"))
-  end
-
-  def decimal(value)
     BigDecimal(value.to_s)
-  rescue ArgumentError, TypeError
-    BigDecimal("0")
-  end
-
-  def pending_nado_target_event?(event)
-    event["position_id"].to_s == position.id.to_s &&
-      event["to_venue"] == "nado" &&
-      event["final_status"].to_s == "TARGET_ACCEPTED_AWAITING_CONTINUATION" &&
-      event["continuation_pending"] == true
-  end
-
-  def event_time(event)
-    Time.zone.parse(event["timestamp"].to_s)
   rescue ArgumentError, TypeError
     nil
   end

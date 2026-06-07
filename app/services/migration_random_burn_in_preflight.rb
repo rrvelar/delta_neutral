@@ -5,7 +5,7 @@ class MigrationRandomBurnInPreflight
   def initialize(position:, env: ENV, proof_registry: nil, venue_builder: HedgeVenues, signer_client: nil,
                  fresh_target_factory: nil, readiness_factory: nil, burn_in_tolerance_multiplier: "1.0",
                  burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15",
-                 burn_in_max_allowed_drift_ratio: "0.08")
+                 burn_in_max_allowed_drift_ratio: "0.08", canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR)
     @position = position
     @env = env
     @proof_registry = proof_registry || MigrationRouteProofRegistry.new
@@ -17,19 +17,18 @@ class MigrationRandomBurnInPreflight
     @burn_in_extra_tolerance_eth = decimal_or_nil(burn_in_extra_tolerance_eth) || BigDecimal("0")
     @burn_in_max_allowed_drift_eth = decimal_or_nil(burn_in_max_allowed_drift_eth) || BigDecimal("0.15")
     @burn_in_max_allowed_drift_ratio = decimal_or_nil(burn_in_max_allowed_drift_ratio) || BigDecimal("0.08")
+    @canary_dir = canary_dir
   end
 
   def report
-    report = MigrationExecutionPreflight.new(
+    report = MigrationRandomExecutionPreflight.new(
       position: position,
       env: env,
       proof_registry: proof_registry,
       venue_builder: venue_builder,
       signer_client: signer_client,
       fresh_target_factory: fresh_target_factory,
-      readiness_factory: readiness_factory,
-      require_route_proofs: true,
-      require_random_readiness: true,
+      canary_dir: canary_dir,
       tolerance_multiplier: burn_in_tolerance_multiplier,
       extra_tolerance_eth: burn_in_extra_tolerance_eth,
       max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
@@ -39,10 +38,14 @@ class MigrationRandomBurnInPreflight
       warning == "strict tolerance exceeded but within migration preflight tolerance buffer" ? "strict tolerance exceeded but within burn-in tolerance buffer" : warning
     end
     blockers = Array(report[:blockers]).map { |blocker| burn_in_blocker_label(blocker) }
+    readiness = report.fetch(:readiness, {}).merge(
+      blockers: Array(report.dig(:readiness, :blockers)).map { |blocker| burn_in_blocker_label(blocker) }
+    )
     report.merge(
       warnings: warnings,
       blockers: blockers,
       hard_blockers: blockers,
+      readiness: readiness,
       burn_in_inside_tolerance: report[:inside_tolerance],
       effective_burn_in_tolerance_eth: report[:effective_tolerance_eth],
       burn_in_tolerance_multiplier: burn_in_tolerance_multiplier,
@@ -58,13 +61,14 @@ class MigrationRandomBurnInPreflight
 
   attr_reader :position, :env, :proof_registry, :venue_builder, :signer_client, :fresh_target_factory,
     :readiness_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
-    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
+    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio, :canary_dir
 
   def burn_in_blocker_label(blocker)
     text = blocker.to_s
     return text.sub("max allowed drift exceeded", "burn-in max allowed drift exceeded") if text.start_with?("max allowed drift exceeded")
     return text.sub("max allowed drift ratio exceeded", "burn-in max allowed drift ratio exceeded") if text.start_with?("max allowed drift ratio exceeded")
     return text.sub("current hedge outside tolerance", "current hedge out_of_burn_in_tolerance") if text.start_with?("current hedge outside tolerance")
+    return text.sub("before migration", "before burn-in") if text == MigrationRandomExecutionPreflight::PENDING_CONTINUATION_BLOCKER
 
     text
   end
