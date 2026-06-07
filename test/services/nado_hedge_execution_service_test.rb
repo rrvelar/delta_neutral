@@ -65,6 +65,24 @@ class NadoHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "active hedge-ready Mellow Autopilot position is required"
   end
 
+  test "manual Nado rebalance preflight does not require continuous auto enabled" do
+    service = ConfirmationBypassNadoService.new
+    position = mellow_position
+    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false)
+
+    report = service.preflight(
+      position: position,
+      action: "rebalance",
+      size_eth: "-0.120",
+      current_position: { size: BigDecimal("-2.439"), short_size: BigDecimal("2.439"), margin_mode: "isolated", isolated_margin_usd: "1000" },
+      confirmation: ConfirmationVenue::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+
+    assert_not_includes report.fetch(:blockers), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
+    assert_not report.fetch(:blockers).any? { |blocker| blocker.include?("AUTO_REBALANCE_ENABLED") }
+  end
+
   test "accepted digest stale readback confirms late when final readback is inside tolerance" do
     service = ConfirmationBypassNadoService.new(late_position: { size: BigDecimal("-1.18"), short_size: BigDecimal("1.18"), margin_mode: "isolated" })
     result = service.reconcile_pending_result(

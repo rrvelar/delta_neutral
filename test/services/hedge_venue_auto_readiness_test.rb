@@ -140,6 +140,26 @@ class HedgeVenueAutoReadinessTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "Position hedge execution_venue must be nado for Nado continuous auto"
   end
 
+  test "Nado manual one-shot readiness does not require continuous auto gate" do
+    env = nado_ready_env.merge("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false")
+    report = nado_adapter(env: env, current_short: "1.10", target: "1.0").readiness(position: position("nado"), mode: :manual_one_shot)
+
+    assert_equal "manual_one_shot", report.fetch(:readiness_mode)
+    assert_equal false, report.fetch(:nado_auto_rebalance_enabled)
+    assert_equal true, report.fetch(:nado_live_enabled)
+    assert_equal "decrease_short", report.fetch(:planned_auto_action)
+    assert_not_includes report.fetch(:blockers), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
+    assert_equal true, report.fetch(:manual_one_shot_ready)
+  end
+
+  test "Nado continuous auto readiness still requires continuous auto gate" do
+    env = nado_ready_env.merge("AERODROME_NADO_AUTO_REBALANCE_ENABLED" => "false")
+    report = nado_adapter(env: env, current_short: "1.10", target: "1.0").readiness(position: position("nado"))
+
+    assert_equal "continuous_auto", report.fetch(:readiness_mode)
+    assert_includes report.fetch(:blockers), "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true"
+  end
+
   test "Nado adapter blocks when Ethereal is not flat" do
     report = nado_adapter(ethereal_short: "0.1").readiness(position: position("nado"))
 

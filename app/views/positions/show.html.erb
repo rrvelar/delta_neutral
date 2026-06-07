@@ -1102,6 +1102,9 @@ end %>
             <% end %>
             <% unless selected_adapter&.live_enabled? %>
               <p class="mt-3 text-sm text-yellow-200">Live submit is disabled for <%= selected_venue_name %>; previews do not create orders.</p>
+              <% if selected_venue == "nado" %>
+                <p class="mt-2 text-sm text-yellow-100">Enable Nado live gate to perform one-shot manual rebalance. Continuous auto does not need to be enabled.</p>
+              <% end %>
             <% end %>
           </div>
 

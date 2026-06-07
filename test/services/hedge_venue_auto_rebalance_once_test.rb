@@ -192,6 +192,25 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
 
+  test "Nado manual one-shot rebalance does not require continuous auto readiness" do
+    readiness = ModeSensitiveNadoReadiness.new
+    service = FakeNadoExecutionService.new
+    result = nado_adapter(readiness: readiness, service: service).run(
+      position: position("nado"),
+      dry_run: false,
+      live: true,
+      confirmation: "I_UNDERSTAND_THIS_SUBMITS_LIVE_NADO_REBALANCE_ORDER",
+      max_slippage: "0.01"
+    )
+
+    assert_equal :manual_one_shot, readiness.last_mode
+    assert_equal "submitted_and_confirmed", result.status
+    assert_empty result.blockers.grep(/AERODROME_NADO_AUTO_REBALANCE_ENABLED/)
+    assert_equal 1, service.submit_calls
+    assert_equal 1, result.receipt.fetch(:orders_submitted)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+  end
+
   private
 
   def adapter(readiness: StaticReadiness.new, service: FakeExecutionService.new)
@@ -236,10 +255,11 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
       @reduce_only = reduce_only
     end
 
-    def readiness(position:)
+    def readiness(position:, mode: :continuous_auto)
       {
         position_id: position.id,
         venue: @venue || position.hedge.execution_venue,
+        readiness_mode: mode.to_s,
         planned_auto_action: @planned_auto_action,
         current_short_eth: "0.9",
         target_short_eth: "1.0",
@@ -252,6 +272,16 @@ class HedgeVenueAutoRebalanceOnceTest < ActiveSupport::TestCase
         blockers: [ @blocker ].compact,
         warnings: []
       }
+    end
+  end
+
+  class ModeSensitiveNadoReadiness < StaticReadiness
+    attr_reader :last_mode
+
+    def readiness(position:, mode: :continuous_auto)
+      @last_mode = mode
+      blocker = mode == :continuous_auto ? "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true" : nil
+      super(position: position, mode: mode).merge(blockers: [ blocker ].compact)
     end
   end
 

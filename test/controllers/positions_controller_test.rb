@@ -2173,6 +2173,24 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Nado Hedge Actions", response.body
   end
 
+  test "show selected Nado venue enables manual rebalance input when auto is disabled" do
+    position = create_aerodrome_position(active: true)
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.03", active: true, execution_venue: "nado")
+    create_dashboard_snapshot(position, extended_short_eth: "0", ethereal_short_eth: "0", nado_short_eth: "1.40")
+    OperationalSettings.set!(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false)
+
+    HyperliquidService.stub(:new, ->(*) { raise "HyperliquidService should not be called" }) do
+      get position_path(position, hedge_venue: "nado")
+    end
+
+    assert_response :success
+    assert_match "Rebalance Hedge", response.body
+    assert_match AerodromeDashboardHedgeAction::NADO_CONFIRMATION, response.body
+    assert_select "input#dashboard-hedge-confirmation-rebalance[disabled]", count: 0
+    assert_no_match "AERODROME_NADO_AUTO_REBALANCE_ENABLED must be true", response.body
+  end
+
   test "show active unhedged position puts hedge tab and open hedge risk cap near top" do
     position = create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), active: true)
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
