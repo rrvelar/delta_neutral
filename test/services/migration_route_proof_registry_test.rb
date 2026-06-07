@@ -188,6 +188,49 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "source first Nado proof can use fast execution confirmation when final readback later matches" do
+    position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: Time.current.utc.iso8601,
+      position_id: position.id,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      migration_sequence: "source_first",
+      final_status: "SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_complete_by_readback: true,
+      manual_action_required: false,
+      route_production_safe: true,
+      target_execution_confirmed_at: Time.current.utc.iso8601,
+      source_flat_to_execution_confirmed_seconds: "4",
+      source_flat_to_target_confirmed_seconds: "27",
+      source_flat_to_position_confirmed_seconds: "27",
+      underhedge_seconds: "4",
+      double_exposure_seconds: "0",
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2,
+      cancels_submitted: 0
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "nado")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "route proof report diagnoses all route policies disabled" do
     position = position_with_snapshot("ethereal")
     OperationalSettings::ROUTE_KEYS.each { |key| OperationalSettings.set!(key: key, enabled: false) }

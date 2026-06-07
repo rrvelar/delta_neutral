@@ -342,10 +342,17 @@ class MigrationRouteProofRegistry
 
   def source_first_underhedge_latency(event)
     return event["underhedge_seconds"] unless source_first_event?(event)
+    if event["target_execution_confirmed_at"].present? && truthy?(event["route_complete_by_readback"])
+      return event["source_flat_to_execution_confirmed_seconds"]
+    end
 
     event["source_flat_to_target_confirmed_seconds"].presence ||
       event["underhedge_seconds"].presence ||
       event["source_flat_to_finalized_seconds"]
+  end
+
+  def truthy?(value)
+    ActiveModel::Type::Boolean.new.cast(value)
   end
 
   def max_double_exposure_seconds

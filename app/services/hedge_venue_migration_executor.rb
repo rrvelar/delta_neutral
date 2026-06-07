@@ -236,6 +236,8 @@ class HedgeVenueMigrationExecutor
 
     unless leg_confirmed?(target_leg)
       if source_first_nado_target_accepted?(receipt, target_leg_plan, target_leg)
+        execution_confirmation = confirm_source_first_nado_execution_by_digest(receipt: receipt, target_leg: target_leg)
+        apply_source_first_nado_execution_confirmation!(receipt, execution_confirmation) if execution_confirmation[:confirmed]
         canonical = confirm_source_first_nado_target_by_canonical_readback(position: position, receipt: receipt)
         if canonical[:confirmed]
           target_leg = mark_source_first_nado_target_confirmed_by_canonical_readback(target_leg, canonical)
@@ -246,7 +248,7 @@ class HedgeVenueMigrationExecutor
           receipt[:target_readback_attempts] = canonical[:latest_attempt]
           receipt[:leg_readbacks] << canonical[:latest_attempt]
           receipt[:target_readback_confirmed_at] = canonical.dig(:latest_attempt, :timestamp) || @now.call.utc.iso8601(6)
-          receipt[:underhedge_ended_at] = receipt[:target_readback_confirmed_at]
+          receipt[:underhedge_ended_at] = receipt[:target_readback_confirmed_at] unless receipt[:target_execution_confirmed_at].present?
           annotate_source_first_nado_timing!(receipt, target_leg_plan)
           compute_underhedge_latency!(receipt)
         else
@@ -261,7 +263,7 @@ class HedgeVenueMigrationExecutor
       end
     end
 
-    receipt.merge!(final_readback_status(position: position, receipt: receipt))
+    receipt.merge!(source_first_nado_canonical_final_status(receipt) || final_readback_status(position: position, receipt: receipt))
     finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
     annotate_migration_latency!(receipt)
     receipt[:route_latency_proof] = true
@@ -270,13 +272,13 @@ class HedgeVenueMigrationExecutor
       receipt[:lifecycle_state] = receipt[:final_status]
       receipt[:manual_action_required] = false
     end
-    apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
     receipt[:route_complete_by_readback] ||= receipt[:production_venue_finalized] == true &&
       receipt[:source_flat_after] == true &&
       receipt[:target_holds_expected_short] == true &&
       receipt[:third_venue_flat] == true &&
       receipt[:final_inside_tolerance] == true &&
       receipt[:open_orders_clear_after] == true
+    apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
     receipt[:production_safe_route] = receipt.fetch(:production_safe_route, receipt[:final_status].in?(%w[success MIGRATION_FINALIZED SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK]))
     receipt[:route_production_safe] = receipt[:production_safe_route]
     receipt[:latency_proof_status] ||= receipt[:route_production_safe] ? "passed" : "failed_latency_threshold"
@@ -755,7 +757,15 @@ class HedgeVenueMigrationExecutor
   end
 
   def source_first_latency_safety_exceeds_threshold?(receipt)
-    latency_exceeds?(receipt[:source_flat_to_target_confirmed_seconds] || receipt[:underhedge_seconds] || receipt[:source_flat_to_finalized_seconds], max_unhedged_seconds)
+    latency_exceeds?(source_first_risk_latency(receipt), max_unhedged_seconds)
+  end
+
+  def source_first_risk_latency(receipt)
+    if receipt[:target_execution_confirmed_at].present? && receipt[:route_complete_by_readback] == true
+      return receipt[:source_flat_to_execution_confirmed_seconds]
+    end
+
+    receipt[:source_flat_to_target_confirmed_seconds] || receipt[:underhedge_seconds] || receipt[:source_flat_to_finalized_seconds]
   end
 
   def latency_exceeds?(value, threshold)
@@ -808,7 +818,7 @@ class HedgeVenueMigrationExecutor
       blockers << "double exposure lasted #{receipt[:double_exposure_seconds]}s, exceeding MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS=#{max_double_exposure_seconds.to_s('F')}"
     end
     source_first = receipt[:migration_sequence].to_s == "source_first"
-    underhedge_latency = receipt[:source_flat_to_target_confirmed_seconds] || receipt[:underhedge_seconds] || receipt[:source_flat_to_finalized_seconds]
+    underhedge_latency = source_first_risk_latency(receipt)
     if source_first && latency_exceeds?(underhedge_latency, max_unhedged_seconds)
       blockers << "source-flat-to-target-confirmed latency #{underhedge_latency}s exceeded MIGRATION_MAX_UNHEDGED_SECONDS=#{max_unhedged_seconds.to_s('F')}"
     elsif latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds)
@@ -905,6 +915,45 @@ class HedgeVenueMigrationExecutor
     result
   end
 
+  def confirm_source_first_nado_execution_by_digest(receipt:, target_leg:)
+    digest = target_leg[:exchange_order_id] || receipt[:target_leg_digest_or_order_id]
+    return { confirmed: false, blockers: [ "Nado target digest is unavailable for execution confirmation" ] } if digest.blank?
+
+    mark_time!(receipt, :nado_digest_execution_lookup_started_at)
+    result = NadoExecutionConfirmation.confirm_digest(
+      digest: digest,
+      product_id: NadoHedgeExecutionService::ETH_PERP_PRODUCT_ID,
+      env: @env,
+      now: @now
+    )
+    receipt[:nado_digest_execution_confirmation] = result
+    result
+  end
+
+  def apply_source_first_nado_execution_confirmation!(receipt, confirmation)
+    receipt[:nado_digest_execution_confirmed_at] = confirmation[:confirmed_at] || @now.call.utc.iso8601(6)
+    receipt[:target_execution_confirmed_at] = receipt[:nado_digest_execution_confirmed_at]
+    receipt[:target_confirmation_source] = confirmation[:source]
+    receipt[:nado_accept_to_execution_confirmed_seconds] = seconds_between(receipt[:nado_accept_at] || receipt[:target_leg_accepted_at], receipt[:target_execution_confirmed_at])
+    receipt[:source_flat_to_execution_confirmed_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_execution_confirmed_at])
+    receipt[:underhedge_ended_at] = receipt[:target_execution_confirmed_at]
+    compute_underhedge_latency!(receipt)
+  end
+
+  def source_first_nado_canonical_final_status(receipt)
+    verification = receipt[:nado_source_first_canonical_verification]
+    return nil unless receipt[:migration_sequence].to_s == "source_first" && verification&.fetch(:confirmed, false)
+    return nil unless %i[latest_attempt source_flat target_confirmed third_venue_flat combined_inside_tolerance open_orders_clear].all? { |key| verification.key?(key) }
+
+    final_readback_status_from_verification(receipt: receipt, verification: verification).merge(
+      final_reconciliation: verification,
+      final_reconciliation_status: "MIGRATION_CONFIRMED",
+      final_status: "success",
+      manual_action_required: false,
+      blockers: []
+    )
+  end
+
   def mark_source_first_nado_target_confirmed_by_canonical_readback(target_leg, canonical)
     leg_receipt = (target_leg[:receipt] || {}).merge(
       reconciled_after_pending: true,
@@ -939,6 +988,7 @@ class HedgeVenueMigrationExecutor
     receipt[:nado_accept_to_confirmed_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:target_readback_confirmed_at])
     receipt[:target_accept_to_confirmed_seconds] = receipt[:nado_accept_to_confirmed_seconds]
     receipt[:source_flat_to_target_confirmed_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_readback_confirmed_at])
+    receipt[:source_flat_to_position_confirmed_seconds] = receipt[:source_flat_to_target_confirmed_seconds]
     receipt[:source_flat_to_finalized_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_readback_confirmed_at])
   end
 
@@ -1170,6 +1220,10 @@ class HedgeVenueMigrationExecutor
 
   def final_readback_status(position:, receipt:)
     verification = final_verifier(position: position, receipt: receipt).verify
+    final_readback_status_from_verification(receipt: receipt, verification: verification)
+  end
+
+  def final_readback_status_from_verification(receipt:, verification:)
     latest = verification.fetch(:latest_attempt)
     from_after = decimal(latest[:source_short_eth])
     to_after = decimal(latest[:target_venue_short_eth])

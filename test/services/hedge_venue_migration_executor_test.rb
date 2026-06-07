@@ -1504,6 +1504,147 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     end
   end
 
+  test "source first Nado execution confirmation ends risk window before delayed position readback" do
+    position = migration_position_for("ethereal")
+    base = Time.zone.parse("2026-06-06T16:00:00Z")
+    times = [
+      base,
+      base + 1.second,
+      base + 2.seconds,
+      base + 3.seconds,
+      base + 4.seconds,
+      base + 5.seconds,
+      base + 6.seconds,
+      base + 7.seconds,
+      base + 8.seconds
+    ]
+    now = -> { times.shift || base + 9.seconds }
+    pending = NadoHedgeExecutionService::Result.new("submitted_but_readback_pending", [ "target still not visible through Nado service poll" ], [], {
+      submitted: true,
+      orders_placed: 1,
+      orders_submitted: 1,
+      signatures_created: 1,
+      exchange_order_id: "0xnado-exec-fast",
+      action_plan: { expected_after_short_eth: "0.8" },
+      final_status: "submitted_but_readback_pending"
+    })
+    fake_service = FakeNadoMigrationService.new(pending: pending, confirmed: pending)
+    fake_venue = Class.new do
+      def read_position(symbol:) = nil
+    end.new
+    fake_builder = Class.new do
+      def initialize(venue) = @venue = venue
+      def build(_name, **_kwargs) = @venue
+    end.new(fake_venue)
+    nado_runner = HedgeVenueMigrationExecutor::DefaultLegRunner.new(
+      env: live_env.merge(
+        "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+        "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"
+      ),
+      venue_builder: fake_builder,
+      sleeper: ->(_seconds) { }
+    )
+    calls = []
+    runner = ->(leg, context:) do
+      calls << leg
+      calls.size == 1 ? { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "ethereal-close", after_short_eth: "0" } : nado_runner.call(leg, context: context)
+    end
+    canonical_readback = {
+      status: "confirmed",
+      confirmed: true,
+      target_confirmed: true,
+      source_flat: true,
+      third_venue_flat: true,
+      combined_inside_tolerance: true,
+      open_orders_clear: true,
+      target_short_eth: "0.8",
+      source_short_eth: "0",
+      combined_short_eth: "0.8",
+      expected_target_short_eth: "0.8",
+      tolerance_eth: "0.024",
+      latest_attempt: {
+        timestamp: "2026-06-06T16:00:25.000000Z",
+        source_short_eth: "0",
+        target_venue_short_eth: "0.8",
+        combined_short_eth: "0.8",
+        expected_target_short_eth: "0.8",
+        tolerance_eth: "0.024",
+        source_flat: true,
+        target_confirmed: true,
+        third_venue_flat: true,
+        combined_inside_tolerance: true,
+        open_orders_clear: true,
+        open_orders_count: 0,
+        blockers: []
+      },
+      verification: {
+        confirmed: true,
+        attempts: [ { attempt: 1 } ],
+        latest_attempt: {
+          source_short_eth: "0",
+          target_venue_short_eth: "0.8",
+          combined_short_eth: "0.8",
+          expected_target_short_eth: "0.8",
+          tolerance_eth: "0.024",
+          open_orders_count: 0
+        },
+        source_flat: true,
+        target_confirmed: true,
+        third_venue_flat: true,
+        combined_inside_tolerance: true,
+        open_orders_clear: true,
+        blockers: []
+      },
+      blockers: [],
+      readback_source: "canonical_nado_migration_readback"
+    }
+    execution_confirmation = {
+      status: "confirmed",
+      confirmed: true,
+      confirmed_at: "2026-06-06T16:00:04.500000Z",
+      source: "archive_order",
+      digest: "0xnado-exec-fast",
+      attempts: []
+    }
+
+    NadoHedgeExecutionService.stub(:new, fake_service) do
+      NadoExecutionConfirmation.stub(:confirm_digest, ->(**_kwargs) { execution_confirmation }) do
+        NadoMigrationReadback.stub(:confirm_target_short, ->(**_kwargs) { canonical_readback }) do
+          result = HedgeVenueMigrationExecutor.new(
+            env: live_env.merge(
+              "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+              "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+              "MIGRATION_MAX_UNHEDGED_SECONDS" => "10",
+              "MIGRATION_MAX_TOTAL_ROUTE_SECONDS" => "10"
+            ),
+            leg_runner: runner,
+            now: now,
+            snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+            final_verifier_factory: ->(**) { raise "canonical final state should avoid redundant final verifier" },
+            sleeper: ->(_seconds) { }
+          ).run(
+            position: position,
+            from_venue: "ethereal",
+            to_venue: "nado",
+            dry_run: false,
+            confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+            full_migration_allowed: true,
+            mode: "full",
+            migration_sequence: "source_first"
+          )
+
+          assert_equal "SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK", result.status, result.blockers.inspect
+          assert_equal true, result.receipt.fetch(:route_production_safe)
+          assert_equal "passed", result.receipt.fetch(:latency_proof_status)
+          assert_equal "archive_order", result.receipt.fetch(:target_confirmation_source)
+          assert_operator BigDecimal(result.receipt.fetch(:source_flat_to_execution_confirmed_seconds).to_s), :<, BigDecimal("10")
+          assert_operator BigDecimal(result.receipt.fetch(:source_flat_to_position_confirmed_seconds).to_s), :>, BigDecimal("10")
+          assert_operator BigDecimal(result.receipt.fetch(:source_flat_to_finalized_seconds).to_s), :<, BigDecimal("10")
+        end
+      end
+    end
+  end
+
   test "source first Nado accepted digest becomes bounded ambiguous state without duplicate submit" do
     position = migration_position_for("ethereal")
     fake_venue = Class.new do
