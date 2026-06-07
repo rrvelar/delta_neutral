@@ -11,12 +11,13 @@ class MigrationRouteProofRegistry
     failed: "FAILED_NEEDS_REPAIR"
   }.freeze
 
-  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: MigrationTargetFirstSourceRecovery::RECEIPT_DIR, continuation_dir: MigrationTargetNadoContinuation::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), now: -> { Time.current }, source_commit: nil, stale_after: 30.days, env: ENV, route_policy: nil)
+  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: MigrationTargetFirstSourceRecovery::RECEIPT_DIR, continuation_dir: MigrationTargetNadoContinuation::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), latency_proof_dir: Rails.root.join("storage/hedge_migration_route_latency_proofs"), now: -> { Time.current }, source_commit: nil, stale_after: 30.days, env: ENV, route_policy: nil)
     @route_proof_dir = Pathname(route_proof_dir)
     @canary_dir = Pathname(canary_dir)
     @recovery_dirs = Array(recovery_dir).map { |dir| Pathname(dir) }
     @continuation_dir = Pathname(continuation_dir)
     @random_dir = Pathname(random_dir)
+    @latency_proof_dir = Pathname(latency_proof_dir)
     @now = now
     @source_commit = source_commit || current_commit
     @stale_after = stale_after
@@ -54,15 +55,18 @@ class MigrationRouteProofRegistry
     continuation = latest_event(position: position, from: from, to: to, dirs: [ continuation_dir ]) do |event|
       continuation_proof?(event)
     end
+    latency = latest_event(position: position, from: from, to: to, dirs: [ latency_proof_dir ]) do |event|
+      route_latency_proof?(event)
+    end
     recovery = latest_event(position: position, from: from, to: to, dirs: recovery_dirs) do |event|
       recovery_proof?(event)
     end
-    failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, *recovery_dirs, random_dir ]) do |event|
+    failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, latency_proof_dir, *recovery_dirs, random_dir ]) do |event|
       failed_proof?(event)
     end
-    latest = [ dry, live, continuation, recovery, failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
-    status = status_for(dry: dry, live: live, continuation: continuation, recovery: recovery, failed: failed, latest: latest)
-    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, recovery: recovery, failed: failed, latest: latest)
+    latest = [ dry, live, continuation, latency, recovery, failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+    status = status_for(dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, latest: latest)
+    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, latest: latest)
     route_policy_status = route_policy.route_status(from: from, to: to)
     if status == STATUSES[:ready] && !route_policy_status.fetch(:enabled)
       status = STATUSES[:not_safe_latency]
@@ -76,6 +80,7 @@ class MigrationRouteProofRegistry
       dry_run_receipt: receipt_ref(dry),
       live_canary_receipt: receipt_ref(live),
       continuation_receipt: receipt_ref(continuation),
+      latency_proof_receipt: receipt_ref(latency),
       recovery_receipt: receipt_ref(recovery),
       finalization_receipt: receipt_ref(proof_event),
       proof_timestamp: proof_event&.fetch("timestamp", nil),
@@ -89,6 +94,9 @@ class MigrationRouteProofRegistry
       route_strategy: route_policy_status[:strategy],
       migration_sequence: route_policy_status[:migration_sequence],
       route_production_safe: production_safe_latency?(proof_event),
+      latency_proof_status: latency_proof_status(proof_event),
+      target_confirmation_source: proof_event&.fetch("target_confirmation_source", nil),
+      source_flat_to_execution_confirmed_seconds: proof_event&.fetch("source_flat_to_execution_confirmed_seconds", nil),
       double_exposure_seconds: proof_event&.fetch("double_exposure_seconds", nil),
       underhedge_seconds: proof_event&.fetch("underhedge_seconds", nil),
       total_route_seconds: proof_event&.fetch("total_route_seconds", nil) || proof_event&.fetch("total_migration_latency_seconds", nil),
@@ -120,16 +128,20 @@ class MigrationRouteProofRegistry
 
   private
 
-  attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :now, :source_commit, :stale_after, :env, :route_policy
+  attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :latency_proof_dir, :now, :source_commit, :stale_after, :env, :route_policy
 
-  def status_for(dry:, live:, continuation:, recovery:, failed:, latest:)
+  def status_for(dry:, live:, continuation:, latency:, recovery:, failed:, latest:)
     return STATUSES[:not_started] unless latest
 
-    if continuation && !manual_intervention?(continuation) && production_safe_latency?(continuation) && later_than?(continuation, recovery) && later_than?(continuation, live)
+    if continuation && !manual_intervention?(continuation) && production_safe_latency?(continuation) && later_than?(continuation, recovery) && later_than?(continuation, live) && later_than?(continuation, latency) && later_than?(continuation, failed)
       return stale?(continuation) ? STATUSES[:stale] : STATUSES[:ready]
     end
 
-    if live && !manual_intervention?(live) && production_safe_latency?(live) && later_than?(live, recovery)
+    if latency && !manual_intervention?(latency) && production_safe_latency?(latency) && later_than?(latency, recovery) && later_than?(latency, live) && later_than?(latency, continuation) && later_than?(latency, failed)
+      return stale?(latency) ? STATUSES[:stale] : STATUSES[:ready]
+    end
+
+    if live && !manual_intervention?(live) && production_safe_latency?(live) && later_than?(live, recovery) && later_than?(live, latency) && later_than?(live, failed)
       return stale?(live) ? STATUSES[:stale] : STATUSES[:ready]
     end
 
@@ -150,10 +162,10 @@ class MigrationRouteProofRegistry
     STATUSES[:not_started]
   end
 
-  def proof_event_for(status:, dry:, live:, continuation:, recovery:, failed:, latest:)
+  def proof_event_for(status:, dry:, live:, continuation:, latency:, recovery:, failed:, latest:)
     case status
     when STATUSES[:ready], STATUSES[:live]
-      [ continuation, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+      [ continuation, latency, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
     when STATUSES[:recovery]
       recovery
     when STATUSES[:dry_run]
@@ -235,6 +247,35 @@ class MigrationRouteProofRegistry
       production_safe_latency?(event)
   end
 
+  def route_latency_proof?(event)
+    return false unless truthy?(event["route_latency_proof"])
+    return false if manual_intervention?(event)
+
+    if source_first_nado_target_latency_proof?(event)
+      return source_first_nado_target_finalized_safely?(event) && production_safe_latency?(event)
+    end
+
+    clean_live_final_status?(event["final_status"]) &&
+      finalized_target_first_event?(event) &&
+      production_safe_latency?(event)
+  end
+
+  def source_first_nado_target_latency_proof?(event)
+    event["to_venue"].to_s == "nado" &&
+      (event["migration_sequence"].to_s == "source_first" || event["strategy"].to_s == "source_first")
+  end
+
+  def source_first_nado_target_finalized_safely?(event)
+    clean_live_final_status?(event["final_status"]) &&
+      truthy?(event["production_venue_finalized"]) &&
+      truthy?(event["route_complete_by_readback"]) &&
+      truthy?(event["final_inside_tolerance"]) &&
+      (truthy?(event["source_flat_after"]) || truthy?(event["source_close_confirmed"]) || truthy?(event["source_already_flat"])) &&
+      (truthy?(event["target_holds_expected_short"]) || truthy?(event["target_confirmed"])) &&
+      (event["third_venue_flat"] != false && event["other_venues_flat"] != false) &&
+      (event["open_orders_clear"] != false && event["open_orders_clear_after"] != false && event["open_orders_after"].to_i.zero?)
+  end
+
   def clean_live_final_status?(status)
     status.to_s.in?([
       MigrationLiveCanaryChecker::CONFIRMED_STATUS,
@@ -302,7 +343,7 @@ class MigrationRouteProofRegistry
     return false unless event
     return true if event["final_status"].to_s == STATUSES[:not_safe_latency]
     return true if event["latency_incident"] == true
-    return true if event["route_production_safe"] == false || event["production_safe_route"] == false
+    return true if explicit_route_production_safe?(event) == false
 
     return true if nado_target_without_latency_proof?(event)
     return true if latency_value_exceeds?(event["double_exposure_seconds"], max_double_exposure_seconds)
@@ -342,7 +383,7 @@ class MigrationRouteProofRegistry
 
   def source_first_underhedge_latency(event)
     return event["underhedge_seconds"] unless source_first_event?(event)
-    if event["target_execution_confirmed_at"].present? && truthy?(event["route_complete_by_readback"])
+    if source_first_nado_execution_proof_usable?(event)
       return event["source_flat_to_execution_confirmed_seconds"]
     end
 
@@ -353,6 +394,28 @@ class MigrationRouteProofRegistry
 
   def truthy?(value)
     ActiveModel::Type::Boolean.new.cast(value)
+  end
+
+  def source_first_nado_execution_proof_usable?(event)
+    source = event["target_confirmation_source"].to_s
+    source_first_nado_target_latency_proof?(event) &&
+      source.in?(%w[archive_order gateway_order fill trade digest]) &&
+      truthy?(event["route_complete_by_readback"]) &&
+      event["source_flat_to_execution_confirmed_seconds"].present?
+  end
+
+  def explicit_route_production_safe?(event)
+    return truthy?(event["route_production_safe"]) unless event["route_production_safe"].nil?
+    return truthy?(event["production_safe_route"]) unless event["production_safe_route"].nil?
+    return truthy?(event["production_safe"]) unless event["production_safe"].nil?
+
+    nil
+  end
+
+  def latency_proof_status(event)
+    return nil unless event
+
+    event["latency_proof_status"] || (production_safe_latency?(event) ? "passed" : "failed_latency_threshold")
   end
 
   def max_double_exposure_seconds

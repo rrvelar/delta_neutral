@@ -37,6 +37,7 @@ class HedgeVenueMigrationReceiptWriter
   def sensitive_key?(key)
     text = key.to_s
     return false if text == "confirmation_type"
+    return false if text == "target_confirmation_source"
     return false if text == "signatures_created"
 
     text.match?(/api[_-]?key|private|authorization|cookie|signature|secret|confirmation/i)

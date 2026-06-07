@@ -382,7 +382,8 @@ namespace :migration do
         OperationalSettings.set!(key: OperationalSettings.route_key_for(from, to), enabled: true, reason: "route latency proof passed")
         OperationalSettings.set!(key: OperationalSettings.route_strategy_key_for(from, to), enabled: strategy, reason: "route latency proof strategy")
       end
-      puts JSON.pretty_generate(receipt)
+      path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_route_latency_proofs")).write(receipt)
+      puts JSON.pretty_generate(receipt.merge(receipt_path: path&.to_s))
     else
       result = HedgeVenueMigrationExecutor.new.run(
         position: position,
