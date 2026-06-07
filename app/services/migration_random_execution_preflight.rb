@@ -114,7 +114,12 @@ class MigrationRandomExecutionPreflight
 
   def direct_open_orders(report)
     %w[extended ethereal nado].to_h do |venue|
-      [ venue, report.dig(:venues, venue, :open_orders_status) ]
+      details = report.dig(:venues, venue) || report.dig(:venues, venue.to_sym) || {}
+      [ venue, {
+        status: details[:open_orders_status] || details["open_orders_status"],
+        count: details[:open_orders_count] || details["open_orders_count"],
+        message: details[:open_orders_message] || details["open_orders_message"]
+      }.compact ]
     end
   end
 

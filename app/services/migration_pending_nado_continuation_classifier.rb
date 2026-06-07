@@ -41,10 +41,16 @@ class MigrationPendingNadoContinuationClassifier
   end
 
   def classify(event)
-    return "stale_artifact" if proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event)
+    return "stale_artifact" if registry_resolved?(event)
     return "stale_artifact" if current_direct_state_safe_for?(event)
 
     "real_unresolved_exchange_risk"
+  end
+
+  def registry_resolved?(event)
+    return false unless proof_registry.respond_to?(:resolved_nado_target_continuation?)
+
+    proof_registry.resolved_nado_target_continuation?(position: position, pending_event: event)
   end
 
   def current_direct_state_safe_for?(event)
@@ -54,20 +60,20 @@ class MigrationPendingNadoContinuationClassifier
       active_short_venues.first == current_production_venue &&
       other_venues_flat? &&
       direct_open_orders_zero? &&
-      direct_report[:inside_tolerance] == true &&
+      truthy?(report_value(:inside_tolerance)) &&
       event["manual_action_required"] != true
   end
 
   def route_ready_or_finalized?(event)
     route = route_for(event)
     return false unless route
-    return true if route[:status] == MigrationRouteProofRegistry::STATUSES[:ready]
+    return true if route_value(route, :status) == MigrationRouteProofRegistry::STATUSES[:ready]
 
-    summary = route[:final_readback_summary] || {}
-    route[:status] == MigrationRouteProofRegistry::STATUSES[:not_safe_latency] &&
-      summary[:source_flat_after] == true &&
-      summary[:target_holds_expected_short] == true &&
-      summary[:final_inside_tolerance] == true
+    summary = route_value(route, :final_readback_summary) || {}
+    route_value(route, :status) == MigrationRouteProofRegistry::STATUSES[:not_safe_latency] &&
+      truthy?(hash_value(summary, :source_flat_after)) &&
+      truthy?(hash_value(summary, :target_holds_expected_short)) &&
+      truthy?(hash_value(summary, :final_inside_tolerance))
   end
 
   def production_venue_finalized?
@@ -80,31 +86,31 @@ class MigrationPendingNadoContinuationClassifier
 
   def other_venues_flat?
     (VENUES - [ current_production_venue ]).all? do |venue|
-      short = direct_report.dig(:venues, venue, :short_eth)
+      short = venue_short(venue)
       short && short <= FLAT_EPSILON
     end
   end
 
   def direct_open_orders_zero?
     VENUES.all? do |venue|
-      direct_report.dig(:venues, venue, :open_orders_status) == "zero"
+      open_order_status(venue) == "zero"
     end
   end
 
   def active_short_venues
     @active_short_venues ||= VENUES.select do |venue|
-      short = direct_report.dig(:venues, venue, :short_eth)
+      short = venue_short(venue)
       short && short > FLAT_EPSILON
     end
   end
 
   def current_production_venue
-    @current_production_venue ||= HedgeVenues.known_key(direct_report[:production_venue] || position.hedge&.execution_venue)
+    @current_production_venue ||= HedgeVenues.known_key(report_value(:production_venue) || position.hedge&.execution_venue)
   end
 
   def route_for(event)
-    proof_report.fetch(:routes).find do |entry|
-      entry[:from_venue] == event["from_venue"] && entry[:to_venue] == event["to_venue"]
+    Array(hash_value(proof_report, :routes)).find do |entry|
+      route_value(entry, :from_venue) == event["from_venue"] && route_value(entry, :to_venue) == event["to_venue"]
     end
   end
 
@@ -147,13 +153,91 @@ class MigrationPendingNadoContinuationClassifier
   def diagnostics(event)
     {
       route: "#{event['from_venue']}->#{event['to_venue']}",
-      route_status: route_for(event)&.fetch(:status, nil),
+      route_status: route_for(event)&.then { |route| route_value(route, :status) },
       active_short_venues: active_short_venues,
       production_venue: current_production_venue,
       open_orders_zero: direct_open_orders_zero?,
-      inside_tolerance: direct_report[:inside_tolerance],
-      direct_blockers: Array(direct_report[:blockers])
+      direct_open_orders: canonical_open_orders,
+      inside_tolerance: report_value(:inside_tolerance),
+      direct_blockers: Array(report_value(:blockers))
     }
+  end
+
+  def venue_short(venue)
+    decimal_or_nil(venue_value(venue, :short_eth))
+  end
+
+  def open_order_status(venue)
+    status = canonical_open_orders.dig(venue, :status)
+    status.to_s.presence
+  end
+
+  def canonical_open_orders
+    @canonical_open_orders ||= VENUES.to_h do |venue|
+      raw = direct_open_order_value(venue)
+      status, count, message = normalize_open_order_value(raw, venue)
+      [ venue, { status: status, count: count, message: message }.compact ]
+    end
+  end
+
+  def direct_open_order_value(venue)
+    direct_open_orders = report_value(:direct_open_orders)
+    value = hash_value(direct_open_orders, venue) if direct_open_orders
+    return value unless value.nil?
+
+    {
+      status: venue_value(venue, :open_orders_status),
+      count: venue_value(venue, :open_orders_count),
+      message: venue_value(venue, :open_orders_message)
+    }
+  end
+
+  def normalize_open_order_value(raw, venue)
+    case raw
+    when Hash
+      status = hash_value(raw, :status) || hash_value(raw, :open_orders_status)
+      count = hash_value(raw, :count) || hash_value(raw, :open_orders_count)
+      message = hash_value(raw, :message) || hash_value(raw, :open_orders_message)
+    else
+      status = raw
+      count = venue_value(venue, :open_orders_count)
+      message = venue_value(venue, :open_orders_message)
+    end
+    status = status.to_s.presence || (count.nil? ? "unknown" : (count.to_i.zero? ? "zero" : "blocked"))
+    count = count.to_i if count.present?
+    [ status, count, message ]
+  end
+
+  def venue_value(venue, key)
+    venues = report_value(:venues) || {}
+    venue_report = hash_value(venues, venue) || {}
+    hash_value(venue_report, key)
+  end
+
+  def route_value(route, key)
+    hash_value(route, key)
+  end
+
+  def report_value(key)
+    hash_value(direct_report, key)
+  end
+
+  def hash_value(hash, key)
+    return nil unless hash.respond_to?(:[])
+
+    hash[key] || hash[key.to_s]
+  end
+
+  def decimal_or_nil(value)
+    return nil if value.nil?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
+  end
+
+  def truthy?(value)
+    value == true || value.to_s == "true"
   end
 
   def event_time(event)

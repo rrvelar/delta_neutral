@@ -78,7 +78,14 @@ class MigrationRandomReadiness
       pending,
       preflight_source: "migration_random_execution_preflight",
       direct_venue_shorts: %w[extended ethereal nado].to_h { |venue| [ venue, direct.dig(:venues, venue, :short_eth)&.to_s("F") ] },
-      direct_open_orders: %w[extended ethereal nado].to_h { |venue| [ venue, direct.dig(:venues, venue, :open_orders_status) ] }
+      direct_open_orders: %w[extended ethereal nado].to_h do |venue|
+        details = direct.dig(:venues, venue) || {}
+        [ venue, {
+          status: details[:open_orders_status],
+          count: details[:open_orders_count],
+          message: details[:open_orders_message]
+        }.compact ]
+      end
     )
   end
 

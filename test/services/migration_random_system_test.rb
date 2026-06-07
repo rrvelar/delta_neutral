@@ -1017,6 +1017,107 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
+  test "pending Nado classifier treats production-shaped safe direct state as stale artifact" do
+    canary_dir = Rails.root.join("tmp/test-classifier-canary-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 3.days.ago))
+    proof_report = {
+      "routes" => MigrationLiveRouteCapability::ROUTES.map do |from, to|
+        { "route" => "#{from}->#{to}", "from_venue" => from, "to_venue" => to, "status" => "READY_FOR_RANDOM" }
+      end
+    }
+    direct_report = {
+      "production_venue" => "nado",
+      "inside_tolerance" => true,
+      "venues" => {
+        "extended" => { "short_eth" => "0", "open_orders_status" => "zero", "open_orders_count" => 0 },
+        "ethereal" => { "short_eth" => "0", "open_orders_status" => "zero", "open_orders_count" => 0 },
+        "nado" => { "short_eth" => "1.18", "open_orders_status" => "zero", "open_orders_count" => 0 }
+      },
+      "direct_open_orders" => {
+        "extended" => { "status" => "zero", "count" => 0 },
+        "ethereal" => { "status" => "zero", "count" => 0 },
+        "nado" => { "status" => "zero", "count" => 0 }
+      },
+      "blockers" => []
+    }
+
+    report = MigrationPendingNadoContinuationClassifier.new(
+      position: position,
+      proof_registry: BurnInProofRegistry.new,
+      proof_report: proof_report,
+      direct_report: direct_report,
+      canary_dir: canary_dir
+    ).report
+
+    assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal "stale_artifact", report.fetch(:pending_continuation_classification)
+    assert_equal true, report.dig(:pending_continuation_diagnostics, :open_orders_zero)
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
+  test "burn-in preflight proceeds past stale pending Nado continuation when direct production state is safe" do
+    canary_dir = Rails.root.join("tmp/test-burn-in-canary-#{SecureRandom.hex(4)}")
+    position = migration_position("nado")
+    write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 3.days.ago))
+
+    report = direct_preflight(
+      position,
+      venues: {
+        "ethereal" => DirectBurnInVenue.new(short: "0"),
+        "nado" => DirectBurnInVenue.new(short: "1.18")
+      },
+      canary_dir: canary_dir
+    ).report
+
+    assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
+    assert_equal false, report.fetch(:pending_nado_target_continuation_blocking)
+    assert_equal true, report.fetch(:stale_pending_continuation_ignored)
+    assert_equal "stale_artifact", report.fetch(:pending_continuation_classification)
+    assert_not_includes report.fetch(:blockers), "pending target=Nado migration continuation must be completed before burn-in"
+  ensure
+    FileUtils.rm_rf(canary_dir) if canary_dir
+  end
+
+  test "burn-in preflight keeps authoritative unknown direct open orders as blocker" do
+    position = migration_position("nado")
+    report = direct_preflight(
+      position,
+      venues: {
+        "ethereal" => DirectBurnInVenue.new(short: "0"),
+        "nado" => DirectBurnInVenue.new(short: "1.18", open_orders_count: nil)
+      }
+    ).report
+
+    assert_equal false, report.fetch(:accepted)
+    assert_includes report.fetch(:blockers), "nado open orders could not be confirmed zero"
+  end
+
+  test "dashboard snapshot partial does not override safe direct burn-in preflight readbacks" do
+    position = migration_position("nado")
+    position.position_dashboard_snapshot.update!(
+      refresh_status: "partial",
+      extended_source_status: "error",
+      source_errors: JSON.generate({ extended: "Timeout::Error: execution expired; carried forward previous Extended snapshot #4" }),
+      open_orders_count_extended: nil
+    )
+
+    report = direct_preflight(
+      position,
+      venues: {
+        "extended" => DirectBurnInVenue.new(short: "0", open_orders_count: 0),
+        "ethereal" => DirectBurnInVenue.new(short: "0", open_orders_count: 0),
+        "nado" => DirectBurnInVenue.new(short: "1.18", open_orders_count: 0)
+      }
+    ).report
+
+    assert_equal true, report.fetch(:accepted), report.fetch(:blockers).inspect
+    assert_empty report.fetch(:blockers)
+    assert_equal "zero", report.dig(:direct_open_orders, "extended", :status)
+  end
+
   test "burn-in preflight blocks real pending Nado continuation when source and target exposure remain open" do
     canary_dir = Rails.root.join("tmp/test-burn-in-canary-#{SecureRandom.hex(4)}")
     proof_dir = Rails.root.join("tmp/test-burn-in-proof-#{SecureRandom.hex(4)}")
