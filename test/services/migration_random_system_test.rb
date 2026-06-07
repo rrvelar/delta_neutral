@@ -98,6 +98,8 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("nado")
     write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended").merge(
+      route_latency_proof: true,
+      submitted: true,
       double_exposure_seconds: "18.2",
       double_exposure_started_at: 20.seconds.ago.iso8601,
       double_exposure_ended_at: 2.seconds.ago.iso8601,

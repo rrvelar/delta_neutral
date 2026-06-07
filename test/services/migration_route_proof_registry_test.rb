@@ -307,6 +307,126 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "dry run latency proof receipt does not downgrade ready route" do
+    position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY", enabled: "source_first")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_latency_proof(dir: dir, position: position, from: "ethereal", timestamp: "2026-06-07T12:00:00Z")
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("latency_proofs")).write(
+      action: "prove_route_latency",
+      timestamp: "2026-06-07T13:00:00Z",
+      position_id: position.id,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      strategy: "source_first",
+      migration_sequence: "source_first",
+      final_status: "dry_run",
+      route_latency_proof: false,
+      dry_run: true,
+      route_production_safe: false,
+      production_safe: false,
+      double_exposure_seconds: "0",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "nado")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal true, route.fetch(:route_production_safe)
+    assert_empty route.fetch(:blockers)
+    assert_equal "2026-06-07T12:00:00Z", route.fetch(:proof_timestamp)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "dry run source first Nado receipt with zero double exposure does not create latency blocker" do
+    position = position_with_snapshot("nado")
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY", enabled: "source_first")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("latency_proofs")).write(
+      action: "prove_route_latency",
+      timestamp: "2026-06-07T13:00:00Z",
+      position_id: position.id,
+      from_venue: "ethereal",
+      to_venue: "nado",
+      strategy: "source_first",
+      migration_sequence: "source_first",
+      final_status: "dry_run",
+      route_latency_proof: false,
+      dry_run: true,
+      double_exposure_seconds: "0",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "nado")
+
+    assert_equal "NOT_STARTED", route.fetch(:status)
+    assert_no_match(/double_exposure_seconds=0/, route.fetch(:blockers).join(" "))
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "later non proof manual canary does not downgrade existing ready route" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-07T12:00:00Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "LIVE_CANARY_CONFIRMED",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_production_safe: true,
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
+    )
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-07T13:00:00Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "LIVE_CANARY_CONFIRMED",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_production_safe: false,
+      total_migration_latency_seconds: "96",
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
+    )
+
+    route = registry.route_status(position: position, from: "nado", to: "ethereal")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+    assert_equal "2026-06-07T12:00:00Z", route.fetch(:proof_timestamp)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "ethereal Nado latency proof does not make extended Nado route ready" do
     position = position_with_snapshot("nado")
     OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)

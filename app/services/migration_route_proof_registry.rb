@@ -248,7 +248,7 @@ class MigrationRouteProofRegistry
   end
 
   def route_latency_proof?(event)
-    return false unless truthy?(event["route_latency_proof"])
+    return false unless production_latency_proof_event?(event)
     return false if manual_intervention?(event)
 
     if source_first_nado_target_latency_proof?(event)
@@ -329,9 +329,10 @@ class MigrationRouteProofRegistry
   def failed_proof?(event)
     return false if recovery_proof?(event)
     return false if continuation_proof?(event)
+    return true if production_latency_proof_event?(event) && latency_unsafe?(event)
+    return true if nado_target_without_latency_proof?(event)
 
-    latency_unsafe?(event) ||
-      event["final_status"].to_s.match?(/FAILED|BLOCKED|MANUAL_ACTION/i) ||
+    event["final_status"].to_s.match?(/FAILED|BLOCKED|MANUAL_ACTION/i) ||
       event["manual_action_required"] == true
   end
 
@@ -360,6 +361,8 @@ class MigrationRouteProofRegistry
   def nado_target_without_latency_proof?(event)
     event["to_venue"].to_s == "nado" &&
       finalized_latency_proof_required_event?(event) &&
+      !truthy?(event["dry_run"]) &&
+      (production_receipt_event?(event) || event["action"].to_s.in?(%w[manual_live_canary recover_target_first_source_close])) &&
       event["double_exposure_seconds"].blank? &&
       event["underhedge_seconds"].blank? &&
       event["route_latency_proof"] != true &&
@@ -394,6 +397,17 @@ class MigrationRouteProofRegistry
 
   def truthy?(value)
     ActiveModel::Type::Boolean.new.cast(value)
+  end
+
+  def production_latency_proof_event?(event)
+    truthy?(event["route_latency_proof"]) &&
+      !truthy?(event["dry_run"]) &&
+      (truthy?(event["live"]) || truthy?(event["submitted"]) || event["orders_submitted"].to_i.positive? || event["orders_placed"].to_i.positive?)
+  end
+
+  def production_receipt_event?(event)
+    !truthy?(event["dry_run"]) &&
+      (truthy?(event["live"]) || truthy?(event["submitted"]) || event["orders_submitted"].to_i.positive? || event["orders_placed"].to_i.positive?)
   end
 
   def source_first_nado_execution_proof_usable?(event)
