@@ -262,18 +262,25 @@ class HedgeVenueMigrationExecutor
     receipt.merge!(final_readback_status(position: position, receipt: receipt))
     finalize_production_venue(position, receipt) if receipt[:finalize_available] && receipt[:final_status] == "success"
     annotate_migration_latency!(receipt)
-    apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
     receipt[:route_latency_proof] = true
     if source_first_nado_target?(receipt, target_leg_plan) && late_reconciled?(target_leg) && receipt[:production_venue_finalized] && receipt[:final_status] == "success"
-      receipt[:final_status] = "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK"
+      receipt[:final_status] = "SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK"
       receipt[:lifecycle_state] = receipt[:final_status]
       receipt[:manual_action_required] = false
     end
-    receipt[:production_safe_route] = receipt[:final_status].in?(%w[success MIGRATION_FINALIZED SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK])
+    apply_latency_incident!(position, receipt) if receipt[:production_venue_finalized] && latency_safety_exceeds_threshold?(receipt)
+    receipt[:route_complete_by_readback] ||= receipt[:production_venue_finalized] == true &&
+      receipt[:source_flat_after] == true &&
+      receipt[:target_holds_expected_short] == true &&
+      receipt[:third_venue_flat] == true &&
+      receipt[:final_inside_tolerance] == true &&
+      receipt[:open_orders_clear_after] == true
+    receipt[:production_safe_route] = receipt.fetch(:production_safe_route, receipt[:final_status].in?(%w[success MIGRATION_FINALIZED SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK]))
     receipt[:route_production_safe] = receipt[:production_safe_route]
+    receipt[:latency_proof_status] ||= receipt[:route_production_safe] ? "passed" : "failed_latency_threshold"
     receipt[:lifecycle_state] = if receipt[:final_status] == "NOT_PRODUCTION_SAFE_LATENCY"
       "NOT_PRODUCTION_SAFE_LATENCY"
-    elsif receipt[:final_status] == "SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK"
+    elsif receipt[:final_status].in?(%w[SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK])
       receipt[:final_status]
     elsif receipt[:production_venue_finalized]
       "MIGRATION_FINALIZED"
@@ -719,7 +726,7 @@ class HedgeVenueMigrationExecutor
     return unless receipt[:migration_sequence].to_s == "source_first"
     return unless receipt[:underhedge_started_at].present?
 
-    receipt[:underhedge_seconds] ||= seconds_between(receipt[:underhedge_started_at], receipt[:underhedge_ended_at])
+    receipt[:underhedge_seconds] = seconds_between(receipt[:underhedge_started_at], receipt[:underhedge_ended_at])
     receipt[:double_exposure_seconds] ||= "0"
   end
 
@@ -756,18 +763,42 @@ class HedgeVenueMigrationExecutor
 
   def apply_latency_incident!(position, receipt)
     pause_autonomous_migration!(position)
-    receipt[:final_status] = "NOT_PRODUCTION_SAFE_LATENCY"
-    receipt[:lifecycle_state] = "NOT_PRODUCTION_SAFE_LATENCY"
-    receipt[:manual_action_required] = true
+    safe_finalized = receipt[:production_venue_finalized] == true &&
+      receipt[:source_flat_after] == true &&
+      receipt[:target_holds_expected_short] == true &&
+      receipt[:third_venue_flat] == true &&
+      receipt[:final_inside_tolerance] == true &&
+      receipt[:open_orders_clear_after] == true
+    receipt[:final_status] = "NOT_PRODUCTION_SAFE_LATENCY" unless safe_finalized
+    receipt[:lifecycle_state] = safe_finalized ? receipt[:final_status] : "NOT_PRODUCTION_SAFE_LATENCY"
+    receipt[:manual_action_required] = !safe_finalized
     receipt[:latency_incident] = true
+    receipt[:latency_proof_status] = "failed_latency_threshold"
+    receipt[:route_complete_by_readback] = safe_finalized
     receipt[:production_safe_route] = false
     receipt[:route_production_safe] = false
-    receipt[:blockers] = [ "double exposure lasted #{receipt[:double_exposure_seconds]}s, exceeding MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS=#{max_double_exposure_seconds.to_s('F')}" ]
-    receipt[:recovery_command] ||= recovery_command(receipt)
+    receipt[:double_exposure_threshold_passed] = !double_exposure_exceeds_threshold?(receipt)
+    receipt[:latency_threshold_blockers] = latency_safety_blockers(receipt)
+    receipt[:blockers] = safe_finalized ? Array(receipt[:blockers]) : receipt[:latency_threshold_blockers]
+    receipt[:recovery_command] ||= recovery_command(receipt) unless safe_finalized
     receipt[:random_and_auto_paused] = true
     receipt[:warnings] = (Array(receipt[:warnings]) + [
-      "Route finalized safely but source close was too slow for production random; route must be re-proven with acceptable double-exposure latency."
+      "Route finalized safely but latency thresholds failed for production random; route must be re-proven with acceptable latency."
     ]).uniq
+  end
+
+  def latency_safety_blockers(receipt)
+    blockers = []
+    if double_exposure_exceeds_threshold?(receipt)
+      blockers << "double exposure lasted #{receipt[:double_exposure_seconds]}s, exceeding MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS=#{max_double_exposure_seconds.to_s('F')}"
+    end
+    if latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds)
+      blockers << "underhedge lasted #{receipt[:underhedge_seconds]}s, exceeding MIGRATION_MAX_UNHEDGED_SECONDS=#{max_unhedged_seconds.to_s('F')}"
+    end
+    if latency_exceeds?(receipt[:total_migration_latency_seconds], max_total_route_seconds)
+      blockers << "total migration latency #{receipt[:total_migration_latency_seconds]}s exceeded MIGRATION_MAX_TOTAL_ROUTE_SECONDS=#{max_total_route_seconds.to_s('F')}"
+    end
+    blockers
   end
 
   def apply_source_first_target_failed_manual_action!(position, receipt, blockers)
