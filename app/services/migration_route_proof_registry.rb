@@ -62,11 +62,14 @@ class MigrationRouteProofRegistry
       recovery_proof?(event)
     end
     failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, latency_proof_dir, *recovery_dirs, random_dir ]) do |event|
-      failed_proof?(event)
+      blocking_failed_proof?(event)
     end
-    latest = [ dry, live, continuation, latency, recovery, failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
-    status = status_for(dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, latest: latest)
-    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, latest: latest)
+    ignored_failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, latency_proof_dir, *recovery_dirs, random_dir ]) do |event|
+      ignored_failed_proof?(event)
+    end
+    latest = [ dry, live, continuation, latency, recovery, failed, ignored_failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+    status = status_for(dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, ignored_failed: ignored_failed, latest: latest)
+    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, ignored_failed: ignored_failed, latest: latest)
     route_policy_status = route_policy.route_status(from: from, to: to)
     if status == STATUSES[:ready] && !route_policy_status.fetch(:enabled)
       status = STATUSES[:not_safe_latency]
@@ -104,6 +107,8 @@ class MigrationRouteProofRegistry
       orders_placed: proof_event&.fetch("orders_placed", 0).to_i,
       signatures_created: proof_event&.fetch("signatures_created", 0).to_i,
       manual_intervention: manual_intervention?(proof_event),
+      ignored_failed_receipt: receipt_ref(ignored_failed),
+      ignored_failed_reason: ignored_failed_reason(ignored_failed),
       blockers: blockers_for(status, route, route_policy_status: route_policy_status, proof_event: proof_event)
     }
   end
@@ -130,7 +135,7 @@ class MigrationRouteProofRegistry
 
   attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :latency_proof_dir, :now, :source_commit, :stale_after, :env, :route_policy
 
-  def status_for(dry:, live:, continuation:, latency:, recovery:, failed:, latest:)
+  def status_for(dry:, live:, continuation:, latency:, recovery:, failed:, ignored_failed:, latest:)
     return STATUSES[:not_started] unless latest
 
     if continuation && !manual_intervention?(continuation) && production_safe_latency?(continuation) && later_than?(continuation, recovery) && later_than?(continuation, live) && later_than?(continuation, latency) && later_than?(continuation, failed)
@@ -155,6 +160,10 @@ class MigrationRouteProofRegistry
       return stale?(failed) ? STATUSES[:stale] : STATUSES[:failed]
     end
 
+    if ignored_failed && [ dry, live, continuation, latency, recovery ].compact.empty?
+      return stale?(ignored_failed) ? STATUSES[:stale] : STATUSES[:failed]
+    end
+
     return stale?(live) ? STATUSES[:stale] : STATUSES[:ready] if live && !manual_intervention?(live) && production_safe_latency?(live)
     return STATUSES[:live] if live
     return stale?(dry) ? STATUSES[:stale] : STATUSES[:dry_run] if dry
@@ -162,7 +171,7 @@ class MigrationRouteProofRegistry
     STATUSES[:not_started]
   end
 
-  def proof_event_for(status:, dry:, live:, continuation:, latency:, recovery:, failed:, latest:)
+  def proof_event_for(status:, dry:, live:, continuation:, latency:, recovery:, failed:, ignored_failed:, latest:)
     case status
     when STATUSES[:ready], STATUSES[:live]
       [ continuation, latency, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
@@ -171,7 +180,7 @@ class MigrationRouteProofRegistry
     when STATUSES[:dry_run]
       dry
     when STATUSES[:failed]
-      failed
+      failed || ignored_failed
     else
       latest
     end
@@ -326,14 +335,20 @@ class MigrationRouteProofRegistry
       event["production_venue_finalized"] == true
   end
 
-  def failed_proof?(event)
+  def blocking_failed_proof?(event)
     return false if recovery_proof?(event)
     return false if continuation_proof?(event)
     return true if production_latency_proof_event?(event) && latency_unsafe?(event)
     return true if nado_target_without_latency_proof?(event)
 
-    event["final_status"].to_s.match?(/FAILED|BLOCKED|MANUAL_ACTION/i) ||
-      event["manual_action_required"] == true
+    failed_status_event?(event) && valid_failed_production_proof?(event)
+  end
+
+  def ignored_failed_proof?(event)
+    return false unless failed_status_event?(event)
+    return false if blocking_failed_proof?(event)
+
+    ignored_failed_reason(event).present?
   end
 
   def production_safe_latency?(event)
@@ -408,6 +423,48 @@ class MigrationRouteProofRegistry
   def production_receipt_event?(event)
     !truthy?(event["dry_run"]) &&
       (truthy?(event["live"]) || truthy?(event["submitted"]) || event["orders_submitted"].to_i.positive? || event["orders_placed"].to_i.positive?)
+  end
+
+  def failed_status_event?(event)
+    event["final_status"].to_s.match?(/FAILED|BLOCKED|MANUAL_ACTION/i) ||
+      truthy?(event["manual_action_required"])
+  end
+
+  def valid_failed_production_proof?(event)
+    return false if truthy?(event["dry_run"])
+    return false unless truthy?(event["live"]) || truthy?(event["submitted"]) || event["orders_submitted"].to_i.positive? || event["orders_placed"].to_i.positive? || event["signatures_created"].to_i.positive?
+
+    truthy?(event["manual_action_required"]) || unsafe_final_readback?(event)
+  end
+
+  def ignored_failed_reason(event)
+    return nil unless event
+    return nil unless failed_status_event?(event)
+    return nil if valid_failed_production_proof?(event)
+    return "dry_run_failure" if truthy?(event["dry_run"])
+    return "no_submit_no_final_readback" unless production_action_attempted?(event)
+    return "no_unsafe_final_readback" unless unsafe_final_readback?(event)
+
+    "informational_failure"
+  end
+
+  def production_action_attempted?(event)
+    truthy?(event["live"]) ||
+      truthy?(event["submitted"]) ||
+      event["orders_submitted"].to_i.positive? ||
+      event["orders_placed"].to_i.positive? ||
+      event["signatures_created"].to_i.positive?
+  end
+
+  def unsafe_final_readback?(event)
+    return true if event["final_inside_tolerance"] == false
+    return true if event["source_flat_after"] == false && event.key?("source_flat_after")
+    return true if event["target_holds_expected_short"] == false && event.key?("target_holds_expected_short")
+    return true if event["production_venue_finalized"] == false && event.key?("production_venue_finalized")
+    return true if event["open_orders_after"].to_i.positive?
+    return true if event["open_orders_clear_after"] == false || event["open_orders_clear"] == false
+
+    false
   end
 
   def source_first_nado_execution_proof_usable?(event)

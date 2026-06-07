@@ -427,6 +427,153 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "stale no submit failed needs repair receipt does not override older ready proof" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T20:00:00Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "LIVE_CANARY_CONFIRMED",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_production_safe: true,
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
+    )
+    ignored_path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T21:01:04Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "FAILED_NEEDS_REPAIR",
+      production_venue: "nado",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+
+    route = registry.route_status(position: position, from: "nado", to: "ethereal")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+    assert_equal ignored_path.to_s, route.fetch(:ignored_failed_receipt)
+    assert_equal "no_submit_no_final_readback", route.fetch(:ignored_failed_reason)
+    assert_equal "2026-06-06T20:00:00Z", route.fetch(:proof_timestamp)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "real failed live proof with unsafe readback can downgrade ready route" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T20:00:00Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "LIVE_CANARY_CONFIRMED",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_production_safe: true,
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
+    )
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T21:01:04Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "FAILED_NEEDS_REPAIR",
+      live: true,
+      manual_action_required: true,
+      final_inside_tolerance: false,
+      source_flat_after: false,
+      target_holds_expected_short: false,
+      production_venue_finalized: false,
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1
+    )
+
+    route = registry.route_status(position: position, from: "nado", to: "ethereal")
+
+    assert_equal "FAILED_NEEDS_REPAIR", route.fetch(:status)
+    assert_includes route.fetch(:blockers), "nado->ethereal latest proof failed and needs repair."
+    assert_nil route.fetch(:ignored_failed_reason)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "clean live canary after failed production proof restores ready" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T20:00:00Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "FAILED_NEEDS_REPAIR",
+      live: true,
+      manual_action_required: true,
+      final_inside_tolerance: false,
+      source_flat_after: false,
+      target_holds_expected_short: false,
+      production_venue_finalized: false,
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1
+    )
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary",
+      timestamp: "2026-06-06T21:01:04Z",
+      position_id: position.id,
+      from_venue: "nado",
+      to_venue: "ethereal",
+      final_status: "LIVE_CANARY_CONFIRMED",
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      production_venue_finalized: true,
+      route_production_safe: true,
+      orders_submitted: 2,
+      orders_placed: 2,
+      signatures_created: 2
+    )
+
+    route = registry.route_status(position: position, from: "nado", to: "ethereal")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+    assert_equal "2026-06-06T21:01:04Z", route.fetch(:proof_timestamp)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "ethereal Nado latency proof does not make extended Nado route ready" do
     position = position_with_snapshot("nado")
     OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
