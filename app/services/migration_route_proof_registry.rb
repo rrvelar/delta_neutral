@@ -306,7 +306,9 @@ class MigrationRouteProofRegistry
 
     return true if nado_target_without_latency_proof?(event)
     return true if latency_value_exceeds?(event["double_exposure_seconds"], max_double_exposure_seconds)
-    return true if latency_value_exceeds?(event["underhedge_seconds"], max_unhedged_seconds)
+    return true if latency_value_exceeds?(source_first_underhedge_latency(event), max_unhedged_seconds)
+    return false if source_first_event?(event)
+
     return true if latency_value_exceeds?(event["total_route_seconds"] || event["total_migration_latency_seconds"], max_total_route_seconds)
 
     false
@@ -332,6 +334,18 @@ class MigrationRouteProofRegistry
 
   def latency_value_exceeds?(value, threshold)
     value.present? && BigDecimal(value.to_s) > threshold
+  end
+
+  def source_first_event?(event)
+    event["migration_sequence"].to_s == "source_first"
+  end
+
+  def source_first_underhedge_latency(event)
+    return event["underhedge_seconds"] unless source_first_event?(event)
+
+    event["source_flat_to_target_confirmed_seconds"].presence ||
+      event["underhedge_seconds"].presence ||
+      event["source_flat_to_finalized_seconds"]
   end
 
   def max_double_exposure_seconds

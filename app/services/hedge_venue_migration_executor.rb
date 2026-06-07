@@ -225,6 +225,8 @@ class HedgeVenueMigrationExecutor
     receipt[:target_leg_status] = leg_lifecycle_status(leg: target_leg, planned_leg: target_leg_plan, role: "target")
     receipt[:target_readback_attempts] = target_leg[:readback]
     receipt[:nado_source_first_reconciliation_attempts] = target_leg.dig(:receipt, :migration_target_reconciliation_attempts) if source_first_nado_target?(receipt, target_leg_plan)
+    receipt[:service_readback_attempts] = Array(receipt[:nado_source_first_reconciliation_attempts]).size if source_first_nado_target?(receipt, target_leg_plan)
+    receipt[:canonical_readback_attempts] ||= 0 if source_first_nado_target?(receipt, target_leg_plan)
     receipt[:target_late_reconciliation] = late_reconciled?(target_leg)
     receipt[:target_readback_confirmed_at] ||= target_leg.dig(:timing, :readback_confirmed_at) if leg_confirmed?(target_leg)
     mark_time!(receipt, :target_readback_confirmed_at) if leg_confirmed?(target_leg) && receipt[:target_readback_confirmed_at].blank?
@@ -407,7 +409,7 @@ class HedgeVenueMigrationExecutor
 
     def reconcile_nado_migration_leg(service:, result:, leg:, context:)
       attempts = []
-      attempts_limit = nado_target_reconciliation_attempts(context)
+      attempts_limit = source_first_nado_target_leg?(leg, context) ? 1 : nado_target_reconciliation_attempts(context)
       attempts_limit.times do |index|
         result = service.reconcile_pending_result(
           result,
@@ -427,6 +429,13 @@ class HedgeVenueMigrationExecutor
 
     def nado_pending_result?(result)
       result.status.to_s.in?(%w[submitted_but_readback_pending submitted_but_not_confirmed submitted_pending_readback])
+    end
+
+    def source_first_nado_target_leg?(leg, context)
+      receipt = context[:receipt] || {}
+      receipt[:migration_sequence].to_s == "source_first" &&
+        HedgeVenues.normalize(leg[:venue]) == "nado" &&
+        HedgeVenues.normalize(receipt[:to_venue]) == "nado"
     end
 
     def nado_target_reconciliation_attempts(context)
@@ -738,9 +747,15 @@ class HedgeVenueMigrationExecutor
   end
 
   def latency_safety_exceeds_threshold?(receipt)
+    return source_first_latency_safety_exceeds_threshold?(receipt) if receipt[:migration_sequence].to_s == "source_first"
+
     double_exposure_exceeds_threshold?(receipt) ||
       latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds) ||
       latency_exceeds?(receipt[:total_migration_latency_seconds], max_total_route_seconds)
+  end
+
+  def source_first_latency_safety_exceeds_threshold?(receipt)
+    latency_exceeds?(receipt[:source_flat_to_target_confirmed_seconds] || receipt[:underhedge_seconds] || receipt[:source_flat_to_finalized_seconds], max_unhedged_seconds)
   end
 
   def latency_exceeds?(value, threshold)
@@ -792,10 +807,14 @@ class HedgeVenueMigrationExecutor
     if double_exposure_exceeds_threshold?(receipt)
       blockers << "double exposure lasted #{receipt[:double_exposure_seconds]}s, exceeding MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS=#{max_double_exposure_seconds.to_s('F')}"
     end
-    if latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds)
+    source_first = receipt[:migration_sequence].to_s == "source_first"
+    underhedge_latency = receipt[:source_flat_to_target_confirmed_seconds] || receipt[:underhedge_seconds] || receipt[:source_flat_to_finalized_seconds]
+    if source_first && latency_exceeds?(underhedge_latency, max_unhedged_seconds)
+      blockers << "source-flat-to-target-confirmed latency #{underhedge_latency}s exceeded MIGRATION_MAX_UNHEDGED_SECONDS=#{max_unhedged_seconds.to_s('F')}"
+    elsif latency_exceeds?(receipt[:underhedge_seconds], max_unhedged_seconds)
       blockers << "underhedge lasted #{receipt[:underhedge_seconds]}s, exceeding MIGRATION_MAX_UNHEDGED_SECONDS=#{max_unhedged_seconds.to_s('F')}"
     end
-    if latency_exceeds?(receipt[:total_migration_latency_seconds], max_total_route_seconds)
+    if !source_first && latency_exceeds?(receipt[:total_migration_latency_seconds], max_total_route_seconds)
       blockers << "total migration latency #{receipt[:total_migration_latency_seconds]}s exceeded MIGRATION_MAX_TOTAL_ROUTE_SECONDS=#{max_total_route_seconds.to_s('F')}"
     end
     blockers
@@ -859,6 +878,8 @@ class HedgeVenueMigrationExecutor
   end
 
   def confirm_source_first_nado_target_by_canonical_readback(position:, receipt:)
+    receipt[:nado_accept_at] ||= receipt[:target_leg_accepted_at]
+    mark_time!(receipt, :nado_first_canonical_readback_started_at)
     result = NadoMigrationReadback.confirm_target_short(
       position: position,
       from: receipt[:from_venue],
@@ -871,8 +892,16 @@ class HedgeVenueMigrationExecutor
       sleeper: @sleeper,
       now: @now
     )
+    mark_time!(receipt, :nado_canonical_readback_finished_at)
     receipt[:nado_source_first_canonical_readback] = result.except(:verification)
     receipt[:nado_source_first_canonical_verification] = result[:verification]
+    receipt[:canonical_readback_attempts] = Array(result.dig(:verification, :attempts)).size
+    receipt[:nado_accept_to_first_canonical_readback_seconds] = seconds_between(receipt[:nado_accept_at], receipt[:nado_first_canonical_readback_started_at])
+    receipt[:source_flat_to_first_canonical_readback_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:nado_first_canonical_readback_started_at])
+    if result[:confirmed]
+      receipt[:first_confirming_readback_source] = result[:readback_source]
+      receipt[:nado_accept_to_canonical_confirmed_seconds] = seconds_between(receipt[:nado_accept_at], result.dig(:latest_attempt, :timestamp) || receipt[:nado_canonical_readback_finished_at])
+    end
     result
   end
 
@@ -908,6 +937,8 @@ class HedgeVenueMigrationExecutor
     receipt[:nado_submit_to_accept_seconds] = seconds_between(receipt[:target_leg_submit_started_at], receipt[:target_leg_accepted_at])
     receipt[:nado_accept_to_first_readback_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:target_readback_started_at])
     receipt[:nado_accept_to_confirmed_seconds] = seconds_between(receipt[:target_leg_accepted_at], receipt[:target_readback_confirmed_at])
+    receipt[:target_accept_to_confirmed_seconds] = receipt[:nado_accept_to_confirmed_seconds]
+    receipt[:source_flat_to_target_confirmed_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_readback_confirmed_at])
     receipt[:source_flat_to_finalized_seconds] = seconds_between(receipt[:source_close_flat_confirmed_at], receipt[:target_readback_confirmed_at])
   end
 
