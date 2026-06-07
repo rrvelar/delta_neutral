@@ -5,6 +5,7 @@ class NadoTaskTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks unless Rake::Task.task_defined?("nado:auto_readiness")
     Rake::Task["nado:auto_readiness"].reenable
+    Rake::Task["nado:confirm_digest_readonly"].reenable if Rake::Task.task_defined?("nado:confirm_digest_readonly")
     Rake::Task["nado:auto_rebalance_once"].reenable if Rake::Task.task_defined?("nado:auto_rebalance_once")
     Rake::Task["nado:market_metadata"].reenable if Rake::Task.task_defined?("nado:market_metadata")
   end
@@ -97,6 +98,63 @@ class NadoTaskTest < ActiveSupport::TestCase
     Rake::Task["nado:market_metadata"].reenable if Rake::Task.task_defined?("nado:market_metadata")
   end
 
+  test "nado confirm digest readonly task prints request summaries with zero side effects" do
+    result = {
+      status: "unconfirmed",
+      confirmed: false,
+      confirmed_at: nil,
+      source: nil,
+      digest: "0xabc",
+      gateway_order_request: {
+        method: "GET",
+        url: "https://nado.example/v1/query?type=order&product_id=4&digest=0xabc",
+        params: { type: "order", product_id: "4", digest: "0xabc" }
+      },
+      archive_order_request: {
+        method: "POST",
+        url: nil,
+        payload: { orders: { digests: [ "0xabc" ], limit: 1 } }
+      },
+      attempts: [
+        {
+          source: "gateway_order",
+          status: "ok",
+          response_summary: { row_present: true, order_digest: "", base_filled: "0.0", unfilled_amount: "0.0" }
+        },
+        {
+          source: "archive_order",
+          status: "skipped",
+          blocker: "NADO_ARCHIVE_ENDPOINT is not configured"
+        }
+      ],
+      blockers: [ "NADO_ARCHIVE_ENDPOINT is not configured" ]
+    }
+
+    NadoExecutionConfirmation.stub(:confirm_digest, ->(digest:, product_id:, env:) {
+      assert_equal "0xabc", digest
+      assert_equal "4", product_id
+      assert_same ENV, env
+      result
+    }) do
+      with_digest_env("0xabc", "4") do
+        out, = capture_io { Rake::Task["nado:confirm_digest_readonly"].invoke }
+        payload = JSON.parse(out)
+
+        assert_equal "nado_confirm_digest_readonly", payload.fetch("action")
+        assert_equal false, payload.fetch("confirmed")
+        assert_equal "none", payload.fetch("source")
+        assert_equal "https://nado.example/v1/query?type=order&product_id=4&digest=0xabc", payload.fetch("gateway_order_request").fetch("url")
+        assert_equal "0.0", payload.fetch("gateway_order_response_summary").fetch("base_filled")
+        assert_includes payload.fetch("blockers"), "NADO_ARCHIVE_ENDPOINT is not configured"
+        assert_equal 0, payload.fetch("orders_submitted")
+        assert_equal 0, payload.fetch("signatures_created")
+        assert_equal 0, payload.fetch("cancels_submitted")
+      end
+    end
+  ensure
+    Rake::Task["nado:confirm_digest_readonly"].reenable if Rake::Task.task_defined?("nado:confirm_digest_readonly")
+  end
+
   test "nado auto rebalance once does not abort as blocked for confirmed late accepted submit" do
     position = nado_position
     runner = FakeNadoAutoRebalanceRunner.new(
@@ -184,6 +242,19 @@ class NadoTaskTest < ActiveSupport::TestCase
     yield
   ensure
     previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def with_digest_env(digest, product_id)
+    previous = {
+      "digest" => ENV["digest"],
+      "product_id" => ENV["product_id"]
+    }
+    ENV["digest"] = digest
+    ENV["product_id"] = product_id
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    Rake::Task["nado:confirm_digest_readonly"].reenable if Rake::Task.task_defined?("nado:confirm_digest_readonly")
   end
 
   def nado_position

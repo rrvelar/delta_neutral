@@ -1,4 +1,49 @@
 namespace :nado do
+  desc "Read-only Nado digest execution confirmation diagnostics"
+  task confirm_digest_readonly: :environment do
+    digest = ENV["digest"].presence || ENV["DIGEST"].presence
+    product_id = ENV["product_id"].presence || ENV["PRODUCT_ID"].presence || NadoExecutionConfirmation::ETH_PERP_PRODUCT_ID
+
+    unless digest
+      puts JSON.pretty_generate(
+        action: "nado_confirm_digest_readonly",
+        status: "blocked",
+        blockers: [ "digest is required" ],
+        orders_submitted: 0,
+        signatures_created: 0,
+        cancels_submitted: 0
+      )
+      next
+    end
+
+    result = NadoExecutionConfirmation.confirm_digest(digest: digest, product_id: product_id, env: ENV)
+    gateway_attempt = Array(result[:attempts]).find { |attempt| attempt[:source] == "gateway_order" } || {}
+    archive_attempt = Array(result[:attempts]).find { |attempt| attempt[:source] == "archive_order" } || {}
+    puts JSON.pretty_generate(
+      action: "nado_confirm_digest_readonly",
+      status: result[:status],
+      digest: digest,
+      product_id: product_id.to_s,
+      gateway_order_request: result[:gateway_order_request],
+      gateway_order_response_summary: gateway_attempt[:response_summary],
+      archive_order_request: result[:archive_order_request],
+      archive_order_response_summary: archive_attempt[:response_summary],
+      parsed_confirmation: {
+        confirmed: result[:confirmed],
+        source: result[:source],
+        confirmed_at: result[:confirmed_at],
+        order: result[:order]
+      },
+      confirmed: result[:confirmed],
+      source: result[:source] || "none",
+      blockers: result[:blockers],
+      attempts: result[:attempts],
+      orders_submitted: 0,
+      signatures_created: 0,
+      cancels_submitted: 0
+    )
+  end
+
   desc "Read-only Nado unified active-venue auto readiness diagnostics"
   task auto_readiness: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
