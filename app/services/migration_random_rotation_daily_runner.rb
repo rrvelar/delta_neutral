@@ -17,7 +17,14 @@ class MigrationRandomRotationDailyRunner
     virtual_state_class: MigrationRandomRotationVirtualState,
     proof_registry: nil,
     preflight_factory: nil,
-    executor_factory: nil
+    executor_factory: nil,
+    active_rebalance_factory: nil,
+    rebalance_after_migration: true,
+    rebalance_during_hold: true,
+    rebalance_hold_interval_seconds: 300,
+    rebalance_before_next_migration: true,
+    rebalance_only_if_outside_tolerance: true,
+    rebalance_max_attempts_per_cycle: 2
   )
     @env = env
     @now = now
@@ -32,6 +39,13 @@ class MigrationRandomRotationDailyRunner
     @proof_registry = proof_registry || MigrationRouteProofRegistry.new
     @preflight_factory = preflight_factory
     @executor_factory = executor_factory
+    @active_rebalance_factory = active_rebalance_factory
+    @rebalance_after_migration = ActiveModel::Type::Boolean.new.cast(rebalance_after_migration)
+    @rebalance_during_hold = ActiveModel::Type::Boolean.new.cast(rebalance_during_hold)
+    @rebalance_hold_interval_seconds = rebalance_hold_interval_seconds.to_i
+    @rebalance_before_next_migration = ActiveModel::Type::Boolean.new.cast(rebalance_before_next_migration)
+    @rebalance_only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(rebalance_only_if_outside_tolerance)
+    @rebalance_max_attempts_per_cycle = rebalance_max_attempts_per_cycle.to_i
   end
 
   def call(position_id: nil, force: false, seed: nil, enabled_override: false)
@@ -66,7 +80,14 @@ class MigrationRandomRotationDailyRunner
     :virtual_state_class,
     :proof_registry,
     :preflight_factory,
-    :executor_factory
+    :executor_factory,
+    :active_rebalance_factory,
+    :rebalance_after_migration,
+    :rebalance_during_hold,
+    :rebalance_hold_interval_seconds,
+    :rebalance_before_next_migration,
+    :rebalance_only_if_outside_tolerance,
+    :rebalance_max_attempts_per_cycle
 
   def run_position(position, force:, seed:, enabled_override:)
     lock_key = "migration_random_rotation_daily:position:#{position.id}"
@@ -158,8 +179,10 @@ class MigrationRandomRotationDailyRunner
 
   def execute_live_workflow(position, seed:, enabled_override:)
     direct = direct_preflight(position)
+    pre_next_rebalance = rebalance_before_next_migration ? run_active_rebalance(position, reason: "pre_next_cycle") : nil
+    direct = direct_preflight(position) if pre_next_rebalance
     route = direct.fetch(:blockers).empty? ? live_route_from_preflight(direct, seed: seed) : nil
-    blockers = Array(direct[:blockers])
+    blockers = (Array(direct[:blockers]) + Array(pre_next_rebalance&.fetch(:blockers, []))).uniq
     blockers << "no READY_FOR_RANDOM route from current production venue" unless route || blockers.any?
     if blockers.any?
       receipt = live_receipt(
@@ -169,7 +192,8 @@ class MigrationRandomRotationDailyRunner
         result: nil,
         status: "blocked_before_submit",
         blockers: blockers,
-        enabled_override: enabled_override
+        enabled_override: enabled_override,
+        pre_next_rebalance: pre_next_rebalance
       )
       write_daily_receipt(receipt)
       return receipt
@@ -197,14 +221,20 @@ class MigrationRandomRotationDailyRunner
       result: result,
       status: result.status,
       blockers: result.blockers,
-      enabled_override: enabled_override
+      enabled_override: enabled_override,
+      pre_next_rebalance: pre_next_rebalance,
+      post_migration_rebalance: post_migration_rebalance(position, result)
     )
     write_daily_receipt(receipt)
     receipt
   end
 
-  def live_receipt(position:, direct:, route:, result:, status:, blockers:, enabled_override:)
+  def live_receipt(position:, direct:, route:, result:, status:, blockers:, enabled_override:, pre_next_rebalance: nil, post_migration_rebalance: nil, hold_rebalance_checks: [])
     migration_receipt = result&.receipt || {}
+    rebalance_blockers = Array(pre_next_rebalance&.fetch(:blockers, [])) +
+      Array(post_migration_rebalance&.fetch(:blockers, [])) +
+      hold_rebalance_checks.flat_map { |check| Array(check[:blockers]) }
+    final_status = rebalance_blockers.any? ? "blocked_after_migration_rebalance" : status
     {
       action: "daily_random_rotation_live",
       timestamp: now.call.utc.iso8601,
@@ -213,8 +243,8 @@ class MigrationRandomRotationDailyRunner
       current_venue: direct[:production_venue],
       selected_route: route,
       selected_target_venue: route&.fetch(:to_venue, nil),
-      status: status,
-      blockers: Array(blockers).uniq,
+      status: final_status,
+      blockers: (Array(blockers) + rebalance_blockers).uniq,
       warnings: Array(direct[:warnings]) + Array(result&.warnings),
       auto_enabled: bool_env("MIGRATION_AUTO_ENABLED"),
       daily_enabled: true,
@@ -222,7 +252,10 @@ class MigrationRandomRotationDailyRunner
       dry_run_only: false,
       virtual_mode: false,
       live_available: true,
-      would_migrate: status.to_s.in?(%w[success MIGRATION_FINALIZED]),
+      would_migrate: status.to_s.in?(%w[success MIGRATION_FINALIZED]) && rebalance_blockers.empty?,
+      post_migration_rebalance: post_migration_rebalance || unchecked_rebalance_payload("post_migration"),
+      hold_rebalance_checks: hold_rebalance_checks,
+      pre_next_cycle_rebalance: pre_next_rebalance || unchecked_rebalance_payload("pre_next_cycle"),
       preflight_source: direct[:preflight_source],
       direct_preflight_blockers: Array(direct[:blockers]),
       direct_preflight_warnings: Array(direct[:warnings]),
@@ -235,9 +268,9 @@ class MigrationRandomRotationDailyRunner
       },
       migration_receipt_path: migration_receipt[:receipt_path],
       migration_timing: migration_timing_payload(migration_receipt),
-      orders_submitted: migration_receipt.fetch(:orders_submitted, 0).to_i,
-      orders_placed: migration_receipt.fetch(:orders_placed, 0).to_i,
-      signatures_created: migration_receipt.fetch(:signatures_created, 0).to_i
+      orders_submitted: migration_receipt.fetch(:orders_submitted, 0).to_i + rebalance_order_count(post_migration_rebalance, :orders_submitted),
+      orders_placed: migration_receipt.fetch(:orders_placed, 0).to_i + rebalance_order_count(post_migration_rebalance, :orders_placed),
+      signatures_created: migration_receipt.fetch(:signatures_created, 0).to_i + rebalance_order_count(post_migration_rebalance, :signatures_created)
     }
   end
 
@@ -369,6 +402,46 @@ class MigrationRandomRotationDailyRunner
     return executor_factory.call if executor_factory
 
     HedgeVenueMigrationExecutor.new(env: env)
+  end
+
+  def post_migration_rebalance(position, migration_result)
+    return nil unless rebalance_after_migration
+    return nil unless migration_result&.status.to_s.in?(%w[success MIGRATION_FINALIZED])
+
+    run_active_rebalance(position, reason: "post_migration")
+  end
+
+  def run_active_rebalance(position, reason:)
+    active_rebalancer(position).run(reason: reason)
+  end
+
+  def active_rebalancer(position)
+    return active_rebalance_factory.call(position: position) if active_rebalance_factory
+
+    ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: true,
+      env: env,
+      preflight_factory: ->(position:, stage:) { direct_preflight(position) },
+      max_attempts: rebalance_max_attempts_per_cycle,
+      only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
+      now: now
+    )
+  end
+
+  def rebalance_order_count(payload, key)
+    payload ? payload[key].to_i : 0
+  end
+
+  def unchecked_rebalance_payload(reason)
+    {
+      checked: false,
+      needed: false,
+      reason: reason,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    }
   end
 
   def enable_route_live_gates(route)

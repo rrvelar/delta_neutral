@@ -216,7 +216,13 @@ namespace :migration do
       burn_in_tolerance_multiplier: (ENV["burn_in_tolerance_multiplier"].presence || ENV["BURN_IN_TOLERANCE_MULTIPLIER"].presence || "1.0"),
       burn_in_extra_tolerance_eth: (ENV["burn_in_extra_tolerance_eth"].presence || ENV["BURN_IN_EXTRA_TOLERANCE_ETH"].presence || "0"),
       burn_in_max_allowed_drift_eth: (ENV["burn_in_max_allowed_drift_eth"].presence || ENV["BURN_IN_MAX_ALLOWED_DRIFT_ETH"].presence || "0.15"),
-      burn_in_max_allowed_drift_ratio: (ENV["burn_in_max_allowed_drift_ratio"].presence || ENV["BURN_IN_MAX_ALLOWED_DRIFT_RATIO"].presence || "0.08")
+      burn_in_max_allowed_drift_ratio: (ENV["burn_in_max_allowed_drift_ratio"].presence || ENV["BURN_IN_MAX_ALLOWED_DRIFT_RATIO"].presence || "0.08"),
+      rebalance_after_migration: ENV.fetch("rebalance_after_migration", ENV.fetch("REBALANCE_AFTER_MIGRATION", "true")),
+      rebalance_during_hold: ENV.fetch("rebalance_during_hold", ENV.fetch("REBALANCE_DURING_HOLD", "false")),
+      rebalance_hold_interval_seconds: ENV.fetch("rebalance_hold_interval_seconds", ENV.fetch("REBALANCE_HOLD_INTERVAL_SECONDS", "300")),
+      rebalance_before_next_migration: ENV.fetch("rebalance_before_next_migration", ENV.fetch("REBALANCE_BEFORE_NEXT_MIGRATION", "true")),
+      rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true")),
+      rebalance_max_attempts_per_cycle: ENV.fetch("rebalance_max_attempts_per_cycle", ENV.fetch("REBALANCE_MAX_ATTEMPTS_PER_CYCLE", "2"))
     ).run
     puts JSON.pretty_generate(result.summary.merge(action: "migration_random_burn_in", receipt_path: result.receipt_path))
     abort("migration_random_burn_in #{result.status}") unless result.status == "success"

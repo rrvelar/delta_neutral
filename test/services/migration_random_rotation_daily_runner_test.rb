@@ -143,7 +143,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
         "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED" => "true"
       },
       preflight_factory: live_preflight_factory,
-      executor_factory: -> { executor }
+      executor_factory: -> { executor },
+      active_rebalance_factory: noop_active_rebalance_factory
     ).call(position_id: position.id, force: true, seed: "seed-live")
     receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
 
@@ -178,7 +179,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
         "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
       },
       preflight_factory: live_preflight_factory,
-      executor_factory: -> { executor }
+      executor_factory: -> { executor },
+      active_rebalance_factory: noop_active_rebalance_factory
     ).call(position_id: position.id, force: true, seed: "seed-live")
     receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
 
@@ -186,6 +188,42 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal "nado", receipt.fetch("selected_target_venue")
     assert_equal "nado", position.hedge.reload.execution_venue
     assert_equal true, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+  end
+
+  test "daily live random runs pre-cycle and post-migration active venue rebalance hooks" do
+    OperationalSetting.delete_all
+    position = migration_position
+    fake_snapshot_refresh_class.new(position: position).refresh
+    position.hedge.update!(execution_venue: "ethereal")
+    dirs = receipt_dirs
+    executor = live_executor(orders_submitted: 0, signatures_created: 0)
+    active = SequencedActiveRebalance.new([
+      active_rebalance_payload(venue: "ethereal", needed: false, reason: "inside_tolerance"),
+      active_rebalance_payload(venue: "nado", needed: true, reason: "executed", orders_submitted: 1, signatures_created: 1)
+    ])
+
+    result = runner(
+      **dirs,
+      env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
+        "MIGRATION_AUTO_ENABLED" => "true",
+        "MIGRATION_LIVE_ENABLED" => "true",
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      },
+      preflight_factory: live_preflight_factory,
+      executor_factory: -> { executor },
+      active_rebalance_factory: ->(position:) { active }
+    ).call(position_id: position.id, force: true, seed: "seed-live")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+
+    assert_equal "ok", result.status
+    assert_equal "success", receipt.fetch("status")
+    assert_equal true, receipt.fetch("pre_next_cycle_rebalance").fetch("checked")
+    assert_equal true, receipt.fetch("post_migration_rebalance").fetch("needed")
+    assert_equal "nado", receipt.fetch("post_migration_rebalance").fetch("venue")
+    assert_equal 1, receipt.fetch("orders_submitted")
+    assert_equal 1, receipt.fetch("signatures_created")
   end
 
   test "daily live random records target-open source-still-open as manual action" do
@@ -206,7 +244,8 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
         "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
       },
       preflight_factory: live_preflight_factory,
-      executor_factory: -> { executor }
+      executor_factory: -> { executor },
+      active_rebalance_factory: noop_active_rebalance_factory
     ).call(position_id: position.id, force: true, seed: "seed-live")
     receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
 
@@ -220,7 +259,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
 
   private
 
-  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil)
+  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil, active_rebalance_factory: nil)
     MigrationRandomRotationDailyRunner.new(
       env: { "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "false", "MIGRATION_MIN_COOLDOWN_HOURS" => "0" }.merge(env),
       receipt_dir: receipt_dir || Rails.root.join("tmp/test-daily-random-#{SecureRandom.hex(4)}"),
@@ -231,8 +270,33 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
       snapshot_refresh_class: fake_snapshot_refresh_class,
       preflight_factory: preflight_factory,
       executor_factory: executor_factory,
+      active_rebalance_factory: active_rebalance_factory,
       now: -> { Time.zone.local(2026, 5, 28, 12, 0, 0) }
     )
+  end
+
+  def noop_active_rebalance_factory
+    ->(position:) { NoopActiveRebalance.new(position) }
+  end
+
+  def active_rebalance_payload(venue:, needed:, reason:, orders_submitted: 0, signatures_created: 0)
+    {
+      checked: true,
+      checked_at: Time.zone.local(2026, 5, 28, 12, 0, 0).utc.iso8601,
+      needed: needed,
+      venue: venue,
+      reason: reason,
+      target_short_eth: "0.8",
+      current_short_eth: needed ? "0.7" : "0.8",
+      drift_eth: needed ? "0.1" : "0",
+      tolerance_eth: "0.024",
+      inside_tolerance: !needed,
+      orders_submitted: orders_submitted,
+      orders_placed: orders_submitted,
+      signatures_created: signatures_created,
+      final_inside_tolerance: true,
+      blockers: []
+    }
   end
 
   def receipt_dirs
@@ -490,5 +554,41 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
         )
       end
     end.new(status, orders_submitted, signatures_created)
+  end
+
+  class NoopActiveRebalance
+    def initialize(position)
+      @position = position
+    end
+
+    def run(reason:)
+      {
+        checked: true,
+        checked_at: Time.zone.local(2026, 5, 28, 12, 0, 0).utc.iso8601,
+        needed: false,
+        venue: HedgeVenues.normalize(@position.hedge.execution_venue),
+        reason: "inside_tolerance",
+        target_short_eth: "0.8",
+        current_short_eth: "0.8",
+        drift_eth: "0",
+        tolerance_eth: "0.024",
+        inside_tolerance: true,
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0,
+        final_inside_tolerance: true,
+        blockers: []
+      }
+    end
+  end
+
+  class SequencedActiveRebalance
+    def initialize(payloads)
+      @payloads = payloads
+    end
+
+    def run(reason:)
+      @payloads.shift.merge(trigger: reason)
+    end
   end
 end

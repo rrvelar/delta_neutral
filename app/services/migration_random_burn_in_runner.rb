@@ -16,7 +16,11 @@ class MigrationRandomBurnInRunner
                  readiness_factory: nil, snapshot_refresher: nil, rebalance_before_cycle: false,
                  max_target_change_per_cycle_eth: "0.15", preflight_factory: nil,
                  burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0",
-                 burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
+                 burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08",
+                 rebalance_after_migration: true, rebalance_during_hold: false,
+                 rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true,
+                 rebalance_only_if_outside_tolerance: true, rebalance_max_attempts_per_cycle: 2,
+                 active_rebalance_factory: nil)
     @position = position
     @duration_minutes = duration_minutes.to_i
     @interval_seconds = interval_seconds.to_i
@@ -41,6 +45,13 @@ class MigrationRandomBurnInRunner
     @burn_in_extra_tolerance_eth = decimal(burn_in_extra_tolerance_eth)
     @burn_in_max_allowed_drift_eth = decimal(burn_in_max_allowed_drift_eth)
     @burn_in_max_allowed_drift_ratio = decimal(burn_in_max_allowed_drift_ratio)
+    @rebalance_after_migration = ActiveModel::Type::Boolean.new.cast(rebalance_after_migration)
+    @rebalance_during_hold = ActiveModel::Type::Boolean.new.cast(rebalance_during_hold)
+    @rebalance_hold_interval_seconds = rebalance_hold_interval_seconds.to_i
+    @rebalance_before_next_migration = ActiveModel::Type::Boolean.new.cast(rebalance_before_next_migration)
+    @rebalance_only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(rebalance_only_if_outside_tolerance)
+    @rebalance_max_attempts_per_cycle = rebalance_max_attempts_per_cycle.to_i
+    @active_rebalance_factory = active_rebalance_factory
     @orders_submitted = 0
     @orders_placed = 0
     @signatures_created = 0
@@ -79,7 +90,7 @@ class MigrationRandomBurnInRunner
     status = "success"
     blockers = []
     while cycles_attempted < max_cycles && now.call < deadline
-      cycle_result = run_cycle(cycles_attempted + 1)
+      cycle_result = run_cycle(cycles_attempted + 1, deadline: deadline)
       blockers = Array(cycle_result[:blockers])
       status = cycle_result[:status] == "success" ? "success" : burn_in_status_for_cycle(cycle_result[:status])
       self.last_blocker_status = cycle_result[:status] unless cycle_result[:status] == "success"
@@ -105,7 +116,10 @@ class MigrationRandomBurnInRunner
     :executor_factory, :now, :sleeper, :selector, :log_dir, :stdout, :started_at, :receipt_path, :disable_after,
     :readiness_factory, :snapshot_refresher, :rebalance_before_cycle, :max_target_change_per_cycle_eth,
     :preflight_factory, :burn_in_tolerance_multiplier, :burn_in_extra_tolerance_eth,
-    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio
+    :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio,
+    :rebalance_after_migration, :rebalance_during_hold, :rebalance_hold_interval_seconds,
+    :rebalance_before_next_migration, :rebalance_only_if_outside_tolerance,
+    :rebalance_max_attempts_per_cycle, :active_rebalance_factory
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
@@ -168,7 +182,7 @@ class MigrationRandomBurnInRunner
     OperationalSettings.set!(key: key, enabled: enabled, reason: reason)
   end
 
-  def run_cycle(cycle)
+  def run_cycle(cycle, deadline:)
     self.cycles_attempted += 1
     pre_report = direct_preflight("pre_cycle")
     record_direct_preflight(pre_report)
@@ -176,15 +190,20 @@ class MigrationRandomBurnInRunner
     pre_target = target_payload(pre_report)
     pre_hedge = hedge_payload(pre_report)
     pre_blockers, pre_status = pre_cycle_blockers(pre_report)
+    pre_next_cycle_rebalance = run_active_rebalance(reason: "pre_next_cycle") if rebalance_before_next_migration && pre_cycle_rebalance_allowed?(pre_report)
+    if pre_next_cycle_rebalance && Array(pre_next_cycle_rebalance[:blockers]).any?
+      pre_blockers = (pre_blockers + Array(pre_next_cycle_rebalance[:blockers])).uniq
+      pre_status = "stopped_active_rebalance"
+    end
     if pre_blockers.any?
-      event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: nil, execution: zero_execution(status: "blocked"), post_target: nil, post_hedge: nil, status: pre_status, blockers: pre_blockers)
+      event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: nil, execution: zero_execution(status: "blocked"), post_target: nil, post_hedge: nil, status: pre_status, blockers: pre_blockers, pre_next_cycle_rebalance: pre_next_cycle_rebalance)
       write_event(event)
       return { status: pre_status, blockers: pre_blockers }
     end
 
     route = select_route
     unless route
-      event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: nil, execution: zero_execution(status: "blocked"), post_target: nil, post_hedge: nil, status: "blocked", blockers: [ "no READY_FOR_RANDOM route from current production venue" ])
+      event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: nil, execution: zero_execution(status: "blocked"), post_target: nil, post_hedge: nil, status: "blocked", blockers: [ "no READY_FOR_RANDOM route from current production venue" ], pre_next_cycle_rebalance: pre_next_cycle_rebalance)
       write_event(event)
       return { status: "blocked", blockers: event.fetch(:blockers) }
     end
@@ -217,12 +236,27 @@ class MigrationRandomBurnInRunner
     post_target = target_payload(post_report, previous_target: decimal_or_nil(pre_target[:target_short_eth]))
     post_hedge = hedge_payload(post_report)
     blockers, status = cycle_blockers(route: route, execution: execution, post_report: post_report, post_target: post_target)
+    post_migration_rebalance = run_active_rebalance(reason: "post_migration") if status == "success" && rebalance_after_migration
+    if post_migration_rebalance && Array(post_migration_rebalance[:blockers]).any?
+      blockers = (blockers + Array(post_migration_rebalance[:blockers])).uniq
+      status = "stopped_active_rebalance"
+    end
+    hold_rebalance_checks = []
+    if status == "success"
+      hold_rebalance_checks = self.hold_rebalance_checks(deadline: deadline)
+      hold_blockers = hold_rebalance_checks.flat_map { |check| Array(check[:blockers]) }.uniq
+      if hold_blockers.any?
+        blockers = (blockers + hold_blockers).uniq
+        status = "stopped_active_rebalance"
+      end
+    end
     self.orders_submitted += execution.fetch(:orders_submitted)
     self.orders_placed += execution.fetch(:orders_placed)
     self.signatures_created += execution.fetch(:signatures_created)
+    accumulate_rebalance_counts(post_migration_rebalance)
     record_manual_action(route: route, execution: execution) if target_open_source_still_open?(execution)
     self.cycles_succeeded += 1 if status == "success"
-    event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers)
+    event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers, post_migration_rebalance: post_migration_rebalance, hold_rebalance_checks: hold_rebalance_checks, pre_next_cycle_rebalance: pre_next_cycle_rebalance)
     write_event(event)
     { status: status, blockers: blockers }
   end
@@ -249,6 +283,7 @@ class MigrationRandomBurnInRunner
 
   def cycle_blockers(route:, execution:, post_report:, post_target:)
     blockers = Array(post_report.fetch(:blockers))
+    blockers = blockers.reject { |blocker| rebalance_trigger_blocker?(blocker) } if rebalance_after_migration
     target_delta = decimal_or_nil(post_target[:target_delta_eth]) || BigDecimal("0")
     self.max_target_delta_eth = [ max_target_delta_eth, target_delta ].max
     blockers << "target changed #{target_delta.to_s('F')} ETH during cycle; max allowed is #{max_target_change_per_cycle_eth.to_s('F')} ETH" if target_delta > max_target_change_per_cycle_eth
@@ -412,7 +447,50 @@ class MigrationRandomBurnInRunner
     ActiveModel::Type::Boolean.new.cast(value)
   end
 
-  def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:)
+  def run_active_rebalance(reason:)
+    active_rebalancer.run(reason: reason)
+  end
+
+  def active_rebalancer
+    return active_rebalance_factory.call if active_rebalance_factory
+
+    ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: live?,
+      env: env,
+      preflight_factory: ->(position: _position, stage:) { direct_preflight(stage) },
+      max_attempts: rebalance_max_attempts_per_cycle,
+      only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
+      now: now
+    )
+  end
+
+  def hold_rebalance_checks(deadline:)
+    return [] unless rebalance_during_hold
+    return [] unless rebalance_hold_interval_seconds.positive? && interval_seconds >= rebalance_hold_interval_seconds
+
+    checks = []
+    elapsed = rebalance_hold_interval_seconds
+    while elapsed <= interval_seconds && now.call < deadline
+      check = run_active_rebalance(reason: "hold_monitor")
+      accumulate_rebalance_counts(check)
+      checks << check
+      break if Array(check[:blockers]).any?
+
+      elapsed += rebalance_hold_interval_seconds
+    end
+    checks
+  end
+
+  def accumulate_rebalance_counts(payload)
+    return unless payload
+
+    self.orders_submitted += payload[:orders_submitted].to_i
+    self.orders_placed += payload[:orders_placed].to_i
+    self.signatures_created += payload[:signatures_created].to_i
+  end
+
+  def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:, post_migration_rebalance: nil, hold_rebalance_checks: [], pre_next_cycle_rebalance: nil)
     {
       event: "cycle",
       cycle: cycle,
@@ -427,8 +505,22 @@ class MigrationRandomBurnInRunner
       post_cycle_target: post_target,
       post_cycle_hedge: post_hedge,
       after: post_hedge,
+      post_migration_rebalance: post_migration_rebalance || unchecked_rebalance_payload("post_migration"),
+      hold_rebalance_checks: hold_rebalance_checks,
+      pre_next_cycle_rebalance: pre_next_cycle_rebalance || unchecked_rebalance_payload("pre_next_cycle"),
       status: status,
       blockers: blockers
+    }
+  end
+
+  def unchecked_rebalance_payload(reason)
+    {
+      checked: false,
+      needed: false,
+      reason: reason,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
     }
   end
 
@@ -570,7 +662,17 @@ class MigrationRandomBurnInRunner
 
   def pre_cycle_blockers(report)
     blockers = Array(report.fetch(:blockers))
+    blockers = blockers.reject { |blocker| rebalance_trigger_blocker?(blocker) } if rebalance_before_next_migration
     [ blockers.uniq, pre_cycle_status(blockers) ]
+  end
+
+  def pre_cycle_rebalance_allowed?(report)
+    blockers = Array(report.fetch(:blockers))
+    blockers.empty? || blockers.all? { |blocker| rebalance_trigger_blocker?(blocker) }
+  end
+
+  def rebalance_trigger_blocker?(blocker)
+    blocker.to_s.match?(ActiveVenueOneShotRebalance::REBALANCE_TRIGGER_BLOCKER_PATTERN)
   end
 
   def trusted_snapshot?(snapshot)

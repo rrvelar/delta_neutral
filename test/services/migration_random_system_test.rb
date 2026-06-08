@@ -680,7 +680,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher).run
 
     assert_equal "success", result.status, result.blockers.inspect
-    assert_equal %w[preflight pre_cycle post_cycle], refresher.stages
+    assert_equal %w[preflight pre_cycle active_rebalance_pre_next_cycle post_cycle active_rebalance_post_migration], refresher.stages
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -711,6 +711,103 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_empty final.fetch("snapshot_blockers")
   ensure
     FileUtils.rm_rf(dir) if dir
+  end
+
+  test "active venue one-shot rebalance skips order when active venue is inside tolerance" do
+    position = migration_position("extended")
+    rebalancer = ActiveRebalanceAdapter.new
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: true),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "post_migration")
+
+    assert_equal true, result.fetch(:checked)
+    assert_equal false, result.fetch(:needed)
+    assert_equal "extended", result.fetch(:venue)
+    assert_equal "inside_tolerance", result.fetch(:reason)
+    assert_empty rebalancer.calls
+    assert_equal 0, result.fetch(:orders_submitted)
+    assert_equal 0, result.fetch(:signatures_created)
+  end
+
+  test "active venue one-shot rebalance plans dry-run order on finalized Nado venue without Nado auto gate" do
+    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false)
+    position = migration_position("nado")
+    rebalancer = ActiveRebalanceAdapter.new(status: "dry_run", venue: "nado")
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      preflight_factory: active_rebalance_preflight_factory(venue: "nado", inside: false),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "post_migration")
+
+    assert_equal true, result.fetch(:needed)
+    assert_equal "nado", result.fetch(:venue)
+    assert_equal "executed", result.fetch(:reason)
+    assert_equal [ "nado" ], rebalancer.calls.map { |call| call.fetch(:venue) }
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal 0, result.fetch(:orders_submitted)
+    assert_equal 0, result.fetch(:signatures_created)
+  end
+
+  test "active venue one-shot rebalance calls Ethereal and Extended active venues" do
+    %w[ethereal extended].each do |venue|
+      position = migration_position(venue)
+      rebalancer = ActiveRebalanceAdapter.new(status: "dry_run", venue: venue)
+      service = ActiveVenueOneShotRebalance.new(
+        position: position,
+        live: false,
+        preflight_factory: active_rebalance_preflight_factory(venue: venue, inside: false),
+        rebalancer: rebalancer
+      )
+
+      result = service.run(reason: "post_migration")
+
+      assert_equal venue, result.fetch(:venue)
+      assert_equal [ venue ], rebalancer.calls.map { |call| call.fetch(:venue) }
+      assert_equal 0, result.fetch(:orders_submitted)
+      assert_equal 0, result.fetch(:signatures_created)
+    end
+  end
+
+  test "active venue one-shot rebalance blocks when open orders are nonzero" do
+    position = migration_position("extended")
+    rebalancer = ActiveRebalanceAdapter.new
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: false, open_orders_status: "blocked"),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "post_migration")
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_includes result.fetch(:blockers), "active venue open orders are not zero"
+    assert_empty rebalancer.calls
+  end
+
+  test "active venue one-shot rebalance blocks when another venue has exposure" do
+    position = migration_position("extended")
+    rebalancer = ActiveRebalanceAdapter.new
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: false, other_exposure: true),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "post_migration")
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_includes result.fetch(:blockers), "active venue exposure is not isolated to extended"
+    assert_empty rebalancer.calls
   end
 
   test "dedicated burn-in preflight blocks if Extended position readback fails" do
@@ -1293,7 +1390,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     refresher = BurnInSnapshotRefresher.new(target_by_stage: { "pre_cycle" => "1.30" })
 
-    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher, rebalance_before_cycle: false).run
+    result = burn_in(position: position, live: true, log_dir: dir, snapshot_refresher: refresher, rebalance_before_cycle: false, rebalance_before_next_migration: false).run
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "stopped", result.status
@@ -1376,7 +1473,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "stopped", result.status
-    assert_equal "blocked_before_cycle_out_of_burn_in_tolerance", cycle.fetch("status")
+    assert_equal "blocked_unexpected_venue_exposure", cycle.fetch("status")
     assert_includes cycle.fetch("blockers"), "more than one venue has exposure"
   ensure
     FileUtils.rm_rf(dir) if dir
@@ -1556,6 +1653,156 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     assert_equal "stopped", result.status, result.blockers.inspect
     assert_includes result.blockers, "extended open orders could not be confirmed zero"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in logs post-migration no-op when active venue remains inside tolerance" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      active_rebalance_factory: -> { active }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, cycle.fetch("post_migration_rebalance").fetch("checked")
+    assert_equal false, cycle.fetch("post_migration_rebalance").fetch("needed")
+    assert_equal "inside_tolerance", cycle.fetch("post_migration_rebalance").fetch("reason")
+    assert_equal 0, cycle.fetch("post_migration_rebalance").fetch("orders_submitted")
+    assert_equal %w[pre_next_cycle post_migration], active.reasons
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in post-migration rebalance uses finalized production venue not source venue" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+      active_rebalance_payload(reason: "executed", needed: true, venue: "nado", orders_submitted: 1, signatures_created: 1)
+    ])
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      active_rebalance_factory: -> { active }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "nado", cycle.fetch("post_migration_rebalance").fetch("venue")
+    assert_equal true, cycle.fetch("post_migration_rebalance").fetch("needed")
+    assert_equal 1, cycle.fetch("post_migration_rebalance").fetch("orders_submitted")
+    assert_equal 3, result.summary.fetch(:orders_submitted)
+    assert_equal 3, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in dry-run post-migration rebalance logs planned action with zero submissions" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+      active_rebalance_payload(reason: "executed", needed: true, venue: "ethereal")
+    ])
+
+    result = burn_in(position: position, live: false, log_dir: dir, active_rebalance_factory: -> { active }).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, cycle.fetch("post_migration_rebalance").fetch("needed")
+    assert_equal 0, cycle.fetch("post_migration_rebalance").fetch("orders_submitted")
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold monitor checks inside tolerance without orders" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 1,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 1,
+      active_rebalance_factory: -> { active }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 1, cycle.fetch("hold_rebalance_checks").size
+    assert_equal false, cycle.fetch("hold_rebalance_checks").first.fetch("needed")
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in pre-next-cycle rebalance runs before selecting migration" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "executed", needed: true, venue: "ethereal"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+
+    result = burn_in(position: position, live: false, selector: ->(_) { "ethereal->nado" }, log_dir: dir, active_rebalance_factory: -> { active }).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, cycle.fetch("pre_next_cycle_rebalance").fetch("checked")
+    assert_equal true, cycle.fetch("pre_next_cycle_rebalance").fetch("needed")
+    assert_equal "ethereal", cycle.fetch("pre_next_cycle_rebalance").fetch("venue")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in stops fail-closed if active rebalance final readback fails" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+      active_rebalance_payload(reason: "blocked", needed: true, venue: "nado", blockers: [ "active venue one-shot rebalance final readback is outside tolerance" ])
+    ])
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      active_rebalance_factory: -> { active }
+    ).run
+
+    assert_equal "stopped", result.status
+    assert_includes result.blockers, "active venue one-shot rebalance final readback is outside tolerance"
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -1780,7 +2027,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, interval_seconds: 0, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08", rebalance_after_migration: true, rebalance_during_hold: false, rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true, active_rebalance_factory: nil)
     readiness = ->(**) {
       readiness_report || {
         pending_nado_target_continuation: nil,
@@ -1801,7 +2048,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     MigrationRandomBurnInRunner.new(
       position: position,
       duration_minutes: 30,
-      interval_seconds: 0,
+      interval_seconds: interval_seconds,
       max_cycles: max_cycles,
       live: live,
       disable_after: disable_after,
@@ -1819,6 +2066,11 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       burn_in_extra_tolerance_eth: burn_in_extra_tolerance_eth,
       burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
       burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
+      rebalance_after_migration: rebalance_after_migration,
+      rebalance_during_hold: rebalance_during_hold,
+      rebalance_hold_interval_seconds: rebalance_hold_interval_seconds,
+      rebalance_before_next_migration: rebalance_before_next_migration,
+      active_rebalance_factory: active_rebalance_factory,
       readiness_factory: readiness
     )
   end
@@ -1842,6 +2094,69 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         manual_action_required: false
       }.merge(receipt_fields)
     )
+  end
+
+  def active_rebalance_preflight_factory(venue:, inside:, open_orders_status: "zero", other_exposure: false)
+    ->(position:, stage:) {
+      target = BigDecimal("1.18")
+      current = inside ? BigDecimal("1.18") : BigDecimal("1.00")
+      other = other_exposure ? BigDecimal("0.2") : BigDecimal("0")
+      venues = {
+        "extended" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 },
+        "ethereal" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 },
+        "nado" => { short_eth: BigDecimal("0"), position_status: "ok", open_orders_status: "zero", open_orders_count: 0 }
+      }
+      venues[venue] = { short_eth: current, position_status: "ok", open_orders_status: open_orders_status, open_orders_count: open_orders_status == "zero" ? 0 : 1 }
+      other_venue = (%w[extended ethereal nado] - [ venue ]).first
+      venues[other_venue] = venues.fetch(other_venue).merge(short_eth: other) if other_exposure
+      combined = venues.values.sum(BigDecimal("0")) { |payload| payload.fetch(:short_eth) }
+      drift = target - combined
+      blockers = []
+      blockers << "current hedge outside tolerance: target_short_eth=1.18 current_short_eth=#{combined.to_s('F')}" unless inside
+      blockers << "#{venue} open orders could not be confirmed zero" unless open_orders_status == "zero"
+      {
+        preflight_source: "test_active_rebalance_preflight",
+        accepted: blockers.empty?,
+        blockers: blockers,
+        warnings: [],
+        production_venue: venue,
+        target: {
+          target_short_eth: target,
+          target_source: "test",
+          target_fresh: true,
+          exposure_refreshed_at: Time.current.utc.iso8601
+        },
+        venues: venues,
+        active_short_venues: venues.select { |_key, payload| payload.fetch(:short_eth).positive? }.keys,
+        combined_short_eth: combined,
+        drift_eth: drift,
+        tolerance_abs_eth: BigDecimal("0.0354"),
+        inside_tolerance: inside,
+        proof_report: { routes: [], completed_route_proofs: [], missing_route_proofs: [], stale_route_proofs: [] },
+        readiness: { blockers: [] },
+        signer: { status: "ok", payload: { ok: true } }
+      }
+    }
+  end
+
+  def active_rebalance_payload(reason:, needed:, venue:, orders_submitted: 0, signatures_created: 0, blockers: [])
+    {
+      checked: true,
+      checked_at: Time.current.utc.iso8601,
+      needed: needed,
+      venue: venue,
+      reason: reason,
+      target_short_eth: "1.18",
+      current_short_eth: needed ? "1.00" : "1.18",
+      drift_eth: needed ? "0.18" : "0",
+      tolerance_eth: "0.0354",
+      inside_tolerance: !needed,
+      orders_submitted: orders_submitted,
+      orders_placed: orders_submitted,
+      signatures_created: signatures_created,
+      final_inside_tolerance: blockers.empty?,
+      blockers: blockers
+    }
   end
 
   def direct_preflight(position, target: "1.18", venues: {}, proof_registry: BurnInProofRegistry.new, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
@@ -2375,6 +2690,67 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           random_and_auto_paused: @status == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN",
           target_accept_to_source_close_submit_latency_seconds: "0.5"
         }.merge(@receipt_fields).compact
+      )
+    end
+  end
+
+  class BurnInActiveRebalance
+    attr_reader :reasons
+
+    def initialize(payloads)
+      @payloads = payloads
+      @reasons = []
+    end
+
+    def run(reason:)
+      @reasons << reason
+      @payloads.shift || {
+        checked: true,
+        needed: false,
+        venue: "extended",
+        reason: "inside_tolerance",
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0,
+        final_inside_tolerance: true,
+        blockers: []
+      }
+    end
+  end
+
+  class ActiveRebalanceAdapter
+    attr_reader :calls
+
+    def initialize(status: "dry_run", venue: nil, orders_submitted: 0, signatures_created: 0, blockers: [])
+      @status = status
+      @venue = venue
+      @orders_submitted = orders_submitted
+      @signatures_created = signatures_created
+      @blockers = blockers
+      @calls = []
+    end
+
+    def run(position:, dry_run:, live:, confirmation:, one_shot:, **)
+      venue = HedgeVenues.normalize(position.hedge.execution_venue)
+      @calls << { venue: venue, dry_run: dry_run, live: live, confirmation: confirmation, one_shot: one_shot }
+      HedgeVenueAutoRebalanceOnce::Result.new(
+        @status,
+        @blockers,
+        [],
+        {
+          venue: @venue || venue,
+          action: "auto_rebalance_once",
+          source: dry_run ? "dry_run" : "manual_one_shot",
+          planned_auto_action: "increase_short",
+          target_short_eth: "1.18",
+          current_short_eth: "1.00",
+          drift_eth: "0.18",
+          tolerance_eth: "0.0354",
+          final_status: @status,
+          orders_submitted: @orders_submitted,
+          orders_placed: @orders_submitted,
+          signatures_created: @signatures_created
+        }
       )
     end
   end
