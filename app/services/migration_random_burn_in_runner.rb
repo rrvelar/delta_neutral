@@ -2,6 +2,11 @@ class MigrationRandomBurnInRunner
   CONFIRMATION = "I_UNDERSTAND_THIS_RUNS_30_MIN_LIVE_RANDOM_BURN_IN".freeze
   LOG_DIR = Rails.root.join("storage/random_rotation_burn_in")
   VENUES = %w[extended ethereal nado].freeze
+  BASIC_SUCCESS_STATUSES = %w[success MIGRATION_FINALIZED].freeze
+  SOURCE_FIRST_NADO_FINALIZED_STATUSES = %w[
+    SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK
+    SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK
+  ].freeze
 
   Result = Data.define(:status, :blockers, :warnings, :receipt_path, :summary)
 
@@ -151,6 +156,7 @@ class MigrationRandomBurnInRunner
   def disable_after_run
     return unless live?
 
+    set_setting("MIGRATION_LIVE_ENABLED", false, "random burn-in disable_after")
     set_setting("MIGRATION_AUTO_ENABLED", false, "random burn-in disable_after")
     set_setting("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", false, "random burn-in disable_after")
     ActiveVenueAutoPolicy.new(position: position).disable_all!(reason: "random burn-in disable_after")
@@ -255,7 +261,7 @@ class MigrationRandomBurnInRunner
         blockers = (Array(execution[:blockers]) + blockers).uniq
         return [ blockers, "blocked_before_submit" ]
       end
-      blockers << "migration result status is #{execution[:status]}" unless execution[:status].to_s.in?(%w[success MIGRATION_FINALIZED])
+      blockers << "migration result status is #{execution[:status]}" unless successful_migration_result?(route: route, execution: execution, post_report: post_report)
       blockers << "source venue #{route.fetch(:from_venue)} is not flat after migration" unless venue_short(post_report, route.fetch(:from_venue)).zero?
       blockers << "target venue #{route.fetch(:to_venue)} does not hold expected short after migration" unless venue_short(post_report, route.fetch(:to_venue)).positive?
       third = (VENUES - [ route.fetch(:from_venue), route.fetch(:to_venue) ]).first
@@ -282,6 +288,17 @@ class MigrationRandomBurnInRunner
       source_venue: receipt[:source_venue],
       target_venue: receipt[:target_venue],
       random_and_auto_paused: receipt[:random_and_auto_paused]
+    ).merge(
+      source_flat_after: receipt[:source_flat_after],
+      source_flat_confirmed: receipt[:source_flat_confirmed],
+      target_holds_expected_short: receipt[:target_holds_expected_short],
+      target_holds_hedge_confirmed: receipt[:target_holds_hedge_confirmed],
+      third_venue_flat: receipt[:third_venue_flat],
+      open_orders_clear_after: receipt[:open_orders_clear_after],
+      open_orders_after: receipt[:open_orders_after],
+      final_inside_tolerance: receipt[:final_inside_tolerance],
+      production_venue_finalized: receipt[:production_venue_finalized],
+      manual_action_required: receipt[:manual_action_required]
     ).compact
   end
 
@@ -327,6 +344,72 @@ class MigrationRandomBurnInRunner
   def record_manual_action(route:, execution:)
     self.last_manual_action_route = route
     self.last_manual_action_execution = execution
+  end
+
+  def successful_migration_result?(route:, execution:, post_report:)
+    status = execution[:status].to_s
+    return true if BASIC_SUCCESS_STATUSES.include?(status)
+    return false unless SOURCE_FIRST_NADO_FINALIZED_STATUSES.include?(status)
+
+    source_flat_after?(route, execution, post_report) &&
+      target_holds_expected_short?(route, execution, post_report) &&
+      third_venue_flat?(route, execution, post_report) &&
+      open_orders_clear_after?(execution, post_report) &&
+      final_inside_tolerance?(execution, post_report) &&
+      production_venue_finalized?(route, execution) &&
+      !truthy?(execution[:manual_action_required])
+  end
+
+  def source_flat_after?(route, execution, post_report)
+    return boolean_any?(execution, :source_flat_after, :source_flat_confirmed) if execution.key?(:source_flat_after) || execution.key?(:source_flat_confirmed)
+
+    venue_short(post_report, route.fetch(:from_venue)).zero?
+  end
+
+  def target_holds_expected_short?(route, execution, post_report)
+    if execution.key?(:target_holds_expected_short) || execution.key?(:target_holds_hedge_confirmed)
+      return boolean_any?(execution, :target_holds_expected_short, :target_holds_hedge_confirmed)
+    end
+
+    venue_short(post_report, route.fetch(:to_venue)).positive?
+  end
+
+  def third_venue_flat?(route, execution, post_report)
+    return truthy?(execution[:third_venue_flat]) if execution.key?(:third_venue_flat)
+
+    third = (VENUES - [ route.fetch(:from_venue), route.fetch(:to_venue) ]).first
+    venue_short(post_report, third).zero?
+  end
+
+  def open_orders_clear_after?(execution, post_report)
+    return true if truthy?(execution[:open_orders_clear_after])
+    return decimal(execution[:open_orders_after]).zero? if execution.key?(:open_orders_after)
+
+    direct_open_orders_zero?(post_report)
+  end
+
+  def final_inside_tolerance?(execution, post_report)
+    return truthy?(execution[:final_inside_tolerance]) if execution.key?(:final_inside_tolerance)
+
+    post_report[:inside_tolerance] == true
+  end
+
+  def production_venue_finalized?(route, execution)
+    return truthy?(execution[:production_venue_finalized]) if execution.key?(:production_venue_finalized)
+
+    HedgeVenues.normalize(position.hedge&.execution_venue) == route.fetch(:to_venue)
+  end
+
+  def direct_open_orders_zero?(report)
+    VENUES.all? { |venue| report.dig(:venues, venue, :open_orders_status) == "zero" }
+  end
+
+  def boolean_any?(hash, *keys)
+    keys.any? { |key| truthy?(hash[key]) }
+  end
+
+  def truthy?(value)
+    ActiveModel::Type::Boolean.new.cast(value)
   end
 
   def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:)

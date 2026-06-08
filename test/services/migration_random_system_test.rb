@@ -1468,6 +1468,68 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in counts canonical source-first Nado readback finalization as success when final readback is safe" do
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = source_first_nado_executor("SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK")
+
+    result = burn_in(position: position, live: true, executor: executor, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "success", cycle.fetch("status")
+    assert_equal 1, result.summary.fetch(:cycles_succeeded)
+    assert_not_includes cycle.fetch("blockers"), "migration result status is SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK"
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:orders_placed)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in counts late source-first Nado readback finalization as success when final readback is safe" do
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = source_first_nado_executor("SOURCE_FIRST_FINALIZED_BY_LATE_NADO_READBACK")
+
+    result = burn_in(position: position, live: true, executor: executor, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 1, result.summary.fetch(:cycles_succeeded)
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:orders_placed)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in blocks source-first Nado readback finalization when final readback is unsafe" do
+    OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_ENABLED", enabled: true)
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    executor = source_first_nado_executor(
+      "SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK",
+      receipt_fields: { source_flat_after: false, source_flat_confirmed: false },
+      after: ->(pos, from, to) {
+        update_burn_in_snapshot(pos, production_venue: to, shorts: { from => "0.5", to => "1.18" })
+      }
+    )
+
+    result = burn_in(position: position, live: true, executor: executor, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
+
+    assert_equal "stopped", result.status
+    assert_includes result.blockers, "migration result status is SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK"
+    assert_match "source venue ethereal is not flat", result.blockers.join(" ")
+    assert_equal 0, result.summary.fetch(:cycles_succeeded)
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:orders_placed)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in stops when target is not confirmed" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -1607,6 +1669,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     result = burn_in(position: position, live: true, disable_after: true, selector: ->(_) { "ethereal->nado" }, log_dir: dir).run
 
     assert_equal "success", result.status, result.blockers.inspect
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
     assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
@@ -1757,6 +1820,27 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       burn_in_max_allowed_drift_eth: burn_in_max_allowed_drift_eth,
       burn_in_max_allowed_drift_ratio: burn_in_max_allowed_drift_ratio,
       readiness_factory: readiness
+    )
+  end
+
+  def source_first_nado_executor(status, receipt_fields: {}, after: nil)
+    BurnInExecutor.new(
+      status: status,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      after: after || ->(pos, from, to) {
+        update_burn_in_snapshot(pos, production_venue: to, shorts: { from => "0", to => "1.18" })
+      },
+      receipt_fields: {
+        source_flat_after: true,
+        target_holds_expected_short: true,
+        third_venue_flat: true,
+        open_orders_clear_after: true,
+        final_inside_tolerance: true,
+        production_venue_finalized: true,
+        manual_action_required: false
+      }.merge(receipt_fields)
     )
   end
 
@@ -2221,7 +2305,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   class BurnInExecutor
     attr_reader :called, :routes
 
-    def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false, recovery_command: nil, recommended_action: nil, source_venue: nil, target_venue: nil)
+    def initialize(after: nil, status: "success", orders_submitted: 2, orders_placed: 2, signatures_created: 2, blockers: [], assert_nado_gates: false, recovery_command: nil, recommended_action: nil, source_venue: nil, target_venue: nil, receipt_fields: {})
       @after = after
       @status = status
       @orders_submitted = orders_submitted
@@ -2233,6 +2317,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       @recommended_action = recommended_action
       @source_venue = source_venue
       @target_venue = target_venue
+      @receipt_fields = receipt_fields
       @called = false
       @routes = []
     end
@@ -2289,7 +2374,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           target_venue: @target_venue,
           random_and_auto_paused: @status == "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN",
           target_accept_to_source_close_submit_latency_seconds: "0.5"
-        }.compact
+        }.merge(@receipt_fields).compact
       )
     end
   end
