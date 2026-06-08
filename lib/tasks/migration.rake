@@ -196,6 +196,27 @@ namespace :migration do
     )
   end
 
+  desc "Show latest daily random rotation receipt"
+  task daily_random_rotation_status: :environment do
+    position = migration_position_from_env(action: "daily_random_rotation_status")
+    next unless position
+
+    path = Dir.glob(MigrationRandomRotationDailyRunner::RECEIPT_DIR.join("*.jsonl")).sort.reverse_each.find do |candidate|
+      File.readlines(candidate).any? { |line| (JSON.parse(line)["position_id"].to_s == position.id.to_s rescue false) }
+    rescue SystemCallError
+      false
+    end
+    unless path
+      puts JSON.pretty_generate(action: "daily_random_rotation_status", position_id: position.id, status: "missing")
+      next
+    end
+    latest = File.readlines(path).reverse_each.filter_map do |line|
+      payload = JSON.parse(line) rescue nil
+      payload if payload&.fetch("position_id", nil).to_s == position.id.to_s
+    end.first
+    puts JSON.pretty_generate(action: "daily_random_rotation_status", position_id: position.id, status: "ok", receipt_path: path.to_s, latest_event: latest)
+  end
+
   desc "Run supervised bounded random rotation burn-in with JSONL logging"
   task random_burn_in: :environment do
     position = migration_position_from_env(action: "migration_random_burn_in")
@@ -254,6 +275,38 @@ namespace :migration do
       next
     end
     puts File.readlines(path).last(lines).join
+  end
+
+  desc "Run active-venue one-shot rebalance watchdog; dry-run by default"
+  task active_venue_rebalance_watchdog: :environment do
+    position = migration_position_from_env(action: "active_venue_rebalance_watchdog")
+    next unless position
+
+    result = MigrationActiveVenueRebalanceWatchdog.new(
+      position: position,
+      live: ActiveModel::Type::Boolean.new.cast(ENV["live"].presence || ENV["LIVE"]),
+      interval_seconds: ENV["interval_seconds"].presence || ENV["INTERVAL_SECONDS"].presence || 300,
+      duration_minutes: ENV["duration_minutes"].presence || ENV["DURATION_MINUTES"].presence,
+      once: ENV.fetch("once", ENV.fetch("ONCE", "true")),
+      disable_after: ENV.fetch("disable_after", ENV.fetch("DISABLE_AFTER", "false")),
+      rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true"))
+    ).run
+    puts JSON.pretty_generate(result.summary.merge(action: "active_venue_rebalance_watchdog", receipt_path: result.receipt_path))
+    abort("active_venue_rebalance_watchdog #{result.status}") unless result.status == "success"
+  end
+
+  desc "Show latest active-venue rebalance watchdog event"
+  task active_venue_rebalance_watchdog_status: :environment do
+    position = migration_position_from_env(action: "active_venue_rebalance_watchdog_status")
+    next unless position
+
+    path = MigrationActiveVenueRebalanceWatchdog::LOG_DIR.join("latest_position_#{position.id}.jsonl")
+    unless File.exist?(path)
+      puts JSON.pretty_generate(action: "active_venue_rebalance_watchdog_status", position_id: position.id, status: "missing", log_path: path.to_s)
+      next
+    end
+    last = File.readlines(path).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.first
+    puts JSON.pretty_generate(action: "active_venue_rebalance_watchdog_status", position_id: position.id, status: "ok", log_path: path.to_s, latest_event: last)
   end
 
   desc "Show read-only random rotation virtual state for a position"

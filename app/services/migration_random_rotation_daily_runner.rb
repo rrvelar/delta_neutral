@@ -50,12 +50,10 @@ class MigrationRandomRotationDailyRunner
 
   def call(position_id: nil, force: false, seed: nil, enabled_override: false)
     daily_enabled = enabled_override || bool_env("MIGRATION_RANDOM_ROTATION_DAILY_ENABLED")
-    return disabled_result(position_id: position_id) unless daily_enabled
-
     positions = target_positions(position_id)
     return missing_position_result(position_id) if position_id.present? && positions.empty?
 
-    results = positions.map { |position| run_position(position, force: force, seed: seed, enabled_override: enabled_override) }
+    results = positions.map { |position| run_position(position, force: force, seed: seed, daily_enabled: daily_enabled, enabled_override: enabled_override) }
     Result.new(
       status: results.any? { |row| row[:status] == "error" } ? "partial" : "ok",
       positions: results,
@@ -89,98 +87,84 @@ class MigrationRandomRotationDailyRunner
     :rebalance_only_if_outside_tolerance,
     :rebalance_max_attempts_per_cycle
 
-  def run_position(position, force:, seed:, enabled_override:)
+  def run_position(position, force:, seed:, daily_enabled:, enabled_override:)
     lock_key = "migration_random_rotation_daily:position:#{position.id}"
     ran = false
     result = nil
     JobConcurrencyGuard.with_lock(lock_key) do
       ran = true
       if !force && recent_receipt?(position.id)
-        result = skipped_receipt(position, reason: "debounce", enabled_override: enabled_override)
+        result = skipped_receipt(position, reason: "debounce", daily_enabled: daily_enabled, enabled_override: enabled_override)
         write_daily_receipt(result)
         next
       end
 
-      result = execute_read_only_workflow(position, seed: seed, enabled_override: enabled_override)
+      result = execute_workflow(position, seed: seed, daily_enabled: daily_enabled, enabled_override: enabled_override)
     end
 
-    return skipped_receipt(position, reason: "lock", enabled_override: enabled_override) unless ran
+    return skipped_receipt(position, reason: "lock", daily_enabled: daily_enabled, enabled_override: enabled_override) unless ran
 
     result
   rescue => e
-    error = error_receipt(position, error: "#{e.class}: #{e.message}", enabled_override: enabled_override)
+    error = error_receipt(position, error: "#{e.class}: #{e.message}", daily_enabled: daily_enabled, enabled_override: enabled_override)
     write_daily_receipt(error)
     error
   end
 
-  def execute_read_only_workflow(position, seed:, enabled_override:)
-    return execute_live_workflow(position, seed: seed, enabled_override: enabled_override) if live_random_enabled?
+  def execute_workflow(position, seed:, daily_enabled:, enabled_override:)
+    return execute_live_workflow(position, seed: seed, daily_enabled: daily_enabled, enabled_override: enabled_override) if live_random_enabled?(daily_enabled)
 
-    snapshot = snapshot_refresh_class.new(position: position, force: true).refresh
-    position.reload
-    route_matrix = route_matrix_class.new(position: position, snapshot: snapshot, receipt_dir: route_receipt_dir)
-    proof_summary = route_matrix.prove_routes!
-    virtual_state = virtual_state_class.new(position: position, state_dir: state_dir, now: now)
-    state_before = virtual_state.current
-    virtual_current = state_before.fetch(:virtual_current_venue)
-    planner = planner_class.new(
-      route_matrix: proof_summary,
-      random_seed: seed,
-      receipt_dir: random_receipt_dir,
-      current_venue_override: virtual_current,
-      virtual_mode: true
-    )
-    decision = planner.plan(position: position)
-    random_receipt_path = planner.write_receipt(decision.receipt)
-    selected_route = decision.receipt[:selected_route]
-    selected_target = decision.receipt[:selected_target_venue]
-    should_advance = virtual_decision_selected?(decision.receipt)
-    virtual_after = should_advance && selected_target.present? ? selected_target : virtual_current
+    execute_read_only_workflow(position, seed: seed, daily_enabled: daily_enabled, enabled_override: enabled_override)
+  end
+
+  def execute_read_only_workflow(position, seed:, daily_enabled:, enabled_override:)
+    direct = direct_preflight(position, live: false)
+    watchdog = run_active_rebalance(position, reason: "daily_dry_run_watchdog", live: false)
+    routes = eligible_routes_from_preflight(direct)
+    selected_route = select_route(routes, seed: seed)
+    warnings = Array(direct[:warnings])
+    warnings << "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED is false; dry-run plan only." unless daily_enabled
 
     receipt = {
       action: "daily_random_rotation_dry_run",
       timestamp: now.call.utc.iso8601,
       position_id: position.id,
       production_venue: position.hedge&.execution_venue,
-      virtual_current_venue_before: virtual_current,
-      current_venue: decision.receipt[:current_venue],
-      route_proof_status: proof_summary[:status] || "recorded",
-      route_proof_receipt_path: Array(proof_summary[:receipt_paths]).first,
-      random_rotation_receipt_path: random_receipt_path&.to_s,
+      current_production_venue: direct[:production_venue],
+      current_venue: direct[:production_venue],
+      active_venue_rebalance_watchdog: watchdog,
+      route_proof_source: "READY_FOR_RANDOM",
+      route_proof_status: direct.dig(:proof_report, :missing_route_proofs).blank? ? "READY_FOR_RANDOM" : "blocked",
       selected_route: selected_route,
-      selected_target_venue: selected_target,
-      virtual_current_venue_after: virtual_after,
-      dry_run_eligible_routes: decision.receipt[:dry_run_eligible_routes],
-      live_blocked_routes: decision.receipt[:live_blocked_routes],
-      status: decision.receipt[:status],
-      blockers: decision.receipt[:blockers],
-      warnings: decision.receipt[:warnings],
+      selected_target_venue: selected_route&.fetch(:to_venue, nil),
+      eligible_random_routes: routes.map { |route| route.fetch(:route) },
+      dry_run_eligible_routes: routes,
+      live_blockers: live_gate_blockers(daily_enabled: daily_enabled),
+      status: dry_run_status(direct: direct, watchdog: watchdog, routes: routes),
+      blockers: (Array(direct[:blockers]) + Array(watchdog[:blockers])).uniq,
+      warnings: warnings,
       auto_enabled: bool_env("MIGRATION_AUTO_ENABLED"),
-      daily_enabled: true,
+      daily_enabled: daily_enabled,
       enabled_override: enabled_override,
       dry_run_only: true,
-      virtual_mode: true,
+      virtual_mode: false,
       production_venue_mutated: false,
       hedge_execution_venue_after: position.hedge&.reload&.execution_venue,
       would_migrate: false,
+      would_execute_live: false,
       live_available: false,
       orders_submitted: 0,
       orders_placed: 0,
       signatures_created: 0
     }
     daily_receipt_path = write_daily_receipt(receipt)
-    state_after = should_advance ? virtual_state.update_from_decision!(decision_receipt: decision.receipt, daily_receipt_path: daily_receipt_path&.to_s) : state_before
-    receipt.merge(
-      virtual_current_venue_after: state_after.fetch(:virtual_current_venue),
-      virtual_state_path: state_dir.join("position_#{position.id}.json").to_s,
-      receipt_path: daily_receipt_path&.to_s
-    )
+    receipt.merge(receipt_path: daily_receipt_path&.to_s)
   end
 
-  def execute_live_workflow(position, seed:, enabled_override:)
-    direct = direct_preflight(position)
-    pre_next_rebalance = rebalance_before_next_migration ? run_active_rebalance(position, reason: "pre_next_cycle") : nil
-    direct = direct_preflight(position) if pre_next_rebalance
+  def execute_live_workflow(position, seed:, daily_enabled:, enabled_override:)
+    direct = direct_preflight(position, live: true)
+    pre_next_rebalance = rebalance_before_next_migration ? run_active_rebalance(position, reason: "pre_next_cycle", live: true) : nil
+    direct = direct_preflight(position, live: true) if pre_next_rebalance
     route = direct.fetch(:blockers).empty? ? live_route_from_preflight(direct, seed: seed) : nil
     blockers = (Array(direct[:blockers]) + Array(pre_next_rebalance&.fetch(:blockers, []))).uniq
     blockers << "no READY_FOR_RANDOM route from current production venue" unless route || blockers.any?
@@ -193,6 +177,7 @@ class MigrationRandomRotationDailyRunner
         status: "blocked_before_submit",
         blockers: blockers,
         enabled_override: enabled_override,
+        daily_enabled: daily_enabled,
         pre_next_rebalance: pre_next_rebalance
       )
       write_daily_receipt(receipt)
@@ -222,6 +207,7 @@ class MigrationRandomRotationDailyRunner
       status: result.status,
       blockers: result.blockers,
       enabled_override: enabled_override,
+      daily_enabled: daily_enabled,
       pre_next_rebalance: pre_next_rebalance,
       post_migration_rebalance: post_migration_rebalance(position, result)
     )
@@ -229,7 +215,7 @@ class MigrationRandomRotationDailyRunner
     receipt
   end
 
-  def live_receipt(position:, direct:, route:, result:, status:, blockers:, enabled_override:, pre_next_rebalance: nil, post_migration_rebalance: nil, hold_rebalance_checks: [])
+  def live_receipt(position:, direct:, route:, result:, status:, blockers:, enabled_override:, daily_enabled:, pre_next_rebalance: nil, post_migration_rebalance: nil, hold_rebalance_checks: [])
     migration_receipt = result&.receipt || {}
     rebalance_blockers = Array(pre_next_rebalance&.fetch(:blockers, [])) +
       Array(post_migration_rebalance&.fetch(:blockers, [])) +
@@ -247,7 +233,7 @@ class MigrationRandomRotationDailyRunner
       blockers: (Array(blockers) + rebalance_blockers).uniq,
       warnings: Array(direct[:warnings]) + Array(result&.warnings),
       auto_enabled: bool_env("MIGRATION_AUTO_ENABLED"),
-      daily_enabled: true,
+      daily_enabled: daily_enabled,
       enabled_override: enabled_override,
       dry_run_only: false,
       virtual_mode: false,
@@ -290,6 +276,12 @@ class MigrationRandomRotationDailyRunner
     decision_receipt[:status] == "RANDOM_ROUTE_SELECTED" &&
       selected.present? &&
       selected.fetch(:virtual_decision_eligible, selected["virtual_decision_eligible"]) == true
+  end
+
+  def dry_run_status(direct:, watchdog:, routes:)
+    return "blocked" if Array(direct[:blockers]).any? || Array(watchdog[:blockers]).any?
+
+    routes.any? ? "RANDOM_ROUTE_SELECTED" : "NO_READY_FOR_RANDOM_ROUTE"
   end
 
   def missing_position_result(position_id)
@@ -371,7 +363,7 @@ class MigrationRandomRotationDailyRunner
     keys.index_with { |key| receipt[key] }.compact
   end
 
-  def direct_preflight(position)
+  def direct_preflight(position, live:)
     if preflight_factory
       return preflight_factory.call(position: position, stage: "daily_random")
     end
@@ -380,7 +372,7 @@ class MigrationRandomRotationDailyRunner
       position: position,
       env: env,
       proof_registry: proof_registry,
-      live: true
+      live: live
     ).report
   end
 
@@ -408,21 +400,21 @@ class MigrationRandomRotationDailyRunner
     return nil unless rebalance_after_migration
     return nil unless migration_result&.status.to_s.in?(%w[success MIGRATION_FINALIZED])
 
-    run_active_rebalance(position, reason: "post_migration")
+    run_active_rebalance(position, reason: "post_migration", live: true)
   end
 
-  def run_active_rebalance(position, reason:)
-    active_rebalancer(position).run(reason: reason)
+  def run_active_rebalance(position, reason:, live:)
+    active_rebalancer(position, live: live).run(reason: reason)
   end
 
-  def active_rebalancer(position)
+  def active_rebalancer(position, live:)
     return active_rebalance_factory.call(position: position) if active_rebalance_factory
 
     ActiveVenueOneShotRebalance.new(
       position: position,
-      live: true,
+      live: live,
       env: env,
-      preflight_factory: ->(position:, stage:) { direct_preflight(position) },
+      preflight_factory: ->(position:, stage:) { direct_preflight(position, live: live) },
       max_attempts: rebalance_max_attempts_per_cycle,
       only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
       now: now
@@ -451,7 +443,33 @@ class MigrationRandomRotationDailyRunner
     OperationalSettings.set!(key: "AERODROME_NADO_LIVE_MIGRATION_ENABLED", enabled: true, reason: "daily random rotation route #{route.fetch(:route)}")
   end
 
-  def live_random_enabled?
+  def eligible_routes_from_preflight(direct)
+    current = HedgeVenues.normalize(direct[:production_venue])
+    policy = MigrationRouteOperationalPolicy.new(env: env)
+    Array(direct.dig(:proof_report, :routes)).select do |route|
+      route[:from_venue] == current &&
+        route[:status] == MigrationRouteProofRegistry::STATUSES[:ready] &&
+        policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
+    end
+  end
+
+  def select_route(routes, seed:)
+    return nil if routes.empty?
+
+    random = seed.present? ? Random.new(Digest::SHA256.hexdigest(seed.to_s).to_i(16) % (2**31)) : Random.new
+    routes[random.rand(routes.size)]
+  end
+
+  def live_gate_blockers(daily_enabled:)
+    blockers = []
+    blockers << "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED must be true for live daily random rotation" unless daily_enabled
+    blockers << "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    blockers << "MIGRATION_LIVE_ENABLED must be true" unless bool_env("MIGRATION_LIVE_ENABLED")
+    blockers
+  end
+
+  def live_random_enabled?(daily_enabled)
+    daily_enabled &&
     bool_env("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED") &&
       bool_env("MIGRATION_AUTO_ENABLED") &&
       bool_env("MIGRATION_LIVE_ENABLED")

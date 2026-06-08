@@ -1,26 +1,27 @@
 require "test_helper"
 
 class MigrationLiveRouteCapabilityTest < ActiveSupport::TestCase
-  test "extended ethereal routes are implemented but blocked without canary" do
+  test "extended ethereal route is ready for random but blocked for live without live gates" do
     report = registry.report
     route = report.fetch(:routes).find { |row| row[:from_venue] == "extended" && row[:to_venue] == "ethereal" }
 
     assert_equal true, route.fetch(:dry_run_ready)
+    assert_equal true, route.fetch(:ready_for_random)
     assert_equal true, route.fetch(:live_path_implemented)
-    assert_equal false, route.fetch(:live_canary_confirmed)
+    assert_equal true, route.fetch(:live_canary_confirmed)
     assert_equal false, route.fetch(:live_autopilot_eligible)
-    assert_includes route.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->ethereal."
+    assert_empty route.fetch(:blockers)
     assert_equal 0, route.fetch(:orders_submitted)
     assert_equal 0, route.fetch(:signatures_created)
   end
 
-  test "extended ethereal can become eligible with mocked canary and gates" do
+  test "extended ethereal can become eligible with live gates" do
     report = registry(
       env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
         "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
         "MIGRATION_LIVE_ENABLED" => "true"
-      },
-      canary_checker: confirmed_canary_checker
+      }
     ).report
     route = report.fetch(:routes).find { |row| row[:from_venue] == "extended" && row[:to_venue] == "ethereal" }
 
@@ -28,17 +29,19 @@ class MigrationLiveRouteCapabilityTest < ActiveSupport::TestCase
     assert_equal true, route.fetch(:live_autopilot_eligible)
   end
 
-  test "nado routes are implemented but not autopilot eligible without confirmed canary" do
+  test "nado routes are ready but require Nado live gates for live autopilot" do
     route = registry.report.fetch(:routes).find { |row| row[:from_venue] == "extended" && row[:to_venue] == "nado" }
 
     assert_equal true, route.fetch(:live_path_implemented)
+    assert_equal true, route.fetch(:ready_for_random)
     assert_equal false, route.fetch(:live_autopilot_eligible)
-    assert_includes route.fetch(:blockers), "LIVE_CANARY_CONFIRMED receipt is required for extended->nado."
+    assert_empty route.fetch(:blockers)
+    assert_includes route.fetch(:required_gates), "AERODROME_NADO_HEDGE_LIVE_ENABLED=true"
   end
 
   private
 
-  def registry(env: {}, canary_checker: missing_canary_checker)
+  def registry(env: {}, canary_checker: nil)
     MigrationLiveRouteCapability.new(
       position: position,
       route_matrix: route_matrix,
@@ -59,36 +62,6 @@ class MigrationLiveRouteCapabilityTest < ActiveSupport::TestCase
 
   def route(from, to, status)
     { from_venue: from, to_venue: to, route_status: status, preview_available: true, blockers: [] }
-  end
-
-  def missing_canary_checker
-    Class.new do
-      def status_for(from:, to:)
-        {
-          live_canary_confirmed: false,
-          latest_canary_status: nil,
-          latest_canary_receipt_path: nil,
-          blockers: [ "LIVE_CANARY_CONFIRMED receipt is required for #{from}->#{to}." ],
-          orders_submitted: 0,
-          signatures_created: 0
-        }
-      end
-    end.new
-  end
-
-  def confirmed_canary_checker
-    Class.new do
-      def status_for(from:, to:)
-        {
-          live_canary_confirmed: from == "extended" && to == "ethereal",
-          latest_canary_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
-          latest_canary_receipt_path: "test.jsonl",
-          blockers: from == "extended" && to == "ethereal" ? [] : [ "missing" ],
-          orders_submitted: 0,
-          signatures_created: 0
-        }
-      end
-    end.new
   end
 
   def position

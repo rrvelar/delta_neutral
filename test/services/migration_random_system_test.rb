@@ -810,6 +810,132 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_empty rebalancer.calls
   end
 
+  test "active venue one-shot rebalance blocks during migration lock" do
+    position = migration_position("extended")
+    rebalancer = ActiveRebalanceAdapter.new
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: false),
+      rebalancer: rebalancer
+    )
+
+    result = nil
+    MigrationExecutionLock.with_lock(position) do
+      result = service.run(reason: "watchdog")
+    end
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_includes result.fetch(:blockers), "migration lock is already active for this position"
+    assert_empty rebalancer.calls
+  end
+
+  test "active venue rebalance watchdog no-ops when inside tolerance" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-active-watchdog-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal")
+    ])
+
+    result = MigrationActiveVenueRebalanceWatchdog.new(
+      position: position,
+      live: false,
+      once: true,
+      log_dir: dir,
+      active_rebalance_factory: ->(position:) { active }
+    ).run
+    check = read_jsonl(result.receipt_path).find { |event| event["event"] == "active_venue_rebalance_watchdog_check" }
+
+    assert_equal "success", result.status
+    assert_equal "ethereal", check.fetch("venue")
+    assert_equal false, check.fetch("needed")
+    assert_equal 0, check.fetch("orders_submitted")
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "active venue rebalance watchdog dry-run plans outside tolerance with zero submissions" do
+    position = migration_position("nado")
+    dir = Rails.root.join("tmp/test-active-watchdog-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "executed", needed: true, venue: "nado")
+    ])
+
+    result = MigrationActiveVenueRebalanceWatchdog.new(
+      position: position,
+      live: false,
+      once: true,
+      log_dir: dir,
+      active_rebalance_factory: ->(position:) { active }
+    ).run
+    check = read_jsonl(result.receipt_path).find { |event| event["event"] == "active_venue_rebalance_watchdog_check" }
+
+    assert_equal "success", result.status
+    assert_equal true, check.fetch("needed")
+    assert_equal "nado", check.fetch("venue")
+    assert_equal 0, check.fetch("orders_submitted")
+    assert_equal 0, check.fetch("signatures_created")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "active venue rebalance watchdog live mocked execution submits one one-shot rebalance" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-active-watchdog-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "executed", needed: true, venue: "extended", orders_submitted: 1, signatures_created: 1)
+    ])
+
+    result = MigrationActiveVenueRebalanceWatchdog.new(
+      position: position,
+      live: true,
+      once: true,
+      log_dir: dir,
+      active_rebalance_factory: ->(position:) { active }
+    ).run
+
+    assert_equal "success", result.status
+    assert_equal 1, result.summary.fetch(:orders_submitted)
+    assert_equal 1, result.summary.fetch(:orders_placed)
+    assert_equal 1, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "active venue rebalance watchdog stops on blocker and disable_after closes gates" do
+    OperationalSettings.set!(key: "MIGRATION_LIVE_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_AUTO_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED", enabled: true)
+    OperationalSettings.set!(key: "AERODROME_NADO_LIVE_MIGRATION_ENABLED", enabled: true)
+    ActiveVenueAutoPolicy.new(position: position = migration_position("ethereal")).enable_venue!(venue: "ethereal", reason: "test")
+    dir = Rails.root.join("tmp/test-active-watchdog-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "blocked", needed: true, venue: "ethereal", blockers: [ "active venue open orders are not zero" ])
+    ])
+
+    result = MigrationActiveVenueRebalanceWatchdog.new(
+      position: position,
+      live: true,
+      once: true,
+      disable_after: true,
+      log_dir: dir,
+      active_rebalance_factory: ->(position:) { active }
+    ).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "active venue open orders are not zero"
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_LIVE_MIGRATION_ENABLED")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "dedicated burn-in preflight blocks if Extended position readback fails" do
     position = migration_position("ethereal")
     preflight = direct_preflight(position, venues: { "extended" => DirectBurnInVenue.new(position_error: "timeout") })
