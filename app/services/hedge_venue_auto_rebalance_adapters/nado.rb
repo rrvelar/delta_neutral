@@ -7,7 +7,7 @@ module HedgeVenueAutoRebalanceAdapters
       @now = now
     end
 
-    def run(position:, dry_run:, live:, confirmation:, max_slippage:, one_shot: true)
+    def run(position:, dry_run:, live:, confirmation:, max_slippage:, one_shot: true, **)
       report = @readiness.readiness(position: position, mode: one_shot ? :manual_one_shot : :continuous_auto)
       blockers = Array(report[:blockers])
       blockers << "submitted confirmation must equal #{nado_confirmation_phrase}" if live && one_shot && (nado_confirmation_phrase.blank? || confirmation.to_s != nado_confirmation_phrase)

@@ -9,7 +9,7 @@ module HedgeVenueAutoRebalanceAdapters
       @now = now
     end
 
-    def run(position:, dry_run:, live:, confirmation:, max_slippage:, one_shot: true)
+    def run(position:, dry_run:, live:, confirmation:, max_slippage:, one_shot: true, **)
       report = @readiness.readiness(position: position)
       blockers = Array(report[:blockers])
       blockers << "submitted confirmation must equal #{CONFIRMATION}" if live && one_shot && confirmation != CONFIRMATION

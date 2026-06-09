@@ -10,12 +10,12 @@ class HedgeVenueAutoRebalanceOnce
     }
   end
 
-  def run(position:, dry_run: true, live: false, confirmation: nil, max_slippage: "0.01", one_shot: true)
+  def run(position:, dry_run: true, live: false, confirmation: nil, max_slippage: "0.01", one_shot: true, **options)
     venue = HedgeVenues.normalize(position.hedge&.execution_venue)
     adapter = @adapters[venue]
     return blocked(position: position, venue: venue, blocker: "Unsupported hedge execution_venue #{venue.inspect}") unless adapter
 
-    adapter.run(position: position, dry_run: dry_run, live: live, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot)
+    adapter.run(position: position, dry_run: dry_run, live: live, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, **options)
   end
 
   private

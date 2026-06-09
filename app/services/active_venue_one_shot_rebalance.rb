@@ -4,6 +4,7 @@ class ActiveVenueOneShotRebalance
   PENDING_RECHECK_STATUSES = %w[submitted_pending_readback submitted_but_readback_pending submitted_but_not_confirmed].freeze
   PENDING_RECHECK_FINAL_STATUSES = %w[REBALANCE_REQUIRES_RECHECK SUBMITTED_BUT_NOT_CONFIRMED].freeze
   REBALANCE_TRIGGER_BLOCKER_PATTERN = /outside tolerance|out_of_burn_in_tolerance|max allowed drift|drift_ratio/i
+  EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_DEFAULT = "0.15".freeze
 
   def initialize(position:, live: false, env: ENV, preflight_factory: nil, rebalancer: nil, now: -> { Time.current },
                  max_attempts: 2, only_if_outside_tolerance: true, recheck_attempts: 4,
@@ -12,7 +13,7 @@ class ActiveVenueOneShotRebalance
     @live = ActiveModel::Type::Boolean.new.cast(live)
     @env = env
     @preflight_factory = preflight_factory
-    @rebalancer = rebalancer || HedgeVenueAutoRebalanceOnce.new(env: env)
+    @rebalancer = rebalancer
     @now = now
     @max_attempts = max_attempts.to_i
     @only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(only_if_outside_tolerance)
@@ -43,6 +44,10 @@ class ActiveVenueOneShotRebalance
       rebalance_final_status: receipt[:final_status],
       recheck_attempts: recheck[:attempts],
       recheck_final_inside_tolerance: recheck[:final_inside_tolerance],
+      planned_auto_action: receipt[:planned_auto_action] || receipt[:intended_action],
+      requested_size_eth: receipt[:requested_size_eth] || receipt[:requested_order_size_eth] || receipt[:order_size_eth],
+      large_drift: large_drift?(venue: venue, receipt: receipt),
+      scoped_full_target_rebalance: scoped_full_target_rebalance?(venue),
       blockers: final_blockers,
       warnings: Array(result.warnings),
       orders_submitted: receipt.fetch(:orders_submitted, receipt.fetch(:orders_placed, 0)).to_i,
@@ -168,20 +173,59 @@ class ActiveVenueOneShotRebalance
   end
 
   def run_one_shot(venue)
-    enable_scoped_live_gates(venue) if live?
-    rebalancer.run(
+    with_scoped_live_gates(venue) do
+      runner_for(venue).run(
       position: position,
       dry_run: !live?,
       live: live?,
       confirmation: confirmation_for(venue),
-      one_shot: true
+      one_shot: true,
+      **one_shot_options_for(venue)
+      )
+    end
+  end
+
+  def runner_for(venue)
+    return rebalancer if rebalancer
+
+    HedgeVenueAutoRebalanceOnce.new(env: scoped_env_for(venue))
+  end
+
+  def scoped_env_for(venue)
+    return env unless venue == "extended"
+
+    env.to_h.merge(
+      "EXTENDED_ONE_SHOT_REBALANCE_ENABLED" => "true",
+      "EXTENDED_MIGRATION_REBALANCE_ENABLED" => "true",
+      "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
+      "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => extended_migration_rebalance_max_size_eth
     )
   end
 
-  def enable_scoped_live_gates(venue)
-    return unless venue == "nado"
+  def one_shot_options_for(venue)
+    return {} unless venue == "extended"
 
+    {
+      mode: "migration_rebalance",
+      max_size_eth: extended_migration_rebalance_max_size_eth
+    }
+  end
+
+  def with_scoped_live_gates(venue)
+    return yield unless live? && venue == "nado"
+
+    original = OperationalSetting.find_by(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED")
+    original_value = original&.value
     OperationalSettings.set!(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED", enabled: true, reason: "active venue one-shot rebalance")
+    yield
+  ensure
+    if live? && venue == "nado"
+      if original
+        OperationalSettings.set!(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED", enabled: original_value, reason: "active venue one-shot rebalance restore")
+      else
+        OperationalSetting.find_by(key: "AERODROME_NADO_HEDGE_LIVE_ENABLED")&.destroy!
+      end
+    end
   end
 
   def confirmation_for(venue)
@@ -196,6 +240,21 @@ class ActiveVenueOneShotRebalance
     return "success_after_recheck" if pending_recheck?(result)
 
     result.status.to_s == "no_op" ? "inside_tolerance" : "executed"
+  end
+
+  def scoped_full_target_rebalance?(venue)
+    venue == "extended"
+  end
+
+  def large_drift?(venue:, receipt:)
+    size = decimal(receipt[:requested_size_eth] || receipt[:requested_order_size_eth] || receipt[:order_size_eth])
+    return false unless size.positive?
+
+    venue == "extended" && size > decimal(env["EXTENDED_ONE_SHOT_MAX_SIZE_ETH"].presence || "0.02")
+  end
+
+  def extended_migration_rebalance_max_size_eth
+    env["EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_DEFAULT
   end
 
   def isolated_active_exposure?(preflight, venue)
@@ -227,6 +286,11 @@ class ActiveVenueOneShotRebalance
       :drift_eth,
       :tolerance_eth,
       :requested_size_eth,
+      :requested_order_size_eth,
+      :order_size_eth,
+      :cap_eth,
+      :cap_exceeded,
+      :migration_mode,
       :final_status,
       :orders_submitted,
       :orders_placed,

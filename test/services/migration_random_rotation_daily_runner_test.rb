@@ -214,6 +214,38 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
     assert_equal 1, receipt.fetch("signatures_created")
   end
 
+  test "daily live random blocks before submit when active venue capability matrix blocks" do
+    OperationalSetting.delete_all
+    position = migration_position
+    fake_snapshot_refresh_class.new(position: position).refresh
+    position.hedge.update!(execution_venue: "ethereal")
+    dirs = receipt_dirs
+    executor = live_executor
+    blocker = "Extended active rebalance cannot handle drift 0.071 ETH because EXTENDED_ONE_SHOT_MAX_SIZE_ETH=0.02 and scoped migration rebalance gate is unavailable."
+
+    result = runner(
+      **dirs,
+      env: {
+        "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "true",
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => "true",
+        "MIGRATION_AUTO_ENABLED" => "true",
+        "MIGRATION_LIVE_ENABLED" => "true",
+        "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true"
+      },
+      preflight_factory: live_preflight_factory,
+      executor_factory: -> { executor },
+      active_rebalance_factory: noop_active_rebalance_factory,
+      active_rebalance_capability_matrix_factory: ->(position:) { CapabilityMatrixStub.new(blockers: [ blocker ]) }
+    ).call(position_id: position.id, force: true, seed: "seed-live")
+    receipt = latest_daily_receipt(dirs.fetch(:receipt_dir), position.id)
+
+    assert_equal "ok", result.status
+    assert_equal "blocked_before_submit", receipt.fetch("status")
+    assert_includes receipt.fetch("blockers"), blocker
+    assert_equal 0, receipt.fetch("orders_submitted")
+    assert_equal 0, receipt.fetch("signatures_created")
+  end
+
   test "daily live random records target-open source-still-open as manual action" do
     OperationalSetting.delete_all
     position = migration_position
@@ -247,7 +279,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
 
   private
 
-  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil, active_rebalance_factory: nil)
+  def runner(env: {}, receipt_dir: nil, route_receipt_dir: nil, random_receipt_dir: nil, state_dir: nil, route_matrix_class: ready_route_matrix_class, preflight_factory: nil, executor_factory: nil, active_rebalance_factory: nil, active_rebalance_capability_matrix_factory: nil)
     MigrationRandomRotationDailyRunner.new(
       env: { "MIGRATION_RANDOM_ROTATION_DAILY_ENABLED" => "false", "MIGRATION_MIN_COOLDOWN_HOURS" => "0" }.merge(env),
       receipt_dir: receipt_dir || Rails.root.join("tmp/test-daily-random-#{SecureRandom.hex(4)}"),
@@ -259,6 +291,7 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
       preflight_factory: preflight_factory || ready_daily_preflight_factory,
       executor_factory: executor_factory,
       active_rebalance_factory: active_rebalance_factory || noop_active_rebalance_factory,
+      active_rebalance_capability_matrix_factory: active_rebalance_capability_matrix_factory,
       now: -> { Time.zone.local(2026, 5, 28, 12, 0, 0) }
     )
   end
@@ -616,6 +649,23 @@ class MigrationRandomRotationDailyRunnerTest < ActiveSupport::TestCase
 
     def run(reason:)
       @payloads.shift.merge(trigger: reason)
+    end
+  end
+
+  class CapabilityMatrixStub
+    def initialize(blockers: [])
+      @blockers = blockers
+    end
+
+    def report
+      {
+        all_supported: @blockers.empty?,
+        venues: [],
+        blockers: @blockers,
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0
+      }
     end
   end
 end

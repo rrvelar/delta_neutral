@@ -313,6 +313,20 @@ namespace :migration do
     puts JSON.pretty_generate(action: "active_venue_rebalance_watchdog_status", position_id: position.id, status: "ok", log_path: path.to_s, latest_event: last)
   end
 
+  desc "Show read-only active-venue rebalance capability matrix"
+  task active_venue_rebalance_capabilities: :environment do
+    position = migration_position_from_env(action: "active_venue_rebalance_capabilities")
+    next unless position
+
+    required_max_drift_eth = ENV["required_max_drift_eth"].presence || ENV["REQUIRED_MAX_DRIFT_ETH"].presence
+    report = ActiveVenueRebalanceCapabilityMatrix.new(
+      position: position,
+      required_max_drift_eth: required_max_drift_eth
+    ).report
+    puts JSON.pretty_generate(report)
+    abort("active_venue_rebalance_capabilities blocked") unless report[:blockers].empty?
+  end
+
   desc "Show read-only random rotation virtual state for a position"
   task random_rotation_state: :environment do
     position_id = ENV["position_id"].presence || ENV["POSITION_ID"].presence
