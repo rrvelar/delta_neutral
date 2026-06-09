@@ -24,7 +24,10 @@ class MigrationRandomRotationDailyRunner
     rebalance_hold_interval_seconds: 300,
     rebalance_before_next_migration: true,
     rebalance_only_if_outside_tolerance: true,
-    rebalance_max_attempts_per_cycle: 2
+    rebalance_max_attempts_per_cycle: 2,
+    rebalance_readback_recheck_attempts: 4,
+    rebalance_readback_recheck_interval_seconds: 5,
+    sleeper: ->(seconds) { sleep(seconds) }
   )
     @env = env
     @now = now
@@ -46,6 +49,9 @@ class MigrationRandomRotationDailyRunner
     @rebalance_before_next_migration = ActiveModel::Type::Boolean.new.cast(rebalance_before_next_migration)
     @rebalance_only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(rebalance_only_if_outside_tolerance)
     @rebalance_max_attempts_per_cycle = rebalance_max_attempts_per_cycle.to_i
+    @rebalance_readback_recheck_attempts = rebalance_readback_recheck_attempts.to_i
+    @rebalance_readback_recheck_interval_seconds = rebalance_readback_recheck_interval_seconds.to_i
+    @sleeper = sleeper
   end
 
   def call(position_id: nil, force: false, seed: nil, enabled_override: false)
@@ -85,7 +91,10 @@ class MigrationRandomRotationDailyRunner
     :rebalance_hold_interval_seconds,
     :rebalance_before_next_migration,
     :rebalance_only_if_outside_tolerance,
-    :rebalance_max_attempts_per_cycle
+    :rebalance_max_attempts_per_cycle,
+    :rebalance_readback_recheck_attempts,
+    :rebalance_readback_recheck_interval_seconds,
+    :sleeper
 
   def run_position(position, force:, seed:, daily_enabled:, enabled_override:)
     lock_key = "migration_random_rotation_daily:position:#{position.id}"
@@ -254,9 +263,9 @@ class MigrationRandomRotationDailyRunner
       },
       migration_receipt_path: migration_receipt[:receipt_path],
       migration_timing: migration_timing_payload(migration_receipt),
-      orders_submitted: migration_receipt.fetch(:orders_submitted, 0).to_i + rebalance_order_count(post_migration_rebalance, :orders_submitted),
-      orders_placed: migration_receipt.fetch(:orders_placed, 0).to_i + rebalance_order_count(post_migration_rebalance, :orders_placed),
-      signatures_created: migration_receipt.fetch(:signatures_created, 0).to_i + rebalance_order_count(post_migration_rebalance, :signatures_created)
+      orders_submitted: migration_receipt.fetch(:orders_submitted, 0).to_i + rebalance_order_count(pre_next_rebalance, :orders_submitted) + rebalance_order_count(post_migration_rebalance, :orders_submitted),
+      orders_placed: migration_receipt.fetch(:orders_placed, 0).to_i + rebalance_order_count(pre_next_rebalance, :orders_placed) + rebalance_order_count(post_migration_rebalance, :orders_placed),
+      signatures_created: migration_receipt.fetch(:signatures_created, 0).to_i + rebalance_order_count(pre_next_rebalance, :signatures_created) + rebalance_order_count(post_migration_rebalance, :signatures_created)
     }
   end
 
@@ -417,6 +426,9 @@ class MigrationRandomRotationDailyRunner
       preflight_factory: ->(position:, stage:) { direct_preflight(position, live: live) },
       max_attempts: rebalance_max_attempts_per_cycle,
       only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
+      recheck_attempts: rebalance_readback_recheck_attempts,
+      recheck_interval_seconds: rebalance_readback_recheck_interval_seconds,
+      sleeper: sleeper,
       now: now
     )
   end

@@ -243,7 +243,9 @@ namespace :migration do
       rebalance_hold_interval_seconds: ENV.fetch("rebalance_hold_interval_seconds", ENV.fetch("REBALANCE_HOLD_INTERVAL_SECONDS", "300")),
       rebalance_before_next_migration: ENV.fetch("rebalance_before_next_migration", ENV.fetch("REBALANCE_BEFORE_NEXT_MIGRATION", "true")),
       rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true")),
-      rebalance_max_attempts_per_cycle: ENV.fetch("rebalance_max_attempts_per_cycle", ENV.fetch("REBALANCE_MAX_ATTEMPTS_PER_CYCLE", "2"))
+      rebalance_max_attempts_per_cycle: ENV.fetch("rebalance_max_attempts_per_cycle", ENV.fetch("REBALANCE_MAX_ATTEMPTS_PER_CYCLE", "2")),
+      rebalance_readback_recheck_attempts: ENV.fetch("rebalance_readback_recheck_attempts", ENV.fetch("REBALANCE_READBACK_RECHECK_ATTEMPTS", "4")),
+      rebalance_readback_recheck_interval_seconds: ENV.fetch("rebalance_readback_recheck_interval_seconds", ENV.fetch("REBALANCE_READBACK_RECHECK_INTERVAL_SECONDS", "5"))
     ).run
     puts JSON.pretty_generate(result.summary.merge(action: "migration_random_burn_in", receipt_path: result.receipt_path))
     abort("migration_random_burn_in #{result.status}") unless result.status == "success"
@@ -289,7 +291,9 @@ namespace :migration do
       duration_minutes: ENV["duration_minutes"].presence || ENV["DURATION_MINUTES"].presence,
       once: ENV.fetch("once", ENV.fetch("ONCE", "true")),
       disable_after: ENV.fetch("disable_after", ENV.fetch("DISABLE_AFTER", "false")),
-      rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true"))
+      rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true")),
+      rebalance_readback_recheck_attempts: ENV.fetch("rebalance_readback_recheck_attempts", ENV.fetch("REBALANCE_READBACK_RECHECK_ATTEMPTS", "4")),
+      rebalance_readback_recheck_interval_seconds: ENV.fetch("rebalance_readback_recheck_interval_seconds", ENV.fetch("REBALANCE_READBACK_RECHECK_INTERVAL_SECONDS", "5"))
     ).run
     puts JSON.pretty_generate(result.summary.merge(action: "active_venue_rebalance_watchdog", receipt_path: result.receipt_path))
     abort("active_venue_rebalance_watchdog #{result.status}") unless result.status == "success"

@@ -20,6 +20,7 @@ class MigrationRandomBurnInRunner
                  rebalance_after_migration: true, rebalance_during_hold: false,
                  rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true,
                  rebalance_only_if_outside_tolerance: true, rebalance_max_attempts_per_cycle: 2,
+                 rebalance_readback_recheck_attempts: 4, rebalance_readback_recheck_interval_seconds: 5,
                  active_rebalance_factory: nil)
     @position = position
     @duration_minutes = duration_minutes.to_i
@@ -51,6 +52,8 @@ class MigrationRandomBurnInRunner
     @rebalance_before_next_migration = ActiveModel::Type::Boolean.new.cast(rebalance_before_next_migration)
     @rebalance_only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(rebalance_only_if_outside_tolerance)
     @rebalance_max_attempts_per_cycle = rebalance_max_attempts_per_cycle.to_i
+    @rebalance_readback_recheck_attempts = rebalance_readback_recheck_attempts.to_i
+    @rebalance_readback_recheck_interval_seconds = rebalance_readback_recheck_interval_seconds.to_i
     @active_rebalance_factory = active_rebalance_factory
     @orders_submitted = 0
     @orders_placed = 0
@@ -119,7 +122,8 @@ class MigrationRandomBurnInRunner
     :burn_in_max_allowed_drift_eth, :burn_in_max_allowed_drift_ratio,
     :rebalance_after_migration, :rebalance_during_hold, :rebalance_hold_interval_seconds,
     :rebalance_before_next_migration, :rebalance_only_if_outside_tolerance,
-    :rebalance_max_attempts_per_cycle, :active_rebalance_factory
+    :rebalance_max_attempts_per_cycle, :rebalance_readback_recheck_attempts,
+    :rebalance_readback_recheck_interval_seconds, :active_rebalance_factory
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
@@ -191,6 +195,7 @@ class MigrationRandomBurnInRunner
     pre_hedge = hedge_payload(pre_report)
     pre_blockers, pre_status = pre_cycle_blockers(pre_report)
     pre_next_cycle_rebalance = run_active_rebalance(reason: "pre_next_cycle") if rebalance_before_next_migration && pre_cycle_rebalance_allowed?(pre_report)
+    accumulate_rebalance_counts(pre_next_cycle_rebalance)
     if pre_next_cycle_rebalance && Array(pre_next_cycle_rebalance[:blockers]).any?
       pre_blockers = (pre_blockers + Array(pre_next_cycle_rebalance[:blockers])).uniq
       pre_status = "stopped_active_rebalance"
@@ -461,6 +466,9 @@ class MigrationRandomBurnInRunner
       preflight_factory: ->(position: _position, stage:) { direct_preflight(stage) },
       max_attempts: rebalance_max_attempts_per_cycle,
       only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
+      recheck_attempts: rebalance_readback_recheck_attempts,
+      recheck_interval_seconds: rebalance_readback_recheck_interval_seconds,
+      sleeper: sleeper,
       now: now
     )
   end

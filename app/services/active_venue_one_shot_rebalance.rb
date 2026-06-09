@@ -1,10 +1,13 @@
 class ActiveVenueOneShotRebalance
   VENUES = %w[extended ethereal nado].freeze
   SUCCESS_STATUSES = %w[success submitted_and_confirmed rebalance_confirmed_late no_op dry_run].freeze
+  PENDING_RECHECK_STATUSES = %w[submitted_pending_readback submitted_but_readback_pending submitted_but_not_confirmed].freeze
+  PENDING_RECHECK_FINAL_STATUSES = %w[REBALANCE_REQUIRES_RECHECK SUBMITTED_BUT_NOT_CONFIRMED].freeze
   REBALANCE_TRIGGER_BLOCKER_PATTERN = /outside tolerance|out_of_burn_in_tolerance|max allowed drift|drift_ratio/i
 
   def initialize(position:, live: false, env: ENV, preflight_factory: nil, rebalancer: nil, now: -> { Time.current },
-                 max_attempts: 2, only_if_outside_tolerance: true)
+                 max_attempts: 2, only_if_outside_tolerance: true, recheck_attempts: 4,
+                 recheck_interval_seconds: 5, sleeper: ->(seconds) { sleep(seconds) })
     @position = position
     @live = ActiveModel::Type::Boolean.new.cast(live)
     @env = env
@@ -13,6 +16,9 @@ class ActiveVenueOneShotRebalance
     @now = now
     @max_attempts = max_attempts.to_i
     @only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(only_if_outside_tolerance)
+    @recheck_attempts = recheck_attempts.to_i
+    @recheck_interval_seconds = recheck_interval_seconds.to_i
+    @sleeper = sleeper
   end
 
   def run(reason:)
@@ -26,13 +32,17 @@ class ActiveVenueOneShotRebalance
 
     result = run_one_shot(venue)
     receipt = result.receipt || {}
-    postflight = live? ? direct_preflight("active_rebalance_#{reason}_after") : preflight
-    final_blockers = final_blockers(result: result, postflight: postflight)
+    recheck = recheck_pending_readback(result: result, reason: reason, venue: venue)
+    postflight = recheck[:postflight] || (live? ? direct_preflight("active_rebalance_#{reason}_after") : preflight)
+    final_blockers = final_blockers(result: result, postflight: postflight, recheck: recheck)
     status_reason = final_blockers.any? ? "blocked" : execution_reason(result)
     base.merge(
       needed: true,
       reason: status_reason,
       rebalance_status: result.status,
+      rebalance_final_status: receipt[:final_status],
+      recheck_attempts: recheck[:attempts],
+      recheck_final_inside_tolerance: recheck[:final_inside_tolerance],
       blockers: final_blockers,
       warnings: Array(result.warnings),
       orders_submitted: receipt.fetch(:orders_submitted, receipt.fetch(:orders_placed, 0)).to_i,
@@ -45,7 +55,8 @@ class ActiveVenueOneShotRebalance
 
   private
 
-  attr_reader :position, :env, :preflight_factory, :rebalancer, :now, :max_attempts, :only_if_outside_tolerance
+  attr_reader :position, :env, :preflight_factory, :rebalancer, :now, :max_attempts, :only_if_outside_tolerance,
+    :recheck_attempts, :recheck_interval_seconds, :sleeper
 
   def live?
     @live
@@ -104,15 +115,56 @@ class ActiveVenueOneShotRebalance
     )
   end
 
-  def final_blockers(result:, postflight:)
+  def final_blockers(result:, postflight:, recheck:)
     blockers = Array(result.blockers)
-    blockers << "active venue one-shot rebalance status is #{result.status}" unless SUCCESS_STATUSES.include?(result.status.to_s)
-    blockers << "active venue one-shot rebalance requires manual action" if result.receipt&.fetch(:manual_action_required, false) == true
+    status_success = SUCCESS_STATUSES.include?(result.status.to_s) || recheck[:confirmed] == true
+    blockers << "active venue one-shot rebalance status is #{result.status}" unless status_success
+    manual_action = result.receipt&.fetch(:manual_action_required, false) == true
+    blockers << "active venue one-shot rebalance requires manual action" if manual_action && recheck[:confirmed] != true
     if live?
       blockers << "active venue one-shot rebalance final readback is outside tolerance" unless inside_tolerance?(postflight)
       blockers << "active venue one-shot rebalance final open orders are not zero" unless open_orders_zero?(postflight)
     end
     blockers.uniq
+  end
+
+  def recheck_pending_readback(result:, reason:, venue:)
+    return { attempts: [], confirmed: false, final_inside_tolerance: nil, postflight: nil } unless pending_recheck?(result)
+    return { attempts: [], confirmed: false, final_inside_tolerance: nil, postflight: nil } unless live?
+
+    attempts = []
+    postflight = nil
+    recheck_attempts.times do |index|
+      sleeper.call(recheck_interval_seconds) if index.positive? && recheck_interval_seconds.positive?
+      postflight = direct_preflight("active_rebalance_#{reason}_recheck_#{index + 1}")
+      attempt = {
+        attempt: index + 1,
+        production_venue: postflight[:production_venue],
+        inside_tolerance: inside_tolerance?(postflight),
+        open_orders_zero: open_orders_zero?(postflight),
+        active_venue_isolated: isolated_active_exposure?(postflight, venue),
+        production_venue_finalized: HedgeVenues.normalize(postflight[:production_venue]) == venue,
+        blockers: Array(postflight[:blockers])
+      }
+      attempts << attempt
+      break if recheck_confirmed?(attempt)
+    end
+
+    confirmed = attempts.any? { |attempt| recheck_confirmed?(attempt) }
+    { attempts: attempts, confirmed: confirmed, final_inside_tolerance: inside_tolerance?(postflight), postflight: postflight }
+  end
+
+  def pending_recheck?(result)
+    PENDING_RECHECK_STATUSES.include?(result.status.to_s) ||
+      PENDING_RECHECK_FINAL_STATUSES.include?(result.receipt&.fetch(:final_status, nil).to_s)
+  end
+
+  def recheck_confirmed?(attempt)
+    attempt[:production_venue_finalized] &&
+      attempt[:inside_tolerance] &&
+      attempt[:open_orders_zero] &&
+      attempt[:active_venue_isolated] &&
+      attempt[:blockers].empty?
   end
 
   def run_one_shot(venue)
@@ -141,6 +193,8 @@ class ActiveVenueOneShotRebalance
   end
 
   def execution_reason(result)
+    return "success_after_recheck" if pending_recheck?(result)
+
     result.status.to_s == "no_op" ? "inside_tolerance" : "executed"
   end
 

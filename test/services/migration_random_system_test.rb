@@ -830,6 +830,99 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_empty rebalancer.calls
   end
 
+  test "active venue one-shot rebalance treats pending readback as success after canonical recheck lands inside tolerance" do
+    position = migration_position("nado")
+    rebalancer = ActiveRebalanceAdapter.new(
+      status: "submitted_pending_readback",
+      venue: "nado",
+      orders_submitted: 1,
+      signatures_created: 1,
+      receipt_fields: { final_status: "REBALANCE_REQUIRES_RECHECK", manual_action_required: true }
+    )
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: true,
+      preflight_factory: active_rebalance_preflight_sequence([
+        active_rebalance_preflight(venue: "nado", inside: false),
+        active_rebalance_preflight(venue: "nado", inside: true)
+      ]),
+      rebalancer: rebalancer,
+      recheck_attempts: 4,
+      recheck_interval_seconds: 0
+    )
+
+    result = service.run(reason: "pre_next_cycle")
+
+    assert_equal "success_after_recheck", result.fetch(:reason)
+    assert_equal "submitted_pending_readback", result.fetch(:rebalance_status)
+    assert_equal "REBALANCE_REQUIRES_RECHECK", result.fetch(:rebalance_final_status)
+    assert_equal true, result.fetch(:recheck_final_inside_tolerance)
+    assert_equal 1, result.fetch(:recheck_attempts).size
+    assert_empty result.fetch(:blockers)
+    assert_equal 1, result.fetch(:orders_submitted)
+    assert_equal 1, result.fetch(:signatures_created)
+  end
+
+  test "active venue one-shot rebalance blocks pending readback when rechecks stay outside tolerance" do
+    position = migration_position("nado")
+    rebalancer = ActiveRebalanceAdapter.new(
+      status: "submitted_pending_readback",
+      venue: "nado",
+      orders_submitted: 1,
+      signatures_created: 1,
+      receipt_fields: { final_status: "REBALANCE_REQUIRES_RECHECK", manual_action_required: true }
+    )
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: true,
+      preflight_factory: active_rebalance_preflight_sequence([
+        active_rebalance_preflight(venue: "nado", inside: false),
+        active_rebalance_preflight(venue: "nado", inside: false),
+        active_rebalance_preflight(venue: "nado", inside: false)
+      ]),
+      rebalancer: rebalancer,
+      recheck_attempts: 2,
+      recheck_interval_seconds: 0
+    )
+
+    result = service.run(reason: "pre_next_cycle")
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_equal 2, result.fetch(:recheck_attempts).size
+    assert_equal false, result.fetch(:recheck_final_inside_tolerance)
+    assert_includes result.fetch(:blockers), "active venue one-shot rebalance status is submitted_pending_readback"
+    assert_includes result.fetch(:blockers), "active venue one-shot rebalance requires manual action"
+    assert_includes result.fetch(:blockers), "active venue one-shot rebalance final readback is outside tolerance"
+  end
+
+  test "active venue one-shot rebalance blocks pending readback when recheck open orders are nonzero" do
+    position = migration_position("nado")
+    rebalancer = ActiveRebalanceAdapter.new(
+      status: "submitted_pending_readback",
+      venue: "nado",
+      orders_submitted: 1,
+      signatures_created: 1,
+      receipt_fields: { final_status: "REBALANCE_REQUIRES_RECHECK", manual_action_required: true }
+    )
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: true,
+      preflight_factory: active_rebalance_preflight_sequence([
+        active_rebalance_preflight(venue: "nado", inside: false),
+        active_rebalance_preflight(venue: "nado", inside: true, open_orders_status: "blocked")
+      ]),
+      rebalancer: rebalancer,
+      recheck_attempts: 1,
+      recheck_interval_seconds: 0
+    )
+
+    result = service.run(reason: "pre_next_cycle")
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_equal true, result.fetch(:recheck_final_inside_tolerance)
+    assert_includes result.fetch(:blockers), "active venue one-shot rebalance final open orders are not zero"
+  end
+
   test "active venue rebalance watchdog no-ops when inside tolerance" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-active-watchdog-#{SecureRandom.hex(4)}")
@@ -1905,6 +1998,44 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in continues when pre-cycle active rebalance pending readback succeeds after recheck" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(
+        reason: "success_after_recheck",
+        needed: true,
+        venue: "ethereal",
+        orders_submitted: 1,
+        signatures_created: 1
+      ).merge(
+        rebalance_status: "submitted_pending_readback",
+        rebalance_final_status: "REBALANCE_REQUIRES_RECHECK",
+        recheck_attempts: [ { attempt: 1, inside_tolerance: true, open_orders_zero: true } ],
+        recheck_final_inside_tolerance: true
+      ),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      active_rebalance_factory: -> { active }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "submitted_pending_readback", cycle.fetch("pre_next_cycle_rebalance").fetch("rebalance_status")
+    assert_equal "success_after_recheck", cycle.fetch("pre_next_cycle_rebalance").fetch("reason")
+    assert_equal true, cycle.fetch("pre_next_cycle_rebalance").fetch("recheck_final_inside_tolerance")
+    assert_equal 3, result.summary.fetch(:orders_submitted)
+    assert_equal 3, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in stops fail-closed if active rebalance final readback fails" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -2224,6 +2355,16 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
   def active_rebalance_preflight_factory(venue:, inside:, open_orders_status: "zero", other_exposure: false)
     ->(position:, stage:) {
+      active_rebalance_preflight(venue: venue, inside: inside, open_orders_status: open_orders_status, other_exposure: other_exposure)
+    }
+  end
+
+  def active_rebalance_preflight_sequence(payloads)
+    queue = payloads.dup
+    ->(position:, stage:) { queue.shift || payloads.last }
+  end
+
+  def active_rebalance_preflight(venue:, inside:, open_orders_status: "zero", other_exposure: false)
       target = BigDecimal("1.18")
       current = inside ? BigDecimal("1.18") : BigDecimal("1.00")
       other = other_exposure ? BigDecimal("0.2") : BigDecimal("0")
@@ -2262,7 +2403,6 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         readiness: { blockers: [] },
         signer: { status: "ok", payload: { ok: true } }
       }
-    }
   end
 
   def active_rebalance_payload(reason:, needed:, venue:, orders_submitted: 0, signatures_created: 0, blockers: [])
@@ -2847,12 +2987,13 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   class ActiveRebalanceAdapter
     attr_reader :calls
 
-    def initialize(status: "dry_run", venue: nil, orders_submitted: 0, signatures_created: 0, blockers: [])
+    def initialize(status: "dry_run", venue: nil, orders_submitted: 0, signatures_created: 0, blockers: [], receipt_fields: {})
       @status = status
       @venue = venue
       @orders_submitted = orders_submitted
       @signatures_created = signatures_created
       @blockers = blockers
+      @receipt_fields = receipt_fields
       @calls = []
     end
 
@@ -2876,7 +3017,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           orders_submitted: @orders_submitted,
           orders_placed: @orders_submitted,
           signatures_created: @signatures_created
-        }
+        }.merge(@receipt_fields)
       )
     end
   end

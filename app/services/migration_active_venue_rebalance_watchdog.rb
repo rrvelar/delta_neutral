@@ -6,7 +6,8 @@ class MigrationActiveVenueRebalanceWatchdog
   def initialize(position:, live: false, interval_seconds: 300, duration_minutes: nil, once: true,
                  disable_after: false, rebalance_only_if_outside_tolerance: true, env: ENV,
                  active_rebalance_factory: nil, now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) },
-                 log_dir: LOG_DIR)
+                 log_dir: LOG_DIR, rebalance_readback_recheck_attempts: 4,
+                 rebalance_readback_recheck_interval_seconds: 5)
     @position = position
     @live = ActiveModel::Type::Boolean.new.cast(live)
     @interval_seconds = interval_seconds.to_i
@@ -16,6 +17,8 @@ class MigrationActiveVenueRebalanceWatchdog
     @rebalance_only_if_outside_tolerance = ActiveModel::Type::Boolean.new.cast(rebalance_only_if_outside_tolerance)
     @env = env
     @active_rebalance_factory = active_rebalance_factory
+    @rebalance_readback_recheck_attempts = rebalance_readback_recheck_attempts.to_i
+    @rebalance_readback_recheck_interval_seconds = rebalance_readback_recheck_interval_seconds.to_i
     @now = now
     @sleeper = sleeper
     @log_dir = Pathname(log_dir)
@@ -54,7 +57,8 @@ class MigrationActiveVenueRebalanceWatchdog
 
   attr_reader :position, :interval_seconds, :duration_minutes, :once, :disable_after,
     :rebalance_only_if_outside_tolerance, :env, :active_rebalance_factory, :now, :sleeper,
-    :log_dir, :started_at, :receipt_path
+    :log_dir, :started_at, :receipt_path, :rebalance_readback_recheck_attempts,
+    :rebalance_readback_recheck_interval_seconds
 
   def live?
     @live
@@ -68,6 +72,9 @@ class MigrationActiveVenueRebalanceWatchdog
       live: live?,
       env: env,
       only_if_outside_tolerance: rebalance_only_if_outside_tolerance,
+      recheck_attempts: rebalance_readback_recheck_attempts,
+      recheck_interval_seconds: rebalance_readback_recheck_interval_seconds,
+      sleeper: sleeper,
       now: now
     )
   end
