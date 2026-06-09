@@ -4,7 +4,7 @@ class ActiveVenueOneShotRebalance
   PENDING_RECHECK_STATUSES = %w[submitted_pending_readback submitted_but_readback_pending submitted_but_not_confirmed].freeze
   PENDING_RECHECK_FINAL_STATUSES = %w[REBALANCE_REQUIRES_RECHECK SUBMITTED_BUT_NOT_CONFIRMED].freeze
   REBALANCE_TRIGGER_BLOCKER_PATTERN = /outside tolerance|out_of_burn_in_tolerance|max allowed drift|drift_ratio/i
-  EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_DEFAULT = "0.15".freeze
+  ACTIVE_VENUE_REBALANCE_MAX_SIZE_DEFAULT = "0.3".freeze
 
   def initialize(position:, live: false, env: ENV, preflight_factory: nil, rebalancer: nil, now: -> { Time.current },
                  max_attempts: 2, only_if_outside_tolerance: true, recheck_attempts: 4,
@@ -48,6 +48,7 @@ class ActiveVenueOneShotRebalance
       requested_size_eth: receipt[:requested_size_eth] || receipt[:requested_order_size_eth] || receipt[:order_size_eth],
       large_drift: large_drift?(venue: venue, receipt: receipt),
       scoped_full_target_rebalance: scoped_full_target_rebalance?(venue),
+      max_rebalance_size_eth: active_venue_rebalance_max_size_eth(venue),
       blockers: final_blockers,
       warnings: Array(result.warnings),
       orders_submitted: receipt.fetch(:orders_submitted, receipt.fetch(:orders_placed, 0)).to_i,
@@ -198,7 +199,8 @@ class ActiveVenueOneShotRebalance
       "EXTENDED_ONE_SHOT_REBALANCE_ENABLED" => "true",
       "EXTENDED_MIGRATION_REBALANCE_ENABLED" => "true",
       "EXTENDED_AUTO_REBALANCE_ENABLED" => "false",
-      "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => extended_migration_rebalance_max_size_eth
+      "ACTIVE_VENUE_REBALANCE_MAX_SIZE_ETH" => active_venue_rebalance_max_size_eth(venue),
+      "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => active_venue_rebalance_max_size_eth(venue)
     )
   end
 
@@ -207,7 +209,7 @@ class ActiveVenueOneShotRebalance
 
     {
       mode: "migration_rebalance",
-      max_size_eth: extended_migration_rebalance_max_size_eth
+      max_size_eth: active_venue_rebalance_max_size_eth(venue)
     }
   end
 
@@ -237,6 +239,7 @@ class ActiveVenueOneShotRebalance
   end
 
   def execution_reason(result)
+    return "outside_tolerance" if result.status.to_s == "dry_run"
     return "success_after_recheck" if pending_recheck?(result)
 
     result.status.to_s == "no_op" ? "inside_tolerance" : "executed"
@@ -253,8 +256,13 @@ class ActiveVenueOneShotRebalance
     venue == "extended" && size > decimal(env["EXTENDED_ONE_SHOT_MAX_SIZE_ETH"].presence || "0.02")
   end
 
-  def extended_migration_rebalance_max_size_eth
-    env["EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_DEFAULT
+  def active_venue_rebalance_max_size_eth(venue)
+    override = case venue
+    when "extended" then env["EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence
+    when "ethereal" then env["AERODROME_ETHEREAL_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence
+    when "nado" then env["AERODROME_NADO_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence
+    end
+    override || env["ACTIVE_VENUE_REBALANCE_MAX_SIZE_ETH"].presence || ACTIVE_VENUE_REBALANCE_MAX_SIZE_DEFAULT
   end
 
   def isolated_active_exposure?(preflight, venue)

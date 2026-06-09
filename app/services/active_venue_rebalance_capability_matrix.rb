@@ -1,8 +1,6 @@
 class ActiveVenueRebalanceCapabilityMatrix
   VENUES = ActiveVenueOneShotRebalance::VENUES
-  DEFAULT_EXTENDED_MAX_SIZE_ETH = ActiveVenueOneShotRebalance::EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_DEFAULT
-  DEFAULT_ETHEREAL_MAX_SIZE_ETH = "0.15".freeze
-  DEFAULT_NADO_MAX_SIZE_ETH = "0.15".freeze
+  ACTIVE_VENUE_REBALANCE_MAX_SIZE_DEFAULT = ActiveVenueOneShotRebalance::ACTIVE_VENUE_REBALANCE_MAX_SIZE_DEFAULT
 
   def initialize(position:, env: ENV, required_max_drift_eth: nil, now: -> { Time.current }, venue_overrides: {})
     @position = position
@@ -80,14 +78,18 @@ class ActiveVenueRebalanceCapabilityMatrix
   def max_size_for(venue)
     case venue
     when "extended"
-      decimal(env["EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || DEFAULT_EXTENDED_MAX_SIZE_ETH)
+      decimal(env["EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || shared_max_size)
     when "ethereal"
-      decimal(env["AERODROME_ETHEREAL_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || DEFAULT_ETHEREAL_MAX_SIZE_ETH)
+      decimal(env["AERODROME_ETHEREAL_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || shared_max_size)
     when "nado"
-      decimal(env["AERODROME_NADO_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || DEFAULT_NADO_MAX_SIZE_ETH)
+      decimal(env["AERODROME_NADO_MIGRATION_REBALANCE_MAX_SIZE_ETH"].presence || shared_max_size)
     else
       BigDecimal("0")
     end
+  end
+
+  def shared_max_size
+    env["ACTIVE_VENUE_REBALANCE_MAX_SIZE_ETH"].presence || ACTIVE_VENUE_REBALANCE_MAX_SIZE_DEFAULT
   end
 
   def decimal(value)

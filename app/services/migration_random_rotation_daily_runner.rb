@@ -19,7 +19,6 @@ class MigrationRandomRotationDailyRunner
     preflight_factory: nil,
     executor_factory: nil,
     active_rebalance_factory: nil,
-    active_rebalance_capability_matrix_factory: nil,
     rebalance_after_migration: true,
     rebalance_during_hold: true,
     rebalance_hold_interval_seconds: 300,
@@ -44,7 +43,6 @@ class MigrationRandomRotationDailyRunner
     @preflight_factory = preflight_factory
     @executor_factory = executor_factory
     @active_rebalance_factory = active_rebalance_factory
-    @active_rebalance_capability_matrix_factory = active_rebalance_capability_matrix_factory
     @rebalance_after_migration = ActiveModel::Type::Boolean.new.cast(rebalance_after_migration)
     @rebalance_during_hold = ActiveModel::Type::Boolean.new.cast(rebalance_during_hold)
     @rebalance_hold_interval_seconds = rebalance_hold_interval_seconds.to_i
@@ -88,7 +86,6 @@ class MigrationRandomRotationDailyRunner
     :preflight_factory,
     :executor_factory,
     :active_rebalance_factory,
-    :active_rebalance_capability_matrix_factory,
     :rebalance_after_migration,
     :rebalance_during_hold,
     :rebalance_hold_interval_seconds,
@@ -175,22 +172,6 @@ class MigrationRandomRotationDailyRunner
 
   def execute_live_workflow(position, seed:, daily_enabled:, enabled_override:)
     direct = direct_preflight(position, live: true)
-    capability_blockers = active_rebalance_capability_blockers(position)
-    if capability_blockers.any?
-      receipt = live_receipt(
-        position: position,
-        direct: direct,
-        route: nil,
-        result: nil,
-        status: "blocked_before_submit",
-        blockers: (Array(direct[:blockers]) + capability_blockers).uniq,
-        enabled_override: enabled_override,
-        daily_enabled: daily_enabled
-      )
-      write_daily_receipt(receipt)
-      return receipt
-    end
-
     pre_next_rebalance = rebalance_before_next_migration ? run_active_rebalance(position, reason: "pre_next_cycle", live: true) : nil
     direct = direct_preflight(position, live: true) if pre_next_rebalance
     route = direct.fetch(:blockers).empty? ? live_route_from_preflight(direct, seed: seed) : nil
@@ -450,15 +431,6 @@ class MigrationRandomRotationDailyRunner
       sleeper: sleeper,
       now: now
     )
-  end
-
-  def active_rebalance_capability_blockers(position)
-    matrix = if active_rebalance_capability_matrix_factory
-      active_rebalance_capability_matrix_factory.call(position: position)
-    else
-      ActiveVenueRebalanceCapabilityMatrix.new(position: position, env: env)
-    end
-    Array(matrix.report[:blockers])
   end
 
   def rebalance_order_count(payload, key)

@@ -21,7 +21,7 @@ class MigrationRandomBurnInRunner
                  rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true,
                  rebalance_only_if_outside_tolerance: true, rebalance_max_attempts_per_cycle: 2,
                  rebalance_readback_recheck_attempts: 4, rebalance_readback_recheck_interval_seconds: 5,
-                 active_rebalance_factory: nil, active_rebalance_capability_matrix_factory: nil)
+                 active_rebalance_factory: nil)
     @position = position
     @duration_minutes = duration_minutes.to_i
     @interval_seconds = interval_seconds.to_i
@@ -55,7 +55,6 @@ class MigrationRandomBurnInRunner
     @rebalance_readback_recheck_attempts = rebalance_readback_recheck_attempts.to_i
     @rebalance_readback_recheck_interval_seconds = rebalance_readback_recheck_interval_seconds.to_i
     @active_rebalance_factory = active_rebalance_factory
-    @active_rebalance_capability_matrix_factory = active_rebalance_capability_matrix_factory
     @orders_submitted = 0
     @orders_placed = 0
     @signatures_created = 0
@@ -124,8 +123,7 @@ class MigrationRandomBurnInRunner
     :rebalance_after_migration, :rebalance_during_hold, :rebalance_hold_interval_seconds,
     :rebalance_before_next_migration, :rebalance_only_if_outside_tolerance,
     :rebalance_max_attempts_per_cycle, :rebalance_readback_recheck_attempts,
-    :rebalance_readback_recheck_interval_seconds, :active_rebalance_factory,
-    :active_rebalance_capability_matrix_factory
+    :rebalance_readback_recheck_interval_seconds, :active_rebalance_factory
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
@@ -152,28 +150,8 @@ class MigrationRandomBurnInRunner
     direct = direct_preflight("preflight")
     record_direct_preflight(direct)
     blockers.concat(direct.fetch(:blockers))
-    blockers.concat(active_rebalance_capability_blockers) if live? && long_run?
     refresh_dashboard_snapshot_for_diagnostics("preflight")
     blockers.uniq
-  end
-
-  def long_run?
-    duration_minutes >= 120 || interval_seconds >= 900
-  end
-
-  def active_rebalance_capability_blockers
-    matrix = active_rebalance_capability_matrix
-    Array(matrix.report[:blockers])
-  end
-
-  def active_rebalance_capability_matrix
-    return active_rebalance_capability_matrix_factory.call(position: position) if active_rebalance_capability_matrix_factory
-
-    ActiveVenueRebalanceCapabilityMatrix.new(
-      position: position,
-      env: env,
-      required_max_drift_eth: burn_in_max_allowed_drift_eth
-    )
   end
 
   def normalize_gates_before_start

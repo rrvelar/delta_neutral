@@ -749,7 +749,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     assert_equal true, result.fetch(:needed)
     assert_equal "nado", result.fetch(:venue)
-    assert_equal "executed", result.fetch(:reason)
+    assert_equal "outside_tolerance", result.fetch(:reason)
     assert_equal [ "nado" ], rebalancer.calls.map { |call| call.fetch(:venue) }
     assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
     assert_equal 0, result.fetch(:orders_submitted)
@@ -788,11 +788,12 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       assert_equal true, row.fetch(:decrease_short_supported), venue
       assert_equal true, row.fetch(:large_drift_supported), venue
       assert_equal true, row.fetch(:pending_readback_recheck_supported), venue
+      assert_equal "0.3", row.fetch(:max_rebalance_size_eth), venue
       assert_empty row.fetch(:blockers), venue
     end
   end
 
-  test "active venue rebalance capability matrix blocks long run when venue max size is too small" do
+  test "active venue rebalance capability matrix reports undersized venue diagnostics" do
     report = ActiveVenueRebalanceCapabilityMatrix.new(
       position: migration_position("extended"),
       required_max_drift_eth: "0.071",
@@ -820,7 +821,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       signatures_created: 1,
       receipt_fields: {
         requested_order_size_eth: "0.071291430314143",
-        cap_eth: "0.15",
+        cap_eth: "0.3",
         cap_exceeded: false,
         migration_mode: true
       }
@@ -828,7 +829,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     service = ActiveVenueOneShotRebalance.new(
       position: position,
       live: true,
-      env: { "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.02", "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => "0.15" },
+      env: { "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.02" },
       preflight_factory: active_rebalance_preflight_sequence([
         active_rebalance_preflight(venue: "extended", inside: false),
         active_rebalance_preflight(venue: "extended", inside: true)
@@ -844,7 +845,73 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal true, result.fetch(:scoped_full_target_rebalance)
     assert_equal "0.071291430314143", result.fetch(:requested_size_eth)
     assert_equal "migration_rebalance", rebalancer.calls.first.fetch(:mode)
-    assert_equal "0.15", rebalancer.calls.first.fetch(:max_size_eth)
+    assert_equal "0.3", result.fetch(:max_rebalance_size_eth)
+    assert_equal "0.3", rebalancer.calls.first.fetch(:max_size_eth)
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+  end
+
+  test "Extended scoped active venue dry-run above probe cap uses active venue max cap" do
+    position = migration_position("extended")
+    rebalancer = ActiveRebalanceAdapter.new(
+      status: "dry_run",
+      venue: "extended",
+      receipt_fields: {
+        requested_order_size_eth: "0.13590089066602",
+        cap_eth: "0.3",
+        cap_exceeded: false,
+        migration_mode: true
+      }
+    )
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      env: { "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.02" },
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: false),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "pre_next_cycle")
+
+    assert_equal "outside_tolerance", result.fetch(:reason)
+    assert_empty result.fetch(:blockers)
+    assert_equal true, result.fetch(:large_drift)
+    assert_equal true, result.fetch(:scoped_full_target_rebalance)
+    assert_equal "0.13590089066602", result.fetch(:requested_size_eth)
+    assert_equal "0.3", result.fetch(:max_rebalance_size_eth)
+    assert_equal "0.3", rebalancer.calls.first.fetch(:max_size_eth)
+    assert_equal 0, result.fetch(:orders_submitted)
+    assert_equal 0, result.fetch(:signatures_created)
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+  end
+
+  test "Extended scoped active venue rebalance above active venue cap blocks" do
+    position = migration_position("extended")
+    blocker = "Extended one-shot order size 0.31 exceeds EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH 0.3"
+    rebalancer = ActiveRebalanceAdapter.new(
+      status: "blocked_before_submit",
+      venue: "extended",
+      blockers: [ blocker ],
+      receipt_fields: {
+        requested_order_size_eth: "0.31",
+        cap_eth: "0.3",
+        cap_exceeded: true,
+        migration_mode: true
+      }
+    )
+    service = ActiveVenueOneShotRebalance.new(
+      position: position,
+      live: false,
+      env: { "EXTENDED_ONE_SHOT_MAX_SIZE_ETH" => "0.02" },
+      preflight_factory: active_rebalance_preflight_factory(venue: "extended", inside: false),
+      rebalancer: rebalancer
+    )
+
+    result = service.run(reason: "pre_next_cycle")
+
+    assert_equal "blocked", result.fetch(:reason)
+    assert_includes result.fetch(:blockers), blocker
+    assert_equal "0.31", result.fetch(:requested_size_eth)
+    assert_equal "0.3", result.fetch(:max_rebalance_size_eth)
     assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
   end
 
@@ -2108,31 +2175,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
-  test "random burn-in long-run preflight blocks before start when active rebalance capability is missing" do
-    position = migration_position("ethereal")
-    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
-    matrix = CapabilityMatrixStub.new(blockers: [
-      "Extended active rebalance cannot handle drift 0.071 ETH because EXTENDED_ONE_SHOT_MAX_SIZE_ETH=0.02 and scoped migration rebalance gate is unavailable."
-    ])
-
-    result = burn_in(
-      position: position,
-      live: true,
-      log_dir: dir,
-      duration_minutes: 240,
-      interval_seconds: 3900,
-      active_rebalance_capability_matrix_factory: ->(position:) { matrix }
-    ).run
-
-    assert_equal "blocked", result.status
-    assert_includes result.blockers, matrix.report.fetch(:blockers).first
-    assert_equal 0, result.summary.fetch(:orders_submitted)
-    assert_equal 0, result.summary.fetch(:signatures_created)
-  ensure
-    FileUtils.rm_rf(dir) if dir
-  end
-
-  test "random burn-in long-run preflight passes when all active rebalance capabilities pass" do
+  test "random burn-in long-run uses executable active rebalance path" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     active = BurnInActiveRebalance.new([
@@ -2147,8 +2190,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       log_dir: dir,
       duration_minutes: 240,
       interval_seconds: 3900,
-      active_rebalance_factory: -> { active },
-      active_rebalance_capability_matrix_factory: ->(position:) { CapabilityMatrixStub.new }
+      active_rebalance_factory: -> { active }
     ).run
 
     assert_equal "success", result.status, result.blockers.inspect
@@ -2406,7 +2448,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, duration_minutes: 30, interval_seconds: 0, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08", rebalance_after_migration: true, rebalance_during_hold: false, rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true, active_rebalance_factory: nil, active_rebalance_capability_matrix_factory: nil)
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, duration_minutes: 30, interval_seconds: 0, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08", rebalance_after_migration: true, rebalance_during_hold: false, rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true, active_rebalance_factory: nil)
     readiness = ->(**) {
       readiness_report || {
         pending_nado_target_continuation: nil,
@@ -2450,7 +2492,6 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       rebalance_hold_interval_seconds: rebalance_hold_interval_seconds,
       rebalance_before_next_migration: rebalance_before_next_migration,
       active_rebalance_factory: active_rebalance_factory,
-      active_rebalance_capability_matrix_factory: active_rebalance_capability_matrix_factory,
       readiness_factory: readiness
     )
   end
@@ -3142,23 +3183,6 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
           signatures_created: @signatures_created
         }.merge(@receipt_fields)
       )
-    end
-  end
-
-  class CapabilityMatrixStub
-    def initialize(blockers: [])
-      @blockers = blockers
-    end
-
-    def report
-      {
-        all_supported: @blockers.empty?,
-        venues: [],
-        blockers: @blockers,
-        orders_submitted: 0,
-        orders_placed: 0,
-        signatures_created: 0
-      }
     end
   end
 end
