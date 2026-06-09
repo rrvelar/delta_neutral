@@ -199,6 +199,75 @@ class ExtendedAutoRebalanceOnceTest < ActiveSupport::TestCase
     assert_equal 1, client.submit_calls
   end
 
+  test "scoped active venue dry-run does not require persistent Extended auto gate" do
+    client = api_client(before_positions: [ extended_short("0.20") ])
+
+    result = build_service(
+      env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH").merge(
+        "EXTENDED_MIGRATION_REBALANCE_ENABLED" => "true",
+        "ACTIVE_VENUE_REBALANCE_MAX_SIZE_ETH" => "0.3",
+        "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => "0.3"
+      ),
+      api_client: client
+    ).run(
+      position: fake_position(target: "1.34"),
+      dry_run: true,
+      mode: "migration_rebalance",
+      max_size_eth: "0.3",
+      scoped_active_venue_rebalance: true
+    )
+
+    assert_equal "dry_run", result.status, result.blockers.inspect
+    assert_empty result.blockers
+    assert_equal true, result.receipt.fetch(:migration_mode)
+    assert_equal true, result.receipt.fetch(:scoped_active_venue_rebalance)
+    assert_equal "0.335", result.receipt.fetch(:target_short_eth)
+    assert_equal "0.135", result.receipt.fetch(:requested_order_size_eth)
+    assert_equal "0.3", result.receipt.fetch(:cap_eth)
+    assert_equal false, result.receipt.fetch(:cap_exceeded)
+    assert_equal false, result.receipt.dig(:readiness_gates, :continuous_auto_enabled)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 0, result.receipt.fetch(:signatures_created)
+    assert_equal 0, client.submit_calls
+  end
+
+  test "scoped active venue live submit does not require persistent Extended auto gate" do
+    signer = CountingSigner.new
+    client = api_client(
+      before_positions: [ extended_short("0.20") ],
+      after_positions: [ extended_short("0.335") ]
+    )
+
+    result = build_service(
+      env: live_env.except("EXTENDED_ONE_SHOT_MAX_SIZE_ETH").merge(
+        "EXTENDED_MIGRATION_REBALANCE_ENABLED" => "true",
+        "ACTIVE_VENUE_REBALANCE_MAX_SIZE_ETH" => "0.3",
+        "EXTENDED_MIGRATION_REBALANCE_MAX_SIZE_ETH" => "0.3"
+      ),
+      api_client: client,
+      signer_client: signer
+    ).run(
+      position: fake_position(target: "1.34"),
+      dry_run: false,
+      confirmation: ExtendedAutoRebalanceOnce::CONFIRMATION,
+      mode: "migration_rebalance",
+      max_size_eth: "0.3",
+      scoped_active_venue_rebalance: true
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_empty result.blockers
+    assert_equal true, result.receipt.fetch(:migration_mode)
+    assert_equal true, result.receipt.fetch(:scoped_active_venue_rebalance)
+    assert_equal "0.135", result.receipt.fetch(:requested_order_size_eth)
+    assert_equal "0.3", result.receipt.fetch(:cap_eth)
+    assert_equal false, result.receipt.dig(:readiness_gates, :continuous_auto_enabled)
+    assert_equal 1, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal 1, signer.sign_calls
+    assert_equal 1, client.submit_calls
+  end
+
   test "live one-shot blocks when Nado still has a short" do
     signer = CountingSigner.new
     client = api_client(before_positions: [ extended_short("0.20") ])

@@ -209,7 +209,8 @@ class ActiveVenueOneShotRebalance
 
     {
       mode: "migration_rebalance",
-      max_size_eth: active_venue_rebalance_max_size_eth(venue)
+      max_size_eth: active_venue_rebalance_max_size_eth(venue),
+      scoped_active_venue_rebalance: true
     }
   end
 
