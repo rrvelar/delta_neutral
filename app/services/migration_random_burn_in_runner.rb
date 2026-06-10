@@ -80,14 +80,21 @@ class MigrationRandomBurnInRunner
   def run
     prepare_log!
     start_blockers = preflight_blockers
+    pre_start_rebalance = nil
+    if pre_start_rebalance_allowed?(start_blockers)
+      pre_start_rebalance = run_active_rebalance(reason: "pre_start")
+      accumulate_rebalance_counts(pre_start_rebalance)
+      start_blockers = pre_start_blockers_after_rebalance(start_blockers, pre_start_rebalance)
+    end
     if start_blockers.any?
-      write_event(readiness_diagnostics.merge(event: "burn_in_start", status: "blocked_before_start", blocker_status: preflight_status(start_blockers), blockers: start_blockers))
+      write_event(readiness_diagnostics.merge(event: "burn_in_start", status: "blocked_before_start", blocker_status: preflight_status(start_blockers), blockers: start_blockers, pre_start_rebalance: pre_start_rebalance || unchecked_rebalance_payload("pre_start")))
+      disable_after_run if disable_after && pre_start_rebalance
       finish(status: "blocked", blockers: start_blockers)
       return result("blocked", start_blockers)
     end
 
     normalize_gates_before_start if live?
-    write_event(event: "burn_in_started", status: live? ? "live" : "dry_run", position_id: position.id, duration_minutes: duration_minutes, interval_seconds: interval_seconds, max_cycles: max_cycles, log_path: receipt_path.to_s)
+    write_event(event: "burn_in_started", status: live? ? "live" : "dry_run", position_id: position.id, duration_minutes: duration_minutes, interval_seconds: interval_seconds, max_cycles: max_cycles, log_path: receipt_path.to_s, pre_start_rebalance: pre_start_rebalance || unchecked_rebalance_payload("pre_start"))
 
     deadline = started_at + duration_minutes.minutes
     status = "success"
@@ -152,6 +159,30 @@ class MigrationRandomBurnInRunner
     blockers.concat(direct.fetch(:blockers))
     refresh_dashboard_snapshot_for_diagnostics("preflight")
     blockers.uniq
+  end
+
+  def pre_start_rebalance_allowed?(blockers)
+    rebalance_before_next_migration &&
+      Array(blockers).present? &&
+      Array(blockers).all? { |blocker| rebalance_trigger_blocker?(blocker) }
+  end
+
+  def pre_start_blockers_after_rebalance(start_blockers, pre_start_rebalance)
+    rebalance_blockers = Array(pre_start_rebalance[:blockers])
+    return rebalance_blockers.uniq if rebalance_blockers.any?
+
+    refreshed = direct_preflight("preflight_after_pre_start_rebalance")
+    record_direct_preflight(refreshed)
+    refreshed_blockers = Array(refreshed.fetch(:blockers))
+    return refreshed_blockers.reject { |blocker| rebalance_trigger_blocker?(blocker) }.uniq if pre_start_rebalance_succeeded?(pre_start_rebalance)
+
+    (start_blockers + [ "active venue one-shot rebalance final readback is outside tolerance" ]).uniq
+  end
+
+  def pre_start_rebalance_succeeded?(payload)
+    return true if !live? && Array(payload[:blockers]).empty?
+
+    payload[:final_inside_tolerance] == true
   end
 
   def normalize_gates_before_start

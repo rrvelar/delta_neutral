@@ -701,7 +701,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       "post_cycle" => optional_timeout
     })
 
-    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, rebalance_before_next_migration: false).run
     final = read_jsonl(result.receipt_path).last
 
     assert_equal "success", result.status, result.blockers.inspect
@@ -1363,7 +1363,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       }
     })
 
-    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, rebalance_before_next_migration: false).run
 
     assert_equal "blocked", result.status
     assert_includes result.summary.fetch(:snapshot_blockers), "critical Ethereal readback failed"
@@ -1697,7 +1697,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     }
     refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.30" })
 
-    result = burn_in(position: position, live: false, log_dir: dir, readiness_report: stale_ignored_readiness, snapshot_refresher: refresher).run
+    result = burn_in(position: position, live: false, log_dir: dir, readiness_report: stale_ignored_readiness, snapshot_refresher: refresher, rebalance_before_next_migration: false).run
     start = read_jsonl(result.receipt_path).first
 
     assert_equal "blocked", result.status
@@ -1765,7 +1765,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
     refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.18", "pre_cycle" => "1.19", "post_cycle" => "1.19" })
 
-    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, rebalance_before_next_migration: false).run
     cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
 
     assert_equal "success", result.status, result.blockers.inspect
@@ -1887,7 +1887,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     refresher = BurnInSnapshotRefresher.new(target_by_stage: { "preflight" => "1.30" })
 
-    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher).run
+    result = burn_in(position: position, live: false, log_dir: dir, snapshot_refresher: refresher, rebalance_before_next_migration: false).run
 
     assert_equal "blocked", result.status
     assert_match "out_of_burn_in_tolerance", result.blockers.join(" ")
@@ -2133,6 +2133,152 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     assert_equal true, cycle.fetch("pre_next_cycle_rebalance").fetch("checked")
     assert_equal true, cycle.fetch("pre_next_cycle_rebalance").fetch("needed")
     assert_equal "ethereal", cycle.fetch("pre_next_cycle_rebalance").fetch("venue")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in startup outside tolerance runs pre-start rebalance and continues when successful" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "outside_tolerance", needed: true, venue: "extended").merge(
+        requested_size_eth: "0.135932812363944",
+        scoped_full_target_rebalance: true,
+        large_drift: true,
+        max_rebalance_size_eth: "0.3",
+        rebalance_status: "dry_run"
+      ),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+    preflight = active_rebalance_preflight_sequence([
+      active_rebalance_preflight(venue: "extended", inside: false),
+      active_rebalance_preflight(venue: "extended", inside: true),
+      active_rebalance_preflight(venue: "extended", inside: true),
+      active_rebalance_preflight(venue: "nado", inside: true)
+    ])
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "extended->nado" },
+      log_dir: dir,
+      preflight_factory: preflight,
+      active_rebalance_factory: -> { active }
+    ).run
+    events = read_jsonl(result.receipt_path)
+    started = events.find { |event| event["event"] == "burn_in_started" }
+    cycle = events.find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal %w[pre_start pre_next_cycle post_migration], active.reasons
+    assert_equal true, started.fetch("pre_start_rebalance").fetch("needed")
+    assert_equal "extended", started.fetch("pre_start_rebalance").fetch("venue")
+    assert_equal "0.135932812363944", started.fetch("pre_start_rebalance").fetch("requested_size_eth")
+    assert_equal true, started.fetch("pre_start_rebalance").fetch("scoped_full_target_rebalance")
+    assert_equal true, started.fetch("pre_start_rebalance").fetch("large_drift")
+    assert_equal "0.3", started.fetch("pre_start_rebalance").fetch("max_rebalance_size_eth")
+    assert_equal 0, started.fetch("pre_start_rebalance").fetch("orders_submitted")
+    assert_equal 0, started.fetch("pre_start_rebalance").fetch("signatures_created")
+    assert_equal "success", cycle.fetch("status")
+    assert_equal 1, result.summary.fetch(:cycles_succeeded)
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in startup outside tolerance blocks when pre-start rebalance fails" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "blocked", needed: true, venue: "extended", blockers: [ "active venue one-shot rebalance final readback is outside tolerance" ])
+    ])
+    preflight = active_rebalance_preflight_factory(venue: "extended", inside: false)
+
+    result = burn_in(
+      position: position,
+      live: false,
+      log_dir: dir,
+      preflight_factory: preflight,
+      active_rebalance_factory: -> { active }
+    ).run
+    start = read_jsonl(result.receipt_path).find { |event| event["event"] == "burn_in_start" }
+
+    assert_equal "blocked", result.status
+    assert_equal "blocked_before_start", start.fetch("status")
+    assert_equal true, start.fetch("pre_start_rebalance").fetch("needed")
+    assert_includes result.blockers, "active venue one-shot rebalance final readback is outside tolerance"
+    assert_equal 0, result.summary.fetch(:cycles_attempted)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in startup open orders blocker does not attempt pre-start rebalance" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "outside_tolerance", needed: true, venue: "extended")
+    ])
+    preflight = active_rebalance_preflight_factory(venue: "extended", inside: false, open_orders_status: "blocked")
+
+    result = burn_in(
+      position: position,
+      live: false,
+      log_dir: dir,
+      preflight_factory: preflight,
+      active_rebalance_factory: -> { active }
+    ).run
+    start = read_jsonl(result.receipt_path).find { |event| event["event"] == "burn_in_start" }
+
+    assert_equal "blocked", result.status
+    assert_empty active.reasons
+    assert_equal false, start.fetch("pre_start_rebalance").fetch("checked")
+    assert_match "open orders", result.blockers.join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in live startup Extended pre-start rebalance contributes mocked order and disables gates after run" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    active = BurnInActiveRebalance.new([
+      active_rebalance_payload(reason: "executed", needed: true, venue: "extended", orders_submitted: 1, signatures_created: 1).merge(
+        requested_size_eth: "0.135932812363944",
+        scoped_full_target_rebalance: true,
+        large_drift: true,
+        max_rebalance_size_eth: "0.3",
+        rebalance_status: "submitted_and_confirmed",
+        final_inside_tolerance: true
+      ),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+      active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+    ])
+    preflight = active_rebalance_preflight_sequence([
+      active_rebalance_preflight(venue: "extended", inside: false),
+      active_rebalance_preflight(venue: "extended", inside: true),
+      active_rebalance_preflight(venue: "extended", inside: true),
+      active_rebalance_preflight(venue: "nado", inside: true)
+    ])
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "extended->nado" },
+      log_dir: dir,
+      preflight_factory: preflight,
+      active_rebalance_factory: -> { active }
+    ).run
+    started = read_jsonl(result.receipt_path).find { |event| event["event"] == "burn_in_started" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 3, result.summary.fetch(:orders_submitted)
+    assert_equal 3, result.summary.fetch(:signatures_created)
+    assert_equal 1, started.fetch("pre_start_rebalance").fetch("orders_submitted")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_AUTO_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
