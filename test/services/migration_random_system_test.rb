@@ -2118,6 +2118,207 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in hold checks are spaced by configured interval" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 4, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(clock)
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 600,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal [ 120, 120, 120, 120, 120 ], clock.sleeps.map(&:round)
+    assert_equal 5, cycle.fetch("hold_rebalance_checks_count")
+    assert_nil cycle.fetch("hold_monitor_gap_warning")
+    assert_equal [ 120, 120, 120, 120 ], active.check_spacing_seconds
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold checks span the full hold interval" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 5, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(clock)
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 600,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 600, cycle.fetch("hold_target_seconds")
+    assert_equal 120, cycle.fetch("hold_rebalance_interval_seconds")
+    assert_equal 480, cycle.fetch("hold_monitor_actual_span_seconds")
+    assert_equal 600, Time.zone.parse(cycle.fetch("hold_finished_at")) - Time.zone.parse(cycle.fetch("hold_started_at"))
+    assert_nil cycle.fetch("hold_monitor_gap_warning")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold monitor stops early only if rebalance fails" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 6, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado"),
+        active_rebalance_payload(reason: "blocked", needed: true, venue: "nado", blockers: [ "active venue one-shot rebalance final readback is outside tolerance" ])
+      ]
+    )
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 600,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal 2, cycle.fetch("hold_rebalance_checks_count")
+    assert_equal "stopped_active_rebalance", cycle.fetch("status")
+    assert_includes result.blockers, "active venue one-shot rebalance final readback is outside tolerance"
+    assert_nil cycle.fetch("hold_monitor_gap_warning")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold monitor continues after successful rebalance" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 7, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "executed", needed: true, venue: "nado"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "nado")
+      ]
+    )
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 600,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 5, cycle.fetch("hold_rebalance_checks_count")
+    assert_equal true, cycle.fetch("hold_rebalance_checks").first.fetch("needed")
+    assert_equal 480, cycle.fetch("hold_monitor_actual_span_seconds")
+    assert_nil cycle.fetch("hold_monitor_gap_warning")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in dry-run hold monitor submits zero orders and signatures" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 8, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(clock)
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      interval_seconds: 600,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 0, result.summary.fetch(:orders_submitted)
+    assert_equal 0, result.summary.fetch(:signatures_created)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in 65 minute hold with 300 second interval spans the full hold" do
+    position = migration_position("ethereal")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 1, 9, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(clock)
+
+    result = burn_in(
+      position: position,
+      live: false,
+      selector: ->(_) { "ethereal->nado" },
+      log_dir: dir,
+      duration_minutes: 120,
+      interval_seconds: 3900,
+      rebalance_after_migration: false,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 300,
+      rebalance_before_next_migration: false,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    cycle = read_jsonl(result.receipt_path).find { |event| event["event"] == "cycle" }
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal 13, cycle.fetch("hold_rebalance_checks_count")
+    assert_equal 3600, cycle.fetch("hold_monitor_actual_span_seconds")
+    assert_equal 13, active.check_times.size
+    assert_equal 12, active.check_spacing_seconds.count(300)
+    assert_nil cycle.fetch("hold_monitor_gap_warning")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "random burn-in pre-next-cycle rebalance runs before selecting migration" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -2594,7 +2795,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     File.open(Pathname(dir).join("20260601.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
   end
 
-  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, duration_minutes: 30, interval_seconds: 0, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08", rebalance_after_migration: true, rebalance_during_hold: false, rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true, active_rebalance_factory: nil)
+  def burn_in(position:, live:, proof_registry: BurnInProofRegistry.new, executor: BurnInExecutor.new, selector: ->(routes) { routes.first.fetch(:route) }, log_dir:, confirmation: MigrationRandomBurnInRunner::CONFIRMATION, disable_after: true, snapshot_refresher: BurnInSnapshotRefresher.new, max_cycles: 1, duration_minutes: 30, interval_seconds: 0, rebalance_before_cycle: false, max_target_change_per_cycle_eth: "0.15", readiness_report: nil, preflight_factory: nil, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08", rebalance_after_migration: true, rebalance_during_hold: false, rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true, active_rebalance_factory: nil, now: nil, sleeper: nil)
     readiness = ->(**) {
       readiness_report || {
         pending_nado_target_continuation: nil,
@@ -2638,7 +2839,9 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       rebalance_hold_interval_seconds: rebalance_hold_interval_seconds,
       rebalance_before_next_migration: rebalance_before_next_migration,
       active_rebalance_factory: active_rebalance_factory,
-      readiness_factory: readiness
+      readiness_factory: readiness,
+      now: now || -> { Time.current },
+      sleeper: sleeper || ->(seconds) { sleep(seconds) }
     )
   end
 
@@ -3291,6 +3494,55 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
         final_inside_tolerance: true,
         blockers: []
       }
+    end
+  end
+
+  class BurnInClock
+    attr_reader :now, :sleeps
+
+    def initialize(now)
+      @now = now
+      @sleeps = []
+    end
+
+    def sleep(seconds)
+      @sleeps << seconds
+      @now += seconds.seconds
+    end
+  end
+
+  class ClockedBurnInActiveRebalance
+    attr_reader :check_times
+
+    def initialize(clock, payloads: nil)
+      @clock = clock
+      @payloads = payloads || []
+      @check_times = []
+    end
+
+    def run(reason:)
+      @check_times << @clock.now if reason == "hold_monitor"
+      payload = @payloads.shift || {
+        checked: true,
+        needed: false,
+        venue: "nado",
+        reason: "inside_tolerance",
+        target_short_eth: "1.18",
+        current_short_eth: "1.18",
+        drift_eth: "0",
+        tolerance_eth: "0.0354",
+        inside_tolerance: true,
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0,
+        final_inside_tolerance: true,
+        blockers: []
+      }
+      payload.merge(checked_at: @clock.now.utc.iso8601, trigger: reason)
+    end
+
+    def check_spacing_seconds
+      check_times.each_cons(2).map { |first, second| (second - first).round }
     end
   end
 

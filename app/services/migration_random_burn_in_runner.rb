@@ -107,7 +107,7 @@ class MigrationRandomBurnInRunner
       break unless cycle_result[:status] == "success"
       break if cycles_attempted >= max_cycles || now.call >= deadline
 
-      sleeper.call(interval_seconds) if interval_seconds.positive?
+      sleeper.call(interval_seconds) if interval_seconds.positive? && !cycle_result[:hold_monitored]
     end
 
     disable_after_run if disable_after
@@ -277,9 +277,10 @@ class MigrationRandomBurnInRunner
       blockers = (blockers + Array(post_migration_rebalance[:blockers])).uniq
       status = "stopped_active_rebalance"
     end
-    hold_rebalance_checks = []
+    hold_rebalance = empty_hold_rebalance_payload
     if status == "success"
-      hold_rebalance_checks = self.hold_rebalance_checks(deadline: deadline)
+      hold_rebalance = self.hold_rebalance_checks(deadline: deadline)
+      hold_rebalance_checks = hold_rebalance.fetch(:checks)
       hold_blockers = hold_rebalance_checks.flat_map { |check| Array(check[:blockers]) }.uniq
       if hold_blockers.any?
         blockers = (blockers + hold_blockers).uniq
@@ -292,9 +293,9 @@ class MigrationRandomBurnInRunner
     accumulate_rebalance_counts(post_migration_rebalance)
     record_manual_action(route: route, execution: execution) if target_open_source_still_open?(execution)
     self.cycles_succeeded += 1 if status == "success"
-    event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers, post_migration_rebalance: post_migration_rebalance, hold_rebalance_checks: hold_rebalance_checks, pre_next_cycle_rebalance: pre_next_cycle_rebalance)
+    event = cycle_event(cycle: cycle, pre_target: pre_target, pre_hedge: pre_hedge, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers, post_migration_rebalance: post_migration_rebalance, hold_rebalance: hold_rebalance, pre_next_cycle_rebalance: pre_next_cycle_rebalance)
     write_event(event)
-    { status: status, blockers: blockers }
+    { status: status, blockers: blockers, hold_monitored: hold_rebalance.fetch(:monitored) }
   end
 
   def select_route
@@ -505,20 +506,88 @@ class MigrationRandomBurnInRunner
   end
 
   def hold_rebalance_checks(deadline:)
-    return [] unless rebalance_during_hold
-    return [] unless rebalance_hold_interval_seconds.positive? && interval_seconds >= rebalance_hold_interval_seconds
+    return empty_hold_rebalance_payload unless rebalance_during_hold
+    return empty_hold_rebalance_payload unless rebalance_hold_interval_seconds.positive? && interval_seconds >= rebalance_hold_interval_seconds
 
     checks = []
-    elapsed = rebalance_hold_interval_seconds
-    while elapsed <= interval_seconds && now.call < deadline
+    check_times = []
+    started_at = now.call
+    target_at = [ started_at + interval_seconds.seconds, deadline ].min
+    next_check_at = started_at + rebalance_hold_interval_seconds.seconds
+    while next_check_at <= target_at && now.call < deadline
+      sleep_until(next_check_at)
       check = run_active_rebalance(reason: "hold_monitor")
+      check_times << now.call
       accumulate_rebalance_counts(check)
       checks << check
       break if Array(check[:blockers]).any?
 
-      elapsed += rebalance_hold_interval_seconds
+      next_check_at += rebalance_hold_interval_seconds.seconds
     end
-    checks
+    sleep_until(target_at) if checks.none? { |check| Array(check[:blockers]).any? }
+    finished_at = now.call
+
+    hold_rebalance_payload(
+      started_at: started_at,
+      finished_at: finished_at,
+      target_seconds: (target_at - started_at).round,
+      check_times: check_times,
+      checks: checks
+    )
+  end
+
+  def empty_hold_rebalance_payload
+    {
+      monitored: false,
+      checks: [],
+      started_at: nil,
+      finished_at: nil,
+      target_seconds: nil,
+      interval_seconds: nil,
+      checks_count: 0,
+      actual_span_seconds: nil,
+      gap_warning: nil
+    }
+  end
+
+  def hold_rebalance_payload(started_at:, finished_at:, target_seconds:, check_times:, checks:)
+    expected_checks = target_seconds / rebalance_hold_interval_seconds
+    expected_span = [ expected_checks - 1, 0 ].max * rebalance_hold_interval_seconds
+    actual_span = if check_times.size >= 2
+      (check_times.last - check_times.first).round
+    else
+      0
+    end
+    {
+      monitored: true,
+      checks: checks,
+      started_at: started_at.utc.iso8601,
+      finished_at: finished_at.utc.iso8601,
+      target_seconds: target_seconds,
+      interval_seconds: rebalance_hold_interval_seconds,
+      checks_count: checks.size,
+      actual_span_seconds: actual_span,
+      gap_warning: hold_monitor_gap_warning(
+        expected_checks: expected_checks,
+        expected_span: expected_span,
+        actual_span: actual_span,
+        checks: checks
+      )
+    }
+  end
+
+  def hold_monitor_gap_warning(expected_checks:, expected_span:, actual_span:, checks:)
+    return nil if checks.any? { |check| Array(check[:blockers]).any? }
+    return nil if expected_checks.zero?
+    return "hold monitor ran #{checks.size} checks; expected #{expected_checks}" unless checks.size == expected_checks
+    return nil if expected_span.zero? || actual_span >= expected_span
+
+    "hold monitor covered #{actual_span}s; expected at least #{expected_span}s"
+  end
+
+  def sleep_until(target_time)
+    remaining = target_time - now.call
+    sleeper.call(remaining) if remaining.positive?
   end
 
   def accumulate_rebalance_counts(payload)
@@ -529,7 +598,7 @@ class MigrationRandomBurnInRunner
     self.signatures_created += payload[:signatures_created].to_i
   end
 
-  def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:, post_migration_rebalance: nil, hold_rebalance_checks: [], pre_next_cycle_rebalance: nil)
+  def cycle_event(cycle:, pre_target:, pre_hedge:, route:, execution:, post_target:, post_hedge:, status:, blockers:, post_migration_rebalance: nil, hold_rebalance: empty_hold_rebalance_payload, pre_next_cycle_rebalance: nil)
     {
       event: "cycle",
       cycle: cycle,
@@ -545,7 +614,14 @@ class MigrationRandomBurnInRunner
       post_cycle_hedge: post_hedge,
       after: post_hedge,
       post_migration_rebalance: post_migration_rebalance || unchecked_rebalance_payload("post_migration"),
-      hold_rebalance_checks: hold_rebalance_checks,
+      hold_rebalance_checks: hold_rebalance.fetch(:checks),
+      hold_started_at: hold_rebalance.fetch(:started_at),
+      hold_finished_at: hold_rebalance.fetch(:finished_at),
+      hold_target_seconds: hold_rebalance.fetch(:target_seconds),
+      hold_rebalance_interval_seconds: hold_rebalance.fetch(:interval_seconds),
+      hold_rebalance_checks_count: hold_rebalance.fetch(:checks_count),
+      hold_monitor_actual_span_seconds: hold_rebalance.fetch(:actual_span_seconds),
+      hold_monitor_gap_warning: hold_rebalance.fetch(:gap_warning),
       pre_next_cycle_rebalance: pre_next_cycle_rebalance || unchecked_rebalance_payload("pre_next_cycle"),
       status: status,
       blockers: blockers
