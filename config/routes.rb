@@ -32,6 +32,9 @@ Rails.application.routes.draw do
     post :random_rotation_enable, on: :member
     post :random_rotation_disable, on: :member
     post :random_rotation_disable_all, on: :member
+    post :random_production_start, on: :member
+    post :random_production_stop, on: :member
+    post :random_production_refresh, on: :member
     post :hedge_emergency_restore, on: :member
     post :activate, on: :member
     post :archive, on: :member

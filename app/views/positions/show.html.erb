@@ -548,6 +548,119 @@ end %>
 
       <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup %>
 
+      <% random_production = @random_production_runner_status || {} %>
+      <% random_production_status = random_production[:lock_stale] ? "stale lock" : (random_production[:status].presence || "unknown") %>
+      <% random_production_tail_visible = ActiveModel::Type::Boolean.new.cast(params[:show_random_production_tail]) %>
+      <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p class="text-xs uppercase tracking-wide text-gray-500">Production Random Runner</p>
+            <h3 class="mt-1 text-base font-semibold text-white">24/7 random rotation control</h3>
+            <p class="mt-1 text-xs text-gray-400">Dashboard controls submit systemd start/stop requests only. The web request does not run the production loop.</p>
+          </div>
+          <span class="rounded-full border <%= random_production_status == 'running' ? 'border-green-800 bg-green-950/60 text-green-300' : (random_production_status.in?([ 'blocked', 'stale lock' ]) ? 'border-red-800 bg-red-950/50 text-red-100' : 'border-gray-700 bg-gray-900 text-gray-300') %> px-3 py-1 text-xs font-semibold"><%= random_production_status %></span>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div><p class="text-xs text-gray-500">Current venue</p><p class="text-white"><%= random_production[:current_production_venue].present? ? HedgeVenues.label(random_production[:current_production_venue]) : "unknown" %></p></div>
+          <div><p class="text-xs text-gray-500">Target short ETH</p><p class="text-white"><%= format_venue_eth_amount(random_production[:target_short_eth]) %></p></div>
+          <div><p class="text-xs text-gray-500">Combined short ETH</p><p class="text-white"><%= format_venue_eth_amount(random_production[:combined_short_eth]) %></p></div>
+          <div><p class="text-xs text-gray-500">Inside tolerance</p><p class="<%= random_production[:inside_tolerance] == true ? 'text-green-300' : (random_production[:inside_tolerance] == false ? 'text-red-300' : 'text-gray-300') %>"><%= random_production[:inside_tolerance].nil? ? "unknown" : random_production[:inside_tolerance].to_s %></p></div>
+          <div><p class="text-xs text-gray-500">Last route</p><p class="text-white"><%= random_production[:last_route].presence || "none" %></p></div>
+          <div><p class="text-xs text-gray-500">Last cycle</p><p class="text-white"><%= random_production[:last_cycle].presence || "none" %></p></div>
+          <div><p class="text-xs text-gray-500">Last hold check</p><p class="text-white"><%= random_production[:last_hold_check].presence || "none" %></p></div>
+          <div><p class="text-xs text-gray-500">Heartbeat</p><p class="text-white"><%= random_production[:heartbeat_updated_at].presence || "none" %></p></div>
+          <div><p class="text-xs text-gray-500">Lock pid</p><p class="text-white"><%= random_production[:lock_pid].presence || "none" %></p></div>
+          <div><p class="text-xs text-gray-500">Open orders zero</p><p class="<%= random_production[:open_orders_zero] ? 'text-green-300' : 'text-red-300' %>"><%= random_production[:open_orders_zero] ? "true" : "false" %></p></div>
+          <div><p class="text-xs text-gray-500">Route proofs</p><p class="text-white">ready <%= random_production.dig(:route_proofs_summary, :ready) || 0 %> / total <%= random_production.dig(:route_proofs_summary, :total) || 0 %></p></div>
+          <div><p class="text-xs text-gray-500">Latest blocker</p><p class="break-words text-white"><%= random_production[:latest_blocker].presence || "none" %></p></div>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <p class="text-xs uppercase tracking-wide text-gray-500">Direct venue shorts</p>
+            <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
+              <% (random_production[:direct_venue_shorts] || {}).each do |venue, value| %>
+                <div><span class="text-gray-500"><%= HedgeVenues.label(venue) %></span><p class="text-white"><%= format_venue_eth_amount(value) %></p></div>
+              <% end %>
+            </div>
+          </div>
+          <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <p class="text-xs uppercase tracking-wide text-gray-500">Direct open orders</p>
+            <div class="mt-2 space-y-1 text-xs">
+              <% (random_production[:direct_open_orders] || {}).each do |venue, details| %>
+                <p class="text-gray-300"><%= HedgeVenues.label(venue) %>: <%= details[:status] || details["status"] || "unknown" %> <%= details[:count] || details["count"] %></p>
+              <% end %>
+            </div>
+          </div>
+          <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <p class="text-xs uppercase tracking-wide text-gray-500">Gates state</p>
+            <div class="mt-2 space-y-1 text-xs">
+              <% (random_production[:gates_state] || {}).each do |key, enabled| %>
+                <p class="text-gray-300"><%= key %>: <span class="<%= enabled ? 'text-green-300' : 'text-gray-400' %>"><%= enabled ? "true" : "false" %></span></p>
+              <% end %>
+            </div>
+          </div>
+        </div>
+
+        <% if Array(random_production[:direct_preflight_blockers]).present? %>
+          <div class="mt-3 rounded-lg border border-red-900 bg-red-950/20 p-3">
+            <p class="text-xs font-semibold text-red-100">Direct preflight blockers</p>
+            <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-red-100">
+              <% Array(random_production[:direct_preflight_blockers]).first(6).each do |blocker| %><li class="break-words"><%= blocker %></li><% end %>
+            </ul>
+          </div>
+        <% end %>
+        <% diagnostics = random_production[:dashboard_snapshot_diagnostic] || {} %>
+        <% if Array(diagnostics[:blockers] || diagnostics["blockers"]).present? %>
+          <div class="mt-3 rounded-lg border border-yellow-900 bg-yellow-950/20 p-3">
+            <p class="text-xs font-semibold text-yellow-100">Dashboard snapshot diagnostics only</p>
+            <ul class="mt-2 list-disc space-y-1 pl-5 text-xs text-yellow-100">
+              <% Array(diagnostics[:blockers] || diagnostics["blockers"]).first(6).each do |blocker| %><li class="break-words"><%= blocker %></li><% end %>
+            </ul>
+          </div>
+        <% end %>
+
+        <div class="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-3">
+          <% [[ "Start 24h Canary", "canary" ], [ "Start 24/7 Production", "production" ]].each do |label, mode| %>
+            <%= form_with url: random_production_start_position_path(@position), method: :post, class: "rounded-lg border border-gray-800 bg-gray-950 p-3" do |form| %>
+              <%= form.hidden_field :production_runner_mode, value: mode %>
+              <code class="block break-all rounded border border-gray-800 bg-black/30 p-2 text-[11px] text-gray-300"><%= MigrationRandomProductionRunner::CONFIRMATION %></code>
+              <%= form.text_field :random_production_confirmation, autocomplete: "off", placeholder: MigrationRandomProductionRunner::CONFIRMATION, class: "mt-2 w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
+              <%= form.submit label, class: "mt-2 w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900" %>
+            <% end %>
+          <% end %>
+          <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <%= button_to "Stop Safely", random_production_stop_position_path(@position), method: :post, class: "w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            <%= button_to "Refresh Status", random_production_refresh_position_path(@position), method: :post, class: "mt-2 w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            <%= link_to "View Tail", position_path(@position, tab: "migration", show_random_production_tail: true), class: "mt-2 block rounded-lg bg-gray-800 px-3 py-2 text-center text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+          </div>
+        </div>
+
+        <% if random_production_tail_visible %>
+          <div class="mt-4 overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-800 text-left text-xs">
+              <thead class="text-gray-500"><tr><th class="px-3 py-2">Cycle</th><th class="px-3 py-2">Route</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Orders</th><th class="px-3 py-2">Post venue</th><th class="px-3 py-2">Hold checks</th><th class="px-3 py-2">Hold span</th><th class="px-3 py-2">Hold warning</th><th class="px-3 py-2">Blockers</th></tr></thead>
+              <tbody class="divide-y divide-gray-800 text-gray-300">
+                <% Array(random_production[:tail_events]).last(300).each do |event| %>
+                  <tr>
+                    <td class="px-3 py-2"><%= event["cycle"] || "—" %></td>
+                    <td class="px-3 py-2"><%= event["route"] || "—" %></td>
+                    <td class="px-3 py-2"><%= event["status"] || event["event"] || "recorded" %></td>
+                    <td class="px-3 py-2"><%= event.dig("execution", "orders_submitted") || event["orders_submitted"] || 0 %></td>
+                    <td class="px-3 py-2"><%= event.dig("post_cycle_hedge", "production_venue") || event["final_production_venue"] || "—" %></td>
+                    <td class="px-3 py-2"><%= event["hold_rebalance_checks_count"] || Array(event["hold_rebalance_checks"]).size %></td>
+                    <td class="px-3 py-2"><%= event["hold_monitor_actual_span_seconds"] || "—" %></td>
+                    <td class="px-3 py-2"><%= event["hold_monitor_gap_warning"] || "none" %></td>
+                    <td class="px-3 py-2"><%= Array(event["blockers"]).first(2).join("; ").presence || "none" %></td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </div>
+
       <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 xl:col-span-2">
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

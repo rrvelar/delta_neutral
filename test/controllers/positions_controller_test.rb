@@ -752,6 +752,176 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "0 / 0", response.body
   end
 
+  test "production random runner section renders" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Production Random Runner", response.body
+    assert_match "24/7 random rotation control", response.body
+    assert_match "Start 24h Canary", response.body
+    assert_match "Start 24/7 Production", response.body
+    assert_match "Stop Safely", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random 24h canary start requires confirmation phrase" do
+    position = production_random_position
+    control = random_production_control_guard
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "canary",
+        random_production_confirmation: "WRONG"
+      }
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_match "confirmation must equal #{MigrationRandomProductionRunner::CONFIRMATION}", flash[:alert]
+    assert_equal [], control.calls
+  end
+
+  test "production random 24x7 start requires confirmation phrase" do
+    position = production_random_position
+    control = random_production_control_guard
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "production",
+        random_production_confirmation: "WRONG"
+      }
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_match "confirmation must equal #{MigrationRandomProductionRunner::CONFIRMATION}", flash[:alert]
+    assert_equal [], control.calls
+  end
+
+  test "production random start submits systemd adapter with exact confirmation only" do
+    position = production_random_position
+    control = random_production_control_guard(ok: true)
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "canary",
+        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+      }
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_equal [ [ :start, position.id, "canary" ] ], control.calls
+    assert_no_match MigrationRandomProductionRunner::CONFIRMATION, flash[:notice]
+  end
+
+  test "production random stop safely calls production stop path" do
+    position = production_random_position
+    control = random_production_control_guard(ok: true)
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_stop_position_path(position)
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_equal [ [ :stop, position.id ] ], control.calls
+    assert_match "safe stop requested", flash[:notice]
+  end
+
+  test "production random dashboard reads heartbeat status and tail json safely" do
+    position = production_random_position
+    write_random_production_files(position, latest_event: {
+      event: "cycle",
+      cycle: 7,
+      route: "ethereal->nado",
+      status: "success",
+      execution: { orders_submitted: 0 },
+      post_cycle_hedge: { production_venue: "nado" },
+      hold_rebalance_checks_count: 13,
+      hold_monitor_actual_span_seconds: 3600,
+      hold_monitor_gap_warning: nil,
+      blockers: []
+    })
+
+    get position_path(position, tab: "migration", show_random_production_tail: true)
+
+    assert_response :success
+    assert_match "ethereal-&gt;nado", response.body
+    assert_match "3600", response.body
+    assert_match "Hold checks", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard shows stale lock clearly" do
+    position = production_random_position
+    write_random_production_files(position, lock: { runner: "random_production_runner", pid: 99_999_999 })
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "stale lock", response.body
+    assert_match "99999999", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard shows direct preflight blockers" do
+    position = production_random_position
+    write_random_production_files(position, status: {
+      status: "blocked",
+      direct_preflight_blockers: [ "direct open orders are nonzero" ],
+      direct_open_orders: random_production_open_orders("blocked"),
+      direct_venue_shorts: random_production_shorts,
+      inside_tolerance: true,
+      gates_state: {}
+    })
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Direct preflight blockers", response.body
+    assert_match "direct open orders are nonzero", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard shows snapshot blockers as diagnostics only" do
+    position = production_random_position
+    position.position_dashboard_snapshot.update!(
+      open_orders_count_extended: nil,
+      extended_critical_read_status: "error",
+      source_errors: { extended: "carried forward previous Extended snapshot" }.to_json
+    )
+    write_random_production_files(position)
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Dashboard snapshot diagnostics only", response.body
+    assert_match "critical Extended readback failed", response.body
+    assert_match "carried forward previous Extended snapshot", response.body
+    assert_no_match "Direct preflight blockers", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random confirmation phrase is not persisted" do
+    position = production_random_position
+    control = random_production_control_guard(ok: true)
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "production",
+        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+      }
+    end
+
+    assert_nil OperationalSetting.where("value LIKE ?", "%PRODUCTION_RANDOM_ROTATION%").first
+    assert_no_match MigrationRandomProductionRunner::CONFIRMATION, flash[:notice].to_s
+  end
+
   test "show omits Nado open orders unavailable reason when readback succeeded" do
     position = create_aerodrome_position
     Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
@@ -3848,6 +4018,91 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     )
   end
 
+  def production_random_position
+    position = create_aerodrome_position
+    position.create_hedge!(target: "0.8", tolerance: "0.03", active: true, execution_venue: "nado")
+    position.update!(asset0_amount: "2.65")
+    create_dashboard_snapshot(
+      position,
+      extended_short_eth: "0",
+      ethereal_short_eth: "0",
+      nado_short_eth: "2.12",
+      extended_attrs: { open_orders_count: 0, leverage_margin_gate_status: "pass" }
+    )
+    position
+  end
+
+  def random_production_dir
+    MigrationRandomProductionRunner::LOG_DIR
+  end
+
+  def write_random_production_files(position, status: nil, heartbeat: nil, lock: nil, latest_event: nil)
+    FileUtils.mkdir_p(random_production_dir)
+    heartbeat ||= {
+      runner: "random_production_runner",
+      position_id: position.id,
+      pid: 12_345,
+      started_at: Time.current.utc.iso8601,
+      updated_at: Time.current.utc.iso8601,
+      last_cycle: 3,
+      last_route: "extended->nado",
+      current_production_venue: "nado",
+      target_short_eth: "2.12",
+      combined_short_eth: "2.12",
+      inside_tolerance: true,
+      open_orders_zero: true,
+      gates_enabled: true,
+      last_hold_check_at: Time.current.utc.iso8601,
+      status: "running"
+    }
+    status ||= {
+      status: "running",
+      direct_preflight_blockers: [],
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: random_production_shorts,
+      inside_tolerance: true,
+      gates_state: {
+        "MIGRATION_LIVE_ENABLED" => true,
+        "MIGRATION_AUTO_ENABLED" => true,
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => true
+      },
+      heartbeat: heartbeat
+    }
+    latest_event ||= {
+      event: "cycle",
+      cycle: 3,
+      route: "extended->nado",
+      status: "success",
+      execution: { orders_submitted: 0 },
+      post_cycle_hedge: { production_venue: "nado" },
+      hold_rebalance_checks_count: 13,
+      hold_monitor_actual_span_seconds: 3600,
+      hold_monitor_gap_warning: nil,
+      blockers: []
+    }
+    File.write(random_production_dir.join("heartbeat_position_#{position.id}.json"), JSON.pretty_generate(heartbeat))
+    File.write(random_production_dir.join("status_position_#{position.id}.json"), JSON.pretty_generate(status))
+    File.write(random_production_dir.join("latest_position_#{position.id}.jsonl"), "#{JSON.generate(latest_event)}\n")
+    File.write(random_production_dir.join("lock_position_#{position.id}.json"), JSON.pretty_generate(lock)) if lock
+  end
+
+  def random_production_open_orders(status)
+    HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, { status: status, count: status == "zero" ? 0 : 1 } ] }
+  end
+
+  def random_production_shorts
+    { "extended" => "0", "ethereal" => "0", "nado" => "2.12" }
+  end
+
+  def clear_random_production_files(position_id)
+    return unless position_id
+
+    %w[heartbeat status latest lock stop].each do |prefix|
+      suffix = prefix == "latest" ? "jsonl" : "json"
+      FileUtils.rm_f(random_production_dir.join("#{prefix}_position_#{position_id}.#{suffix}"))
+    end
+  end
+
   def write_ready_random_route_proofs(position)
     writer = HedgeVenueMigrationReceiptWriter.new(receipt_dir: Rails.root.join("storage/hedge_migration_live_canaries"))
     MigrationRouteProofRegistry::ROUTES.each do |from, to|
@@ -3975,6 +4230,29 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
         object.define_singleton_method(:close_short) { raise "Hyperliquid close_short must not be called" }
         object.define_singleton_method(:set_leverage) { raise "Hyperliquid set_leverage must not be called" }
       end
+    end
+  end
+
+  def random_production_control_guard(ok: false)
+    RandomProductionControlGuard.new(ok: ok)
+  end
+
+  class RandomProductionControlGuard
+    attr_reader :calls
+
+    def initialize(ok:)
+      @ok = ok
+      @calls = []
+    end
+
+    def start(position:, mode:)
+      @calls << [ :start, position.id, mode ]
+      MigrationRandomProductionControl::Result.new(@ok, @ok ? "submitted" : "failed", @ok ? "submitted" : "blocked in test", [ "systemctl", "start" ])
+    end
+
+    def stop(position:)
+      @calls << [ :stop, position.id ]
+      MigrationRandomProductionControl::Result.new(@ok, @ok ? "submitted" : "failed", @ok ? "submitted" : "blocked in test", [ "systemctl", "stop" ])
     end
   end
 

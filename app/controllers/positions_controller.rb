@@ -148,6 +148,9 @@ class PositionsController < ApplicationController
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
       @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
       @latest_daily_random_rotation_receipt = latest_jsonl_receipt_for_position(@position.id, "storage/hedge_migration_random_rotation_daily/*.jsonl")
+      @random_production_runner_status = safe_dashboard_section("random_production_runner_status", fallback: unavailable_random_production_runner_status) do
+        MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300)
+      end
       @random_rotation_virtual_state = MigrationRandomRotationVirtualState.new(position: @position).current
       @migration_control_plan = cached_migration_control_plan
       @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
@@ -521,6 +524,36 @@ class PositionsController < ApplicationController
       flash: { level => message }
   end
 
+  def random_production_start
+    position = load_position_for_migration
+    mode = params[:production_runner_mode].to_s == "production" ? "production" : "canary"
+    unless params[:random_production_confirmation].to_s == MigrationRandomProductionRunner::CONFIRMATION
+      return redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+        alert: "Production random runner blocked: confirmation must equal #{MigrationRandomProductionRunner::CONFIRMATION}. No runner was started."
+    end
+
+    result = random_production_control.start(position: position, mode: mode)
+    level = result.ok ? :notice : :alert
+    message = result.ok ? "Production random runner #{mode == 'canary' ? '24h canary' : '24/7'} start submitted via systemd. No orders or signatures were created by the dashboard request." : "Production random runner start blocked: #{result.message}. No runner was started."
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+      flash: { level => message }
+  end
+
+  def random_production_stop
+    position = load_position_for_migration
+    result = random_production_control.stop(position: position)
+    level = result.ok ? :notice : :alert
+    message = result.ok ? "Production random runner safe stop requested. No orders, signatures, or cancels were created by the dashboard request." : "Production random runner stop requested, but systemd stop failed: #{result.message}"
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+      flash: { level => message }
+  end
+
+  def random_production_refresh
+    position = load_position_for_migration
+    redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+      notice: "Production random runner status refreshed. No orders, signatures, or cancels were created."
+  end
+
   def hedge_emergency_restore
     position = load_position_for_migration
     live = ActiveModel::Type::Boolean.new.cast(params[:live])
@@ -541,6 +574,10 @@ class PositionsController < ApplicationController
 
   def load_position_for_migration
     Current.user.positions.includes(:dex, :hedge, :position_dashboard_snapshot).find(params[:id])
+  end
+
+  def random_production_control
+    MigrationRandomProductionControl.new
   end
 
   def migration_result_message(label, result)
@@ -1463,6 +1500,34 @@ class PositionsController < ApplicationController
       drift_eth: drift&.to_s("F"),
       rebalance_needed_now: drift && tolerance ? drift.abs > tolerance : false,
       warnings: [ "Production dashboard diagnostics unavailable; refresh diagnostics." ]
+    }
+  end
+
+  def unavailable_random_production_runner_status
+    {
+      status: "unknown",
+      heartbeat: {},
+      lock: {},
+      lock_stale: false,
+      latest_event: nil,
+      tail_events: [],
+      current_production_venue: nil,
+      target_short_eth: nil,
+      combined_short_eth: nil,
+      inside_tolerance: nil,
+      direct_preflight_blockers: [ "Production random runner status unavailable; refresh status." ],
+      direct_open_orders: {},
+      direct_venue_shorts: {},
+      open_orders_zero: false,
+      route_proofs_summary: {},
+      last_route: nil,
+      last_cycle: nil,
+      last_hold_check: nil,
+      heartbeat_updated_at: nil,
+      lock_pid: nil,
+      gates_state: {},
+      latest_blocker: "Production random runner status unavailable; refresh status.",
+      dashboard_snapshot_diagnostic: {}
     }
   end
 

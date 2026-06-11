@@ -236,6 +236,7 @@ class MigrationRandomProductionRunner
   end
 
   def write_status(status:, blockers: [], summary: nil)
+    direct = direct_report
     payload = {
       runner: "random_production_runner",
       position_id: position.id,
@@ -248,6 +249,10 @@ class MigrationRandomProductionRunner
       latest_event: latest_event || latest_event_from_log,
       heartbeat: heartbeat_payload.presence,
       summary: summary,
+      direct_preflight_blockers: Array(direct[:blockers]),
+      direct_open_orders: direct_open_orders(direct),
+      direct_venue_shorts: direct_venue_shorts(direct),
+      inside_tolerance: direct[:inside_tolerance] == true,
       gates_state: gates_state,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.compact
