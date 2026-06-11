@@ -8,7 +8,6 @@ class MigrationRandomProductionDashboard
   end
 
   def report(tail_lines: DEFAULT_TAIL_LINES)
-    direct = direct_preflight
     status = read_json(status_path)
     heartbeat = read_json(heartbeat_path)
     lock = read_json(lock_path)
@@ -31,15 +30,15 @@ class MigrationRandomProductionDashboard
       bridge_status: bridge_status(control_request, control_result),
       latest_event: latest_event,
       tail_events: latest_events,
-      current_production_venue: heartbeat["current_production_venue"] || direct[:production_venue],
-      target_short_eth: heartbeat["target_short_eth"] || decimal_string(direct.dig(:target, :target_short_eth)),
-      combined_short_eth: heartbeat["combined_short_eth"] || decimal_string(direct[:combined_short_eth]),
-      inside_tolerance: heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : direct[:inside_tolerance],
-      direct_preflight_blockers: Array(direct[:blockers]),
-      direct_open_orders: direct_open_orders(direct),
-      direct_venue_shorts: direct_venue_shorts(direct),
-      open_orders_zero: direct_open_orders_zero?(direct),
-      route_proofs_summary: route_proofs_summary(direct),
+      current_production_venue: heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue,
+      target_short_eth: heartbeat["target_short_eth"],
+      combined_short_eth: heartbeat["combined_short_eth"],
+      inside_tolerance: heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : status["inside_tolerance"],
+      direct_preflight_blockers: Array(status["direct_preflight_blockers"]),
+      direct_open_orders: direct_open_orders(status),
+      direct_venue_shorts: direct_venue_shorts(status),
+      open_orders_zero: direct_open_orders_zero?(status),
+      route_proofs_summary: route_proofs_summary(status),
       last_route: heartbeat["last_route"] || latest_event&.fetch("route", nil),
       last_cycle: heartbeat["last_cycle"] || latest_event&.fetch("cycle", nil),
       last_hold_check: heartbeat["last_hold_check_at"] || last_hold_check_from(latest_event),
@@ -102,6 +101,7 @@ class MigrationRandomProductionDashboard
   end
 
   def bridge_status(request, result)
+    return result["status"] == "failed" ? "failed" : "handled" if request.blank? && result.present?
     return "unknown" if request.blank?
     return "pending" if result.blank?
     return "pending" if result["request_id"].present? && result["request_id"] != request["request_id"]
@@ -110,60 +110,30 @@ class MigrationRandomProductionDashboard
     "handled"
   end
 
-  def direct_preflight
-    @direct_preflight ||= if file_direct_preflight
-      file_direct_preflight
-    elsif preflight_factory
-      preflight_factory.call(position: position, stage: "random_production_dashboard")
-    else
-      MigrationRandomBurnInPreflight.new(position: position).report
-    end
-  end
-
-  def file_direct_preflight
-    status = read_json(status_path)
-    return nil unless status.key?("direct_open_orders") || status.key?("direct_venue_shorts") || status.key?("direct_preflight_blockers")
-
-    {
-      blockers: Array(status["direct_preflight_blockers"]),
-      production_venue: status.dig("heartbeat", "current_production_venue") || status.dig("latest_event", "final_production_venue") || position.hedge&.execution_venue,
-      target: { target_short_eth: status.dig("heartbeat", "target_short_eth") },
-      combined_short_eth: status.dig("heartbeat", "combined_short_eth"),
-      inside_tolerance: status["inside_tolerance"],
-      venues: HedgeVenues::SUPPORTED_KEYS.to_h do |venue|
-        open = status.dig("direct_open_orders", venue) || {}
-        [ venue, {
-          short_eth: decimal_or_nil(status.dig("direct_venue_shorts", venue)),
-          open_orders_status: open["status"],
-          open_orders_count: open["count"]
-        } ]
-      end,
-      proof_report: {}
-    }
-  end
-
-  def direct_open_orders(report)
+  def direct_open_orders(status)
     HedgeVenues::SUPPORTED_KEYS.to_h do |venue|
-      details = report.dig(:venues, venue) || {}
-      [ venue, { status: details[:open_orders_status], count: details[:open_orders_count] }.compact ]
+      details = status.dig("direct_open_orders", venue) || {}
+      [ venue, { status: details["status"], count: details["count"] }.compact ]
     end
   end
 
-  def direct_venue_shorts(report)
-    HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, decimal_string(report.dig(:venues, venue, :short_eth)) ] }
+  def direct_venue_shorts(status)
+    HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, status.dig("direct_venue_shorts", venue) ] }
   end
 
-  def direct_open_orders_zero?(report)
-    HedgeVenues::SUPPORTED_KEYS.all? { |venue| report.dig(:venues, venue, :open_orders_status) == "zero" }
+  def direct_open_orders_zero?(status)
+    return nil unless status.key?("direct_open_orders")
+
+    HedgeVenues::SUPPORTED_KEYS.all? { |venue| status.dig("direct_open_orders", venue, "status") == "zero" }
   end
 
-  def route_proofs_summary(report)
-    proof = report[:proof_report] || {}
+  def route_proofs_summary(status)
+    proof = status["proof_report"] || status["route_proofs_summary"] || {}
     {
-      ready: Array(proof[:completed_route_proofs]).size,
-      missing: Array(proof[:missing_route_proofs]).size,
-      stale: Array(proof[:stale_route_proofs]).size,
-      total: Array(proof[:routes]).size
+      ready: proof["ready"] || Array(proof["completed_route_proofs"]).size,
+      missing: proof["missing"] || Array(proof["missing_route_proofs"]).size,
+      stale: proof["stale"] || Array(proof["stale_route_proofs"]).size,
+      total: proof["total"] || Array(proof["routes"]).size
     }
   end
 
@@ -199,11 +169,7 @@ class MigrationRandomProductionDashboard
   end
 
   def latest_jsonl_events(lines)
-    return [] unless File.exist?(latest_path)
-
-    File.readlines(latest_path).last(lines).filter_map { |line| JSON.parse(line) rescue nil }
-  rescue SystemCallError
-    []
+    BoundedJsonlTail.read(latest_path, lines: lines)
   end
 
   def read_json(path)
@@ -258,14 +224,6 @@ class MigrationRandomProductionDashboard
     BigDecimal(value.to_s)
   rescue ArgumentError, TypeError
     BigDecimal("0")
-  end
-
-  def decimal_or_nil(value)
-    return nil if value.nil?
-
-    BigDecimal(value.to_s)
-  rescue ArgumentError, TypeError
-    nil
   end
 
   def decimal_string(value)

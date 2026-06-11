@@ -929,6 +929,124 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     clear_random_production_files(position&.id)
   end
 
+  test "production random dashboard renders when files are missing" do
+    position = production_random_position
+    clear_random_production_files(position.id)
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Production Random Runner", response.body
+    assert_match "unavailable", response.body
+    assert_match "Start 24h Canary", response.body
+    assert_match "Stop Safely", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard status timeout returns placeholder" do
+    position = production_random_position
+    write_random_production_files(position)
+    slow_dashboard = Class.new do
+      def report(tail_lines:)
+        sleep 0.1
+        { status: "should_not_render", tail_lines: tail_lines }
+      end
+    end
+
+    with_env("POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01") do
+      MigrationRandomProductionDashboard.stub(:new, ->(*) { slow_dashboard.new }) do
+        get position_path(position, tab: "migration")
+      end
+    end
+
+    assert_response :success
+    assert_match "Production Random Runner", response.body
+    assert_match "unavailable", response.body
+    assert_no_match "should_not_render", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard does not parse full huge jsonl" do
+    position = production_random_position
+    write_random_production_files(position)
+    latest_path = random_production_dir.join("latest_position_#{position.id}.jsonl")
+    File.open(latest_path, "wb") do |file|
+      1_000.times { |index| file.write(JSON.generate({ event: "old", cycle: index, position_id: position.id }) + "\n") }
+      file.write(JSON.generate({ event: "cycle", cycle: 1_001, route: "nado->ethereal", position_id: position.id }) + "\n")
+    end
+
+    File.stub(:readlines, ->(*) { raise "full file read is not allowed in position show" }) do
+      get position_path(position, tab: "migration", show_random_production_tail: true)
+    end
+
+    assert_response :success
+    assert_match "nado-&gt;ethereal", response.body
+    assert_no_match "full file read is not allowed", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard does not call direct venue preflight" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    MigrationRandomBurnInPreflight.stub(:new, ->(*) { raise "direct preflight must not run in position show" }) do
+      get position_path(position, tab: "migration")
+    end
+
+    assert_response :success
+    assert_match "Production Random Runner", response.body
+    assert_no_match "direct preflight must not run", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "position show does not recompute route proofs" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    HedgeVenueMigrationRouteMatrix.stub(:new, ->(*) { raise "route matrix recompute must not run in position show" }) do
+      MigrationRouteProofRegistry.stub(:new, ->(*) { raise "route proof registry recompute must not run in position show" }) do
+        get position_path(position, tab: "migration")
+      end
+    end
+
+    assert_response :success
+    assert_match "Route Proof Matrix", response.body
+    assert_no_match "route matrix recompute must not run", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "slow random rotation setup returns placeholder without slow page" do
+    position = production_random_position
+    write_random_production_files(position)
+    fake_cache = Class.new do
+      def route_matrix
+        { routes: [], orders_submitted: 0, signatures_created: 0 }
+      end
+
+      def random_setup
+        sleep 0.1
+        { status_label: "should_not_render" }
+      end
+    end
+
+    with_env("POSITIONS_RANDOM_ROTATION_SETUP_TIMEOUT_SECONDS" => "0.01") do
+      MigrationRouteProofCache.stub(:new, ->(*) { fake_cache.new }) do
+        get position_path(position, tab: "migration")
+      end
+    end
+
+    assert_response :success
+    assert_match "Route proof cache unavailable", response.body
+    assert_no_match "should_not_render", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
   test "production random dashboard renders host control result" do
     position = production_random_position
     write_random_production_files(position)
@@ -4016,8 +4134,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position
   end
 
-  def create_aerodrome_position(asset0_price_usd: BigDecimal("2000"), asset1_price_usd: BigDecimal("1"), external_id: "315985", pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", active: true)
+  def create_aerodrome_position(id: nil, asset0_price_usd: BigDecimal("2000"), asset1_price_usd: BigDecimal("1"), external_id: "315985", pool_address: "0x90757bd1595ca6e6a011e900e7a22d1a991856a5", active: true)
     Position.create!(
+      id: id,
       user: users(:one),
       wallet: base_wallet,
       dex: Dex.find_or_create_by!(name: "aerodrome_slipstream"),
@@ -4135,7 +4254,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   def production_random_position
-    position = create_aerodrome_position
+    position = create_aerodrome_position(id: unique_random_production_position_id)
     position.create_hedge!(target: "0.8", tolerance: "0.03", active: true, execution_venue: "nado")
     position.update!(asset0_amount: "2.65")
     create_dashboard_snapshot(
@@ -4146,6 +4265,10 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       extended_attrs: { open_orders_count: 0, leverage_margin_gate_status: "pass" }
     )
     position
+  end
+
+  def unique_random_production_position_id
+    @unique_random_production_position_id ||= 10_000_000_000 + (Process.pid * 1_000_000) + SecureRandom.random_number(1_000_000)
   end
 
   def random_production_dir

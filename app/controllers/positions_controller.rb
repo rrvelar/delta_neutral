@@ -4,6 +4,7 @@ require "timeout"
 #
 # All queries are scoped to {Current.user} to prevent cross-user data access.
 class PositionsController < ApplicationController
+  around_action :log_position_show_total, only: :show
   # GET /positions
   #
   # Lists all active positions for the current user, eager-loading the
@@ -111,23 +112,25 @@ class PositionsController < ApplicationController
   #
   # @return [void]
   def show
-    @position = Current.user.positions.includes(
-      :dex,
-      :hedge,
-      :position_dashboard_snapshot,
-      :position_rewards_fees_snapshot,
-      :position_hedge_accounting_snapshot,
-      wallet: :network
-    ).find(params[:id])
-    @position_valuation = PositionValuation.current(@position)
-    @pnl_snapshots = @position.pnl_snapshots.order(captured_at: :desc).limit(10)
-    @rebalances = @position.hedge&.short_rebalances&.order(rebalanced_at: :desc) || ShortRebalance.none
+    @position = timed_show_section("load_position") do
+      Current.user.positions.includes(
+        :dex,
+        :hedge,
+        :position_dashboard_snapshot,
+        :position_rewards_fees_snapshot,
+        :position_hedge_accounting_snapshot,
+        wallet: :network
+      ).find(params[:id])
+    end
+    @position_valuation = timed_show_section("load_view_models") { PositionValuation.current(@position) }
+    @pnl_snapshots = timed_show_section("load_pnl_snapshots") { @position.pnl_snapshots.order(captured_at: :desc).limit(10) }
+    @rebalances = timed_show_section("load_hedge") { @position.hedge&.short_rebalances&.order(rebalanced_at: :desc)&.limit(50) || ShortRebalance.none }
     if @position.dex.name == "aerodrome_slipstream"
       @unsupported_legacy_hedge_venue = @position.hedge&.unsupported_legacy_execution_venue?
       @selected_hedge_venue = selected_supported_hedge_venue(@position)
       @hedge_venue_options = HedgeVenues.options
       @selected_hedge_venue_adapter = HedgeVenues.build(@selected_hedge_venue)
-      @cached_hedge_dashboard_snapshot = cached_hedge_dashboard_snapshot
+      @cached_hedge_dashboard_snapshot = timed_show_section("load_dashboard_snapshot_cached") { cached_hedge_dashboard_snapshot }
       @position_tab = selected_position_tab
       @risk_recommendation = RiskLimitRecommendation.new(position: @position, venue: @selected_hedge_venue).report
       @auto_control_status = AutoRebalanceControl.new(position: @position, venue: @selected_hedge_venue).status
@@ -146,22 +149,20 @@ class PositionsController < ApplicationController
       @aerodrome_rewards_report = cached_rewards_report || unavailable_rewards_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_fees_report = cached_fees_report || unavailable_fees_report("Rewards/fees snapshot not refreshed yet.")
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
-      @latest_hedge_migration_receipt = latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl")
-      @latest_daily_random_rotation_receipt = latest_jsonl_receipt_for_position(@position.id, "storage/hedge_migration_random_rotation_daily/*.jsonl")
-      @random_production_runner_status = safe_dashboard_section("random_production_runner_status", fallback: unavailable_random_production_runner_status) do
+      @latest_hedge_migration_receipt = timed_show_section("load_latest_migration_receipt_cached") { latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl") }
+      @latest_daily_random_rotation_receipt = timed_show_section("load_latest_random_rotation_receipt_cached") { latest_jsonl_receipt_for_position(@position.id, "storage/hedge_migration_random_rotation_daily/*.jsonl") }
+      @random_production_runner_status = safe_dashboard_section("load_random_production_dashboard", fallback: unavailable_random_production_runner_status) do
         MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300)
       end
-      @random_rotation_virtual_state = MigrationRandomRotationVirtualState.new(position: @position).current
-      @migration_control_plan = cached_migration_control_plan
-      @migration_route_matrix = HedgeVenueMigrationRouteMatrix.new(position: @position).report
-      @auto_migration_decision = HedgeVenueAutoMigrationPlanner.new(route_matrix: @migration_route_matrix).plan(position: @position).receipt
-      @live_autopilot_readiness = MigrationLiveAutopilotReadiness.new(position: @position, route_matrix: @migration_route_matrix).report
+      @route_proof_cache = MigrationRouteProofCache.new(position: @position, source_dirs: cached_route_proof_source_dirs)
+      @random_rotation_virtual_state = timed_show_section("load_random_rotation_virtual_state_cached") { MigrationRandomRotationVirtualState.new(position: @position).current }
+      @migration_control_plan = timed_show_section("load_migration_control_plan_cached") { cached_migration_control_plan }
+      @migration_route_matrix = timed_show_section("load_route_proofs_cached") { @route_proof_cache.route_matrix }
+      @auto_migration_decision = cached_auto_migration_decision
+      @live_autopilot_readiness = cached_live_autopilot_readiness
       @production_health = auto_readiness_production_health(@current_auto_readiness)
-      random_setup_fallback = RandomRotationSetupWizard.degraded(position: @position, message: "Random readiness refresh needed; showing cached dashboard snapshot and route proof registry.")
-      @random_rotation_setup = safe_dashboard_section("random_rotation_setup", timeout_seconds: random_rotation_setup_timeout_seconds, fallback: random_setup_fallback) do
-        proof_registry = MigrationRouteProofRegistry.new
-        readiness = MigrationRandomReadiness.new(position: @position, proof_registry: proof_registry, dashboard_health: @production_health[:status]).report
-        RandomRotationSetupWizard.new(position: @position, readiness: readiness, proof_registry: proof_registry, route_matrix: @migration_route_matrix).report
+      @random_rotation_setup = safe_dashboard_section("load_random_rotation_setup_cached", timeout_seconds: random_rotation_setup_timeout_seconds, fallback: unavailable_random_rotation_setup_cached) do
+        @route_proof_cache.random_setup
       end
       @aerodrome_rebalance_history_status = safe_dashboard_section("rebalance_history_status", fallback: {}) do
         AerodromeRebalanceHistoryStatus.new(
@@ -571,6 +572,32 @@ class PositionsController < ApplicationController
   end
 
   private
+
+  def render(*args, &block)
+    if action_name == "show"
+      timed_show_section("render") { super }
+    else
+      super
+    end
+  end
+
+  def log_position_show_total
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+  ensure
+    elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
+    Rails.logger.info(
+      "[PositionsController#show] section=total position_id=#{@position&.id || params[:id]} " \
+      "duration_ms=#{elapsed_ms} orders_submitted=0 signatures_created=0"
+    )
+  end
+
+  def timed_show_section(name)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+  ensure
+    log_dashboard_section_duration(name, started)
+  end
 
   def load_position_for_migration
     Current.user.positions.includes(:dex, :hedge, :position_dashboard_snapshot).find(params[:id])
@@ -1100,8 +1127,7 @@ class PositionsController < ApplicationController
     path = files.last
     return nil unless path && File.file?(path)
 
-    line = File.readlines(path).reverse.find(&:present?)
-    line ? JSON.parse(line) : nil
+    BoundedJsonlTail.read(path, lines: 20).reverse.find(&:present?)
   rescue JSON::ParserError, SystemCallError
     nil
   end
@@ -1109,18 +1135,101 @@ class PositionsController < ApplicationController
   def latest_jsonl_receipt_for_position(position_id, *patterns)
     files = patterns.flat_map { |pattern| Dir.glob(Rails.root.join(pattern)) }.sort
     files.reverse_each do |path|
-      File.readlines(path).reverse_each do |line|
-        next if line.blank?
-
-        receipt = JSON.parse(line)
+      BoundedJsonlTail.read(path, lines: 200).reverse_each do |receipt|
         return receipt if receipt["position_id"].to_s == position_id.to_s
-      rescue JSON::ParserError
-        next
       end
     end
     nil
   rescue SystemCallError
     nil
+  end
+
+  def cached_auto_migration_decision
+    {
+      action: "auto_migration_decision_cached",
+      status: "cached",
+      decision: "unavailable",
+      blockers: [ "Auto migration decision is cached/lazy on position show. Run refresh/check task for current route decision." ],
+      orders_submitted: 0,
+      signatures_created: 0
+    }
+  end
+
+  def cached_live_autopilot_readiness
+    {
+      action: "live_autopilot_readiness_cached",
+      status: "cached",
+      live_migration_enabled: OperationalSettings.enabled?("MIGRATION_LIVE_ENABLED"),
+      live_autopilot_enabled: OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED"),
+      live_autopilot_blocked_routes: [],
+      nado_live_blockers: [ "Live autopilot readiness is cached/lazy on position show. Run refresh/check task for full route diagnostics." ],
+      orders_submitted: 0,
+      signatures_created: 0
+    }
+  end
+
+  def cached_route_proof_source_dirs
+    registry = MigrationRouteProofRegistry.new
+    [
+      registry.instance_variable_get(:@route_proof_dir),
+      registry.instance_variable_get(:@canary_dir),
+      *Array(registry.instance_variable_get(:@recovery_dirs)),
+      registry.instance_variable_get(:@continuation_dir),
+      registry.instance_variable_get(:@random_dir),
+      registry.instance_variable_get(:@latency_proof_dir)
+    ].compact
+  rescue
+    MigrationRouteProofCache::SOURCE_DIRS
+  end
+
+  def unavailable_random_rotation_setup_cached
+    routes = MigrationRouteProofRegistry::ROUTES.map do |from, to|
+      {
+        route: "#{from}->#{to}",
+        from_venue: from,
+        to_venue: to,
+        status: MigrationRouteProofRegistry::STATUSES[:not_started],
+        route_status: MigrationRouteProofRegistry::STATUSES[:not_started],
+        blockers: [ "Route proof cache unavailable. Run refresh/check task." ],
+        orders_submitted: 0,
+        orders_placed: 0,
+        signatures_created: 0
+      }
+    end
+    {
+      action: "random_rotation_setup",
+      position_id: @position&.id,
+      status: "unavailable",
+      status_label: "Route proof cache unavailable",
+      current_venue: HedgeVenues.normalize(@position&.hedge&.execution_venue),
+      current_venue_label: HedgeVenues.label(@position&.hedge&.execution_venue),
+      hedge_health: RandomRotationSetupWizard.hedge_health_for(@position),
+      venue_shorts: RandomRotationSetupWizard.venue_shorts_for(@position),
+      auto_states: {},
+      auto_policy: {},
+      migration_gates: {},
+      completed_route_proofs: [],
+      missing_route_proofs: routes,
+      stale_route_proofs: [],
+      route_proof_statuses: routes,
+      all_routes_ready: false,
+      setup_progress: {},
+      random_enablement: { ready_routes: 0, total_routes: routes.size, blockers: [ "Route proof cache unavailable. Run refresh/check task." ] },
+      next_missing_proof_route: routes.first,
+      next_executable_route: routes.first,
+      source_reposition_required: false,
+      next_route: routes.first,
+      next_action: "refresh",
+      next_action_label: "Refresh route proofs",
+      next_action_live: false,
+      required_confirmation_phrase: nil,
+      plan: {},
+      blockers: [ "Route proof cache unavailable. Run refresh/check task." ],
+      enable_blockers: [ "Route proof cache unavailable. Run refresh/check task." ],
+      limited_diagnostics: true,
+      fallback_used: true,
+      counters: { orders_submitted: 0, orders_placed: 0, signatures_created: 0, cancels_submitted: 0 }
+    }
   end
 
   def parse_decimal(value)
@@ -1395,6 +1504,7 @@ class PositionsController < ApplicationController
     when Hash
       fallback.deep_dup.tap do |copy|
         copy[:status] ||= "unavailable"
+        copy[:reason] = "timed_out" if warning.include?("timed out")
         copy[:warnings] = Array(copy[:warnings]) + [ warning ]
         copy[:blockers] = Array(copy[:blockers]) + [ warning ] if copy.key?(:blockers)
       end
@@ -1504,31 +1614,85 @@ class PositionsController < ApplicationController
   end
 
   def unavailable_random_production_runner_status
+    status_payload = cached_random_production_json("status")
+    lock_payload = cached_random_production_json("lock")
+    control_request = cached_random_production_json("control")
+    control_result = cached_random_production_json("control_result")
+    direct_preflight_blockers = Array(status_payload["direct_preflight_blockers"])
+    direct_preflight_blockers = [ "Production random runner status unavailable; refresh status." ] if direct_preflight_blockers.blank?
+    lock_stale = lock_payload.present? && !cached_process_alive?(lock_payload["pid"])
+
     {
-      status: "unknown",
+      status: lock_stale ? "stale lock" : "unavailable",
+      reason: "unavailable",
+      status_payload: status_payload,
       heartbeat: {},
-      lock: {},
-      lock_stale: false,
+      lock: lock_payload,
+      lock_stale: lock_stale,
+      host_control_available: false,
+      host_control_mode: "host bridge",
+      control_request: control_request,
+      control_result: control_result,
+      bridge_status: cached_bridge_status(control_request, control_result),
       latest_event: nil,
       tail_events: [],
       current_production_venue: nil,
       target_short_eth: nil,
       combined_short_eth: nil,
       inside_tolerance: nil,
-      direct_preflight_blockers: [ "Production random runner status unavailable; refresh status." ],
-      direct_open_orders: {},
-      direct_venue_shorts: {},
-      open_orders_zero: false,
+      direct_preflight_blockers: direct_preflight_blockers,
+      direct_open_orders: status_payload["direct_open_orders"] || {},
+      direct_venue_shorts: status_payload["direct_venue_shorts"] || {},
+      open_orders_zero: cached_open_orders_zero?(status_payload),
       route_proofs_summary: {},
       last_route: nil,
       last_cycle: nil,
       last_hold_check: nil,
       heartbeat_updated_at: nil,
-      lock_pid: nil,
+      lock_pid: lock_payload["pid"],
       gates_state: {},
       latest_blocker: "Production random runner status unavailable; refresh status.",
       dashboard_snapshot_diagnostic: {}
     }
+  end
+
+  def cached_random_production_json(prefix)
+    return {} unless @position
+
+    path = MigrationRandomProductionRunner::LOG_DIR.join("#{prefix}_position_#{@position.id}.json")
+    return {} unless File.file?(path)
+
+    JSON.parse(File.read(path))
+  rescue JSON::ParserError, SystemCallError
+    {}
+  end
+
+  def cached_process_alive?(value)
+    pid = value.to_i
+    return false unless pid.positive?
+
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  rescue Errno::EPERM
+    true
+  end
+
+  def cached_bridge_status(request, result)
+    return result["status"] == "failed" ? "failed" : "handled" if request.blank? && result.present?
+    return "unknown" if request.blank?
+    return "pending" if result.blank?
+    return "pending" if result["request_id"].present? && result["request_id"] != request["request_id"]
+    return "failed" if result["status"] == "failed"
+
+    "handled"
+  end
+
+  def cached_open_orders_zero?(status_payload)
+    return nil unless status_payload.key?("direct_open_orders")
+
+    HedgeVenues::SUPPORTED_KEYS.all? { |venue| status_payload.dig("direct_open_orders", venue, "status") == "zero" }
   end
 
   def unavailable_auto_rebalance_status(reason = "auto-rebalance diagnostics unavailable")
