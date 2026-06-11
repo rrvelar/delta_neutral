@@ -1,0 +1,106 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "json"
+require "open3"
+require "pathname"
+require "time"
+
+root = Pathname(ENV.fetch("DELTA_NEUTRAL_ROOT", Dir.pwd))
+position_id = (ENV["POSITION_ID"] || ARGV.first || "6").to_i
+log_dir = root.join("storage/random_rotation_production")
+control_path = log_dir.join("control_position_#{position_id}.json")
+result_path = log_dir.join("control_result_position_#{position_id}.json")
+production_service = ENV.fetch("RANDOM_PRODUCTION_SYSTEMD_SERVICE", "delta-neutral-random-production-#{position_id}.service")
+canary_service = ENV.fetch("RANDOM_PRODUCTION_CANARY_SYSTEMD_SERVICE", "delta-neutral-random-production-#{position_id}-canary.service")
+request = nil
+
+def write_result(path, payload)
+  FileUtils.mkdir_p(path.dirname)
+  tmp_path = path.sub_ext("#{path.extname}.#{Process.pid}.tmp")
+  File.write(tmp_path, JSON.pretty_generate(payload))
+  File.rename(tmp_path, path)
+end
+
+def run_systemctl(*args)
+  stdout, stderr, status = Open3.capture3("systemctl", *args)
+  {
+    command: [ "systemctl", *args ],
+    exit_status: status.exitstatus,
+    stdout: stdout.to_s[-4000, 4000].to_s,
+    stderr: stderr.to_s[-4000, 4000].to_s
+  }
+end
+
+begin
+  request = JSON.parse(File.read(control_path))
+  raise "position_id mismatch" unless request["position_id"].to_i == position_id
+
+  action = request["action"].to_s
+  mode = request["mode"].to_s
+  service =
+    case [ action, mode ]
+    when [ "start", "canary_24h" ]
+      canary_service
+    when [ "start", "production_24x7" ]
+      production_service
+    when [ "status", "" ], [ "status", "canary_24h" ], [ "status", "production_24x7" ]
+      mode == "canary_24h" ? canary_service : production_service
+    else
+      nil
+    end
+
+  runs =
+    if action == "stop"
+      [ run_systemctl("stop", canary_service), run_systemctl("stop", production_service) ]
+    elsif [ "start", "status" ].include?(action) && service
+      [ run_systemctl(action, service) ]
+    else
+      raise "unsupported control action or mode: action=#{action.inspect} mode=#{mode.inspect}"
+    end
+
+  status_runs = [ canary_service, production_service ].map { |name| [ name, run_systemctl("is-active", name) ] }.to_h
+  failed = runs.find { |run| run[:exit_status].to_i.nonzero? }
+  systemd_status = status_runs.transform_values do |run|
+    output = run[:stdout].strip
+    output = run[:stderr].strip if output.empty?
+    output.empty? ? "unknown" : output
+  end
+
+  write_result(
+    result_path,
+    {
+      status: failed ? "failed" : "success",
+      action: action,
+      mode: request["mode"],
+      position_id: position_id,
+      request_id: request["request_id"],
+      service: service || [ canary_service, production_service ].join(","),
+      handled_at: Time.now.utc.iso8601,
+      exit_status: failed ? failed[:exit_status] : 0,
+      stdout: runs.map { |run| run[:stdout] }.join("\n"),
+      stderr: runs.map { |run| run[:stderr] }.reject(&:empty?).join("\n"),
+      systemd_status: systemd_status
+    }
+  )
+  exit(failed ? 1 : 0)
+rescue => e
+  write_result(
+    result_path,
+    {
+      status: "failed",
+      action: request && request["action"],
+      mode: request && request["mode"],
+      position_id: position_id,
+      request_id: request && request["request_id"],
+      service: nil,
+      handled_at: Time.now.utc.iso8601,
+      exit_status: 1,
+      stdout: "",
+      stderr: "#{e.class}: #{e.message}"
+    }
+  )
+  warn "#{e.class}: #{e.message}"
+  exit 1
+end

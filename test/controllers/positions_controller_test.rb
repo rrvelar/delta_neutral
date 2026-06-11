@@ -816,6 +816,63 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match MigrationRandomProductionRunner::CONFIRMATION, flash[:notice]
   end
 
+  test "production random docker mode writes host bridge control request instead of failing" do
+    position = production_random_position
+    control = MigrationRandomProductionControl.new(control_mode: "bridge")
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "canary",
+        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+      }
+    end
+
+    payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_equal "start", payload["action"]
+    assert_equal "canary_24h", payload["mode"]
+    assert_equal true, payload["confirmation_present"]
+    assert_no_match MigrationRandomProductionRunner::CONFIRMATION, payload.to_json
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random 24h canary start writes canary bridge mode" do
+    position = production_random_position
+    control = MigrationRandomProductionControl.new(control_mode: "bridge")
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "canary",
+        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+      }
+    end
+
+    payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
+    assert_equal "start", payload["action"]
+    assert_equal "canary_24h", payload["mode"]
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random 24x7 start writes production bridge mode" do
+    position = production_random_position
+    control = MigrationRandomProductionControl.new(control_mode: "bridge")
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_start_position_path(position), params: {
+        production_runner_mode: "production",
+        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+      }
+    end
+
+    payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
+    assert_equal "start", payload["action"]
+    assert_equal "production_24x7", payload["mode"]
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
   test "production random stop safely calls production stop path" do
     position = production_random_position
     control = random_production_control_guard(ok: true)
@@ -827,6 +884,24 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
     assert_equal [ [ :stop, position.id ] ], control.calls
     assert_match "safe stop requested", flash[:notice]
+  end
+
+  test "production random stop writes bridge stop action and stop request" do
+    position = production_random_position
+    control = MigrationRandomProductionControl.new(control_mode: "bridge")
+
+    MigrationRandomProductionControl.stub(:new, -> { control }) do
+      post random_production_stop_position_path(position)
+    end
+
+    control_payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
+    stop_payload = JSON.parse(File.read(random_production_dir.join("stop_position_#{position.id}.json")))
+    assert_equal "stop", control_payload["action"]
+    assert_nil control_payload["mode"]
+    assert_equal "stop_requested", stop_payload["status"]
+    assert_equal position.id, stop_payload["position_id"]
+  ensure
+    clear_random_production_files(position&.id)
   end
 
   test "production random dashboard reads heartbeat status and tail json safely" do
@@ -850,6 +925,44 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "ethereal-&gt;nado", response.body
     assert_match "3600", response.body
     assert_match "Hold checks", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard renders host control result" do
+    position = production_random_position
+    write_random_production_files(position)
+    File.write(
+      random_production_dir.join("control_position_#{position.id}.json"),
+      JSON.pretty_generate({
+        action: "start",
+        mode: "canary_24h",
+        position_id: position.id,
+        requested_at: Time.current.utc.iso8601,
+        request_id: "request-1",
+        confirmation_present: true
+      })
+    )
+    File.write(
+      random_production_dir.join("control_result_position_#{position.id}.json"),
+      JSON.pretty_generate({
+        status: "success",
+        action: "start",
+        mode: "canary_24h",
+        position_id: position.id,
+        request_id: "request-1",
+        handled_at: Time.current.utc.iso8601,
+        systemd_status: { "delta-neutral-random-production-6-canary.service" => "active" }
+      })
+    )
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Control mode", response.body
+    assert_match "Bridge status", response.body
+    assert_match "handled", response.body
+    assert_match "canary_24h", response.body
   ensure
     clear_random_production_files(position&.id)
   end
@@ -909,7 +1022,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
   test "production random confirmation phrase is not persisted" do
     position = production_random_position
-    control = random_production_control_guard(ok: true)
+    control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
     MigrationRandomProductionControl.stub(:new, -> { control }) do
       post random_production_start_position_path(position), params: {
@@ -920,6 +1033,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_nil OperationalSetting.where("value LIKE ?", "%PRODUCTION_RANDOM_ROTATION%").first
     assert_no_match MigrationRandomProductionRunner::CONFIRMATION, flash[:notice].to_s
+    assert_no_match MigrationRandomProductionRunner::CONFIRMATION, File.read(random_production_dir.join("control_position_#{position.id}.json"))
+  ensure
+    clear_random_production_files(position&.id)
   end
 
   test "show omits Nado open orders unavailable reason when readback succeeded" do
@@ -4097,7 +4213,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
   def clear_random_production_files(position_id)
     return unless position_id
 
-    %w[heartbeat status latest lock stop].each do |prefix|
+    %w[heartbeat status latest lock stop control control_result].each do |prefix|
       suffix = prefix == "latest" ? "jsonl" : "json"
       FileUtils.rm_f(random_production_dir.join("#{prefix}_position_#{position_id}.#{suffix}"))
     end

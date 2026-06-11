@@ -12,6 +12,8 @@ class MigrationRandomProductionDashboard
     status = read_json(status_path)
     heartbeat = read_json(heartbeat_path)
     lock = read_json(lock_path)
+    control_request = read_json(control_path)
+    control_result = read_json(control_result_path)
     latest_events = latest_jsonl_events(tail_lines)
     latest_event = latest_events.last
     blockers = Array(status["blockers"]).presence || Array(latest_event&.fetch("blockers", nil))
@@ -22,6 +24,11 @@ class MigrationRandomProductionDashboard
       heartbeat: heartbeat,
       lock: lock,
       lock_stale: lock.present? && !process_alive?(lock["pid"]),
+      host_control_available: host_control_available?,
+      host_control_mode: host_control_mode,
+      control_request: control_request,
+      control_result: control_result,
+      bridge_status: bridge_status(control_request, control_result),
       latest_event: latest_event,
       tail_events: latest_events,
       current_production_venue: heartbeat["current_production_venue"] || direct[:production_venue],
@@ -49,6 +56,11 @@ class MigrationRandomProductionDashboard
       heartbeat: {},
       lock: {},
       lock_stale: false,
+      host_control_available: host_control_available?,
+      host_control_mode: host_control_mode,
+      control_request: read_json(control_path),
+      control_result: read_json(control_result_path),
+      bridge_status: "unknown",
       latest_event: nil,
       tail_events: [],
       current_production_venue: nil,
@@ -79,6 +91,23 @@ class MigrationRandomProductionDashboard
     return "stale lock" if lock.present? && !process_alive?(lock["pid"])
 
     status["status"].presence || heartbeat["status"].presence || "unknown"
+  end
+
+  def host_control_available?
+    MigrationRandomProductionControl.systemctl_available?
+  end
+
+  def host_control_mode
+    host_control_available? ? "direct systemd" : "host bridge"
+  end
+
+  def bridge_status(request, result)
+    return "unknown" if request.blank?
+    return "pending" if result.blank?
+    return "pending" if result["request_id"].present? && result["request_id"] != request["request_id"]
+    return "failed" if result["status"] == "failed"
+
+    "handled"
   end
 
   def direct_preflight
@@ -215,6 +244,14 @@ class MigrationRandomProductionDashboard
 
   def latest_path
     log_dir.join("latest_position_#{position.id}.jsonl")
+  end
+
+  def control_path
+    log_dir.join("control_position_#{position.id}.json")
+  end
+
+  def control_result_path
+    log_dir.join("control_result_position_#{position.id}.json")
   end
 
   def decimal(value)

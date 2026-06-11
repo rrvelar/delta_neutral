@@ -1,0 +1,11 @@
+[Unit]
+Description=Handle Delta Neutral random production control request for Position 6
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/delta_neutral
+Environment=DELTA_NEUTRAL_ROOT=/opt/delta_neutral
+Environment=POSITION_ID=6
+ExecStart=/opt/delta_neutral/bin/random_production_systemd_bridge 6

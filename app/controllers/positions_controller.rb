@@ -534,7 +534,7 @@ class PositionsController < ApplicationController
 
     result = random_production_control.start(position: position, mode: mode)
     level = result.ok ? :notice : :alert
-    message = result.ok ? "Production random runner #{mode == 'canary' ? '24h canary' : '24/7'} start submitted via systemd. No orders or signatures were created by the dashboard request." : "Production random runner start blocked: #{result.message}. No runner was started."
+    message = result.ok ? "Production random runner #{mode == 'canary' ? '24h canary' : '24/7'} start request submitted. No orders or signatures were created by the dashboard request." : "Production random runner start blocked: #{result.message}. No runner was started."
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
       flash: { level => message }
   end
@@ -543,7 +543,7 @@ class PositionsController < ApplicationController
     position = load_position_for_migration
     result = random_production_control.stop(position: position)
     level = result.ok ? :notice : :alert
-    message = result.ok ? "Production random runner safe stop requested. No orders, signatures, or cancels were created by the dashboard request." : "Production random runner stop requested, but systemd stop failed: #{result.message}"
+    message = result.ok ? "Production random runner safe stop requested. No orders, signatures, or cancels were created by the dashboard request." : "Production random runner stop request failed: #{result.message}"
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
       flash: { level => message }
   end

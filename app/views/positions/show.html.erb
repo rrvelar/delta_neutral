@@ -576,6 +576,18 @@ end %>
           <div><p class="text-xs text-gray-500">Latest blocker</p><p class="break-words text-white"><%= random_production[:latest_blocker].presence || "none" %></p></div>
         </div>
 
+        <% control_request = random_production[:control_request] || {} %>
+        <% control_result = random_production[:control_result] || {} %>
+        <% control_systemd_status = control_result["systemd_status"].is_a?(Hash) ? control_result["systemd_status"].map { |service, state| "#{service}: #{state}" }.join(", ") : control_result["systemd_status"] %>
+        <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div><p class="text-xs text-gray-500">Control mode</p><p class="text-white"><%= random_production[:host_control_mode].presence || "unknown" %></p></div>
+          <div><p class="text-xs text-gray-500">Host control</p><p class="<%= random_production[:host_control_available] ? 'text-green-300' : 'text-yellow-200' %>"><%= random_production[:host_control_available] ? "available" : "unavailable in container" %></p></div>
+          <div><p class="text-xs text-gray-500">Bridge status</p><p class="<%= random_production[:bridge_status] == 'failed' ? 'text-red-300' : (random_production[:bridge_status] == 'pending' ? 'text-yellow-200' : 'text-white') %>"><%= random_production[:bridge_status].presence || "unknown" %></p></div>
+          <div><p class="text-xs text-gray-500">Service status</p><p class="text-white"><%= control_systemd_status.presence || control_result["status"].presence || "unknown" %></p></div>
+          <div><p class="text-xs text-gray-500">Last control request</p><p class="break-words text-white"><%= [ control_request["action"], control_request["mode"], control_request["requested_at"] ].compact.join(" · ").presence || "none" %></p></div>
+          <div class="md:col-span-3"><p class="text-xs text-gray-500">Last control result</p><p class="break-words text-white"><%= [ control_result["status"], control_result["action"], control_result["mode"], control_result["handled_at"], control_result["stderr"].presence ].compact.join(" · ").presence || "none" %></p></div>
+        </div>
+
         <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
             <p class="text-xs uppercase tracking-wide text-gray-500">Direct venue shorts</p>

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Delta Neutral random production control requests for Position 6
+
+[Path]
+PathChanged=/opt/delta_neutral/storage/random_rotation_production/control_position_6.json
+Unit=delta-neutral-random-production-control-6.service
+
+[Install]
+WantedBy=multi-user.target
