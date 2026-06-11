@@ -21,7 +21,8 @@ class MigrationRandomBurnInRunner
                  rebalance_hold_interval_seconds: 300, rebalance_before_next_migration: true,
                  rebalance_only_if_outside_tolerance: true, rebalance_max_attempts_per_cycle: 2,
                  rebalance_readback_recheck_attempts: 4, rebalance_readback_recheck_interval_seconds: 5,
-                 active_rebalance_factory: nil)
+                 active_rebalance_factory: nil, event_callback: nil, stop_requested: nil,
+                 hold_monitor_warning_grace_seconds: 5)
     @position = position
     @duration_minutes = duration_minutes.to_i
     @interval_seconds = interval_seconds.to_i
@@ -55,6 +56,9 @@ class MigrationRandomBurnInRunner
     @rebalance_readback_recheck_attempts = rebalance_readback_recheck_attempts.to_i
     @rebalance_readback_recheck_interval_seconds = rebalance_readback_recheck_interval_seconds.to_i
     @active_rebalance_factory = active_rebalance_factory
+    @event_callback = event_callback
+    @stop_requested = stop_requested
+    @hold_monitor_warning_grace_seconds = hold_monitor_warning_grace_seconds.to_i
     @orders_submitted = 0
     @orders_placed = 0
     @signatures_created = 0
@@ -96,16 +100,21 @@ class MigrationRandomBurnInRunner
     normalize_gates_before_start if live?
     write_event(event: "burn_in_started", status: live? ? "live" : "dry_run", position_id: position.id, duration_minutes: duration_minutes, interval_seconds: interval_seconds, max_cycles: max_cycles, log_path: receipt_path.to_s, pre_start_rebalance: pre_start_rebalance || unchecked_rebalance_payload("pre_start"))
 
-    deadline = started_at + duration_minutes.minutes
+    deadline = duration_minutes.positive? ? started_at + duration_minutes.minutes : nil
     status = "success"
     blockers = []
-    while cycles_attempted < max_cycles && now.call < deadline
+    while cycles_attempted < max_cycles && !deadline_reached?(deadline)
+      if stop_requested?
+        status = "stopped"
+        blockers = [ "stop requested" ]
+        break
+      end
       cycle_result = run_cycle(cycles_attempted + 1, deadline: deadline)
       blockers = Array(cycle_result[:blockers])
       status = cycle_result[:status] == "success" ? "success" : burn_in_status_for_cycle(cycle_result[:status])
       self.last_blocker_status = cycle_result[:status] unless cycle_result[:status] == "success"
       break unless cycle_result[:status] == "success"
-      break if cycles_attempted >= max_cycles || now.call >= deadline
+      break if cycles_attempted >= max_cycles || deadline_reached?(deadline) || stop_requested?
 
       sleeper.call(interval_seconds) if interval_seconds.positive? && !cycle_result[:hold_monitored]
     end
@@ -130,7 +139,8 @@ class MigrationRandomBurnInRunner
     :rebalance_after_migration, :rebalance_during_hold, :rebalance_hold_interval_seconds,
     :rebalance_before_next_migration, :rebalance_only_if_outside_tolerance,
     :rebalance_max_attempts_per_cycle, :rebalance_readback_recheck_attempts,
-    :rebalance_readback_recheck_interval_seconds, :active_rebalance_factory
+    :rebalance_readback_recheck_interval_seconds, :active_rebalance_factory,
+    :event_callback, :stop_requested, :hold_monitor_warning_grace_seconds
   attr_accessor :orders_submitted, :orders_placed, :signatures_created, :cycles_attempted, :cycles_succeeded,
     :initial_target_short_eth, :final_target_short_eth, :max_target_delta_eth, :target_refresh_failures,
     :last_readiness_report, :snapshot_refresh_status, :snapshot_accepted_for_burn_in, :snapshot_warnings,
@@ -139,6 +149,14 @@ class MigrationRandomBurnInRunner
 
   def live?
     @live
+  end
+
+  def deadline_reached?(deadline)
+    deadline && now.call >= deadline
+  end
+
+  def stop_requested?
+    stop_requested&.call == true
   end
 
   def prepare_log!
@@ -512,10 +530,12 @@ class MigrationRandomBurnInRunner
     checks = []
     check_times = []
     started_at = now.call
-    target_at = [ started_at + interval_seconds.seconds, deadline ].min
+    target_at = [ started_at + interval_seconds.seconds, deadline ].compact.min
     next_check_at = started_at + rebalance_hold_interval_seconds.seconds
-    while next_check_at <= target_at && now.call < deadline
+    while next_check_at <= target_at && !deadline_reached?(deadline) && !stop_requested?
       sleep_until(next_check_at)
+      break if stop_requested?
+
       check = run_active_rebalance(reason: "hold_monitor")
       check_times << now.call
       accumulate_rebalance_counts(check)
@@ -524,7 +544,7 @@ class MigrationRandomBurnInRunner
 
       next_check_at += rebalance_hold_interval_seconds.seconds
     end
-    sleep_until(target_at) if checks.none? { |check| Array(check[:blockers]).any? }
+    sleep_until(target_at) if checks.none? { |check| Array(check[:blockers]).any? } && !stop_requested?
     finished_at = now.call
 
     hold_rebalance_payload(
@@ -580,14 +600,14 @@ class MigrationRandomBurnInRunner
     return nil if checks.any? { |check| Array(check[:blockers]).any? }
     return nil if expected_checks.zero?
     return "hold monitor ran #{checks.size} checks; expected #{expected_checks}" unless checks.size == expected_checks
-    return nil if expected_span.zero? || actual_span >= expected_span
+    return nil if expected_span.zero? || actual_span >= expected_span - hold_monitor_warning_grace_seconds
 
     "hold monitor covered #{actual_span}s; expected at least #{expected_span}s"
   end
 
   def sleep_until(target_time)
     remaining = target_time - now.call
-    sleeper.call(remaining) if remaining.positive?
+    sleeper.call(remaining) if remaining.positive? && !stop_requested?
   end
 
   def accumulate_rebalance_counts(payload)
@@ -1032,6 +1052,7 @@ class MigrationRandomBurnInRunner
     File.open(receipt_path, "a") { |file| file.puts(JSON.generate(event)) }
     stdout.puts("#{event.fetch(:event)} #{event.fetch(:status, 'ok')} #{event[:route]}".strip)
     update_latest!
+    event_callback&.call(event)
   end
 
   def update_latest!

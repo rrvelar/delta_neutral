@@ -15,12 +15,14 @@ class ExtendedAutoRebalanceOnce
     @anti_churn_policy = anti_churn_policy || ExtendedAutoAntiChurnPolicy.new(env: env, now: now)
   end
 
-  def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil)
-    return run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth) if dry_run || one_shot
+  def run(position:, dry_run: true, confirmation: nil, max_slippage: "0.01", one_shot: true, mode: nil, probe: false, max_size_eth: nil, scoped_active_venue_rebalance: false)
+    if dry_run || one_shot
+      return run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth, scoped_active_venue_rebalance: scoped_active_venue_rebalance)
+    end
 
     result = nil
     ran = JobConcurrencyGuard.with_lock("extended_auto:position:#{position.id}") do
-      result = run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth)
+      result = run_unlocked(position: position, dry_run: dry_run, confirmation: confirmation, max_slippage: max_slippage, one_shot: one_shot, mode: mode, probe: probe, max_size_eth: max_size_eth, scoped_active_venue_rebalance: scoped_active_venue_rebalance)
     end
     return result if ran
 
@@ -46,7 +48,7 @@ class ExtendedAutoRebalanceOnce
 
   private
 
-  def run_unlocked(position:, dry_run:, confirmation:, max_slippage:, one_shot:, mode:, probe:, max_size_eth:)
+  def run_unlocked(position:, dry_run:, confirmation:, max_slippage:, one_shot:, mode:, probe:, max_size_eth:, scoped_active_venue_rebalance:)
     current_position = @venue.read_position(symbol: "ETH")
     account_state = @venue.account_state
     signer_health = signer_health_for_diagnostics
@@ -56,7 +58,8 @@ class ExtendedAutoRebalanceOnce
       max_slippage: max_slippage,
       probe_mode: probe_mode?(mode: mode, probe: probe),
       max_size_eth: max_size_eth,
-      one_shot: one_shot
+      one_shot: one_shot,
+      scoped_active_venue_rebalance: scoped_active_venue_rebalance
     )
     conflict_state = conflict_state_for(position: position, dry_run: dry_run)
     blockers = readiness_blockers(
@@ -122,7 +125,7 @@ class ExtendedAutoRebalanceOnce
     )
   end
 
-  def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:, one_shot:)
+  def build_plan(position:, current_position:, max_slippage:, probe_mode:, max_size_eth:, one_shot:, scoped_active_venue_rebalance:)
     fresh_target = @fresh_target_factory.call(position).resolve(refresh_if_stale: true)
     target = fresh_target[:target_short_eth]
     current_short = short_size(current_position)
@@ -183,10 +186,11 @@ class ExtendedAutoRebalanceOnce
       partial_probe: probe_mode && cap_exceeded == true,
       partial_auto_rebalance: partial_auto,
       migration_mode: migration_mode?,
+      scoped_active_venue_rebalance: scoped_active_venue_rebalance,
       auto_partial_allowed: auto_partial_allowed?,
       intended_order: preview&.fetch(:payload, nil),
       order_validation_blockers: Array(preview&.dig(:payload, :validation_blockers)),
-      preview_blockers: preview&.fetch(:blockers, []) || []
+      preview_blockers: preview_blockers(preview, scoped_active_venue_rebalance: scoped_active_venue_rebalance)
     }
   end
 
@@ -276,6 +280,7 @@ class ExtendedAutoRebalanceOnce
       partial_probe: plan[:partial_probe],
       partial_auto_rebalance: plan[:partial_auto_rebalance],
       migration_mode: plan[:migration_mode],
+      scoped_active_venue_rebalance: plan[:scoped_active_venue_rebalance],
       selected_hedge_venue: position.hedge&.execution_venue,
       intended_order: plan[:intended_order],
       readiness_gates: {
@@ -330,6 +335,13 @@ class ExtendedAutoRebalanceOnce
     else
       @venue.rebalance_preview(symbol: "ETH", delta_eth: BigDecimal("0"), max_slippage: max_slippage)
     end
+  end
+
+  def preview_blockers(preview, scoped_active_venue_rebalance:)
+    blockers = preview&.fetch(:blockers, []) || []
+    return blockers unless scoped_active_venue_rebalance
+
+    blockers.reject { |blocker| blocker.to_s == "Extended auto-rebalance disabled." }
   end
 
   def order_size_for(action:, delta:)

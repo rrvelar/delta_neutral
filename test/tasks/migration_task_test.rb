@@ -16,6 +16,10 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:route_proofs"].reenable if Rake::Task.task_defined?("migration:route_proofs")
     Rake::Task["migration:random_readiness"].reenable if Rake::Task.task_defined?("migration:random_readiness")
     Rake::Task["migration:random_rehearse"].reenable if Rake::Task.task_defined?("migration:random_rehearse")
+    Rake::Task["migration:random_production_runner"].reenable if Rake::Task.task_defined?("migration:random_production_runner")
+    Rake::Task["migration:random_production_status"].reenable if Rake::Task.task_defined?("migration:random_production_status")
+    Rake::Task["migration:random_production_tail"].reenable if Rake::Task.task_defined?("migration:random_production_tail")
+    Rake::Task["migration:random_production_stop"].reenable if Rake::Task.task_defined?("migration:random_production_stop")
     Rake::Task["migration:canary_ladder"].reenable if Rake::Task.task_defined?("migration:canary_ladder")
     Rake::Task["migration:next_canary"].reenable if Rake::Task.task_defined?("migration:next_canary")
     Rake::Task["migration:rehearse_next_canary"].reenable if Rake::Task.task_defined?("migration:rehearse_next_canary")
@@ -27,6 +31,13 @@ class MigrationTaskTest < ActiveSupport::TestCase
     Rake::Task["migration:route_policy_list"].reenable if Rake::Task.task_defined?("migration:route_policy_list")
     Rake::Task["migration:route_policy_restore_defaults"].reenable if Rake::Task.task_defined?("migration:route_policy_restore_defaults")
     Rake::Task["migration:route_policy_set"].reenable if Rake::Task.task_defined?("migration:route_policy_set")
+  end
+
+  test "random production runner task names are registered" do
+    assert Rake::Task.task_defined?("migration:random_production_runner")
+    assert Rake::Task.task_defined?("migration:random_production_status")
+    assert Rake::Task.task_defined?("migration:random_production_tail")
+    assert Rake::Task.task_defined?("migration:random_production_stop")
   end
 
   test "prove routes task writes JSONL proof receipts" do

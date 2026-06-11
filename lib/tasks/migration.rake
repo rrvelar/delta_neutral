@@ -279,6 +279,60 @@ namespace :migration do
     puts File.readlines(path).last(lines).join
   end
 
+  desc "Run 24/7 production random rotation using the proven random burn-in path"
+  task random_production_runner: :environment do
+    position = migration_position_from_env(action: "migration_random_production_runner")
+    next unless position
+
+    result = MigrationRandomProductionRunner.new(
+      position: position,
+      live: ENV.fetch("live", ENV.fetch("LIVE", "true")),
+      confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
+      duration_minutes: ENV.fetch("duration_minutes", ENV.fetch("DURATION_MINUTES", "0")),
+      interval_seconds: ENV.fetch("interval_seconds", ENV.fetch("INTERVAL_SECONDS", "3900")),
+      rebalance_hold_interval_seconds: ENV.fetch("rebalance_hold_interval_seconds", ENV.fetch("REBALANCE_HOLD_INTERVAL_SECONDS", "300")),
+      rebalance_after_migration: ENV.fetch("rebalance_after_migration", ENV.fetch("REBALANCE_AFTER_MIGRATION", "true")),
+      rebalance_during_hold: ENV.fetch("rebalance_during_hold", ENV.fetch("REBALANCE_DURING_HOLD", "true")),
+      rebalance_before_next_migration: ENV.fetch("rebalance_before_next_migration", ENV.fetch("REBALANCE_BEFORE_NEXT_MIGRATION", "true")),
+      rebalance_only_if_outside_tolerance: ENV.fetch("rebalance_only_if_outside_tolerance", ENV.fetch("REBALANCE_ONLY_IF_OUTSIDE_TOLERANCE", "true")),
+      rebalance_readback_recheck_attempts: ENV.fetch("rebalance_readback_recheck_attempts", ENV.fetch("REBALANCE_READBACK_RECHECK_ATTEMPTS", "4")),
+      rebalance_readback_recheck_interval_seconds: ENV.fetch("rebalance_readback_recheck_interval_seconds", ENV.fetch("REBALANCE_READBACK_RECHECK_INTERVAL_SECONDS", "5"))
+    ).run
+    puts JSON.pretty_generate(result.summary.merge(action: "migration_random_production_runner", receipt_path: result.receipt_path))
+    abort("migration_random_production_runner #{result.status}") unless result.status == "success"
+  end
+
+  desc "Show production random rotation runner status for a position"
+  task random_production_status: :environment do
+    position = migration_position_from_env(action: "migration_random_production_status")
+    next unless position
+
+    puts JSON.pretty_generate(MigrationRandomProductionRunner.new(position: position, live: false).status.merge(action: "migration_random_production_status"))
+  end
+
+  desc "Print the latest production random rotation JSONL log"
+  task random_production_tail: :environment do
+    position = migration_position_from_env(action: "migration_random_production_tail")
+    next unless position
+
+    path = MigrationRandomProductionRunner::LOG_DIR.join("latest_position_#{position.id}.jsonl")
+    lines = (ENV["lines"].presence || ENV["LINES"].presence || 300).to_i
+    unless File.exist?(path)
+      puts JSON.pretty_generate(action: "migration_random_production_tail", position_id: position.id, status: "missing", log_path: path.to_s)
+      next
+    end
+    puts File.readlines(path).last(lines).join
+  end
+
+  desc "Request safe stop for production random rotation runner"
+  task random_production_stop: :environment do
+    position = migration_position_from_env(action: "migration_random_production_stop")
+    next unless position
+
+    payload = MigrationRandomProductionRunner.new(position: position, live: false).stop!
+    puts JSON.pretty_generate(payload.merge(action: "migration_random_production_stop"))
+  end
+
   desc "Run active-venue one-shot rebalance watchdog; dry-run by default"
   task active_venue_rebalance_watchdog: :environment do
     position = migration_position_from_env(action: "active_venue_rebalance_watchdog")
