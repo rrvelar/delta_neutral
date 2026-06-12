@@ -556,7 +556,7 @@ end %>
           <div>
             <p class="text-xs uppercase tracking-wide text-gray-500">Production Random Runner</p>
             <h3 class="mt-1 text-base font-semibold text-white">24/7 random rotation control</h3>
-            <p class="mt-1 text-xs text-gray-400">Dashboard controls submit systemd start/stop requests only. The web request does not run the production loop.</p>
+            <p class="mt-1 text-xs text-gray-400">Dashboard controls submit systemd start/stop requests only. The web request does not run the production loop. Policy: 3 migrations/day with 5-minute hold checks.</p>
           </div>
           <span class="rounded-full border <%= random_production_status == 'running' ? 'border-green-800 bg-green-950/60 text-green-300' : (random_production_status.in?([ 'blocked', 'stale lock' ]) ? 'border-red-800 bg-red-950/50 text-red-100' : 'border-gray-700 bg-gray-900 text-gray-300') %> px-3 py-1 text-xs font-semibold"><%= random_production_status %></span>
         </div>
@@ -572,7 +572,9 @@ end %>
           <div><p class="text-xs text-gray-500">Heartbeat</p><p class="text-white"><%= random_production[:heartbeat_updated_at].presence || "none" %></p></div>
           <div><p class="text-xs text-gray-500">Lock pid</p><p class="text-white"><%= random_production[:lock_pid].presence || "none" %></p></div>
           <div><p class="text-xs text-gray-500">Open orders zero</p><p class="<%= random_production[:open_orders_zero] ? 'text-green-300' : 'text-red-300' %>"><%= random_production[:open_orders_zero] ? "true" : "false" %></p></div>
-          <div><p class="text-xs text-gray-500">Route proofs</p><p class="text-white">ready <%= random_production.dig(:route_proofs_summary, :ready) || 0 %> / total <%= random_production.dig(:route_proofs_summary, :total) || 0 %></p></div>
+          <% route_summary = random_production[:route_proofs_summary] || {} %>
+          <div><p class="text-xs text-gray-500">Route proofs</p><p class="text-white"><%= route_summary[:missing_cache] || route_summary["missing_cache"] ? "cache missing" : "ready #{route_summary[:ready] || route_summary['ready']} / total #{route_summary[:total] || route_summary['total']} · missing #{route_summary[:missing] || route_summary['missing'] || 0} · stale #{route_summary[:stale] || route_summary['stale'] || 0}" %></p></div>
+          <div><p class="text-xs text-gray-500">Migration policy</p><p class="text-white">3/day · interval 28800s · hold check 300s</p></div>
           <div><p class="text-xs text-gray-500">Latest blocker</p><p class="break-words text-white"><%= random_production[:latest_blocker].presence || "none" %></p></div>
         </div>
 

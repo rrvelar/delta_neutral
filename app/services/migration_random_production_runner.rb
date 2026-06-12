@@ -1,6 +1,8 @@
 class MigrationRandomProductionRunner
   CONFIRMATION = "I_UNDERSTAND_THIS_RUNS_PRODUCTION_RANDOM_ROTATION".freeze
   LOG_DIR = Rails.root.join("storage/random_rotation_production")
+  DEFAULT_INTERVAL_SECONDS = 28_800
+  DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS = 300
   ACTIVE_RUNNERS = %w[
     random_production_runner
     random_burn_in
@@ -15,8 +17,8 @@ class MigrationRandomProductionRunner
 
   Result = Data.define(:status, :blockers, :warnings, :receipt_path, :summary)
 
-  def initialize(position:, live: true, confirmation: nil, duration_minutes: 0, interval_seconds: 3900,
-                 rebalance_hold_interval_seconds: 300, rebalance_after_migration: true,
+  def initialize(position:, live: true, confirmation: nil, duration_minutes: 0, interval_seconds: DEFAULT_INTERVAL_SECONDS,
+                 rebalance_hold_interval_seconds: DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS, rebalance_after_migration: true,
                  rebalance_during_hold: true, rebalance_before_next_migration: true,
                  rebalance_only_if_outside_tolerance: true, rebalance_readback_recheck_attempts: 4,
                  rebalance_readback_recheck_interval_seconds: 5, max_cycles: nil,
@@ -64,43 +66,74 @@ class MigrationRandomProductionRunner
     write_heartbeat(status: "running")
     burn_in_result = nil
     begin
+      if stop_requested?
+        write_status(status: "stopped", blockers: [ "stop requested" ])
+        return result("stopped", [ "stop requested" ])
+      end
       burn_in_result = build_burn_in_runner.run
       write_status(status: burn_in_result.status, blockers: burn_in_result.blockers, summary: burn_in_result.summary)
       result(burn_in_result.status, burn_in_result.blockers, burn_in_result.summary)
     ensure
       disable_runtime_gates
       write_final_event(status: burn_in_result&.status || "stopped")
-      write_heartbeat(status: burn_in_result&.status || "stopped")
+      write_heartbeat(status: burn_in_result&.status || "stopped", pid_value: nil)
       clear_lock!
+      write_status(status: burn_in_result&.status || "stopped", blockers: burn_in_result&.blockers || [ "stop requested" ], summary: burn_in_result&.summary)
     end
   rescue SignalException => e
     disable_runtime_gates
+    clear_lock!
+    write_heartbeat(status: "stopped", pid_value: nil)
     write_status(status: "stopped", blockers: [ "#{e.class}: #{e.message}" ])
     result("stopped", [ "#{e.class}: #{e.message}" ])
   rescue => e
     disable_runtime_gates
+    clear_lock!
+    write_heartbeat(status: "failed", pid_value: nil)
     write_status(status: "failed", blockers: [ "#{e.class}: #{e.message}" ])
     result("failed", [ "#{e.class}: #{e.message}" ])
   end
 
   def status
+    direct = direct_report
+    direct_open_orders_payload = direct_open_orders(direct)
+    direct_venue_shorts_payload = direct_venue_shorts(direct)
+    active_venues = active_short_venues(direct)
+    process_running = lock_running?
+    orphan_process = duplicate_runner_process_running?(ignore_pid: lock_payload["pid"])
+    stale_lock = lock_stale?
+    stale_heartbeat = heartbeat_payload["status"] == "running" && !process_running && !orphan_process
+    latest = latest_event_from_log
+    effective_status = production_status(
+      direct: direct,
+      active_venues: active_venues,
+      process_running: process_running,
+      orphan_process: orphan_process,
+      stale_lock: stale_lock,
+      stale_heartbeat: stale_heartbeat,
+      latest: latest
+    )
     {
       runner: "random_production_runner",
       position_id: position.id,
-      status: status_payload.fetch("status", lock_running? ? "running" : "stopped"),
+      status: effective_status,
       pid: lock_payload["pid"],
       lock: lock_payload.presence,
-      lock_stale: lock_stale?,
-      latest_event: latest_event_from_log,
+      lock_stale: stale_lock,
+      latest_event: latest,
       last_heartbeat: heartbeat_payload.presence,
-      current_production_venue: heartbeat_payload["current_production_venue"] || direct_report[:production_venue],
-      direct_open_orders: direct_open_orders(direct_report),
-      direct_venue_shorts: direct_venue_shorts(direct_report),
-      inside_tolerance: direct_report[:inside_tolerance] == true,
+      current_production_venue: heartbeat_payload["current_production_venue"] || direct[:production_venue],
+      direct_open_orders: direct_open_orders_payload,
+      direct_venue_shorts: direct_venue_shorts_payload,
+      active_short_venues: active_venues,
+      inside_tolerance: direct[:inside_tolerance] == true,
       last_route: heartbeat_payload["last_route"],
       last_cycle: heartbeat_payload["last_cycle"],
       last_hold_check: heartbeat_payload["last_hold_check_at"],
       gates_state: gates_state,
+      duplicate_runner_process: orphan_process,
+      stale_heartbeat: stale_heartbeat,
+      blockers: status_blockers(effective_status, direct, active_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }
   end
@@ -139,6 +172,7 @@ class MigrationRandomProductionRunner
   def start_blockers
     blockers = []
     blockers << "confirmation must equal #{CONFIRMATION}" if live? && confirmation != CONFIRMATION
+    blockers << "duplicate_runner_process" if duplicate_runner_process_running?
     blockers.concat(active_lock_blockers)
     blockers.concat(restart_safety_blockers)
     blockers.uniq
@@ -159,7 +193,8 @@ class MigrationRandomProductionRunner
     report = direct_report
     blockers = []
     blockers << "direct preflight open orders are nonzero or unknown" unless direct_open_orders_zero?(report)
-    blockers << "direct preflight must show exactly one active venue exposure" unless active_short_venues(report).size == 1
+    blockers << multiple_exposure_blocker(report) if active_short_venues(report).size > 1
+    blockers << "direct preflight must show exactly one active venue exposure" if active_short_venues(report).empty?
     unless report[:inside_tolerance] == true || Array(report[:blockers]).all? { |blocker| rebalance_trigger_blocker?(blocker) }
       blockers.concat(Array(report[:blockers]))
     end
@@ -213,12 +248,12 @@ class MigrationRandomProductionRunner
     write_status(status: "running")
   end
 
-  def write_heartbeat(status:)
+  def write_heartbeat(status:, pid_value: pid)
     report = direct_report
     payload = {
       runner: "random_production_runner",
       position_id: position.id,
-      pid: pid,
+      pid: pid_value,
       started_at: started_at.utc.iso8601,
       updated_at: now.call.utc.iso8601,
       last_cycle: last_cycle,
@@ -253,6 +288,8 @@ class MigrationRandomProductionRunner
       direct_open_orders: direct_open_orders(direct),
       direct_venue_shorts: direct_venue_shorts(direct),
       inside_tolerance: direct[:inside_tolerance] == true,
+      proof_report: proof_report_payload(direct[:proof_report]),
+      route_proofs_summary: route_proofs_summary(direct[:proof_report]),
       gates_state: gates_state,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.compact
@@ -325,6 +362,13 @@ class MigrationRandomProductionRunner
       HedgeVenues::SUPPORTED_KEYS.select { |venue| decimal(report.dig(:venues, venue, :short_eth)).positive? }
   end
 
+  def multiple_exposure_blocker(report)
+    venues = active_short_venues(report).map do |venue|
+      "#{venue}=#{decimal_string(report.dig(:venues, venue, :short_eth))}"
+    end
+    "unsafe_multiple_exposure: #{venues.join(', ')}"
+  end
+
   def direct_open_orders_zero?(report)
     HedgeVenues::SUPPORTED_KEYS.all? { |venue| report.dig(:venues, venue, :open_orders_status) == "zero" }
   end
@@ -338,6 +382,32 @@ class MigrationRandomProductionRunner
 
   def direct_venue_shorts(report)
     HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, decimal_string(report.dig(:venues, venue, :short_eth)) ] }
+  end
+
+  def proof_report_payload(proof_report)
+    return nil unless proof_report
+
+    {
+      routes: Array(proof_report[:routes]),
+      completed_route_proofs: Array(proof_report[:completed_route_proofs]),
+      missing_route_proofs: Array(proof_report[:missing_route_proofs]),
+      stale_route_proofs: Array(proof_report[:stale_route_proofs])
+    }
+  end
+
+  def route_proofs_summary(proof_report)
+    return nil unless proof_report
+
+    routes = Array(proof_report[:routes])
+    completed = Array(proof_report[:completed_route_proofs])
+    missing = Array(proof_report[:missing_route_proofs])
+    stale = Array(proof_report[:stale_route_proofs])
+    {
+      ready: completed.size,
+      missing: missing.size,
+      stale: stale.size,
+      total: routes.size
+    }
   end
 
   def dashboard_snapshot_diagnostic
@@ -374,6 +444,53 @@ class MigrationRandomProductionRunner
     payload.present? && !process_alive?(payload["pid"])
   end
 
+  def production_status(direct:, active_venues:, process_running:, orphan_process:, stale_lock:, stale_heartbeat:, latest:)
+    return "unsafe_multiple_exposure" if active_venues.size > 1
+    return "orphan_process_running" if orphan_process
+    return "running" if process_running && heartbeat_payload["status"] == "running"
+    return "unsafe_gates_left_enabled" if gates_state.values.any? && !process_running
+    return "stale_lock" if stale_lock
+    return "stale_heartbeat" if stale_heartbeat
+    return "stopped" if latest&.fetch("status", nil) == "stopped"
+    return "success" if latest&.fetch("status", nil) == "success"
+    return "blocked" if Array(direct[:blockers]).any?
+
+    status_payload["status"].presence || "stopped"
+  end
+
+  def status_blockers(status, direct, active_venues)
+    case status
+    when "unsafe_multiple_exposure"
+      [ multiple_exposure_blocker(direct) ]
+    when "orphan_process_running"
+      [ "runner process exists but lock is missing" ]
+    when "unsafe_gates_left_enabled"
+      [ "migration gates are enabled but no runner process is alive" ]
+    when "stale_lock"
+      [ "lock points to a dead process" ]
+    when "stale_heartbeat"
+      [ "heartbeat says running but process/lock are absent" ]
+    else
+      Array(direct[:blockers])
+    end
+  end
+
+  def duplicate_runner_process_running?(ignore_pid: nil)
+    runner_process_lines(ignore_pid: ignore_pid).any?
+  end
+
+  def runner_process_lines(ignore_pid: nil)
+    output = `ps -eo pid=,command= 2>/dev/null`
+    output.lines.select do |line|
+      current_pid, command = line.strip.split(/\s+/, 2)
+      current_pid.to_i != Process.pid &&
+        current_pid.to_i != ignore_pid.to_i &&
+        command.to_s.match?(/migration:(random_production_runner|random_burn_in|random_rotation_daily_runner)/)
+    end
+  rescue
+    []
+  end
+
   def process_alive?(value)
     process_pid = value.to_i
     return false unless process_pid.positive?
@@ -399,9 +516,7 @@ class MigrationRandomProductionRunner
   end
 
   def latest_event_from_log
-    return nil unless File.exist?(latest_path)
-
-    File.readlines(latest_path).reverse_each.filter_map { |line| JSON.parse(line) rescue nil }.first
+    BoundedJsonlTail.read(latest_path, lines: 20).reverse.find(&:present?)
   end
 
   def read_json(path)

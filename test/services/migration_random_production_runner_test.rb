@@ -34,7 +34,7 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
       assert_equal "success", result.status
     end
 
-    assert_equal 3900, captured.fetch(:interval_seconds)
+    assert_equal 28_800, captured.fetch(:interval_seconds)
     assert_equal 300, captured.fetch(:rebalance_hold_interval_seconds)
     assert_equal true, captured.fetch(:rebalance_after_migration)
     assert_equal true, captured.fetch(:rebalance_during_hold)
@@ -177,7 +177,59 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     result = runner(position: position, log_dir: dir, preflight_factory: multiple_exposure_preflight_factory).run
 
     assert_equal "blocked", result.status
-    assert_includes result.blockers, "direct preflight must show exactly one active venue exposure"
+    assert_match "unsafe_multiple_exposure", result.blockers.join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "duplicate runner process blocks start even when lock is missing" do
+    position = migration_position
+    dir = tmp_dir
+    service = runner(position: position, log_dir: dir)
+
+    service.stub(:duplicate_runner_process_running?, true) do
+      result = service.run
+      assert_equal "blocked", result.status
+      assert_includes result.blockers, "duplicate_runner_process"
+    end
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status does not report stale heartbeat as running" do
+    position = migration_position
+    dir = tmp_dir
+    service = runner(position: position, log_dir: dir)
+    FileUtils.mkdir_p(dir)
+    File.write(dir.join("heartbeat_position_#{position.id}.json"), JSON.generate(status: "running", pid: 99_999_999))
+
+    assert_equal "stale_heartbeat", service.status.fetch(:status)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status reports gates true with no process as unsafe" do
+    OperationalSettings.set!(key: "MIGRATION_LIVE_ENABLED", enabled: true)
+    position = migration_position
+    dir = tmp_dir
+    service = runner(position: position, log_dir: dir)
+
+    assert_equal "unsafe_gates_left_enabled", service.status.fetch(:status)
+  ensure
+    OperationalSettings.set!(key: "MIGRATION_LIVE_ENABLED", enabled: false)
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status reports multiple venue exposure as unsafe" do
+    position = migration_position
+    dir = tmp_dir
+    service = runner(position: position, log_dir: dir, preflight_factory: multiple_exposure_preflight_factory)
+
+    status = service.status
+
+    assert_equal "unsafe_multiple_exposure", status.fetch(:status)
+    assert_match "ethereal=1.12", status.fetch(:blockers).join(" ")
+    assert_match "nado=1.0", status.fetch(:blockers).join(" ")
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -228,6 +280,22 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.summary.fetch(:signatures_created)
   ensure
     FileUtils.rm_rf(dir) if dir
+  end
+
+  test "daily venue coverage prefers next venue before repeating" do
+    position = migration_position
+    runner = MigrationRandomBurnInRunner.new(
+      position: position,
+      duration_minutes: 1,
+      interval_seconds: 28_800,
+      max_cycles: 1,
+      live: false,
+      proof_registry: CoverageProofRegistry.new
+    )
+
+    route = runner.send(:select_route)
+
+    assert_equal "nado->extended", route.fetch(:route)
   end
 
   test "systemd documentation is present" do
@@ -378,6 +446,17 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
   class RaisingBurnInRunner
     def run
       raise SignalException, "TERM"
+    end
+  end
+
+  class CoverageProofRegistry
+    def report(position:)
+      {
+        routes: [
+          { route: "nado->ethereal", from_venue: "nado", to_venue: "ethereal", status: MigrationRouteProofRegistry::STATUSES[:ready] },
+          { route: "nado->extended", from_venue: "nado", to_venue: "extended", status: MigrationRouteProofRegistry::STATUSES[:ready] }
+        ]
+      }
     end
   end
 end

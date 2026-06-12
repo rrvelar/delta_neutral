@@ -10,7 +10,7 @@ The production random runner is a thin wrapper around the proven `MigrationRando
 bin/rails migration:random_production_runner \
   position_id=6 \
   live=true \
-  interval_seconds=3900 \
+  interval_seconds=28800 \
   rebalance_hold_interval_seconds=300 \
   duration_minutes=1440 \
   confirmation=I_UNDERSTAND_THIS_RUNS_PRODUCTION_RANDOM_ROTATION
@@ -32,6 +32,8 @@ bin/rails migration:random_production_status position_id=6
 bin/rails migration:random_production_tail position_id=6 lines=300
 bin/rails migration:random_production_stop position_id=6
 ```
+
+Production defaults are `interval_seconds=28800` and `rebalance_hold_interval_seconds=300`, which gives three migrations per day with five-minute active-venue checks during each hold. A 24 hour canary uses `duration_minutes=1440`, so it should attempt about three migration cycles. Indefinite production uses `duration_minutes=0`.
 
 Runtime files are written under `storage/random_rotation_production/`:
 
@@ -85,7 +87,9 @@ The dashboard canary button writes:
 }
 ```
 
-The dashboard 24/7 button writes `mode=production_24x7`. The stop button first writes `stop_position_6.json` through the existing production runner stop path, then writes a bridge stop request. The bridge stops both the canary and production services so either active mode receives the safe stop.
+The dashboard 24/7 button writes `mode=production_24x7`. The stop button first writes `stop_position_6.json` through the existing production runner stop path, then writes a bridge stop request. The bridge also writes the stop request itself, stops both the canary and production services, and runs `systemctl reset-failed` for both so an intentional stop does not resurrect the runner.
+
+`bin/random_production_systemd_bridge` is host-safe: it uses bash and `python3` only. It does not require host Ruby.
 
 The host unit files live in `docs/systemd/`:
 
@@ -104,19 +108,49 @@ Description=Delta Neutral Random Production Runner Position 6 24h Canary
 After=docker.service
 Requires=docker.service
 Conflicts=delta-neutral-random-production-6.service
+StartLimitIntervalSec=3600
+StartLimitBurst=3
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/delta_neutral
-ExecStart=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web bin/rails migration:random_production_runner position_id=6 live=true interval_seconds=3900 rebalance_hold_interval_seconds=300 duration_minutes=1440 confirmation=I_UNDERSTAND_THIS_RUNS_PRODUCTION_RANDOM_ROTATION'
+ExecStart=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web bin/rails migration:random_production_runner position_id=6 live=true interval_seconds=28800 rebalance_hold_interval_seconds=300 duration_minutes=1440 confirmation=I_UNDERSTAND_THIS_RUNS_PRODUCTION_RANDOM_ROTATION'
 ExecStop=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web bin/rails migration:random_production_stop position_id=6'
 Restart=on-failure
 RestartSec=60
-StartLimitIntervalSec=3600
-StartLimitBurst=3
+SuccessExitStatus=0 130 143
+RestartPreventExitStatus=0 130 143
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 For indefinite production, remove `duration_minutes=1440` or set `duration_minutes=0` after the 24 hour canary passes.
+
+## Extra Venue Recovery
+
+Production start refuses multiple venue exposure. Do not let the production runner auto-recover this state.
+
+For the incident class where the app production venue is Ethereal and Extended is the extra source exposure, run dry-run first:
+
+```bash
+bin/rails migration:recover_target_first_source_close \
+  position_id=6 \
+  from=extended \
+  to=ethereal \
+  dry_run=true
+```
+
+If dry-run proves it will close Extended only and preserve Ethereal, run the live recovery with the task confirmation required by `MigrationTargetFirstSourceRecovery`:
+
+```bash
+bin/rails migration:recover_target_first_source_close \
+  position_id=6 \
+  from=extended \
+  to=ethereal \
+  live=true \
+  dry_run=false \
+  confirmation=I_UNDERSTAND_THIS_CLOSES_SOURCE_AFTER_TARGET_CONFIRMED
+```
+
+After recovery, verify direct open orders are zero, Extended is flat, only Ethereal has short exposure, combined short is inside tolerance, and all migration gates are disabled.

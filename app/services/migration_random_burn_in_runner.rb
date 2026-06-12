@@ -83,11 +83,17 @@ class MigrationRandomBurnInRunner
 
   def run
     prepare_log!
+    return stopped_before_start if stop_requested?
+
     start_blockers = preflight_blockers
     pre_start_rebalance = nil
     if pre_start_rebalance_allowed?(start_blockers)
+      return stopped_before_start if stop_requested?
+
       pre_start_rebalance = run_active_rebalance(reason: "pre_start")
       accumulate_rebalance_counts(pre_start_rebalance)
+      return stopped_before_start if stop_requested?
+
       start_blockers = pre_start_blockers_after_rebalance(start_blockers, pre_start_rebalance)
     end
     if start_blockers.any?
@@ -97,7 +103,10 @@ class MigrationRandomBurnInRunner
       return result("blocked", start_blockers)
     end
 
+    return stopped_before_start if stop_requested?
     normalize_gates_before_start if live?
+    return stopped_after_gates_enabled if stop_requested?
+
     write_event(event: "burn_in_started", status: live? ? "live" : "dry_run", position_id: position.id, duration_minutes: duration_minutes, interval_seconds: interval_seconds, max_cycles: max_cycles, log_path: receipt_path.to_s, pre_start_rebalance: pre_start_rebalance || unchecked_rebalance_payload("pre_start"))
 
     deadline = duration_minutes.positive? ? started_at + duration_minutes.minutes : nil
@@ -236,6 +245,8 @@ class MigrationRandomBurnInRunner
   end
 
   def run_cycle(cycle, deadline:)
+    return stopped_cycle_result(cycle, "stop requested before cycle") if stop_requested?
+
     self.cycles_attempted += 1
     pre_report = direct_preflight("pre_cycle")
     record_direct_preflight(pre_report)
@@ -243,8 +254,12 @@ class MigrationRandomBurnInRunner
     pre_target = target_payload(pre_report)
     pre_hedge = hedge_payload(pre_report)
     pre_blockers, pre_status = pre_cycle_blockers(pre_report)
+    return stopped_cycle_result(cycle, "stop requested before pre-next-cycle rebalance") if stop_requested?
+
     pre_next_cycle_rebalance = run_active_rebalance(reason: "pre_next_cycle") if rebalance_before_next_migration && pre_cycle_rebalance_allowed?(pre_report)
     accumulate_rebalance_counts(pre_next_cycle_rebalance)
+    return stopped_cycle_result(cycle, "stop requested before migration") if stop_requested?
+
     if pre_next_cycle_rebalance && Array(pre_next_cycle_rebalance[:blockers]).any?
       pre_blockers = (pre_blockers + Array(pre_next_cycle_rebalance[:blockers])).uniq
       pre_status = "stopped_active_rebalance"
@@ -263,26 +278,35 @@ class MigrationRandomBurnInRunner
     end
 
     if live?
-      result = nil
-      MigrationExecutionLock.with_lock(position) do
-        enable_route_live_gates(route)
-        result = executor.run(
-          position: position,
-          from_venue: route.fetch(:from_venue),
-          to_venue: route.fetch(:to_venue),
-          mode: "full",
-          dry_run: false,
-          confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
-          full_migration_allowed: true,
-          migration_sequence: route.fetch(:migration_sequence, "target_first"),
-          execution_preflight: pre_report
-        )
+      return stopped_cycle_result(cycle, "stop requested before migration submit") if stop_requested?
+
+      begin
+        result = nil
+        MigrationExecutionLock.with_lock(position) do
+          enable_route_live_gates(route)
+          raise StopRequestedDuringCycle if stop_requested?
+          result = executor.run(
+            position: position,
+            from_venue: route.fetch(:from_venue),
+            to_venue: route.fetch(:to_venue),
+            mode: "full",
+            dry_run: false,
+            confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+            full_migration_allowed: true,
+            migration_sequence: route.fetch(:migration_sequence, "target_first"),
+            execution_preflight: pre_report
+          )
+        end
+        execution = execution_payload(result)
+      rescue StopRequestedDuringCycle
+        return stopped_cycle_result(cycle, "stop requested before route execution")
       end
-      execution = execution_payload(result)
     else
       result = nil
       execution = zero_execution(status: "dry_run")
     end
+
+    return stopped_cycle_result(cycle, "stop requested after migration") if stop_requested?
 
     post_report = direct_preflight("post_cycle")
     record_direct_preflight(post_report)
@@ -297,6 +321,8 @@ class MigrationRandomBurnInRunner
     end
     hold_rebalance = empty_hold_rebalance_payload
     if status == "success"
+      return stopped_cycle_result(cycle, "stop requested before hold monitor") if stop_requested?
+
       hold_rebalance = self.hold_rebalance_checks(deadline: deadline)
       hold_rebalance_checks = hold_rebalance.fetch(:checks)
       hold_blockers = hold_rebalance_checks.flat_map { |check| Array(check[:blockers]) }.uniq
@@ -327,7 +353,20 @@ class MigrationRandomBurnInRunner
     return nil if routes.empty?
     return routes.find { |route| route[:route] == selector.call(routes) } || routes.first if selector
 
-    routes[Random.new.rand(routes.size)]
+    preferred_target = next_daily_coverage_target(current)
+    preferred = routes.find { |route| route[:to_venue] == preferred_target }
+    return preferred if preferred
+
+    routes.first.merge(
+      coverage_fallback_reason: "preferred daily coverage target #{preferred_target} was not READY_FOR_RANDOM"
+    )
+  end
+
+  def next_daily_coverage_target(current)
+    index = VENUES.index(current)
+    return VENUES.first unless index
+
+    VENUES[(index + 1) % VENUES.size]
   end
 
   def executor
@@ -606,8 +645,13 @@ class MigrationRandomBurnInRunner
   end
 
   def sleep_until(target_time)
-    remaining = target_time - now.call
-    sleeper.call(remaining) if remaining.positive? && !stop_requested?
+    while !stop_requested?
+      remaining = target_time - now.call
+      break unless remaining.positive?
+
+      sleeper.call([ remaining, rebalance_hold_interval_seconds.positive? ? rebalance_hold_interval_seconds : remaining ].min)
+      break if remaining <= 0
+    end
   end
 
   def accumulate_rebalance_counts(payload)
@@ -662,6 +706,38 @@ class MigrationRandomBurnInRunner
   def finish(status:, blockers:)
     summary = final_summary(status: status, blockers: blockers)
     write_event(summary)
+  end
+
+  class StopRequestedDuringCycle < StandardError; end
+
+  def stopped_before_start
+    blockers = [ "stop requested" ]
+    write_event(event: "burn_in_start", status: "stopped", blockers: blockers, orders_submitted: 0, orders_placed: 0, signatures_created: 0)
+    disable_after_run if disable_after
+    finish(status: "stopped", blockers: blockers)
+    result("stopped", blockers)
+  end
+
+  def stopped_after_gates_enabled
+    blockers = [ "stop requested" ]
+    disable_after_run if disable_after
+    finish(status: "stopped", blockers: blockers)
+    result("stopped", blockers)
+  end
+
+  def stopped_cycle_result(cycle, reason)
+    blockers = [ reason ]
+    write_event(
+      event: "cycle",
+      cycle: cycle,
+      status: "stopped",
+      blockers: blockers,
+      execution: zero_execution(status: "stopped"),
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+    { status: "stopped", blockers: blockers, hold_monitored: false }
   end
 
   def final_summary(status:, blockers:)

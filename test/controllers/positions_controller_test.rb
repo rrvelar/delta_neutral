@@ -1118,6 +1118,56 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     clear_random_production_files(position&.id)
   end
 
+  test "production random dashboard shows six of six route proofs from status cache" do
+    position = production_random_position
+    routes = MigrationRouteProofRegistry::ROUTES.map do |from, to|
+      { route: "#{from}->#{to}", from_venue: from, to_venue: to, status: MigrationRouteProofRegistry::STATUSES[:ready] }
+    end
+    write_random_production_files(position, status: {
+      status: "running",
+      direct_preflight_blockers: [],
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: random_production_shorts,
+      inside_tolerance: true,
+      proof_report: {
+        routes: routes,
+        completed_route_proofs: routes,
+        missing_route_proofs: [],
+        stale_route_proofs: []
+      },
+      gates_state: {}
+    })
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "ready 6 / total 6", response.body
+    assert_match "missing 0", response.body
+    assert_match "stale 0", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production random dashboard shows cache missing instead of fake zero route proofs" do
+    position = production_random_position
+    write_random_production_files(position, status: {
+      status: "running",
+      direct_preflight_blockers: [],
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: random_production_shorts,
+      inside_tolerance: true,
+      gates_state: {}
+    })
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "cache missing", response.body
+    assert_no_match "ready 0 / total 0", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
   test "production random dashboard shows snapshot blockers as diagnostics only" do
     position = production_random_position
     position.position_dashboard_snapshot.update!(

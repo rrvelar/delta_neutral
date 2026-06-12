@@ -88,6 +88,10 @@ class MigrationRandomProductionDashboard
 
   def display_status(status:, heartbeat:, lock:)
     return "stale lock" if lock.present? && !process_alive?(lock["pid"])
+    return "unsafe_multiple_exposure" if status["status"] == "unsafe_multiple_exposure"
+    return "orphan_process_running" if status["status"] == "orphan_process_running"
+    return "unsafe_gates_left_enabled" if gates_enabled_payload?(status) && lock.blank?
+    return "stale_heartbeat" if heartbeat["status"] == "running" && lock.blank?
 
     status["status"].presence || heartbeat["status"].presence || "unknown"
   end
@@ -129,6 +133,8 @@ class MigrationRandomProductionDashboard
 
   def route_proofs_summary(status)
     proof = status["proof_report"] || status["route_proofs_summary"] || {}
+    return { ready: nil, missing: nil, stale: nil, total: nil, missing_cache: true } if proof.blank?
+
     {
       ready: proof["ready"] || Array(proof["completed_route_proofs"]).size,
       missing: proof["missing"] || Array(proof["missing_route_proofs"]).size,
@@ -194,6 +200,13 @@ class MigrationRandomProductionDashboard
 
   def gates_state
     MigrationRandomProductionRunner::MIGRATION_GATE_KEYS.to_h { |key| [ key, OperationalSettings.enabled?(key) ] }
+  end
+
+  def gates_enabled_payload?(status)
+    payload = status["gates_state"]
+    return false unless payload.is_a?(Hash)
+
+    payload.values.any? { |enabled| ActiveModel::Type::Boolean.new.cast(enabled) }
   end
 
   def status_path

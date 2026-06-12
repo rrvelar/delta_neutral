@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "rake"
 
 class MigrationTaskTest < ActiveSupport::TestCase
@@ -38,6 +39,67 @@ class MigrationTaskTest < ActiveSupport::TestCase
     assert Rake::Task.task_defined?("migration:random_production_status")
     assert Rake::Task.task_defined?("migration:random_production_tail")
     assert Rake::Task.task_defined?("migration:random_production_stop")
+  end
+
+  test "host bridge works without ruby and start canary uses canary service" do
+    dir = tmp_bridge_dir
+    write_bridge_control(dir, action: "start", mode: "canary_24h")
+
+    status = run_bridge(dir)
+    result = JSON.parse(File.read(dir.join("storage/random_rotation_production/control_result_position_6.json")))
+
+    assert_predicate status, :success?
+    assert_equal "success", result.fetch("status")
+    assert_equal "start", result.fetch("action")
+    assert_equal "canary_24h", result.fetch("mode")
+    assert_equal "delta-neutral-random-production-6-canary.service", result.fetch("service")
+    assert_equal [ "systemctl", "start", "delta-neutral-random-production-6-canary.service" ], result.fetch("command")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "host bridge start production uses indefinite service" do
+    dir = tmp_bridge_dir
+    write_bridge_control(dir, action: "start", mode: "production_24x7")
+
+    status = run_bridge(dir)
+    result = JSON.parse(File.read(dir.join("storage/random_rotation_production/control_result_position_6.json")))
+
+    assert_predicate status, :success?
+    assert_equal "delta-neutral-random-production-6.service", result.fetch("service")
+    assert_equal [ "systemctl", "start", "delta-neutral-random-production-6.service" ], result.fetch("command")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "host bridge stop writes stop request and stops both services" do
+    dir = tmp_bridge_dir
+    write_bridge_control(dir, action: "stop")
+
+    status = run_bridge(dir)
+    result = JSON.parse(File.read(dir.join("storage/random_rotation_production/control_result_position_6.json")))
+    stop = JSON.parse(File.read(dir.join("storage/random_rotation_production/stop_position_6.json")))
+    commands = File.readlines(dir.join("systemctl.log")).map(&:strip)
+
+    assert_predicate status, :success?
+    assert_equal "success", result.fetch("status")
+    assert_equal "stop_requested", stop.fetch("status")
+    assert_includes commands, "stop delta-neutral-random-production-6-canary.service"
+    assert_includes commands, "stop delta-neutral-random-production-6.service"
+    assert_includes commands, "reset-failed delta-neutral-random-production-6-canary.service"
+    assert_includes commands, "reset-failed delta-neutral-random-production-6.service"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "systemd units do not place StartLimitIntervalSec in Service section" do
+    Rails.root.join("docs/systemd").glob("delta-neutral-random-production-6*.service").each do |path|
+      section = nil
+      File.readlines(path).each do |line|
+        section = line.strip if line.start_with?("[")
+        refute_equal "[Service]", section, "StartLimitIntervalSec must not be in [Service] for #{path}" if line.start_with?("StartLimitIntervalSec")
+      end
+    end
   end
 
   test "prove routes task writes JSONL proof receipts" do
@@ -683,6 +745,50 @@ class MigrationTaskTest < ActiveSupport::TestCase
   end
 
   private
+
+  def tmp_bridge_dir
+    Rails.root.join("tmp/test-random-production-bridge-#{SecureRandom.hex(4)}").tap do |dir|
+      FileUtils.mkdir_p(dir.join("storage/random_rotation_production"))
+      FileUtils.mkdir_p(dir.join("bin"))
+      File.write(
+        dir.join("bin/systemctl"),
+        <<~BASH
+          #!/usr/bin/env bash
+          echo "$*" >> "#{dir.join('systemctl.log')}"
+          if [ "$1" = "is-active" ]; then
+            echo inactive
+          fi
+          exit 0
+        BASH
+      )
+      FileUtils.chmod("+x", dir.join("bin/systemctl"))
+    end
+  end
+
+  def write_bridge_control(dir, action:, mode: nil)
+    payload = {
+      action: action,
+      mode: mode,
+      position_id: 6,
+      request_id: SecureRandom.uuid,
+      requested_at: Time.current.utc.iso8601,
+      confirmation_present: action == "start"
+    }.compact
+    File.write(dir.join("storage/random_rotation_production/control_position_6.json"), JSON.pretty_generate(payload))
+  end
+
+  def run_bridge(dir)
+    _stdout, _stderr, status = Open3.capture3(
+      {
+        "DELTA_NEUTRAL_ROOT" => dir.to_s,
+        "POSITION_ID" => "6",
+        "PATH" => "#{dir.join('bin')}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH')}"
+      },
+      Rails.root.join("bin/random_production_systemd_bridge").to_s,
+      "6"
+    )
+    status
+  end
 
   def migration_position(refreshed_at: Time.current)
     position = Position.create!(

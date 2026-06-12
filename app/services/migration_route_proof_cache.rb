@@ -124,9 +124,21 @@ class MigrationRouteProofCache
 
   def events
     @events ||= source_dirs.flat_map do |dir|
-      Dir.glob(dir.join("*.jsonl")).flat_map { |path| tail_jsonl(path, tail_lines) }
+      Dir.glob(dir.join("*.jsonl")).flat_map { |path| tail_jsonl(path, tail_lines).flat_map { |event| expand_route_events(event) } }
     rescue SystemCallError
       []
+    end
+  end
+
+  def expand_route_events(event)
+    routes = event["routes"]
+    return [ event ] unless routes.is_a?(Array)
+
+    routes.map do |route|
+      route.merge(
+        "position_id" => route["position_id"] || event["position_id"],
+        "timestamp" => route["timestamp"] || event["timestamp"] || event["proof_finished_at"] || event["proof_started_at"]
+      )
     end
   end
 

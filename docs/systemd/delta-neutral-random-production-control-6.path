@@ -3,6 +3,7 @@ Description=Watch Delta Neutral random production control requests for Position 
 
 [Path]
 PathChanged=/opt/delta_neutral/storage/random_rotation_production/control_position_6.json
+PathModified=/opt/delta_neutral/storage/random_rotation_production/control_position_6.json
 Unit=delta-neutral-random-production-control-6.service
 
 [Install]

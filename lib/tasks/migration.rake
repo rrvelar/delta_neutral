@@ -289,8 +289,8 @@ namespace :migration do
       live: ENV.fetch("live", ENV.fetch("LIVE", "true")),
       confirmation: ENV["confirmation"].presence || ENV["CONFIRMATION"].presence,
       duration_minutes: ENV.fetch("duration_minutes", ENV.fetch("DURATION_MINUTES", "0")),
-      interval_seconds: ENV.fetch("interval_seconds", ENV.fetch("INTERVAL_SECONDS", "3900")),
-      rebalance_hold_interval_seconds: ENV.fetch("rebalance_hold_interval_seconds", ENV.fetch("REBALANCE_HOLD_INTERVAL_SECONDS", "300")),
+      interval_seconds: ENV.fetch("interval_seconds", ENV.fetch("INTERVAL_SECONDS", MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS.to_s)),
+      rebalance_hold_interval_seconds: ENV.fetch("rebalance_hold_interval_seconds", ENV.fetch("REBALANCE_HOLD_INTERVAL_SECONDS", MigrationRandomProductionRunner::DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS.to_s)),
       rebalance_after_migration: ENV.fetch("rebalance_after_migration", ENV.fetch("REBALANCE_AFTER_MIGRATION", "true")),
       rebalance_during_hold: ENV.fetch("rebalance_during_hold", ENV.fetch("REBALANCE_DURING_HOLD", "true")),
       rebalance_before_next_migration: ENV.fetch("rebalance_before_next_migration", ENV.fetch("REBALANCE_BEFORE_NEXT_MIGRATION", "true")),
@@ -299,7 +299,7 @@ namespace :migration do
       rebalance_readback_recheck_interval_seconds: ENV.fetch("rebalance_readback_recheck_interval_seconds", ENV.fetch("REBALANCE_READBACK_RECHECK_INTERVAL_SECONDS", "5"))
     ).run
     puts JSON.pretty_generate(result.summary.merge(action: "migration_random_production_runner", receipt_path: result.receipt_path))
-    abort("migration_random_production_runner #{result.status}") unless result.status == "success"
+    abort("migration_random_production_runner #{result.status}") unless result.status.in?(%w[success stopped])
   end
 
   desc "Show production random rotation runner status for a position"

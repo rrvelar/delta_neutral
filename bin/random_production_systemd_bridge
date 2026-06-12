@@ -1,106 +1,159 @@
-#!/usr/bin/env ruby
-# frozen_string_literal: true
+#!/usr/bin/env bash
+set -euo pipefail
 
-require "fileutils"
-require "json"
-require "open3"
-require "pathname"
-require "time"
+python3 - "$@" <<'PY'
+import datetime
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
-root = Pathname(ENV.fetch("DELTA_NEUTRAL_ROOT", Dir.pwd))
-position_id = (ENV["POSITION_ID"] || ARGV.first || "6").to_i
-log_dir = root.join("storage/random_rotation_production")
-control_path = log_dir.join("control_position_#{position_id}.json")
-result_path = log_dir.join("control_result_position_#{position_id}.json")
-production_service = ENV.fetch("RANDOM_PRODUCTION_SYSTEMD_SERVICE", "delta-neutral-random-production-#{position_id}.service")
-canary_service = ENV.fetch("RANDOM_PRODUCTION_CANARY_SYSTEMD_SERVICE", "delta-neutral-random-production-#{position_id}-canary.service")
-request = nil
+root = Path(os.environ.get("DELTA_NEUTRAL_ROOT", os.getcwd()))
+position_id = int(os.environ.get("POSITION_ID") or (sys.argv[1] if len(sys.argv) > 1 else "6"))
+log_dir = root / "storage" / "random_rotation_production"
+control_path = log_dir / f"control_position_{position_id}.json"
+result_path = log_dir / f"control_result_position_{position_id}.json"
+stop_path = log_dir / f"stop_position_{position_id}.json"
+production_service = os.environ.get("RANDOM_PRODUCTION_SYSTEMD_SERVICE", f"delta-neutral-random-production-{position_id}.service")
+canary_service = os.environ.get("RANDOM_PRODUCTION_CANARY_SYSTEMD_SERVICE", f"delta-neutral-random-production-{position_id}-canary.service")
+request = {}
 
-def write_result(path, payload)
-  FileUtils.mkdir_p(path.dirname)
-  tmp_path = path.sub_ext("#{path.extname}.#{Process.pid}.tmp")
-  File.write(tmp_path, JSON.pretty_generate(payload))
-  File.rename(tmp_path, path)
-end
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
-def run_systemctl(*args)
-  stdout, stderr, status = Open3.capture3("systemctl", *args)
-  {
-    command: [ "systemctl", *args ],
-    exit_status: status.exitstatus,
-    stdout: stdout.to_s[-4000, 4000].to_s,
-    stderr: stderr.to_s[-4000, 4000].to_s
-  }
-end
+def atomic_write(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp, path)
 
-begin
-  request = JSON.parse(File.read(control_path))
-  raise "position_id mismatch" unless request["position_id"].to_i == position_id
-
-  action = request["action"].to_s
-  mode = request["mode"].to_s
-  service =
-    case [ action, mode ]
-    when [ "start", "canary_24h" ]
-      canary_service
-    when [ "start", "production_24x7" ]
-      production_service
-    when [ "status", "" ], [ "status", "canary_24h" ], [ "status", "production_24x7" ]
-      mode == "canary_24h" ? canary_service : production_service
-    else
-      nil
-    end
-
-  runs =
-    if action == "stop"
-      [ run_systemctl("stop", canary_service), run_systemctl("stop", production_service) ]
-    elsif [ "start", "status" ].include?(action) && service
-      [ run_systemctl(action, service) ]
-    else
-      raise "unsupported control action or mode: action=#{action.inspect} mode=#{mode.inspect}"
-    end
-
-  status_runs = [ canary_service, production_service ].map { |name| [ name, run_systemctl("is-active", name) ] }.to_h
-  failed = runs.find { |run| run[:exit_status].to_i.nonzero? }
-  systemd_status = status_runs.transform_values do |run|
-    output = run[:stdout].strip
-    output = run[:stderr].strip if output.empty?
-    output.empty? ? "unknown" : output
-  end
-
-  write_result(
-    result_path,
-    {
-      status: failed ? "failed" : "success",
-      action: action,
-      mode: request["mode"],
-      position_id: position_id,
-      request_id: request["request_id"],
-      service: service || [ canary_service, production_service ].join(","),
-      handled_at: Time.now.utc.iso8601,
-      exit_status: failed ? failed[:exit_status] : 0,
-      stdout: runs.map { |run| run[:stdout] }.join("\n"),
-      stderr: runs.map { |run| run[:stderr] }.reject(&:empty?).join("\n"),
-      systemd_status: systemd_status
+def run_command(command):
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    return {
+        "command": command,
+        "exit_status": completed.returncode,
+        "stdout": completed.stdout[-4000:],
+        "stderr": completed.stderr[-4000:],
     }
-  )
-  exit(failed ? 1 : 0)
-rescue => e
-  write_result(
-    result_path,
-    {
-      status: "failed",
-      action: request && request["action"],
-      mode: request && request["mode"],
-      position_id: position_id,
-      request_id: request && request["request_id"],
-      service: nil,
-      handled_at: Time.now.utc.iso8601,
-      exit_status: 1,
-      stdout: "",
-      stderr: "#{e.class}: #{e.message}"
+
+def run_systemctl(*args):
+    return run_command(["systemctl", *args])
+
+def runner_processes():
+    try:
+        completed = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True, check=False)
+    except OSError:
+        return []
+    matches = []
+    needles = (
+        "migration:random_production_runner",
+        "migration:random_burn_in",
+        "migration:random_rotation_daily_runner",
+    )
+    for line in completed.stdout.splitlines():
+        text = line.strip()
+        if any(needle in text for needle in needles):
+            matches.append(text)
+    return matches
+
+def write_stop_request():
+    payload = {
+        "runner": "random_production_runner",
+        "position_id": position_id,
+        "requested_at": utc_now(),
+        "status": "stop_requested",
+        "source": "host_systemd_bridge",
     }
-  )
-  warn "#{e.class}: #{e.message}"
-  exit 1
-end
+    atomic_write(stop_path, payload)
+    return payload
+
+def service_for(action, mode):
+    if action == "start" and mode == "canary_24h":
+        return canary_service
+    if action == "start" and mode == "production_24x7":
+        return production_service
+    if action == "status":
+        return canary_service if mode == "canary_24h" else production_service
+    return None
+
+def result_payload(status, action, mode, service, runs, stderr=""):
+    failed = next((run for run in runs if int(run["exit_status"]) != 0), None)
+    exit_status = int(failed["exit_status"]) if failed else (1 if status == "failed" else 0)
+    command = runs[0]["command"] if len(runs) == 1 else [run["command"] for run in runs]
+    stdout = "\n".join(run["stdout"] for run in runs if run["stdout"])
+    run_stderr = "\n".join(run["stderr"] for run in runs if run["stderr"])
+    return {
+        "status": "failed" if failed or status == "failed" else "success",
+        "action": action,
+        "mode": mode,
+        "position_id": position_id,
+        "request_id": request.get("request_id"),
+        "service": service,
+        "handled_at": utc_now(),
+        "exit_status": exit_status,
+        "command": command,
+        "stdout": stdout,
+        "stderr": stderr or run_stderr,
+    }
+
+try:
+    with control_path.open(encoding="utf-8") as handle:
+        request = json.load(handle)
+    if int(request.get("position_id", 0)) != position_id:
+        raise RuntimeError("position_id mismatch")
+
+    action = str(request.get("action") or "")
+    mode = str(request.get("mode") or "")
+    service = service_for(action, mode)
+    runs = []
+
+    if action == "stop":
+        write_stop_request()
+        runs = [
+            run_systemctl("stop", canary_service),
+            run_systemctl("stop", production_service),
+            run_systemctl("reset-failed", canary_service),
+            run_systemctl("reset-failed", production_service),
+        ]
+        service = f"{canary_service},{production_service}"
+    elif action == "start" and service:
+        existing = runner_processes()
+        if existing:
+            payload = result_payload("failed", action, mode, service, [], stderr="duplicate_runner_process: " + " | ".join(existing))
+            payload["reason"] = "duplicate_runner_process"
+            atomic_write(result_path, payload)
+            sys.exit(1)
+        runs = [run_systemctl("start", service)]
+    elif action == "status" and service:
+        runs = [run_systemctl("status", service)]
+    else:
+        raise RuntimeError(f"unsupported control action or mode: action={action!r} mode={mode!r}")
+
+    status_runs = {
+        canary_service: run_systemctl("is-active", canary_service),
+        production_service: run_systemctl("is-active", production_service),
+    }
+    payload = result_payload("success", action, mode, service, runs)
+    payload["systemd_status"] = {
+        name: (run["stdout"].strip() or run["stderr"].strip() or "unknown")
+        for name, run in status_runs.items()
+    }
+    atomic_write(result_path, payload)
+    sys.exit(0 if payload["status"] == "success" else 1)
+except Exception as exc:
+    payload = result_payload(
+        "failed",
+        request.get("action"),
+        request.get("mode"),
+        None,
+        [],
+        stderr=f"{exc.__class__.__name__}: {exc}",
+    )
+    atomic_write(result_path, payload)
+    print(payload["stderr"], file=sys.stderr)
+    sys.exit(1)
+PY
