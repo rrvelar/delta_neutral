@@ -3,6 +3,7 @@ class MigrationRandomProductionRunner
   LOG_DIR = Rails.root.join("storage/random_rotation_production")
   DEFAULT_INTERVAL_SECONDS = 28_800
   DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS = 300
+  HEARTBEAT_STALE_AFTER_SECONDS = 600
   ACTIVE_RUNNERS = %w[
     random_production_runner
     random_burn_in
@@ -102,7 +103,8 @@ class MigrationRandomProductionRunner
     process_running = lock_running?
     orphan_process = duplicate_runner_process_running?(ignore_pid: lock_payload["pid"])
     stale_lock = lock_stale?
-    stale_heartbeat = heartbeat_payload["status"] == "running" && !process_running && !orphan_process
+    heartbeat_recent = heartbeat_recent?
+    stale_heartbeat = heartbeat_payload["status"] == "running" && (!process_running || !heartbeat_recent) && !orphan_process
     latest = latest_event_from_log
     effective_status = production_status(
       direct: direct,
@@ -111,6 +113,7 @@ class MigrationRandomProductionRunner
       orphan_process: orphan_process,
       stale_lock: stale_lock,
       stale_heartbeat: stale_heartbeat,
+      heartbeat_recent: heartbeat_recent,
       latest: latest
     )
     {
@@ -122,7 +125,7 @@ class MigrationRandomProductionRunner
       lock_stale: stale_lock,
       latest_event: latest,
       last_heartbeat: heartbeat_payload.presence,
-      current_production_venue: heartbeat_payload["current_production_venue"] || direct[:production_venue],
+      current_production_venue: direct[:production_venue] || heartbeat_payload["current_production_venue"],
       direct_open_orders: direct_open_orders_payload,
       direct_venue_shorts: direct_venue_shorts_payload,
       active_short_venues: active_venues,
@@ -243,6 +246,7 @@ class MigrationRandomProductionRunner
     self.last_route = route if route.present?
     hold_checks = event[:hold_rebalance_checks] || event["hold_rebalance_checks"] || []
     hold_check_at = hold_checks.filter_map { |check| check[:checked_at] || check["checked_at"] }.last
+    hold_check_at ||= event[:checked_at] || event["checked_at"] if (event[:event] || event["event"]) == "hold_check"
     self.last_hold_check_at = hold_check_at if hold_check_at.present?
     write_heartbeat(status: "running")
     write_status(status: "running")
@@ -285,6 +289,7 @@ class MigrationRandomProductionRunner
       heartbeat: heartbeat_payload.presence,
       summary: summary,
       direct_preflight_blockers: Array(direct[:blockers]),
+      current_production_venue: direct[:production_venue],
       direct_open_orders: direct_open_orders(direct),
       direct_venue_shorts: direct_venue_shorts(direct),
       inside_tolerance: direct[:inside_tolerance] == true,
@@ -444,10 +449,10 @@ class MigrationRandomProductionRunner
     payload.present? && !process_alive?(payload["pid"])
   end
 
-  def production_status(direct:, active_venues:, process_running:, orphan_process:, stale_lock:, stale_heartbeat:, latest:)
+  def production_status(direct:, active_venues:, process_running:, orphan_process:, stale_lock:, stale_heartbeat:, heartbeat_recent:, latest:)
     return "unsafe_multiple_exposure" if active_venues.size > 1
     return "orphan_process_running" if orphan_process
-    return "running" if process_running && heartbeat_payload["status"] == "running"
+    return "running" if process_running && heartbeat_payload["status"] == "running" && heartbeat_recent
     return "unsafe_gates_left_enabled" if gates_state.values.any? && !process_running
     return "stale_lock" if stale_lock
     return "stale_heartbeat" if stale_heartbeat
@@ -456,6 +461,13 @@ class MigrationRandomProductionRunner
     return "blocked" if Array(direct[:blockers]).any?
 
     status_payload["status"].presence || "stopped"
+  end
+
+  def heartbeat_recent?
+    timestamp = Time.zone.parse(heartbeat_payload["updated_at"].to_s)
+    timestamp && (now.call - timestamp) <= HEARTBEAT_STALE_AFTER_SECONDS
+  rescue ArgumentError, TypeError
+    false
   end
 
   def status_blockers(status, direct, active_venues)

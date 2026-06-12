@@ -67,6 +67,67 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "post migration progress updates heartbeat venue cycle and route immediately" do
+    position = migration_position
+    dir = tmp_dir
+    fake = FakeBurnInRunner.new(events: [
+      {
+        event: "cycle_progress",
+        progress: "post_migration_finalized",
+        cycle: 1,
+        route: "ethereal->nado",
+        from_venue: "ethereal",
+        to_venue: "nado",
+        status: "success"
+      }
+    ])
+
+    runner(position: position, log_dir: dir, preflight_factory: safe_preflight_factory(venue: "nado"), runner_factory: ->(event_callback:, **) {
+      fake.callback = event_callback
+      fake
+    }).run
+
+    heartbeat = JSON.parse(File.read(dir.join("heartbeat_position_#{position.id}.json")))
+    status = JSON.parse(File.read(dir.join("status_position_#{position.id}.json")))
+
+    assert_equal "nado", heartbeat.fetch("current_production_venue")
+    assert_equal 1, heartbeat.fetch("last_cycle")
+    assert_equal "ethereal->nado", heartbeat.fetch("last_route")
+    assert_equal "nado", status.fetch("current_production_venue")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "hold check progress updates heartbeat during long hold" do
+    position = migration_position
+    dir = tmp_dir
+    checked_at = Time.current.utc.iso8601
+    fake = FakeBurnInRunner.new(events: [
+      {
+        event: "hold_check",
+        cycle: 1,
+        route: "ethereal->nado",
+        checked_at: checked_at,
+        hold_rebalance_checks_count: 1,
+        status: "running",
+        blockers: []
+      }
+    ])
+
+    runner(position: position, log_dir: dir, preflight_factory: safe_preflight_factory(venue: "nado"), runner_factory: ->(event_callback:, **) {
+      fake.callback = event_callback
+      fake
+    }).run
+
+    heartbeat = JSON.parse(File.read(dir.join("heartbeat_position_#{position.id}.json")))
+
+    assert_equal "nado", heartbeat.fetch("current_production_venue")
+    assert_equal "ethereal->nado", heartbeat.fetch("last_route")
+    assert_equal checked_at, heartbeat.fetch("last_hold_check_at")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "refuses parallel run for active lock" do
     position = migration_position
     dir = tmp_dir
@@ -204,6 +265,21 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     File.write(dir.join("heartbeat_position_#{position.id}.json"), JSON.generate(status: "running", pid: 99_999_999))
 
     assert_equal "stale_heartbeat", service.status.fetch(:status)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status shows direct venue instead of stale heartbeat venue" do
+    position = migration_position
+    dir = tmp_dir
+    service = runner(position: position, log_dir: dir, preflight_factory: safe_preflight_factory(venue: "nado"))
+    FileUtils.mkdir_p(dir)
+    File.write(dir.join("heartbeat_position_#{position.id}.json"), JSON.generate(status: "running", current_production_venue: "ethereal", updated_at: 30.minutes.ago.utc.iso8601, pid: 99_999_999))
+
+    status = service.status
+
+    assert_equal "stale_heartbeat", status.fetch(:status)
+    assert_equal "nado", status.fetch(:current_production_venue)
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -367,8 +443,8 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     end
   end
 
-  def safe_preflight_factory
-    ->(position:, stage:) { preflight(venue_shorts: { "nado" => "2.12" }, inside: true, blockers: []) }
+  def safe_preflight_factory(venue: "nado")
+    ->(position:, stage:) { preflight(venue_shorts: { venue => "2.12" }, inside: true, blockers: []) }
   end
 
   def outside_tolerance_preflight_factory

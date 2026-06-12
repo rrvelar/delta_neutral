@@ -1144,6 +1144,9 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "ready 6 / total 6", response.body
     assert_match "missing 0", response.body
     assert_match "stale 0", response.body
+    assert_match "Legacy setup diagnostics", response.body
+    assert_match "Next target venue", response.body
+    assert_match "daily coverage policy", response.body
   ensure
     clear_random_production_files(position&.id)
   end

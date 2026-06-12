@@ -546,11 +546,14 @@ end %>
         Preview does not switch the production hedge venue. Production remains <%= cached_snapshot[:production_venue_name] || HedgeVenues.label(@position.hedge&.execution_venue) %> until a live migration completes and final readback allows finalize.
       </div>
 
-      <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup %>
+      <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
 
       <% random_production = @random_production_runner_status || {} %>
       <% random_production_status = random_production[:lock_stale] ? "stale lock" : (random_production[:status].presence || "unknown") %>
       <% random_production_tail_visible = ActiveModel::Type::Boolean.new.cast(params[:show_random_production_tail]) %>
+      <% daily_coverage_venues = %w[extended ethereal nado] %>
+      <% current_policy_venue = HedgeVenues.normalize(random_production[:current_production_venue] || @position.hedge&.execution_venue) %>
+      <% next_policy_target = daily_coverage_venues[(daily_coverage_venues.index(current_policy_venue).to_i + 1) % daily_coverage_venues.size] %>
       <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -575,6 +578,7 @@ end %>
           <% route_summary = random_production[:route_proofs_summary] || {} %>
           <div><p class="text-xs text-gray-500">Route proofs</p><p class="text-white"><%= route_summary[:missing_cache] || route_summary["missing_cache"] ? "cache missing" : "ready #{route_summary[:ready] || route_summary['ready']} / total #{route_summary[:total] || route_summary['total']} · missing #{route_summary[:missing] || route_summary['missing'] || 0} · stale #{route_summary[:stale] || route_summary['stale'] || 0}" %></p></div>
           <div><p class="text-xs text-gray-500">Migration policy</p><p class="text-white">3/day · interval 28800s · hold check 300s</p></div>
+          <div><p class="text-xs text-gray-500">Next target venue</p><p class="text-white"><%= HedgeVenues.label(next_policy_target) %> · daily coverage policy</p></div>
           <div><p class="text-xs text-gray-500">Latest blocker</p><p class="break-words text-white"><%= random_production[:latest_blocker].presence || "none" %></p></div>
         </div>
 

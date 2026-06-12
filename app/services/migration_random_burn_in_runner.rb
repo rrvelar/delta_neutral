@@ -319,16 +319,21 @@ class MigrationRandomBurnInRunner
       blockers = (blockers + Array(post_migration_rebalance[:blockers])).uniq
       status = "stopped_active_rebalance"
     end
+    write_event(cycle_progress_event(cycle: cycle, route: route, execution: execution, post_target: post_target, post_hedge: post_hedge, status: status, blockers: blockers, post_migration_rebalance: post_migration_rebalance)) if live? || rebalance_during_hold
     hold_rebalance = empty_hold_rebalance_payload
     if status == "success"
       return stopped_cycle_result(cycle, "stop requested before hold monitor") if stop_requested?
 
-      hold_rebalance = self.hold_rebalance_checks(deadline: deadline)
+      hold_rebalance = self.hold_rebalance_checks(deadline: deadline, cycle: cycle, route: route)
       hold_rebalance_checks = hold_rebalance.fetch(:checks)
       hold_blockers = hold_rebalance_checks.flat_map { |check| Array(check[:blockers]) }.uniq
       if hold_blockers.any?
         blockers = (blockers + hold_blockers).uniq
         status = "stopped_active_rebalance"
+      end
+      if stop_requested? && hold_blockers.empty?
+        blockers = (blockers + [ "stop requested during hold monitor" ]).uniq
+        status = "stopped"
       end
     end
     self.orders_submitted += execution.fetch(:orders_submitted)
@@ -562,7 +567,7 @@ class MigrationRandomBurnInRunner
     )
   end
 
-  def hold_rebalance_checks(deadline:)
+  def hold_rebalance_checks(deadline:, cycle: nil, route: nil)
     return empty_hold_rebalance_payload unless rebalance_during_hold
     return empty_hold_rebalance_payload unless rebalance_hold_interval_seconds.positive? && interval_seconds >= rebalance_hold_interval_seconds
 
@@ -579,6 +584,7 @@ class MigrationRandomBurnInRunner
       check_times << now.call
       accumulate_rebalance_counts(check)
       checks << check
+      write_event(hold_check_event(cycle: cycle, route: route, check: check, check_time: check_times.last, checks_count: checks.size))
       break if Array(check[:blockers]).any?
 
       next_check_at += rebalance_hold_interval_seconds.seconds
@@ -644,13 +650,33 @@ class MigrationRandomBurnInRunner
     "hold monitor covered #{actual_span}s; expected at least #{expected_span}s"
   end
 
+  def hold_check_event(cycle:, route:, check:, check_time:, checks_count:)
+    {
+      event: "hold_check",
+      cycle: cycle,
+      checked_at: check_time.utc.iso8601,
+      from_venue: route&.fetch(:from_venue, nil),
+      to_venue: route&.fetch(:to_venue, nil),
+      route: route&.fetch(:route, nil),
+      hold_rebalance_checks_count: checks_count,
+      hold_rebalance_check: check,
+      status: Array(check[:blockers]).any? ? "blocked" : "running",
+      blockers: Array(check[:blockers])
+    }
+  end
+
   def sleep_until(target_time)
+    remaining = target_time - now.call
+    if stop_requested.nil?
+      sleeper.call(remaining) if remaining.positive?
+      return
+    end
+
     while !stop_requested?
       remaining = target_time - now.call
       break unless remaining.positive?
 
-      sleeper.call([ remaining, rebalance_hold_interval_seconds.positive? ? rebalance_hold_interval_seconds : remaining ].min)
-      break if remaining <= 0
+      sleeper.call([ remaining, 5 ].min)
     end
   end
 
@@ -687,6 +713,25 @@ class MigrationRandomBurnInRunner
       hold_monitor_actual_span_seconds: hold_rebalance.fetch(:actual_span_seconds),
       hold_monitor_gap_warning: hold_rebalance.fetch(:gap_warning),
       pre_next_cycle_rebalance: pre_next_cycle_rebalance || unchecked_rebalance_payload("pre_next_cycle"),
+      status: status,
+      blockers: blockers
+    }
+  end
+
+  def cycle_progress_event(cycle:, route:, execution:, post_target:, post_hedge:, status:, blockers:, post_migration_rebalance:)
+    {
+      event: "cycle_progress",
+      progress: "post_migration_finalized",
+      cycle: cycle,
+      timestamp: now.call.utc.iso8601,
+      from_venue: route&.fetch(:from_venue, nil),
+      to_venue: route&.fetch(:to_venue, nil),
+      route: route&.fetch(:route, nil),
+      execution: execution,
+      post_cycle_target: post_target,
+      post_cycle_hedge: post_hedge,
+      after: post_hedge,
+      post_migration_rebalance: post_migration_rebalance || unchecked_rebalance_payload("post_migration"),
       status: status,
       blockers: blockers
     }

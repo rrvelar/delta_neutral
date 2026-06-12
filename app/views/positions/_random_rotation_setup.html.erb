@@ -1,4 +1,8 @@
 <% setup ||= {} %>
+<% production_runner ||= {} %>
+<% production_route_summary = production_runner[:route_proofs_summary] || {} %>
+<% production_routes_ready = (production_route_summary[:ready] || production_route_summary["ready"]).to_i == 6 && (production_route_summary[:total] || production_route_summary["total"]).to_i == 6 && (production_route_summary[:missing] || production_route_summary["missing"]).to_i.zero? && (production_route_summary[:stale] || production_route_summary["stale"]).to_i.zero? %>
+<% diagnostic_only = production_routes_ready %>
 <% next_route = setup[:next_route] || {} %>
 <% plan = setup[:plan] || {} %>
 <% counters = setup[:counters] || {} %>
@@ -21,15 +25,15 @@
 <div id="random-rotation-setup" class="mt-4 rounded-xl border border-gray-800 bg-gray-950/70 p-4">
   <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
     <div>
-      <p class="text-xs uppercase tracking-wide text-gray-500">Random Rotation Setup</p>
-      <h3 class="mt-1 text-lg font-semibold text-white">Dashboard setup wizard</h3>
+      <p class="text-xs uppercase tracking-wide text-gray-500">Random Rotation Setup<%= diagnostic_only ? " · Diagnostic only" : "" %></p>
+      <h3 class="mt-1 text-lg font-semibold text-white"><%= diagnostic_only ? "Legacy setup diagnostics" : "Dashboard setup wizard" %></h3>
       <p class="mt-1 text-sm text-gray-300">
         Status: <span class="font-medium text-white"><%= setup[:status_label] || "Unavailable" %></span>
         · Current venue: <span class="font-medium text-white"><%= setup[:current_venue_label] || HedgeVenues.label(position.hedge&.execution_venue) %></span>
       </p>
       <p class="mt-1 text-sm text-gray-400">
-        Next required step:
-        <span class="text-white"><%= setup[:next_action_label] || "Refresh Random Readiness" %><%= next_route[:from_venue].present? ? " #{HedgeVenues.label(next_route[:from_venue])} -> #{HedgeVenues.label(next_route[:to_venue])}" : "" %></span>
+        <%= diagnostic_only ? "Production runner truth:" : "Next required step:" %>
+        <span class="text-white"><%= diagnostic_only ? "All six route proofs are READY_FOR_RANDOM; use the Production Random Runner panel for production route policy." : "#{setup[:next_action_label] || 'Refresh Random Readiness'}#{next_route[:from_venue].present? ? " #{HedgeVenues.label(next_route[:from_venue])} -> #{HedgeVenues.label(next_route[:to_venue])}" : ""}" %></span>
       </p>
       <% if setup_progress[:from_venue].present? %>
         <p class="mt-1 text-sm text-gray-400">
@@ -39,7 +43,7 @@
       <% end %>
       <p class="mt-1 text-sm text-gray-400">
         Random rotation:
-        <span class="text-white"><%= random_enablement[:ready_routes] || 0 %> / <%= random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size %> routes READY_FOR_RANDOM</span>
+        <span class="text-white"><%= diagnostic_only ? "6 / 6 routes READY_FOR_RANDOM" : "#{random_enablement[:ready_routes] || 0} / #{random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size} routes READY_FOR_RANDOM" %></span>
       </p>
     </div>
     <span class="rounded-full border px-3 py-1 text-xs <%= status_color %>"><%= setup[:status_label] || "Unavailable" %></span>
@@ -71,8 +75,8 @@
     </div>
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
       <p class="text-xs text-gray-500">Random enablement</p>
-      <p class="mt-1 text-white"><%= random_enablement[:ready_routes] || Array(setup[:completed_route_proofs]).size %> / <%= random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size %> READY_FOR_RANDOM</p>
-      <p class="mt-1 text-xs text-gray-500">Final random rotation stays blocked until every route is ready.</p>
+      <p class="mt-1 text-white"><%= diagnostic_only ? "6 / 6" : "#{random_enablement[:ready_routes] || Array(setup[:completed_route_proofs]).size} / #{random_enablement[:total_routes] || Array(setup[:route_proof_statuses]).size}" %> READY_FOR_RANDOM</p>
+      <p class="mt-1 text-xs text-gray-500"><%= diagnostic_only ? "Production runner status is authoritative." : "Final random rotation stays blocked until every route is ready." %></p>
     </div>
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
       <p class="text-xs text-gray-500">Action counters</p>

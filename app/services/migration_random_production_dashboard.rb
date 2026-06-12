@@ -30,7 +30,7 @@ class MigrationRandomProductionDashboard
       bridge_status: bridge_status(control_request, control_result),
       latest_event: latest_event,
       tail_events: latest_events,
-      current_production_venue: heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue,
+      current_production_venue: status["current_production_venue"] || active_venue_from_shorts(status) || heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue,
       target_short_eth: heartbeat["target_short_eth"],
       combined_short_eth: heartbeat["combined_short_eth"],
       inside_tolerance: heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : status["inside_tolerance"],
@@ -123,6 +123,14 @@ class MigrationRandomProductionDashboard
 
   def direct_venue_shorts(status)
     HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, status.dig("direct_venue_shorts", venue) ] }
+  end
+
+  def active_venue_from_shorts(status)
+    shorts = status["direct_venue_shorts"]
+    return nil unless shorts.is_a?(Hash)
+
+    active = shorts.find { |_venue, value| decimal(value).positive? }
+    active&.first
   end
 
   def direct_open_orders_zero?(status)

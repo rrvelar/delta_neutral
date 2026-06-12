@@ -89,6 +89,8 @@ The dashboard canary button writes:
 
 The dashboard 24/7 button writes `mode=production_24x7`. The stop button first writes `stop_position_6.json` through the existing production runner stop path, then writes a bridge stop request. The bridge also writes the stop request itself, stops both the canary and production services, and runs `systemctl reset-failed` for both so an intentional stop does not resurrect the runner.
 
+The Rails runner sleeps in short interruptible chunks during long holds and checks the stop file before each hold check. The systemd runner units also use `ExecStopPost` to send TERM to any lingering `bin/rails migration:random_production_runner position_id=6` process inside the web container after the safe stop request is written.
+
 `bin/random_production_systemd_bridge` is host-safe: it uses bash and `python3` only. It does not require host Ruby.
 
 The host unit files live in `docs/systemd/`:
