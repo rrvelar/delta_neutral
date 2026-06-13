@@ -102,6 +102,22 @@ class MigrationTaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "systemd runner stop post uses portable shell kill fallback" do
+    [
+      Rails.root.join("docs/systemd/delta-neutral-random-production-6-canary.service"),
+      Rails.root.join("docs/systemd/delta-neutral-random-production-6.service")
+    ].each do |path|
+      text = File.read(path)
+
+      assert_includes text, "ExecStopPost="
+      assert_includes text, "/bin/sh -lc"
+      assert_includes text, "ps -eo pid=,args="
+      assert_includes text, "kill -TERM"
+      refute_includes text, "pkill"
+      refute_includes text, "pgrep"
+    end
+  end
+
   test "prove routes task writes JSONL proof receipts" do
     position = migration_position
     ENV["position_id"] = position.id.to_s
