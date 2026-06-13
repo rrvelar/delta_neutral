@@ -233,6 +233,7 @@ else "border-gray-700 bg-gray-950 text-gray-300"
 end %>
 <% production_blockers = Array(random_production[:direct_preflight_blockers]).presence || Array(random_production[:latest_blocker]).compact %>
 <% production_optional_diagnostics = Array((random_production[:dashboard_snapshot_diagnostic] || {})[:blockers] || (random_production[:dashboard_snapshot_diagnostic] || {})["blockers"]) %>
+<% production_eth_value = ->(value, reason) { value.present? ? "#{format_venue_eth_amount(value)} ETH" : reason } %>
 <% production_operator_summary = if random_production_running && production_inside_tolerance == true && production_open_orders_zero == true && production_blockers.blank?
   "Bot is running normally. Current hedge: #{production_truth_venue_name} short #{format_venue_eth_amount(production_active_short)} ETH. Target: #{format_venue_eth_amount(production_target_short)} ETH. Drift: #{format_venue_eth_amount(production_drift_eth)} ETH, inside tolerance. Open orders: zero. Last action: #{random_production[:last_route].presence || 'none recorded'}. Next: hold check every 5 minutes; next migration #{production_next_rotation_at ? "around #{l(production_next_rotation_at, format: :short)}" : 'ETA not loaded yet'}. No action required."
 else
@@ -246,16 +247,23 @@ end %>
         <div class="min-w-0">
           <p class="text-xs uppercase tracking-wide text-gray-500">Production Control Center</p>
           <h1 class="mt-1 text-2xl font-semibold text-white">24/7 Random Rotation: <%= random_production_status.to_s.upcase.tr("_", " ") %></h1>
-          <p class="mt-2 max-w-5xl text-sm text-gray-300"><%= production_operator_summary %></p>
+          <% if random_production_running && production_inside_tolerance == true && production_open_orders_zero == true && production_blockers.blank? %>
+            <div class="mt-3 rounded-xl border border-green-900 bg-green-950/40 p-3">
+              <p class="text-sm font-semibold text-green-100">Bot is running normally. No action required.</p>
+              <p class="mt-1 max-w-5xl text-sm text-green-100/90"><%= production_operator_summary %></p>
+            </div>
+          <% else %>
+            <p class="mt-2 max-w-5xl text-sm text-gray-300"><%= production_operator_summary %></p>
+          <% end %>
         </div>
         <span class="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold <%= production_status_color %>"><%= random_production_status %></span>
       </div>
 
       <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Production runner venue</p><p class="mt-1 text-lg font-semibold text-white"><%= production_truth_venue_name %></p></div>
-        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active venue short</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_active_short) %> ETH</p></div>
-        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_target_short) %> ETH</p></div>
-        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Drift / tolerance</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_drift_eth) %> / <%= format_venue_eth_amount(production_tolerance_eth) %> ETH</p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active venue short</p><p class="mt-1 text-lg font-semibold text-white"><%= production_eth_value.call(production_active_short, "not loaded yet - cached direct short missing") %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= production_eth_value.call(production_target_short, "not loaded yet - heartbeat target missing") %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Drift / tolerance</p><p class="mt-1 text-lg font-semibold text-white"><%= production_drift_eth.present? ? format_venue_eth_amount(production_drift_eth) : "not loaded yet" %> / <%= production_tolerance_eth.present? ? "#{format_venue_eth_amount(production_tolerance_eth)} ETH" : "not loaded yet - target/tolerance missing" %></p></div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Inside tolerance</p><p class="<%= production_inside_tolerance == true ? 'text-green-300' : (production_inside_tolerance == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= production_inside_tolerance.nil? ? "unknown - production status not loaded yet" : (production_inside_tolerance ? "yes" : "no") %></p></div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Open orders</p><p class="<%= production_open_orders_zero == true ? 'text-green-300' : (production_open_orders_zero == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= production_open_orders_zero.nil? ? "unknown - direct readback not cached" : (production_open_orders_zero ? "zero" : "nonzero") %></p></div>
       </div>
@@ -263,8 +271,8 @@ end %>
       <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
         <div><p class="text-xs text-gray-500">Mode</p><p class="text-white"><%= random_production[:mode].presence || "24/7 production" %></p></div>
         <div><p class="text-xs text-gray-500">Policy</p><p class="text-white"><%= random_production[:policy_label].presence || "3 migrations/day · interval 28800s · hold check 300s" %></p></div>
-        <div><p class="text-xs text-gray-500">Last route</p><p class="text-white"><%= random_production[:last_route].presence || "none recorded yet" %></p></div>
-        <div><p class="text-xs text-gray-500">Last cycle</p><p class="text-white"><%= random_production[:last_cycle].presence || "none recorded yet" %></p></div>
+        <div><p class="text-xs text-gray-500">Last route</p><p class="text-white"><%= random_production[:last_route].presence || "not recorded yet - waiting for first cycle event" %></p></div>
+        <div><p class="text-xs text-gray-500">Last cycle</p><p class="text-white"><%= random_production[:last_cycle].presence || "not recorded yet - waiting for first cycle event" %></p></div>
         <div><p class="text-xs text-gray-500">Last hold check</p><p class="text-white"><%= production_last_hold_check_at ? "#{l(production_last_hold_check_at, format: :short)} (#{time_ago_in_words(production_last_hold_check_at)} ago)" : "not loaded yet - waiting for heartbeat" %></p></div>
         <div><p class="text-xs text-gray-500">Next rotation ETA</p><p class="text-white"><%= production_next_rotation_at ? "#{l(production_next_rotation_at, format: :short)} (#{distance_of_time_in_words(Time.current, production_next_rotation_at)} from now)" : "not loaded yet - heartbeat lacks start/cycle timing" %></p></div>
         <div><p class="text-xs text-gray-500">Next target venue</p><p class="text-white"><%= HedgeVenues.label(production_next_target) %> · daily coverage policy</p></div>
@@ -308,7 +316,6 @@ end %>
         <% end %>
         <div class="mt-4 flex flex-wrap gap-2">
           <span class="rounded-full border border-green-800 bg-green-950/60 px-3 py-1 text-xs font-semibold text-green-200">Production runner venue: <%= production_truth_venue_name %></span>
-          <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-300">Manual UI selected venue: <%= selected_venue_name %></span>
           <% if @position.active? %>
             <span class="rounded-full border border-green-800 bg-green-950/60 px-3 py-1 text-xs font-semibold text-green-300">Active production position</span>
           <% else %>
@@ -320,9 +327,19 @@ end %>
           <span class="rounded-full border <%= selected_live_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-yellow-800 bg-yellow-950/60 text-yellow-200' %> px-3 py-1 text-xs font-semibold"><%= live_status_label %></span>
           <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold"><%= auto_operational_label %></span>
           <span class="rounded-full border <%= rebalance_needed.nil? ? 'border-gray-700 bg-gray-950 text-gray-300' : (rebalance_needed ? 'border-red-800 bg-red-950/60 text-red-200' : 'border-green-800 bg-green-950/60 text-green-300') %> px-3 py-1 text-xs font-semibold"><%= tolerance_label %></span>
-          <span class="rounded-full border <%= auto_gate_enabled ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold">Auto: <%= auto_operational_label %></span>
           <span class="rounded-full border <%= signer_label == 'OK' ? 'border-green-800 bg-green-950/60 text-green-300' : 'border-gray-700 bg-gray-950 text-gray-300' %> px-3 py-1 text-xs font-semibold">Signer: <%= signer_label %></span>
         </div>
+        <% if aerodrome %>
+          <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-3">
+            <summary class="cursor-pointer text-sm font-semibold text-gray-200">Advanced / manual controls</summary>
+            <div class="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+              <div><p class="text-xs text-gray-500">Manual UI selected venue</p><p class="text-white"><%= selected_venue_name %></p></div>
+              <div><p class="text-xs text-gray-500">Manual live gate</p><p class="text-white"><%= live_status_label %></p></div>
+              <div><p class="text-xs text-gray-500">Manual auto setting</p><p class="text-white"><%= auto_operational_label %></p></div>
+            </div>
+            <p class="mt-2 text-xs text-gray-500">These controls affect manual dashboard views only. Production runner venue above remains authoritative while 24/7 random rotation is active.</p>
+          </details>
+        <% end %>
       </div>
       <div class="flex flex-wrap gap-3">
         <% if aerodrome %>
@@ -350,18 +367,31 @@ end %>
   <% if aerodrome %>
     <nav class="sticky top-0 z-10 -mx-4 border-y border-gray-800 bg-gray-950/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-xl sm:border">
       <div class="flex gap-2 overflow-x-auto text-sm">
-        <% [
-          [ "Overview", "overview" ],
-          [ "Hedge", "hedge" ],
-          [ "Migration", "migration" ],
-          [ "Routes", "routes" ],
-          [ "Accounting", "accounting" ],
-          [ "Diagnostics", "diagnostics" ],
-          [ "Settings", "settings" ]
-        ].each do |label, tab| %>
+        <% nav_tabs = if random_production_running
+          [
+            [ "Overview", "overview" ],
+            [ "Accounting", "accounting" ],
+            [ "Diagnostics", "diagnostics" ],
+            [ "Settings", "settings" ]
+          ]
+        else
+          [
+            [ "Overview", "overview" ],
+            [ "Hedge", "hedge" ],
+            [ "Migration", "migration" ],
+            [ "Routes", "routes" ],
+            [ "Accounting", "accounting" ],
+            [ "Diagnostics", "diagnostics" ],
+            [ "Settings", "settings" ]
+          ]
+        end %>
+        <% nav_tabs.each do |label, tab| %>
           <% tab_url = tab == "settings" ? edit_settings_path(anchor: "risk-settings") : position_path(@position, hedge_venue: selected_venue, tab: tab) %>
           <% active = position_tab == tab %>
           <a href="<%= tab_url %>" class="whitespace-nowrap rounded-lg border px-3 py-2 <%= active ? 'border-blue-700 bg-blue-950/60 text-blue-100' : 'border-gray-800 bg-gray-900 text-gray-200 hover:bg-gray-800' %>"><%= label %></a>
+        <% end %>
+        <% if random_production_running %>
+          <span class="whitespace-nowrap rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 text-gray-500">Hedge / Migration / Routes in Diagnostics</span>
         <% end %>
       </div>
     </nav>
@@ -375,13 +405,13 @@ end %>
       </div>
       <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
         <p class="text-xs uppercase tracking-wide text-gray-500">Hedge Target</p>
-        <p class="mt-2 text-lg font-semibold text-white"><%= format_venue_eth_amount(target_eth_short) %> ETH target</p>
-        <p class="mt-1 text-xs text-gray-500">Current <%= format_venue_eth_amount(current_short_eth) %> · drift <%= format_venue_eth_amount(drift_eth) %> · tolerance <%= format_venue_eth_amount(tolerance_eth) %></p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= production_eth_value.call(production_target_short, "not loaded yet - cached target missing") %> target</p>
+        <p class="mt-1 text-xs text-gray-500">Current <%= production_eth_value.call(production_active_short, "not loaded yet - cached direct short missing") %> · drift <%= production_drift_eth.present? ? format_venue_eth_amount(production_drift_eth) : "not loaded yet" %> · tolerance <%= production_tolerance_eth.present? ? format_venue_eth_amount(production_tolerance_eth) : "not loaded yet" %></p>
       </div>
       <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-        <p class="text-xs uppercase tracking-wide text-gray-500">Manual UI selected venue</p>
-        <p class="mt-2 text-lg font-semibold text-white"><%= selected_venue_name %></p>
-        <p class="mt-1 text-xs text-gray-500"><%= live_status_label %> · <%= auto_operational_label %> · signer <%= signer_label %></p>
+        <p class="text-xs uppercase tracking-wide text-gray-500">Production runner venue</p>
+        <p class="mt-2 text-lg font-semibold text-white"><%= production_truth_venue_name %></p>
+        <p class="mt-1 text-xs text-gray-500">Manual UI selected venue is in Advanced / manual controls.</p>
       </div>
       <div class="rounded-xl border <%= selected_action_blockers.present? || risk_cap_blocked || risk_order_blocked ? 'border-yellow-800 bg-yellow-950/20' : 'border-gray-800 bg-gray-900' %> p-4">
         <p class="text-xs uppercase tracking-wide text-gray-500">Next Action</p>
@@ -524,10 +554,10 @@ end %>
             </div>
             <dl class="mt-3 space-y-1 text-xs">
               <div class="flex justify-between gap-3"><dt class="text-gray-500">Notional</dt><dd class="text-white"><%= format_venue_usd_amount(state[:notional_usd]) %></dd></div>
-              <div class="flex justify-between gap-3"><dt class="text-gray-500">Leverage</dt><dd class="text-white"><%= state[:leverage].present? ? "#{state[:leverage]}x" : "Unavailable" %></dd></div>
+              <div class="flex justify-between gap-3"><dt class="text-gray-500">Leverage</dt><dd class="text-white"><%= state[:leverage].present? ? "#{state[:leverage]}x" : "not loaded yet - snapshot lacks leverage" %></dd></div>
               <% if venue_key == :extended %>
                 <div class="flex justify-between gap-3"><dt class="text-gray-500">Mark</dt><dd class="text-white"><%= format_venue_usd_amount(state[:mark_price]) %></dd></div>
-                <div class="flex justify-between gap-3"><dt class="text-gray-500">Open orders</dt><dd class="text-white"><%= state[:open_orders_count].nil? ? "Unavailable" : state[:open_orders_count] %></dd></div>
+                <div class="flex justify-between gap-3"><dt class="text-gray-500">Open orders</dt><dd class="text-white"><%= state[:open_orders_count].nil? ? "not loaded yet - snapshot lacks open-order count" : state[:open_orders_count] %></dd></div>
               <% end %>
               <div class="flex justify-between gap-3"><dt class="text-gray-500">Latest action</dt><dd class="text-white"><%= state[:latest_status].presence || "none" %></dd></div>
             </dl>
@@ -994,7 +1024,7 @@ end %>
           <div>
             <p class="text-xs uppercase tracking-wide text-gray-500">Legacy route matrix diagnostics only</p>
             <h3 class="mt-1 text-base font-semibold text-white"><%= production_route_ready ? "Production route proofs are 6/6 READY_FOR_RANDOM" : "Cached daily venue rotation diagnostics" %></h3>
-            <p class="mt-1 text-xs text-gray-400"><%= production_route_ready ? "This legacy table may show preview or dry-run states, but it does not block the active production runner." : "Dry-run proof only. Matrix rows use PositionDashboardSnapshot exposure and never sign or submit orders." %></p>
+            <p class="mt-1 text-xs text-gray-400"><%= production_route_ready ? "Legacy route matrix diagnostics only. Production runner uses READY_FOR_RANDOM route proofs. This table may show preview or dry-run states, but it does not block the active production runner." : "Dry-run proof only. Matrix rows use PositionDashboardSnapshot exposure and never sign or submit orders." %></p>
           </div>
           <%= button_to "Run dry-run route proof", migration_route_proof_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
         </div>
@@ -1138,7 +1168,7 @@ end %>
           <% end %>
           <% if selected_venue == "extended" %>
             <div class="mt-4 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-300">
-              <p>Extended production venue. Auto: <%= auto_operational_label %>. Signer: <%= signer_label %>. Required: 1x isolated-equivalent.</p>
+              <p>Extended production venue. Manual auto setting <%= auto_operational_label %>. Signer: <%= signer_label %>. Required: 1x isolated-equivalent.</p>
               <div class="mt-3 grid grid-cols-1 gap-2 border-t border-gray-800 pt-3 sm:grid-cols-2">
                 <div><span class="text-gray-500">Production venue</span><p class="text-white">Extended</p></div>
                 <div><span class="text-gray-500">Normal Extended auto</span><p class="<%= auto_gate_enabled ? 'text-green-300' : 'text-gray-300' %>"><%= auto_gate_enabled ? "enabled" : "disabled" %></p></div>

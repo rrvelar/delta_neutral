@@ -56,6 +56,7 @@ class MigrationRandomProductionRunner
 
   def run
     prepare_files!
+    clear_stale_stop_request!
     blockers = start_blockers
     if blockers.any?
       write_status(status: "blocked", blockers: blockers)
@@ -170,6 +171,10 @@ class MigrationRandomProductionRunner
 
   def prepare_files!
     FileUtils.mkdir_p(log_dir)
+  end
+
+  def clear_stale_stop_request!
+    FileUtils.rm_f(stop_path)
   end
 
   def start_blockers

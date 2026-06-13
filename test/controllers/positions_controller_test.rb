@@ -240,7 +240,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Position Control Center", response.body
     assert_match "Portfolio Snapshot", response.body
     assert_match "Production runner venue: Nado", response.body
-    assert_match "Manual UI selected venue: Nado", response.body
+    assert_match "Advanced / manual controls", response.body
+    assert_match "Manual UI selected venue", response.body
     assert_match "Live Gated", response.body
     assert_match "Auto Off", response.body
     assert_match "Aerodrome Slipstream", response.body
@@ -489,7 +490,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Extended production venue", response.body
-    assert_match "Auto: Auto Off", response.body
+    assert_match "Auto Off", response.body
+    assert_no_match "Auto: Auto Off", response.body
     assert_match "Signer: Unknown", response.body
     assert_match "Required: 1x isolated-equivalent", response.body
     assert_match "Migration tools", response.body
@@ -764,7 +766,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "24/7 Random Rotation: RUNNING", response.body
     assert_match "Production Random Runner", response.body
     assert_match "24/7 random rotation control", response.body
-    assert_match "Bot is running normally.", response.body
+    assert_match "Bot is running normally. No action required.", response.body
     assert_match "Route proofs", response.body
     assert_match "6/6 READY_FOR_RANDOM", response.body
     assert_match "Start 24h Canary", response.body
@@ -813,8 +815,24 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Production runner venue: Ethereal", response.body
-    assert_match "Manual UI selected venue: Extended", response.body
+    assert_match "Advanced / manual controls", response.body
+    assert_match "Manual UI selected venue", response.body
     assert_match "Current hedge: Ethereal short 2.120000 ETH", response.body
+    assert_match "Advanced / manual controls", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production overview reduces primary tabs while runner active" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Hedge / Migration / Routes in Diagnostics", response.body
+    nav_labels = css_select("nav.sticky a").map { |node| node.text.strip }
+    assert_equal [ "Overview", "Accounting", "Diagnostics", "Settings" ], nav_labels
   ensure
     clear_random_production_files(position&.id)
   end
@@ -843,7 +861,49 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Advanced / legacy diagnostics: setup wizard and route matrix are diagnostic only", response.body
     assert_match "Legacy setup diagnostics", response.body
     assert_match "Production route proofs are 6/6 READY_FOR_RANDOM", response.body
+    assert_match "Production runner uses READY_FOR_RANDOM route proofs.", response.body
     assert_no_match "Next required step: Run Supervised Live Canary", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "primary production control center does not show bare unavailable" do
+    position = production_random_position
+    status = {
+      status: "running",
+      current_production_venue: "nado",
+      direct_preflight_blockers: [],
+      direct_venue_shorts: { "extended" => "0", "ethereal" => "0", "nado" => nil },
+      inside_tolerance: nil,
+      route_proofs_summary: random_production_route_summary,
+      gates_state: {
+        "MIGRATION_LIVE_ENABLED" => true,
+        "MIGRATION_AUTO_ENABLED" => true,
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => true
+      }
+    }
+    write_random_production_files(position, heartbeat: {
+      runner: "random_production_runner",
+      position_id: position.id,
+      pid: Process.pid,
+      started_at: Time.current.utc.iso8601,
+      updated_at: Time.current.utc.iso8601,
+      last_cycle: nil,
+      last_route: nil,
+      current_production_venue: "nado",
+      inside_tolerance: nil,
+      open_orders_zero: nil,
+      gates_enabled: true,
+      last_hold_check_at: nil,
+      status: "running"
+    }, status: status)
+
+    get position_path(position)
+
+    assert_response :success
+    primary_text = css_select("#production-control-center").first.text
+    assert_no_match(/\bUnavailable\b/, primary_text)
+    assert_match "unknown - direct readback not cached", primary_text
   ensure
     clear_random_production_files(position&.id)
   end
@@ -2898,7 +2958,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Auto On", response.body
-    assert_match "Auto: Auto On", response.body
+    assert_no_match "Auto: Auto On", response.body
     assert_no_match "Auto: Auto Off", response.body
     assert_match "Disable Ethereal Auto", response.body
     assert_match OperationalSettings::DISABLE_CONFIRMATIONS.fetch("ethereal"), response.body

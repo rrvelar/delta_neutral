@@ -163,17 +163,33 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "clears stale stop request on fresh start" do
+    position = migration_position
+    dir = tmp_dir
+    FileUtils.mkdir_p(dir)
+    stop_path = dir.join("stop_position_#{position.id}.json")
+    File.write(stop_path, JSON.generate(status: "stop_requested", position_id: position.id))
+
+    result = runner(position: position, log_dir: dir, runner_factory: ->(**) { FakeBurnInRunner.new }).run
+
+    assert_equal "success", result.status
+    assert_not_predicate stop_path, :exist?
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "stop request disables gates and exits cleanly" do
     OperationalSettings.set!(key: "MIGRATION_LIVE_ENABLED", enabled: true)
     OperationalSettings.set!(key: "MIGRATION_AUTO_ENABLED", enabled: true)
     OperationalSettings.set!(key: "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED", enabled: true)
     position = migration_position
     dir = tmp_dir
-    service = runner(position: position, log_dir: dir)
-    service.stop!
 
     result = runner(position: position, log_dir: dir, runner_factory: ->(event_callback:, stop_requested:) {
-      FakeBurnInRunner.new(status: stop_requested.call ? "stopped" : "success", blockers: stop_requested.call ? [ "stop requested" ] : [])
+      StopDuringRunBurnInRunner.new(
+        stop_path: dir.join("stop_position_#{position.id}.json"),
+        stop_requested: stop_requested
+      )
     }).run
 
     assert_equal "stopped", result.status
@@ -516,6 +532,20 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
         @callback&.call(event)
       end
       MigrationRandomBurnInRunner::Result.new(@status, @blockers, [], "tmp/fake.jsonl", @summary)
+    end
+  end
+
+  class StopDuringRunBurnInRunner
+    def initialize(stop_path:, stop_requested:)
+      @stop_path = stop_path
+      @stop_requested = stop_requested
+    end
+
+    def run
+      File.write(@stop_path, JSON.generate(status: "stop_requested"))
+      status = @stop_requested.call ? "stopped" : "success"
+      blockers = status == "stopped" ? [ "stop requested" ] : []
+      MigrationRandomBurnInRunner::Result.new(status, blockers, [], "tmp/fake.jsonl", { orders_submitted: 0, signatures_created: 0 })
     end
   end
 
