@@ -16,9 +16,14 @@ class MigrationRandomProductionDashboard
     latest_events = latest_jsonl_events(tail_lines)
     latest_event = latest_events.last
     blockers = Array(status["blockers"]).presence || Array(latest_event&.fetch("blockers", nil))
+    current_venue = status["current_production_venue"] || active_venue_from_shorts(status) || heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue
+    target_short = heartbeat["target_short_eth"]
+    combined_short = heartbeat["combined_short_eth"]
 
     {
       status: display_status(status: status, heartbeat: heartbeat, lock: lock),
+      mode: production_mode(heartbeat),
+      policy_label: "3 migrations/day · interval #{MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS}s · hold check #{MigrationRandomProductionRunner::DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS}s",
       status_payload: status,
       heartbeat: heartbeat,
       lock: lock,
@@ -30,9 +35,12 @@ class MigrationRandomProductionDashboard
       bridge_status: bridge_status(control_request, control_result),
       latest_event: latest_event,
       tail_events: latest_events,
-      current_production_venue: status["current_production_venue"] || active_venue_from_shorts(status) || heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue,
-      target_short_eth: heartbeat["target_short_eth"],
-      combined_short_eth: heartbeat["combined_short_eth"],
+      current_production_venue: current_venue,
+      active_venue_short_eth: active_venue_short(status, current_venue),
+      target_short_eth: target_short,
+      combined_short_eth: combined_short,
+      drift_eth: drift_eth(target_short, combined_short),
+      tolerance_eth: tolerance_eth(target_short),
       inside_tolerance: heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : status["inside_tolerance"],
       direct_preflight_blockers: Array(status["direct_preflight_blockers"]),
       direct_open_orders: direct_open_orders(status),
@@ -43,6 +51,8 @@ class MigrationRandomProductionDashboard
       last_cycle: heartbeat["last_cycle"] || latest_event&.fetch("cycle", nil),
       last_hold_check: heartbeat["last_hold_check_at"] || last_hold_check_from(latest_event),
       heartbeat_updated_at: heartbeat["updated_at"],
+      next_target_venue: next_daily_coverage_target(current_venue),
+      next_rotation_at: next_rotation_at(heartbeat),
       lock_pid: lock["pid"],
       gates_state: status["gates_state"] || gates_state,
       latest_blocker: blockers.first,
@@ -51,6 +61,8 @@ class MigrationRandomProductionDashboard
   rescue => e
     {
       status: "unknown",
+      mode: "unknown",
+      policy_label: "3 migrations/day · interval #{MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS}s · hold check #{MigrationRandomProductionRunner::DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS}s",
       status_payload: {},
       heartbeat: {},
       lock: {},
@@ -63,8 +75,11 @@ class MigrationRandomProductionDashboard
       latest_event: nil,
       tail_events: [],
       current_production_venue: nil,
+      active_venue_short_eth: nil,
       target_short_eth: nil,
       combined_short_eth: nil,
+      drift_eth: nil,
+      tolerance_eth: nil,
       inside_tolerance: nil,
       direct_preflight_blockers: [ "#{e.class}: #{e.message}" ],
       direct_open_orders: {},
@@ -75,6 +90,8 @@ class MigrationRandomProductionDashboard
       last_cycle: nil,
       last_hold_check: nil,
       heartbeat_updated_at: nil,
+      next_target_venue: nil,
+      next_rotation_at: nil,
       lock_pid: nil,
       gates_state: gates_state,
       latest_blocker: "#{e.class}: #{e.message}",
@@ -149,6 +166,50 @@ class MigrationRandomProductionDashboard
       stale: proof["stale"] || Array(proof["stale_route_proofs"]).size,
       total: proof["total"] || Array(proof["routes"]).size
     }
+  end
+
+  def production_mode(heartbeat)
+    duration = heartbeat["duration_minutes"] || heartbeat.dig("config", "duration_minutes")
+    return "24h canary" if duration.to_i == 1_440
+    return "24/7 production" if duration.to_i.zero?
+
+    duration.present? ? "#{duration} minute run" : "24/7 production"
+  end
+
+  def active_venue_short(status, venue)
+    return nil if venue.blank?
+
+    status.dig("direct_venue_shorts", venue.to_s)
+  end
+
+  def drift_eth(target_short, combined_short)
+    return nil if target_short.blank? || combined_short.blank?
+
+    decimal(target_short) - decimal(combined_short)
+  end
+
+  def tolerance_eth(target_short)
+    return nil if target_short.blank? || position.hedge&.tolerance.blank?
+
+    decimal(target_short) * decimal(position.hedge.tolerance)
+  end
+
+  def next_daily_coverage_target(current_venue)
+    venues = %w[extended ethereal nado]
+    current = HedgeVenues.normalize(current_venue)
+    return nil unless venues.include?(current)
+
+    venues[(venues.index(current) + 1) % venues.size]
+  end
+
+  def next_rotation_at(heartbeat)
+    started_at = Time.zone.parse(heartbeat["started_at"].to_s)
+    cycle = heartbeat["last_cycle"].to_i
+    return nil unless started_at && cycle.positive?
+
+    (started_at + (cycle * MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS).seconds).utc.iso8601
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def dashboard_snapshot_diagnostic

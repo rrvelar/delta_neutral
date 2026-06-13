@@ -198,8 +198,92 @@ else risk_current_short
 end %>
 <% risk_cap_blocked = risk_short_cap.value.present? && risk_expected_after.present? && risk_expected_after > risk_short_cap.value %>
 <% risk_order_blocked = risk_order_cap.value.present? && risk_requested_size.present? && risk_requested_size > risk_order_cap.value %>
+<% random_production = @random_production_runner_status || {} %>
+<% random_production_status = random_production[:lock_stale] ? "stale lock" : (random_production[:status].presence || "unknown") %>
+<% random_production_running = random_production_status == "running" %>
+<% production_truth_venue = HedgeVenues.normalize(random_production[:current_production_venue].presence || @position.hedge&.execution_venue) %>
+<% production_truth_venue_name = HedgeVenues.label(production_truth_venue) %>
+<% production_active_short = random_production[:active_venue_short_eth].presence || random_production.dig(:direct_venue_shorts, production_truth_venue) || current_short_eth %>
+<% production_target_short = random_production[:target_short_eth].presence || target_eth_short %>
+<% production_drift_eth = random_production[:drift_eth].presence || drift_eth %>
+<% production_tolerance_eth = random_production[:tolerance_eth].presence || tolerance_eth %>
+<% production_inside_tolerance = random_production.key?(:inside_tolerance) ? random_production[:inside_tolerance] : inside_tolerance %>
+<% production_open_orders_zero = random_production[:open_orders_zero] %>
+<% production_route_summary = random_production[:route_proofs_summary] || {} %>
+<% production_route_ready = (production_route_summary[:ready] || production_route_summary["ready"]).to_i == 6 && (production_route_summary[:total] || production_route_summary["total"]).to_i == 6 && (production_route_summary[:missing] || production_route_summary["missing"]).to_i.zero? && (production_route_summary[:stale] || production_route_summary["stale"]).to_i.zero? %>
+<% production_next_target = random_production[:next_target_venue].presence || begin
+  daily_venues = %w[extended ethereal nado]
+  daily_venues[(daily_venues.index(production_truth_venue).to_i + 1) % daily_venues.size]
+end %>
+<% production_next_rotation_at = begin
+  Time.zone.parse(random_production[:next_rotation_at].to_s)
+rescue ArgumentError, TypeError
+  nil
+end %>
+<% production_last_hold_check_at = begin
+  Time.zone.parse(random_production[:last_hold_check].to_s)
+rescue ArgumentError, TypeError
+  nil
+end %>
+<% production_status_color = case random_production_status
+when "running" then "border-green-800 bg-green-950/50 text-green-100"
+when "unsafe_multiple_exposure", "orphan_process_running", "unsafe_gates_left_enabled", "blocked" then "border-red-800 bg-red-950/50 text-red-100"
+when "stale lock", "stale_lock", "stale_heartbeat" then "border-yellow-800 bg-yellow-950/50 text-yellow-100"
+else "border-gray-700 bg-gray-950 text-gray-300"
+end %>
+<% production_blockers = Array(random_production[:direct_preflight_blockers]).presence || Array(random_production[:latest_blocker]).compact %>
+<% production_optional_diagnostics = Array((random_production[:dashboard_snapshot_diagnostic] || {})[:blockers] || (random_production[:dashboard_snapshot_diagnostic] || {})["blockers"]) %>
+<% production_operator_summary = if random_production_running && production_inside_tolerance == true && production_open_orders_zero == true && production_blockers.blank?
+  "Bot is running normally. Current hedge: #{production_truth_venue_name} short #{format_venue_eth_amount(production_active_short)} ETH. Target: #{format_venue_eth_amount(production_target_short)} ETH. Drift: #{format_venue_eth_amount(production_drift_eth)} ETH, inside tolerance. Open orders: zero. Last action: #{random_production[:last_route].presence || 'none recorded'}. Next: hold check every 5 minutes; next migration #{production_next_rotation_at ? "around #{l(production_next_rotation_at, format: :short)}" : 'ETA not loaded yet'}. No action required."
+else
+  "Production runner state needs review. Status: #{random_production_status}. Current venue: #{production_truth_venue_name}. Open orders: #{production_open_orders_zero.nil? ? 'unknown - production status has not confirmed direct open orders yet' : (production_open_orders_zero ? 'zero' : 'nonzero')}. #{production_blockers.first.presence || 'Check blockers below if the status is not running.'}"
+end %>
 
 <div class="space-y-8">
+  <% if aerodrome %>
+    <section id="production-control-center" class="rounded-2xl border <%= random_production_running ? 'border-green-900 bg-green-950/20' : 'border-gray-800 bg-gray-900/80' %> p-5 shadow-2xl shadow-black/20">
+      <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div class="min-w-0">
+          <p class="text-xs uppercase tracking-wide text-gray-500">Production Control Center</p>
+          <h1 class="mt-1 text-2xl font-semibold text-white">24/7 Random Rotation: <%= random_production_status.to_s.upcase.tr("_", " ") %></h1>
+          <p class="mt-2 max-w-5xl text-sm text-gray-300"><%= production_operator_summary %></p>
+        </div>
+        <span class="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold <%= production_status_color %>"><%= random_production_status %></span>
+      </div>
+
+      <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Production runner venue</p><p class="mt-1 text-lg font-semibold text-white"><%= production_truth_venue_name %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active venue short</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_active_short) %> ETH</p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_target_short) %> ETH</p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Drift / tolerance</p><p class="mt-1 text-lg font-semibold text-white"><%= format_venue_eth_amount(production_drift_eth) %> / <%= format_venue_eth_amount(production_tolerance_eth) %> ETH</p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Inside tolerance</p><p class="<%= production_inside_tolerance == true ? 'text-green-300' : (production_inside_tolerance == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= production_inside_tolerance.nil? ? "unknown - production status not loaded yet" : (production_inside_tolerance ? "yes" : "no") %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Open orders</p><p class="<%= production_open_orders_zero == true ? 'text-green-300' : (production_open_orders_zero == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= production_open_orders_zero.nil? ? "unknown - direct readback not cached" : (production_open_orders_zero ? "zero" : "nonzero") %></p></div>
+      </div>
+
+      <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+        <div><p class="text-xs text-gray-500">Mode</p><p class="text-white"><%= random_production[:mode].presence || "24/7 production" %></p></div>
+        <div><p class="text-xs text-gray-500">Policy</p><p class="text-white"><%= random_production[:policy_label].presence || "3 migrations/day · interval 28800s · hold check 300s" %></p></div>
+        <div><p class="text-xs text-gray-500">Last route</p><p class="text-white"><%= random_production[:last_route].presence || "none recorded yet" %></p></div>
+        <div><p class="text-xs text-gray-500">Last cycle</p><p class="text-white"><%= random_production[:last_cycle].presence || "none recorded yet" %></p></div>
+        <div><p class="text-xs text-gray-500">Last hold check</p><p class="text-white"><%= production_last_hold_check_at ? "#{l(production_last_hold_check_at, format: :short)} (#{time_ago_in_words(production_last_hold_check_at)} ago)" : "not loaded yet - waiting for heartbeat" %></p></div>
+        <div><p class="text-xs text-gray-500">Next rotation ETA</p><p class="text-white"><%= production_next_rotation_at ? "#{l(production_next_rotation_at, format: :short)} (#{distance_of_time_in_words(Time.current, production_next_rotation_at)} from now)" : "not loaded yet - heartbeat lacks start/cycle timing" %></p></div>
+        <div><p class="text-xs text-gray-500">Next target venue</p><p class="text-white"><%= HedgeVenues.label(production_next_target) %> · daily coverage policy</p></div>
+        <div><p class="text-xs text-gray-500">Route proofs</p><p class="<%= production_route_ready ? 'text-green-300' : 'text-yellow-200' %>"><%= production_route_ready ? "6/6 READY_FOR_RANDOM" : (production_route_summary[:missing_cache] || production_route_summary["missing_cache"] ? "cache missing - run route proof refresh" : "ready #{production_route_summary[:ready] || production_route_summary['ready'] || 0}/#{production_route_summary[:total] || production_route_summary['total'] || 0}") %></p></div>
+        <div><p class="text-xs text-gray-500">Heartbeat</p><p class="text-white"><%= random_production[:heartbeat_updated_at].presence || "not loaded yet - production heartbeat file missing" %></p></div>
+        <div><p class="text-xs text-gray-500">Lock pid</p><p class="text-white"><%= random_production[:lock_pid].presence || "none - runner may be stopped or lock absent" %></p></div>
+        <div><p class="text-xs text-gray-500">Blockers</p><p class="<%= production_blockers.present? ? 'text-red-300' : 'text-green-300' %>"><%= production_blockers.first.presence || "none" %></p></div>
+        <div><p class="text-xs text-gray-500">User action</p><p class="text-white"><%= production_blockers.present? ? "review blocker" : (random_production_running ? "none required" : "start only after direct status is safe") %></p></div>
+      </div>
+
+      <% if production_optional_diagnostics.present? %>
+        <div class="mt-4 rounded-xl border border-yellow-900 bg-yellow-950/20 p-3">
+          <p class="text-sm font-semibold text-yellow-100">Optional diagnostics partial; execution safety still follows production status</p>
+          <p class="mt-1 break-words text-xs text-yellow-100"><%= production_optional_diagnostics.first %></p>
+        </div>
+      <% end %>
+    </section>
+  <% end %>
+
   <section class="rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20">
     <div class="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
       <div class="min-w-0">
@@ -223,7 +307,8 @@ end %>
           <% end %>
         <% end %>
         <div class="mt-4 flex flex-wrap gap-2">
-          <span class="rounded-full border border-indigo-700 bg-indigo-950/60 px-3 py-1 text-xs font-semibold text-indigo-200">Selected Venue: <%= selected_venue_name %></span>
+          <span class="rounded-full border border-green-800 bg-green-950/60 px-3 py-1 text-xs font-semibold text-green-200">Production runner venue: <%= production_truth_venue_name %></span>
+          <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 text-xs font-semibold text-gray-300">Manual UI selected venue: <%= selected_venue_name %></span>
           <% if @position.active? %>
             <span class="rounded-full border border-green-800 bg-green-950/60 px-3 py-1 text-xs font-semibold text-green-300">Active production position</span>
           <% else %>
@@ -294,7 +379,7 @@ end %>
         <p class="mt-1 text-xs text-gray-500">Current <%= format_venue_eth_amount(current_short_eth) %> · drift <%= format_venue_eth_amount(drift_eth) %> · tolerance <%= format_venue_eth_amount(tolerance_eth) %></p>
       </div>
       <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-        <p class="text-xs uppercase tracking-wide text-gray-500">Selected Venue</p>
+        <p class="text-xs uppercase tracking-wide text-gray-500">Manual UI selected venue</p>
         <p class="mt-2 text-lg font-semibold text-white"><%= selected_venue_name %></p>
         <p class="mt-1 text-xs text-gray-500"><%= live_status_label %> · <%= auto_operational_label %> · signer <%= signer_label %></p>
       </div>
@@ -527,8 +612,8 @@ end %>
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Migration Control Center</p>
-          <h2 class="mt-1 text-lg font-semibold text-white">Manual hedge venue migration</h2>
-          <p class="mt-1 text-sm text-gray-400">Disabled unless manually gated. Preview uses persisted route data and does not override current Extended auto readiness.</p>
+          <h2 class="mt-1 text-lg font-semibold text-white"><%= random_production_running ? "24/7 Production Runner is active" : "Manual hedge venue migration" %></h2>
+          <p class="mt-1 text-sm text-gray-400"><%= random_production_running ? "Manual migration controls are disabled unless the production runner is stopped. The compact runner state above is the production truth." : "Disabled unless manually gated. Preview uses persisted route data and does not override current production runner readiness." %></p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-sm">
           <p class="text-gray-500">Active migration status</p>
@@ -537,19 +622,25 @@ end %>
       </div>
 
       <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
-        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Production venue</p><p class="mt-1 text-white"><%= cached_snapshot[:production_venue_name] || selected_venue_name %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Production runner venue</p><p class="mt-1 text-white"><%= production_truth_venue_name %></p></div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Preview route</p><p class="mt-1 text-white"><%= HedgeVenues.label(migration_plan[:from_venue]) %> → <%= HedgeVenues.label(migration_plan[:to_venue]) %></p></div>
-        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Selected display venue</p><p class="mt-1 text-white"><%= selected_venue_name %></p></div>
+        <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Manual UI selected venue</p><p class="mt-1 text-white"><%= selected_venue_name %></p></div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4"><p class="text-xs text-gray-500">Tolerance</p><p class="<%= inside_tolerance.nil? ? 'text-gray-300' : (inside_tolerance ? 'text-green-300' : 'text-red-300') %> mt-1"><%= inside_tolerance.nil? ? "Unknown" : (inside_tolerance ? "Inside tolerance" : "Outside tolerance") %></p></div>
       </div>
       <div class="mt-3 rounded-xl border border-yellow-900 bg-yellow-950/20 p-3 text-sm text-yellow-100">
         Preview does not switch the production hedge venue. Production remains <%= cached_snapshot[:production_venue_name] || HedgeVenues.label(@position.hedge&.execution_venue) %> until a live migration completes and final readback allows finalize.
       </div>
 
-      <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
+      <% if production_route_ready || random_production_running %>
+        <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <summary class="cursor-pointer text-sm font-semibold text-white">Advanced / legacy diagnostics: setup wizard and route matrix are diagnostic only</summary>
+          <p class="mt-2 text-xs text-gray-400">Production runner status and route proofs above are authoritative for 24/7 operation.</p>
+          <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
+        </details>
+      <% else %>
+        <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
+      <% end %>
 
-      <% random_production = @random_production_runner_status || {} %>
-      <% random_production_status = random_production[:lock_stale] ? "stale lock" : (random_production[:status].presence || "unknown") %>
       <% random_production_tail_visible = ActiveModel::Type::Boolean.new.cast(params[:show_random_production_tail]) %>
       <% daily_coverage_venues = %w[extended ethereal nado] %>
       <% current_policy_venue = HedgeVenues.normalize(random_production[:current_production_venue] || @position.hedge&.execution_venue) %>
@@ -560,6 +651,9 @@ end %>
             <p class="text-xs uppercase tracking-wide text-gray-500">Production Random Runner</p>
             <h3 class="mt-1 text-base font-semibold text-white">24/7 random rotation control</h3>
             <p class="mt-1 text-xs text-gray-400">Dashboard controls submit systemd start/stop requests only. The web request does not run the production loop. Policy: 3 migrations/day with 5-minute hold checks.</p>
+            <% if random_production_running %>
+              <p class="mt-2 rounded-lg border border-green-900 bg-green-950/30 px-3 py-2 text-xs text-green-100">Already running. Use Stop Safely only if needed.</p>
+            <% end %>
           </div>
           <span class="rounded-full border <%= random_production_status == 'running' ? 'border-green-800 bg-green-950/60 text-green-300' : (random_production_status.in?([ 'blocked', 'stale lock' ]) ? 'border-red-800 bg-red-950/50 text-red-100' : 'border-gray-700 bg-gray-900 text-gray-300') %> px-3 py-1 text-xs font-semibold"><%= random_production_status %></span>
         </div>
@@ -644,8 +738,8 @@ end %>
             <%= form_with url: random_production_start_position_path(@position), method: :post, class: "rounded-lg border border-gray-800 bg-gray-950 p-3" do |form| %>
               <%= form.hidden_field :production_runner_mode, value: mode %>
               <code class="block break-all rounded border border-gray-800 bg-black/30 p-2 text-[11px] text-gray-300"><%= MigrationRandomProductionRunner::CONFIRMATION %></code>
-              <%= form.text_field :random_production_confirmation, autocomplete: "off", placeholder: MigrationRandomProductionRunner::CONFIRMATION, class: "mt-2 w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
-              <%= form.submit label, class: "mt-2 w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900" %>
+              <%= form.text_field :random_production_confirmation, autocomplete: "off", placeholder: MigrationRandomProductionRunner::CONFIRMATION, disabled: random_production_running, class: "mt-2 w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600 disabled:text-gray-600" %>
+              <%= form.submit label, disabled: random_production_running, class: "mt-2 w-full rounded-lg border border-red-800 bg-red-950/70 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-900 disabled:border-gray-800 disabled:bg-gray-900 disabled:text-gray-600" %>
             <% end %>
           <% end %>
           <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
@@ -898,9 +992,9 @@ end %>
       <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p class="text-xs uppercase tracking-wide text-gray-500">Route Proof Matrix</p>
-            <h3 class="mt-1 text-base font-semibold text-white">Daily venue rotation readiness</h3>
-            <p class="mt-1 text-xs text-gray-400">Dry-run proof only. Matrix rows use PositionDashboardSnapshot exposure and never sign or submit orders.</p>
+            <p class="text-xs uppercase tracking-wide text-gray-500">Legacy route matrix diagnostics only</p>
+            <h3 class="mt-1 text-base font-semibold text-white"><%= production_route_ready ? "Production route proofs are 6/6 READY_FOR_RANDOM" : "Cached daily venue rotation diagnostics" %></h3>
+            <p class="mt-1 text-xs text-gray-400"><%= production_route_ready ? "This legacy table may show preview or dry-run states, but it does not block the active production runner." : "Dry-run proof only. Matrix rows use PositionDashboardSnapshot exposure and never sign or submit orders." %></p>
           </div>
           <%= button_to "Run dry-run route proof", migration_route_proof_position_path(@position), method: :post, class: "rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
         </div>
@@ -1492,9 +1586,10 @@ end %>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p class="text-xs uppercase tracking-wide text-gray-500">Hedge PnL & Costs</p>
-          <h2 class="mt-1 text-lg font-semibold text-white"><%= selected_venue_name %> venue accounting</h2>
+          <h2 class="mt-1 text-lg font-semibold text-white">Optional accounting diagnostics</h2>
+          <p class="mt-1 text-sm text-gray-400">Accounting diagnostics are optional and do not affect bot safety. Production runner safety comes from direct short/open-order status above.</p>
         </div>
-        <p class="text-sm text-gray-400">Missing venue components are shown as unavailable, not as zero.</p>
+        <p class="text-sm text-gray-400">Missing venue components include a reason and are not treated as zero.</p>
       </div>
       <% accounting_rows = [
         [ "Unrealized hedge PnL", accounting_components.dig(:unrealized_pnl_usd, :value).presence || snapshot_unrealized_pnl, snapshot_unrealized_pnl.present? ? "snapshot" : accounting_components.dig(:unrealized_pnl_usd, :state), snapshot_unrealized_pnl.present? ? "PositionDashboardSnapshot" : accounting_components.dig(:unrealized_pnl_usd, :source) ],
@@ -1509,22 +1604,22 @@ end %>
       <% if visible_accounting_rows.none? { |_label, value, _state, _source| value.present? } %>
         <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-sm font-medium text-white">Venue accounting unavailable on initial render</p>
-          <p class="mt-1 text-sm text-gray-400">Detailed PnL, fee, funding, and borrow components load from the Hedge accounting diagnostics link. Missing data is not treated as zero.</p>
+          <p class="mt-1 text-sm text-gray-400">Reason: optional accounting snapshots have not been refreshed for this page render. Next action: run accounting refresh from the diagnostics link. This does not mark the production runner blocked.</p>
         </div>
       <% else %>
         <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
           <% visible_accounting_rows.each do |label, value, state, source| %>
             <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
               <p class="text-xs text-gray-500"><%= label %></p>
-              <p class="mt-2 text-lg font-semibold <%= value.present? && BigDecimal(value.to_s) < 0 ? 'text-red-300' : 'text-white' rescue 'text-white' %>"><%= value.present? ? format_venue_usd_amount(value) : "Unavailable" %></p>
-              <p class="mt-1 break-words text-xs text-gray-500"><%= state.presence || "unavailable" %> · <%= source.presence || "venue does not expose this component" %></p>
+              <p class="mt-2 text-lg font-semibold <%= value.present? && BigDecimal(value.to_s) < 0 ? 'text-red-300' : 'text-white' rescue 'text-white' %>"><%= value.present? ? format_venue_usd_amount(value) : "unknown" %></p>
+              <p class="mt-1 break-words text-xs text-gray-500"><%= state.presence || "unknown because optional accounting snapshot is missing" %> · <%= source.presence || "venue does not expose this component" %></p>
             </div>
           <% end %>
           <% if compact_missing_accounting.any? %>
             <div class="min-w-0 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
               <p class="text-xs text-gray-500">Fees / funding / borrow</p>
               <p class="mt-2 text-lg font-semibold text-white">Diagnostics not loaded</p>
-              <p class="mt-1 break-words text-xs text-gray-500"><%= compact_missing_accounting.join(", ") %> load from Hedge accounting diagnostics and are not treated as zero.</p>
+              <p class="mt-1 break-words text-xs text-gray-500">Reason: <%= compact_missing_accounting.join(", ") %> load from Hedge accounting diagnostics and are not treated as zero. Next action: Run accounting refresh.</p>
             </div>
           <% end %>
         </div>
@@ -1533,7 +1628,7 @@ end %>
       <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <p class="text-xs text-gray-500">Fee tier / rate</p>
-          <p class="mt-2 text-sm text-white"><%= fee_rates.present? ? fee_rates.map { |key, value| "#{key.to_s.humanize}: #{value}" }.join(" · ") : "Unavailable" %></p>
+          <p class="mt-2 text-sm text-white"><%= fee_rates.present? ? fee_rates.map { |key, value| "#{key.to_s.humanize}: #{value}" }.join(" · ") : "unknown - optional accounting snapshot missing" %></p>
         </div>
         <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4 md:col-span-2">
           <p class="text-xs text-gray-500">Unavailable components</p>

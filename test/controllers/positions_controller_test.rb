@@ -239,7 +239,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "Position Control Center", response.body
     assert_match "Portfolio Snapshot", response.body
-    assert_match "Selected Venue: Nado", response.body
+    assert_match "Production runner venue: Nado", response.body
+    assert_match "Manual UI selected venue: Nado", response.body
     assert_match "Live Gated", response.body
     assert_match "Auto Off", response.body
     assert_match "Aerodrome Slipstream", response.body
@@ -700,8 +701,8 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Run manual migration", response.body
     assert_match "Finalize migration", response.body
     assert_match "Cancel / clear migration state", response.body
-    assert_match "Route Proof Matrix", response.body
-    assert_match "Daily venue rotation readiness", response.body
+    assert_match "Legacy route matrix diagnostics only", response.body
+    assert_match "Cached daily venue rotation diagnostics", response.body
     assert_match "Random Rotation Planner", response.body
     assert_match "Live Autopilot Readiness", response.body
     assert_match "No live orders are submitted by this readiness panel.", response.body
@@ -759,11 +760,105 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     get position_path(position, tab: "migration")
 
     assert_response :success
+    assert_match "Production Control Center", response.body
+    assert_match "24/7 Random Rotation: RUNNING", response.body
     assert_match "Production Random Runner", response.body
     assert_match "24/7 random rotation control", response.body
+    assert_match "Bot is running normally.", response.body
+    assert_match "Route proofs", response.body
+    assert_match "6/6 READY_FOR_RANDOM", response.body
     assert_match "Start 24h Canary", response.body
     assert_match "Start 24/7 Production", response.body
     assert_match "Stop Safely", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production summary uses runner venue over manual selected venue" do
+    position = production_random_position
+    status = {
+      status: "running",
+      current_production_venue: "ethereal",
+      direct_preflight_blockers: [],
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: { "extended" => "0", "ethereal" => "2.12", "nado" => "0" },
+      inside_tolerance: true,
+      route_proofs_summary: random_production_route_summary,
+      gates_state: {
+        "MIGRATION_LIVE_ENABLED" => true,
+        "MIGRATION_AUTO_ENABLED" => true,
+        "MIGRATION_RANDOM_ROTATION_LIVE_ENABLED" => true
+      }
+    }
+    heartbeat = {
+      runner: "random_production_runner",
+      position_id: position.id,
+      pid: 12_345,
+      started_at: Time.current.utc.iso8601,
+      updated_at: Time.current.utc.iso8601,
+      last_cycle: 1,
+      last_route: "nado->ethereal",
+      current_production_venue: "ethereal",
+      target_short_eth: "2.12",
+      combined_short_eth: "2.12",
+      inside_tolerance: true,
+      open_orders_zero: true,
+      gates_enabled: true,
+      last_hold_check_at: Time.current.utc.iso8601,
+      status: "running"
+    }
+    write_random_production_files(position, status: status, heartbeat: heartbeat)
+
+    get position_path(position, hedge_venue: "extended")
+
+    assert_response :success
+    assert_match "Production runner venue: Ethereal", response.body
+    assert_match "Manual UI selected venue: Extended", response.body
+    assert_match "Current hedge: Ethereal short 2.120000 ETH", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "production start buttons disabled while runner is already running" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Already running. Use Stop Safely only if needed.", response.body
+    assert_select "input[value='Start 24h Canary'][disabled]"
+    assert_select "input[value='Start 24/7 Production'][disabled]"
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "legacy diagnostics do not contradict ready production route proofs" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position, tab: "migration")
+
+    assert_response :success
+    assert_match "Advanced / legacy diagnostics: setup wizard and route matrix are diagnostic only", response.body
+    assert_match "Legacy setup diagnostics", response.body
+    assert_match "Production route proofs are 6/6 READY_FOR_RANDOM", response.body
+    assert_no_match "Next required step: Run Supervised Live Canary", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "optional accounting unavailable does not mark production runner blocked" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position, tab: "accounting")
+
+    assert_response :success
+    assert_match "Accounting diagnostics are optional and do not affect bot safety.", response.body
+    assert_match "This does not mark the production runner blocked.", response.body
+    assert_match "24/7 Random Rotation: RUNNING", response.body
+    assert_no_match "24/7 Random Rotation: BLOCKED", response.body
   ensure
     clear_random_production_files(position&.id)
   end
@@ -1014,7 +1109,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_match "Route Proof Matrix", response.body
+    assert_match "Legacy route matrix diagnostics only", response.body
     assert_no_match "route matrix recompute must not run", response.body
   ensure
     clear_random_production_files(position&.id)
@@ -4333,7 +4428,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     heartbeat ||= {
       runner: "random_production_runner",
       position_id: position.id,
-      pid: 12_345,
+      pid: Process.pid,
       started_at: Time.current.utc.iso8601,
       updated_at: Time.current.utc.iso8601,
       last_cycle: 3,
@@ -4347,12 +4442,20 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       last_hold_check_at: Time.current.utc.iso8601,
       status: "running"
     }
+    lock = {
+      runner: "random_production_runner",
+      position_id: position.id,
+      pid: Process.pid,
+      started_at: Time.current.utc.iso8601,
+      updated_at: Time.current.utc.iso8601
+    } if lock.nil?
     status ||= {
       status: "running",
       direct_preflight_blockers: [],
       direct_open_orders: random_production_open_orders("zero"),
       direct_venue_shorts: random_production_shorts,
       inside_tolerance: true,
+      route_proofs_summary: random_production_route_summary,
       gates_state: {
         "MIGRATION_LIVE_ENABLED" => true,
         "MIGRATION_AUTO_ENABLED" => true,
@@ -4384,6 +4487,15 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
   def random_production_shorts
     { "extended" => "0", "ethereal" => "0", "nado" => "2.12" }
+  end
+
+  def random_production_route_summary
+    {
+      "ready" => 6,
+      "missing" => 0,
+      "stale" => 0,
+      "total" => 6
+    }
   end
 
   def clear_random_production_files(position_id)
