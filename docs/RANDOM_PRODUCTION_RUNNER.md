@@ -89,7 +89,9 @@ The dashboard canary button writes:
 
 The dashboard 24/7 button writes `mode=production_24x7`. The stop button first writes `stop_position_6.json` through the existing production runner stop path, then writes a bridge stop request. The bridge also writes the stop request itself, stops both the canary and production services, and runs `systemctl reset-failed` for both so an intentional stop does not resurrect the runner.
 
-The Rails runner sleeps in short interruptible chunks during long holds and checks the stop file before each hold check. The systemd runner units also use `ExecStopPost` to send TERM to any lingering `bin/rails migration:random_production_runner position_id=6` process inside the web container after the safe stop request is written. That cleanup command uses `/bin/sh`, `ps`, and shell `kill`, so it does not require `pkill` or Ruby inside the container.
+The Rails runner sleeps in short interruptible chunks during long holds and checks the stop file before each hold check. The systemd runner units also use `ExecStopPost=/opt/delta_neutral/bin/random_production_host_runner_cleanup 6` after the safe stop request is written. That cleanup runs on the host, scans `/proc` for the exact `ruby bin/rails migration:random_production_runner position_id=6` command, sends TERM, waits briefly, then sends KILL if the process is still present. It does not depend on `ps`, `pkill`, or `pgrep` inside the web container.
+
+Longer term, prefer a dedicated runner container or `docker compose run --rm --no-deps web bin/rails migration:random_production_runner ...` over `docker compose exec -T web ...`, so systemd owns the runner container lifecycle instead of attaching a long-running process to the existing web container.
 
 `bin/random_production_systemd_bridge` is host-safe: it uses bash and `python3` only. It does not require host Ruby.
 

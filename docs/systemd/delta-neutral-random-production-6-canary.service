@@ -11,7 +11,7 @@ Type=simple
 WorkingDirectory=/opt/delta_neutral
 ExecStart=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web bin/rails migration:random_production_runner position_id=6 live=true interval_seconds=28800 rebalance_hold_interval_seconds=300 rebalance_after_migration=true rebalance_during_hold=true rebalance_before_next_migration=true rebalance_only_if_outside_tolerance=true rebalance_readback_recheck_attempts=4 rebalance_readback_recheck_interval_seconds=5 duration_minutes=1440 confirmation=I_UNDERSTAND_THIS_RUNS_PRODUCTION_RANDOM_ROTATION'
 ExecStop=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web bin/rails migration:random_production_stop position_id=6'
-ExecStopPost=/usr/bin/bash -lc 'cd /opt/delta_neutral && docker compose -f docker-compose.prod.yml exec -T web /bin/sh -lc '"'"'ps -eo pid=,args= | while IFS= read -r line; do set -- $line; pid=$1; shift || true; args=$*; case "$args" in *"bin/rails migration:random_production_runner position_id=6"*) kill -TERM "$pid" 2>/dev/null || true;; esac; done'"'"' || true'
+ExecStopPost=/opt/delta_neutral/bin/random_production_host_runner_cleanup 6
 Restart=on-failure
 RestartSec=60
 SuccessExitStatus=0 130 143

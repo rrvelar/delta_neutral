@@ -102,20 +102,42 @@ class MigrationTaskTest < ActiveSupport::TestCase
     end
   end
 
-  test "systemd runner stop post uses portable shell kill fallback" do
-    [
+  test "systemd runner stop post uses host cleanup script" do
+    paths = [
       Rails.root.join("docs/systemd/delta-neutral-random-production-6-canary.service"),
       Rails.root.join("docs/systemd/delta-neutral-random-production-6.service")
-    ].each do |path|
+    ]
+
+    paths.each do |path|
       text = File.read(path)
 
       assert_includes text, "ExecStopPost="
-      assert_includes text, "/bin/sh -lc"
-      assert_includes text, "ps -eo pid=,args="
-      assert_includes text, "kill -TERM"
+      assert_includes text, "/opt/delta_neutral/bin/random_production_host_runner_cleanup 6"
+      refute_match(/ExecStopPost=.*docker compose.*exec.*ps/m, text)
+      refute_match(/ExecStopPost=.*docker compose.*exec.*pkill/m, text)
+      refute_match(/ExecStopPost=.*docker compose.*exec.*pgrep/m, text)
       refute_includes text, "pkill"
       refute_includes text, "pgrep"
     end
+
+    exec_stop_posts = paths.map { |path| File.readlines(path).grep(/^ExecStopPost=/).first }
+    assert_equal 1, exec_stop_posts.uniq.size
+  end
+
+  test "host cleanup script scopes runner match and escalates term to kill" do
+    path = Rails.root.join("bin/random_production_host_runner_cleanup")
+    script = File.read(path)
+
+    assert_predicate path, :executable?
+    assert_includes script, 'pattern="ruby bin/rails migration:random_production_runner position_id=${position_id}"'
+    assert_includes script, "/proc/[0-9]*/cmdline"
+    assert_includes script, "kill -TERM"
+    assert_includes script, "sleep"
+    assert_includes script, "kill -KILL"
+    refute_includes script, "docker compose"
+    refute_includes script, "pkill"
+    refute_includes script, "pgrep"
+    refute_includes script, "ps "
   end
 
   test "prove routes task writes JSONL proof receipts" do
