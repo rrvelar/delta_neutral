@@ -300,6 +300,26 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "status separates historical stop reason from current direct market safety" do
+    position = migration_position
+    dir = tmp_dir
+    FileUtils.mkdir_p(dir)
+    File.write(
+      dir.join("latest_position_#{position.id}.jsonl"),
+      JSON.generate(event: "burn_in_finished", status: "stopped", blocker_status: "stopped_active_rebalance", blockers: [ "historical readback lag" ])
+    )
+    service = runner(position: position, log_dir: dir, preflight_factory: safe_preflight_factory(venue: "nado"))
+
+    status = service.status
+
+    assert_equal "stopped_active_rebalance", status.fetch(:historical_stop_reason)
+    assert_equal true, status.fetch(:current_direct_market_safe)
+    assert_equal true, status.fetch(:inside_tolerance)
+    assert_empty status.fetch(:blockers)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "status reports gates true with no process as unsafe" do
     OperationalSettings.set!(key: "MIGRATION_LIVE_ENABLED", enabled: true)
     position = migration_position

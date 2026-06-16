@@ -107,6 +107,7 @@ class MigrationRandomProductionRunner
     heartbeat_recent = heartbeat_recent?
     stale_heartbeat = heartbeat_payload["status"] == "running" && (!process_running || !heartbeat_recent) && !orphan_process
     latest = latest_event_from_log
+    current_market_safe = current_direct_market_safe?(direct, active_venues)
     effective_status = production_status(
       direct: direct,
       active_venues: active_venues,
@@ -121,6 +122,8 @@ class MigrationRandomProductionRunner
       runner: "random_production_runner",
       position_id: position.id,
       status: effective_status,
+      historical_stop_reason: historical_stop_reason(latest),
+      current_direct_market_safe: current_market_safe,
       pid: lock_payload["pid"],
       lock: lock_payload.presence,
       lock_stale: stale_lock,
@@ -287,6 +290,8 @@ class MigrationRandomProductionRunner
       pid: pid,
       updated_at: now.call.utc.iso8601,
       status: status,
+      historical_stop_reason: historical_stop_reason(latest_event || latest_event_from_log),
+      current_direct_market_safe: current_direct_market_safe?(direct, active_short_venues(direct)),
       blockers: blockers,
       lock: lock_payload.presence,
       lock_stale: lock_stale?,
@@ -466,6 +471,19 @@ class MigrationRandomProductionRunner
     return "blocked" if Array(direct[:blockers]).any?
 
     status_payload["status"].presence || "stopped"
+  end
+
+  def current_direct_market_safe?(direct, active_venues)
+    direct_open_orders_zero?(direct) &&
+      active_venues.one? &&
+      direct[:inside_tolerance] == true &&
+      Array(direct[:blockers]).empty?
+  end
+
+  def historical_stop_reason(latest)
+    latest&.fetch("blocker_status", nil) ||
+      latest&.fetch("status", nil) ||
+      status_payload["status"]
   end
 
   def heartbeat_recent?

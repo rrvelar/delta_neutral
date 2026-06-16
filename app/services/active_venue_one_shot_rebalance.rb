@@ -35,7 +35,7 @@ class ActiveVenueOneShotRebalance
     receipt = result.receipt || {}
     recheck = recheck_pending_readback(result: result, reason: reason, venue: venue)
     postflight = recheck[:postflight] || (live? ? direct_preflight("active_rebalance_#{reason}_after") : preflight)
-    final_blockers = final_blockers(result: result, postflight: postflight, recheck: recheck)
+    final_blockers = final_blockers(result: result, postflight: postflight, recheck: recheck, venue: venue)
     status_reason = final_blockers.any? ? "blocked" : execution_reason(result)
     base.merge(
       needed: true,
@@ -43,6 +43,8 @@ class ActiveVenueOneShotRebalance
       rebalance_status: result.status,
       rebalance_final_status: receipt[:final_status],
       recheck_attempts: recheck[:attempts],
+      active_rebalance_recovered: recheck[:confirmed] == true,
+      active_rebalance_recheck_attempts: recheck[:attempts].size,
       recheck_final_inside_tolerance: recheck[:final_inside_tolerance],
       planned_auto_action: receipt[:planned_auto_action] || receipt[:intended_action],
       requested_size_eth: receipt[:requested_size_eth] || receipt[:requested_order_size_eth] || receipt[:order_size_eth],
@@ -55,6 +57,9 @@ class ActiveVenueOneShotRebalance
       orders_placed: receipt.fetch(:orders_placed, receipt.fetch(:orders_submitted, 0)).to_i,
       signatures_created: receipt.fetch(:signatures_created, 0).to_i,
       final_inside_tolerance: live? ? inside_tolerance?(postflight) : nil,
+      final_direct_inside_tolerance: live? ? inside_tolerance?(postflight) : nil,
+      final_direct_open_orders_zero: live? ? open_orders_zero?(postflight) : nil,
+      terminal_reason: final_blockers.any? ? terminal_reason(final_blockers, postflight: postflight, venue: venue) : nil,
       rebalance_receipt: compact_receipt(receipt)
     )
   end
@@ -121,7 +126,7 @@ class ActiveVenueOneShotRebalance
     )
   end
 
-  def final_blockers(result:, postflight:, recheck:)
+  def final_blockers(result:, postflight:, recheck:, venue:)
     blockers = Array(result.blockers)
     status_success = SUCCESS_STATUSES.include?(result.status.to_s) || recheck[:confirmed] == true
     blockers << "active venue one-shot rebalance status is #{result.status}" unless status_success
@@ -130,13 +135,16 @@ class ActiveVenueOneShotRebalance
     if live?
       blockers << "active venue one-shot rebalance final readback is outside tolerance" unless inside_tolerance?(postflight)
       blockers << "active venue one-shot rebalance final open orders are not zero" unless open_orders_zero?(postflight)
+      blockers << "active venue one-shot rebalance final exposure is not isolated to #{HedgeVenues.label(venue)}" unless isolated_active_exposure?(postflight, venue)
+      blockers << "active venue one-shot rebalance production venue is not finalized to #{HedgeVenues.label(venue)}" unless HedgeVenues.normalize(postflight[:production_venue]) == venue
     end
     blockers.uniq
   end
 
   def recheck_pending_readback(result:, reason:, venue:)
-    return { attempts: [], confirmed: false, final_inside_tolerance: nil, postflight: nil } unless pending_recheck?(result)
-    return { attempts: [], confirmed: false, final_inside_tolerance: nil, postflight: nil } unless live?
+    return empty_recheck unless pending_recheck?(result)
+    return empty_recheck unless submit_evidence?(result.receipt || {})
+    return empty_recheck unless live?
 
     attempts = []
     postflight = nil
@@ -160,9 +168,19 @@ class ActiveVenueOneShotRebalance
     { attempts: attempts, confirmed: confirmed, final_inside_tolerance: inside_tolerance?(postflight), postflight: postflight }
   end
 
+  def empty_recheck
+    { attempts: [], confirmed: false, final_inside_tolerance: nil, postflight: nil }
+  end
+
   def pending_recheck?(result)
     PENDING_RECHECK_STATUSES.include?(result.status.to_s) ||
       PENDING_RECHECK_FINAL_STATUSES.include?(result.receipt&.fetch(:final_status, nil).to_s)
+  end
+
+  def submit_evidence?(receipt)
+    receipt.fetch(:orders_submitted, receipt.fetch(:orders_placed, 0)).to_i.positive? ||
+      receipt.fetch(:orders_placed, receipt.fetch(:orders_submitted, 0)).to_i.positive? ||
+      receipt.values_at(:exchange_order_id, :order_id, :digest, :tx_hash, :signature).any?(&:present?)
   end
 
   def recheck_confirmed?(attempt)
@@ -241,9 +259,19 @@ class ActiveVenueOneShotRebalance
 
   def execution_reason(result)
     return "outside_tolerance" if result.status.to_s == "dry_run"
-    return "success_after_recheck" if pending_recheck?(result)
+    return "recovered_after_rebalance_readback" if pending_recheck?(result) && submit_evidence?(result.receipt || {})
 
     result.status.to_s == "no_op" ? "inside_tolerance" : "executed"
+  end
+
+  def terminal_reason(blockers, postflight:, venue:)
+    return "open_orders_nonzero_or_unknown" unless open_orders_zero?(postflight)
+    return "multiple_or_missing_active_venues" unless isolated_active_exposure?(postflight, venue)
+    return "production_venue_not_finalized" unless HedgeVenues.normalize(postflight[:production_venue]) == venue
+    return "final_direct_outside_tolerance" unless inside_tolerance?(postflight)
+    return "manual_action_required" if blockers.any? { |blocker| blocker.to_s.match?(/manual action/i) }
+
+    "active_rebalance_unconfirmed"
   end
 
   def scoped_full_target_rebalance?(venue)
