@@ -2272,6 +2272,140 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in hold monitor recovers zero-submit open-order uncertainty block when direct market is safe" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 19, 14, 35, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+        open_orders_uncertainty_hold_payload("ethereal"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal")
+      ]
+    )
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "extended->ethereal" },
+      log_dir: dir,
+      interval_seconds: 240,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    events = read_jsonl(result.receipt_path)
+    checks = events.select { |event| event["event"] == "hold_check" }
+    recovered = checks.first.fetch("hold_rebalance_check")
+    cycle = events.find { |event| event["event"] == "cycle" }
+    final = events.last
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "running", checks.first.fetch("status")
+    assert_equal "recovered_after_direct_market_safe_preflight", recovered.fetch("reason")
+    assert_equal true, recovered.fetch("active_rebalance_recovered")
+    assert_equal "recovered_after_open_orders_uncertainty_readback", recovered.fetch("active_rebalance_recovery_reason")
+    assert_equal true, recovered.fetch("final_direct_inside_tolerance")
+    assert_equal true, recovered.fetch("final_direct_open_orders_zero")
+    assert_equal [ "ethereal" ], recovered.fetch("final_direct_active_venues")
+    assert_nil recovered["terminal_reason"]
+    assert_empty recovered.fetch("blockers")
+    assert_equal "success", cycle.fetch("status")
+    refute_includes events.map { |event| event["status"] }, "stopped_active_rebalance"
+    assert_equal "success", final.fetch("status")
+    assert_equal "success", final.fetch("blocker_status")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  def run_open_orders_uncertainty_terminal(unsafe_report:)
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 19, 14, 35, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+        open_orders_uncertainty_hold_payload("ethereal")
+      ]
+    )
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "extended->ethereal" },
+      log_dir: dir,
+      interval_seconds: 240,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      active_rebalance_factory: -> { active },
+      preflight_factory: recovery_stage_preflight(unsafe_report: unsafe_report),
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    [ result, read_jsonl(result.receipt_path) ]
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold monitor terminal-stops open-order block when direct open orders are nonzero or unknown" do
+    result, events = run_open_orders_uncertainty_terminal(
+      unsafe_report: direct_market_report(
+        production_venue: "ethereal",
+        active_short_venues: [ "ethereal" ],
+        inside_tolerance: true,
+        open_orders: { "ethereal" => "unknown" }
+      )
+    )
+    check = events.select { |event| event["event"] == "hold_check" }.last.fetch("hold_rebalance_check")
+    cycle = events.find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal "blocked", check.fetch("reason")
+    assert_equal false, check.fetch("active_rebalance_recovered")
+    assert_equal "open_orders_nonzero_or_unknown", check.fetch("terminal_reason")
+    assert_equal "stopped_active_rebalance", cycle.fetch("status")
+  end
+
+  test "random burn-in hold monitor terminal-stops open-order block when active venue differs from production venue" do
+    result, events = run_open_orders_uncertainty_terminal(
+      unsafe_report: direct_market_report(
+        production_venue: "ethereal",
+        active_short_venues: [ "nado" ],
+        inside_tolerance: true
+      )
+    )
+    check = events.select { |event| event["event"] == "hold_check" }.last.fetch("hold_rebalance_check")
+    cycle = events.find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal false, check.fetch("active_rebalance_recovered")
+    assert_equal "active_venue_differs_from_production_venue", check.fetch("terminal_reason")
+    assert_equal "stopped_active_rebalance", cycle.fetch("status")
+  end
+
+  test "random burn-in hold monitor terminal-stops open-order block when multiple active venues exist" do
+    result, events = run_open_orders_uncertainty_terminal(
+      unsafe_report: direct_market_report(
+        production_venue: "ethereal",
+        active_short_venues: [ "ethereal", "nado" ],
+        inside_tolerance: true
+      )
+    )
+    check = events.select { |event| event["event"] == "hold_check" }.last.fetch("hold_rebalance_check")
+    cycle = events.find { |event| event["event"] == "cycle" }
+
+    assert_equal "stopped", result.status
+    assert_equal false, check.fetch("active_rebalance_recovered")
+    assert_equal "multiple_active_venues", check.fetch("terminal_reason")
+    assert_equal "stopped_active_rebalance", cycle.fetch("status")
+  end
+
   test "random burn-in hold monitor terminal-stops zero-submit block when direct recheck remains outside tolerance" do
     result, events = run_false_missing_exposure_hold_recheck(
       target_by_stage: { "active_rebalance_hold_monitor_recovery" => "1.30" }
@@ -3058,6 +3192,73 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       signatures_created: 0,
       final_inside_tolerance: false
     )
+  end
+
+  def open_orders_uncertainty_hold_payload(venue)
+    active_rebalance_payload(
+      reason: "blocked",
+      needed: false,
+      venue: venue,
+      blockers: [
+        "#{venue} open orders could not be confirmed zero",
+        "active venue open orders are not zero"
+      ]
+    ).merge(
+      inside_tolerance: true,
+      final_inside_tolerance: true,
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0
+    )
+  end
+
+  def recovery_stage_preflight(unsafe_report:)
+    readiness = ->(**) {
+      {
+        pending_nado_target_continuation: nil,
+        pending_nado_target_continuation_blocking: false,
+        stale_pending_continuation_ignored: false,
+        blockers: []
+      }
+    }
+    base = BurnInDirectPreflightFactory.new(
+      refresher: BurnInSnapshotRefresher.new,
+      proof_registry: BurnInProofRegistry.new,
+      readiness_factory: readiness
+    )
+    ->(position:, stage:) {
+      next unsafe_report if stage == "active_rebalance_hold_monitor_recovery"
+
+      base.call(position: position, stage: stage)
+    }
+  end
+
+  def direct_market_report(production_venue:, active_short_venues:, inside_tolerance:, open_orders: {}, blockers: [])
+    venues = %w[extended ethereal nado].to_h do |venue|
+      status = open_orders.fetch(venue, "zero")
+      [ venue, {
+        short_eth: active_short_venues.include?(venue) ? BigDecimal("1.18") : BigDecimal("0"),
+        position_status: "ok",
+        open_orders_status: status,
+        open_orders_count: status == "zero" ? 0 : 1
+      } ]
+    end
+    {
+      preflight_source: "test_recovery_preflight",
+      accepted: blockers.empty?,
+      blockers: blockers,
+      warnings: [],
+      production_venue: production_venue,
+      target: { target_short_eth: BigDecimal("1.18"), target_source: "test", target_fresh: true },
+      venues: venues,
+      active_short_venues: active_short_venues,
+      combined_short_eth: BigDecimal("1.18"),
+      drift_eth: BigDecimal("0"),
+      tolerance_abs_eth: BigDecimal("0.0354"),
+      inside_tolerance: inside_tolerance,
+      readiness: { blockers: [] },
+      signer: { status: "ok", payload: { ok: true } }
+    }
   end
 
   def run_false_missing_exposure_hold_recheck(target_by_stage: {}, exposure_by_stage: {}, snapshot_attrs_by_stage: {})
