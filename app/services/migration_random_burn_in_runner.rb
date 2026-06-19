@@ -977,7 +977,7 @@ class MigrationRandomBurnInRunner
     check.merge(
       reason: safe ? "recovered_after_direct_market_safe_preflight" : check[:reason],
       active_rebalance_recovered: safe,
-      active_rebalance_recovery_reason: safe ? "recovered_after_false_missing_exposure_readback" : nil,
+      active_rebalance_recovery_reason: safe ? active_rebalance_recovery_reason(check) : nil,
       final_direct_inside_tolerance: direct[:inside_tolerance] == true,
       final_direct_open_orders_zero: direct_open_orders_zero?(direct),
       final_direct_active_venues: active_venues,
@@ -992,11 +992,28 @@ class MigrationRandomBurnInRunner
       check[:orders_submitted].to_i.zero? &&
       check[:orders_placed].to_i.zero? &&
       check[:signatures_created].to_i.zero? &&
-      false_missing_exposure_blockers?(Array(check[:blockers]))
+      transient_active_rebalance_blockers?(Array(check[:blockers]))
   end
 
-  def false_missing_exposure_blockers?(blockers)
-    blockers.any? { |blocker| blocker.to_s.match?(/no venue has the production hedge|current production venue has no real short|active venue exposure is not isolated/i) }
+  def transient_active_rebalance_blockers?(blockers)
+    blockers.any? &&
+      blockers.all? { |blocker| false_missing_exposure_blocker?(blocker) || open_orders_uncertainty_blocker?(blocker) }
+  end
+
+  def active_rebalance_recovery_reason(check)
+    if Array(check[:blockers]).any? { |blocker| open_orders_uncertainty_blocker?(blocker) }
+      "recovered_after_open_orders_uncertainty_readback"
+    else
+      "recovered_after_false_missing_exposure_readback"
+    end
+  end
+
+  def false_missing_exposure_blocker?(blocker)
+    blocker.to_s.match?(/no venue has the production hedge|current production venue has no real short|active venue exposure is not isolated/i)
+  end
+
+  def open_orders_uncertainty_blocker?(blocker)
+    blocker.to_s.match?(/open orders could not be confirmed zero|active venue open orders are not zero|open orders cannot be confirmed zero/i)
   end
 
   def direct_market_safe?(report, active_venues:)
