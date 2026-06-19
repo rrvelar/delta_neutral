@@ -581,6 +581,7 @@ class MigrationRandomBurnInRunner
       break if stop_requested?
 
       check = run_active_rebalance(reason: "hold_monitor")
+      check = recover_hold_rebalance_check(check) if Array(check[:blockers]).any?
       check_times << now.call
       accumulate_rebalance_counts(check)
       checks << check
@@ -800,7 +801,7 @@ class MigrationRandomBurnInRunner
       signatures_created: signatures_created,
       final_production_venue: HedgeVenues.normalize(position.hedge&.execution_venue),
       final_combined_inside_tolerance: last_direct_preflight_report[:inside_tolerance] == true,
-      blocker_status: last_blocker_status || preflight_status(blockers),
+      blocker_status: final_blocker_status(blockers),
       stale_pending_continuation_ignored: stale_pending_continuation_ignored?,
       pending_nado_target_continuation_blocking: pending_nado_target_continuation_blocking?,
       pending_continuation_classification: pending_continuation_classification,
@@ -828,6 +829,15 @@ class MigrationRandomBurnInRunner
 
   def result(status, blockers)
     Result.new(status, blockers, [], receipt_path.to_s, final_summary(status: status, blockers: blockers))
+  end
+
+  def final_blocker_status(blockers)
+    if last_blocker_status == "stopped_active_rebalance" &&
+        direct_market_safe?(last_direct_preflight_report, active_venues: active_short_venues(last_direct_preflight_report))
+      return "recovered_after_direct_market_safe_preflight"
+    end
+
+    last_blocker_status || preflight_status(blockers)
   end
 
   def hedge_payload(report)
@@ -955,6 +965,62 @@ class MigrationRandomBurnInRunner
   def burn_in_status_for_cycle(status)
     return "manual_action_required" if status.to_s == "manual_action_required"
     status.to_s == "blocked_before_submit" ? "blocked" : "stopped"
+  end
+
+  def recover_hold_rebalance_check(check)
+    return check unless zero_submit_active_rebalance_block?(check)
+
+    direct = direct_preflight("active_rebalance_hold_monitor_recovery")
+    record_direct_preflight(direct)
+    active_venues = active_short_venues(direct)
+    safe = direct_market_safe?(direct, active_venues: active_venues)
+    check.merge(
+      reason: safe ? "recovered_after_direct_market_safe_preflight" : check[:reason],
+      active_rebalance_recovered: safe,
+      active_rebalance_recovery_reason: safe ? "recovered_after_false_missing_exposure_readback" : nil,
+      final_direct_inside_tolerance: direct[:inside_tolerance] == true,
+      final_direct_open_orders_zero: direct_open_orders_zero?(direct),
+      final_direct_active_venues: active_venues,
+      terminal_reason: safe ? nil : direct_market_terminal_reason(direct, active_venues: active_venues),
+      recovery_direct_preflight_blockers: Array(direct[:blockers]),
+      blockers: safe ? [] : Array(check[:blockers])
+    ).compact
+  end
+
+  def zero_submit_active_rebalance_block?(check)
+    check[:reason].to_s == "blocked" &&
+      check[:orders_submitted].to_i.zero? &&
+      check[:orders_placed].to_i.zero? &&
+      check[:signatures_created].to_i.zero? &&
+      false_missing_exposure_blockers?(Array(check[:blockers]))
+  end
+
+  def false_missing_exposure_blockers?(blockers)
+    blockers.any? { |blocker| blocker.to_s.match?(/no venue has the production hedge|current production venue has no real short|active venue exposure is not isolated/i) }
+  end
+
+  def direct_market_safe?(report, active_venues:)
+    active_venues.one? &&
+      active_venues.first == HedgeVenues.normalize(report[:production_venue]) &&
+      direct_open_orders_zero?(report) &&
+      Array(report[:blockers]).empty? &&
+      report[:inside_tolerance] == true
+  end
+
+  def active_short_venues(report)
+    Array(report[:active_short_venues]).presence ||
+      VENUES.select { |venue| venue_short(report, venue).positive? }
+  end
+
+  def direct_market_terminal_reason(report, active_venues:)
+    return "open_orders_nonzero_or_unknown" unless direct_open_orders_zero?(report)
+    return "multiple_active_venues" if active_venues.size > 1
+    return "no_active_venue" if active_venues.empty?
+    return "active_venue_differs_from_production_venue" unless active_venues.first == HedgeVenues.normalize(report[:production_venue])
+    return "final_direct_outside_tolerance" unless report[:inside_tolerance] == true
+    return "direct_preflight_blockers_present" if Array(report[:blockers]).any?
+
+    "direct_market_unsafe"
   end
 
   def manual_action_summary_fields

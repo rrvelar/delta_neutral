@@ -992,11 +992,16 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
 
     result = service.run(reason: "pre_next_cycle")
 
-    assert_equal "success_after_recheck", result.fetch(:reason)
+    assert_equal "recovered_after_rebalance_readback", result.fetch(:reason)
     assert_equal "submitted_pending_readback", result.fetch(:rebalance_status)
     assert_equal "REBALANCE_REQUIRES_RECHECK", result.fetch(:rebalance_final_status)
+    assert_equal true, result.fetch(:active_rebalance_recovered)
+    assert_equal 1, result.fetch(:active_rebalance_recheck_attempts)
     assert_equal true, result.fetch(:recheck_final_inside_tolerance)
+    assert_equal true, result.fetch(:final_direct_inside_tolerance)
+    assert_equal true, result.fetch(:final_direct_open_orders_zero)
     assert_equal 1, result.fetch(:recheck_attempts).size
+    assert_nil result.fetch(:terminal_reason)
     assert_empty result.fetch(:blockers)
     assert_equal 1, result.fetch(:orders_submitted)
     assert_equal 1, result.fetch(:signatures_created)
@@ -2218,6 +2223,103 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "random burn-in hold monitor recovers zero-submit false missing exposure when direct market is safe" do
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 18, 15, 40, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+        false_missing_exposure_hold_payload("ethereal"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal")
+      ]
+    )
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "extended->ethereal" },
+      log_dir: dir,
+      interval_seconds: 240,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      active_rebalance_factory: -> { active },
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    events = read_jsonl(result.receipt_path)
+    checks = events.select { |event| event["event"] == "hold_check" }
+    recovered = checks.first.fetch("hold_rebalance_check")
+    cycle = events.find { |event| event["event"] == "cycle" }
+    final = events.last
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal "running", checks.first.fetch("status")
+    assert_equal "recovered_after_direct_market_safe_preflight", recovered.fetch("reason")
+    assert_equal true, recovered.fetch("active_rebalance_recovered")
+    assert_equal "recovered_after_false_missing_exposure_readback", recovered.fetch("active_rebalance_recovery_reason")
+    assert_equal true, recovered.fetch("final_direct_inside_tolerance")
+    assert_equal true, recovered.fetch("final_direct_open_orders_zero")
+    assert_equal [ "ethereal" ], recovered.fetch("final_direct_active_venues")
+    assert_nil recovered["terminal_reason"]
+    assert_empty recovered.fetch("blockers")
+    assert_equal 2, cycle.fetch("hold_rebalance_checks_count")
+    assert_equal "success", cycle.fetch("status")
+    assert_equal "success", final.fetch("blocker_status")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "random burn-in hold monitor terminal-stops zero-submit block when direct recheck remains outside tolerance" do
+    result, events = run_false_missing_exposure_hold_recheck(
+      target_by_stage: { "active_rebalance_hold_monitor_recovery" => "1.30" }
+    )
+    recovered = events.find { |event| event["event"] == "hold_check" }.fetch("hold_rebalance_check")
+
+    assert_equal "stopped", result.status
+    assert_equal false, recovered.fetch("active_rebalance_recovered")
+    assert_equal false, recovered.fetch("final_direct_inside_tolerance")
+    assert_equal "final_direct_outside_tolerance", recovered.fetch("terminal_reason")
+  end
+
+  test "random burn-in hold monitor terminal-stops zero-submit block when direct open orders are unknown" do
+    result, events = run_false_missing_exposure_hold_recheck(
+      snapshot_attrs_by_stage: { "active_rebalance_hold_monitor_recovery" => { open_orders_count_extended: nil } }
+    )
+    recovered = events.find { |event| event["event"] == "hold_check" }.fetch("hold_rebalance_check")
+
+    assert_equal "stopped", result.status
+    assert_equal false, recovered.fetch("active_rebalance_recovered")
+    assert_equal false, recovered.fetch("final_direct_open_orders_zero")
+    assert_equal "open_orders_nonzero_or_unknown", recovered.fetch("terminal_reason")
+  end
+
+  test "random burn-in hold monitor terminal-stops zero-submit block when direct recheck has multiple venues" do
+    result, events = run_false_missing_exposure_hold_recheck(
+      exposure_by_stage: { "active_rebalance_hold_monitor_recovery" => { "extended" => "0", "ethereal" => "1.0", "nado" => "0.18" } }
+    )
+    recovered = events.find { |event| event["event"] == "hold_check" }.fetch("hold_rebalance_check")
+
+    assert_equal "stopped", result.status
+    assert_equal false, recovered.fetch("active_rebalance_recovered")
+    assert_equal %w[ethereal nado], recovered.fetch("final_direct_active_venues")
+    assert_equal "multiple_active_venues", recovered.fetch("terminal_reason")
+  end
+
+  test "random burn-in hold monitor terminal-stops zero-submit block when direct active venue differs from production" do
+    result, events = run_false_missing_exposure_hold_recheck(
+      exposure_by_stage: { "active_rebalance_hold_monitor_recovery" => { "extended" => "0", "ethereal" => "0", "nado" => "1.18" } }
+    )
+    recovered = events.find { |event| event["event"] == "hold_check" }.fetch("hold_rebalance_check")
+
+    assert_equal "stopped", result.status
+    assert_equal false, recovered.fetch("active_rebalance_recovered")
+    assert_equal [ "nado" ], recovered.fetch("final_direct_active_venues")
+    assert_equal "active_venue_differs_from_production_venue", recovered.fetch("terminal_reason")
+  end
+
   test "random burn-in hold monitor continues after successful rebalance" do
     position = migration_position("ethereal")
     dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
@@ -2936,6 +3038,62 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       final_inside_tolerance: blockers.empty?,
       blockers: blockers
     }
+  end
+
+  def false_missing_exposure_hold_payload(venue)
+    active_rebalance_payload(
+      reason: "blocked",
+      needed: true,
+      venue: venue,
+      blockers: [
+        "no venue has the production hedge",
+        "current production venue has no real short",
+        "active venue exposure is not isolated to #{venue}"
+      ]
+    ).merge(
+      current_short_eth: "0.0",
+      drift_eth: "1.18",
+      orders_submitted: 0,
+      orders_placed: 0,
+      signatures_created: 0,
+      final_inside_tolerance: false
+    )
+  end
+
+  def run_false_missing_exposure_hold_recheck(target_by_stage: {}, exposure_by_stage: {}, snapshot_attrs_by_stage: {})
+    position = migration_position("extended")
+    dir = Rails.root.join("tmp/test-burn-in-#{SecureRandom.hex(4)}")
+    clock = BurnInClock.new(Time.zone.local(2026, 6, 18, 16, 0, 0))
+    active = ClockedBurnInActiveRebalance.new(
+      clock,
+      payloads: [
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "extended"),
+        active_rebalance_payload(reason: "inside_tolerance", needed: false, venue: "ethereal"),
+        false_missing_exposure_hold_payload("ethereal")
+      ]
+    )
+    refresher = BurnInSnapshotRefresher.new(
+      target_by_stage: target_by_stage,
+      exposure_by_stage: exposure_by_stage,
+      snapshot_attrs_by_stage: snapshot_attrs_by_stage
+    )
+
+    result = burn_in(
+      position: position,
+      live: true,
+      selector: ->(_) { "extended->ethereal" },
+      log_dir: dir,
+      interval_seconds: 120,
+      rebalance_during_hold: true,
+      rebalance_hold_interval_seconds: 120,
+      active_rebalance_factory: -> { active },
+      snapshot_refresher: refresher,
+      now: -> { clock.now },
+      sleeper: ->(seconds) { clock.sleep(seconds) }
+    ).run
+    [ result, read_jsonl(result.receipt_path) ]
+  ensure
+    FileUtils.rm_rf(dir) if dir
   end
 
   def direct_preflight(position, target: "1.18", venues: {}, proof_registry: BurnInProofRegistry.new, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, burn_in_tolerance_multiplier: "1.0", burn_in_extra_tolerance_eth: "0", burn_in_max_allowed_drift_eth: "0.15", burn_in_max_allowed_drift_ratio: "0.08")
