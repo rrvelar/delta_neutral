@@ -100,17 +100,21 @@ class MigrationRandomProductionRunner
     direct = direct_report
     direct_open_orders_payload = direct_open_orders(direct)
     direct_venue_shorts_payload = direct_venue_shorts(direct)
-    active_venues = active_short_venues(direct)
+    confirmed_active = confirmed_active_short_venues(direct)
+    unknown_venues = unknown_short_venues(direct)
     process_running = lock_running?
     orphan_process = duplicate_runner_process_running?(ignore_pid: lock_payload["pid"])
     stale_lock = lock_stale?
     heartbeat_recent = heartbeat_recent?
     stale_heartbeat = heartbeat_payload["status"] == "running" && (!process_running || !heartbeat_recent) && !orphan_process
+    running_healthy = process_running && heartbeat_payload["status"] == "running" && heartbeat_recent
     latest = latest_event_from_log
-    current_market_safe = current_direct_market_safe?(direct, active_venues)
+    current_market_safe = current_direct_market_safe?(direct, confirmed_active, unknown_venues)
     effective_status = production_status(
       direct: direct,
-      active_venues: active_venues,
+      confirmed_active: confirmed_active,
+      unknown_venues: unknown_venues,
+      running_healthy: running_healthy,
       process_running: process_running,
       orphan_process: orphan_process,
       stale_lock: stale_lock,
@@ -132,7 +136,8 @@ class MigrationRandomProductionRunner
       current_production_venue: direct[:production_venue] || heartbeat_payload["current_production_venue"],
       direct_open_orders: direct_open_orders_payload,
       direct_venue_shorts: direct_venue_shorts_payload,
-      active_short_venues: active_venues,
+      active_short_venues: confirmed_active,
+      unconfirmed_venue_readbacks: unknown_venues,
       inside_tolerance: direct[:inside_tolerance] == true,
       last_route: heartbeat_payload["last_route"],
       last_cycle: heartbeat_payload["last_cycle"],
@@ -140,7 +145,7 @@ class MigrationRandomProductionRunner
       gates_state: gates_state,
       duplicate_runner_process: orphan_process,
       stale_heartbeat: stale_heartbeat,
-      blockers: status_blockers(effective_status, direct, active_venues),
+      blockers: status_blockers(effective_status, direct, confirmed_active, unknown_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }
   end
@@ -202,14 +207,26 @@ class MigrationRandomProductionRunner
 
   def restart_safety_blockers
     report = direct_report
+    confirmed = confirmed_active_short_venues(report)
+    unknown = unknown_short_venues(report)
     blockers = []
     blockers << "direct preflight open orders are nonzero or unknown" unless direct_open_orders_zero?(report)
-    blockers << multiple_exposure_blocker(report) if active_short_venues(report).size > 1
-    blockers << "direct preflight must show exactly one active venue exposure" if active_short_venues(report).empty?
+    blockers << "direct preflight venue readback could not be confirmed for #{unknown.join(', ')}; fail closed" if unknown.any?
+    blockers << multiple_exposure_blocker(report) if confirmed.size > 1
+    blockers << "direct preflight must show exactly one active venue exposure" if confirmed.empty? && unknown.empty?
+    blockers << active_venue_mismatch_blocker if confirmed.one? && confirmed.first != production_venue(report)
     unless report[:inside_tolerance] == true || Array(report[:blockers]).all? { |blocker| rebalance_trigger_blocker?(blocker) }
       blockers.concat(Array(report[:blockers]))
     end
     blockers.uniq
+  end
+
+  def active_venue_mismatch_blocker
+    "active venue differs from production venue; use supervised adopt/sync production venue"
+  end
+
+  def production_venue(report)
+    HedgeVenues.normalize(report[:production_venue] || position.hedge&.execution_venue)
   end
 
   def build_burn_in_runner
@@ -291,7 +308,7 @@ class MigrationRandomProductionRunner
       updated_at: now.call.utc.iso8601,
       status: status,
       historical_stop_reason: historical_stop_reason(latest_event || latest_event_from_log),
-      current_direct_market_safe: current_direct_market_safe?(direct, active_short_venues(direct)),
+      current_direct_market_safe: current_direct_market_safe?(direct, confirmed_active_short_venues(direct), unknown_short_venues(direct)),
       blockers: blockers,
       lock: lock_payload.presence,
       lock_stale: lock_stale?,
@@ -372,13 +389,36 @@ class MigrationRandomProductionRunner
     end
   end
 
-  def active_short_venues(report)
-    Array(report[:active_short_venues]).presence ||
-      HedgeVenues::SUPPORTED_KEYS.select { |venue| decimal(report.dig(:venues, venue, :short_eth)).positive? }
+  # Only venues whose short came from a fresh, confirmed direct readback count as live
+  # exposure. A venue read that failed, is unknown, or was carried forward from a stale
+  # snapshot must not be treated as live exposure (it would fabricate multiple exposure).
+  def confirmed_active_short_venues(report)
+    HedgeVenues::SUPPORTED_KEYS.select do |venue|
+      !venue_readback_unknown?(report, venue) && decimal(report.dig(:venues, venue, :short_eth)).positive?
+    end
+  end
+
+  def unknown_short_venues(report)
+    HedgeVenues::SUPPORTED_KEYS.select { |venue| venue_readback_unknown?(report, venue) }
+  end
+
+  def venue_readback_unknown?(report, venue)
+    details = report.dig(:venues, venue) || {}
+    position_status = details[:position_status] || details["position_status"]
+    return true unless position_status.nil? || position_status.to_s == "ok"
+    return true if (details[:short_eth] || details["short_eth"]).nil?
+
+    stale_venue_source?(details)
+  end
+
+  def stale_venue_source?(details)
+    source_status = (details[:source_status] || details["source_status"]).to_s
+    critical_status = (details[:critical_read_status] || details["critical_read_status"]).to_s
+    source_status == "stale" || critical_status == "error_carried_forward"
   end
 
   def multiple_exposure_blocker(report)
-    venues = active_short_venues(report).map do |venue|
+    venues = confirmed_active_short_venues(report).map do |venue|
       "#{venue}=#{decimal_string(report.dig(:venues, venue, :short_eth))}"
     end
     "unsafe_multiple_exposure: #{venues.join(', ')}"
@@ -396,7 +436,10 @@ class MigrationRandomProductionRunner
   end
 
   def direct_venue_shorts(report)
-    HedgeVenues::SUPPORTED_KEYS.to_h { |venue| [ venue, decimal_string(report.dig(:venues, venue, :short_eth)) ] }
+    HedgeVenues::SUPPORTED_KEYS.to_h do |venue|
+      value = venue_readback_unknown?(report, venue) ? "unknown" : decimal_string(report.dig(:venues, venue, :short_eth))
+      [ venue, value ]
+    end
   end
 
   def proof_report_payload(proof_report)
@@ -459,10 +502,12 @@ class MigrationRandomProductionRunner
     payload.present? && !process_alive?(payload["pid"])
   end
 
-  def production_status(direct:, active_venues:, process_running:, orphan_process:, stale_lock:, stale_heartbeat:, heartbeat_recent:, latest:)
-    return "unsafe_multiple_exposure" if active_venues.size > 1
+  def production_status(direct:, confirmed_active:, unknown_venues:, running_healthy:, process_running:, orphan_process:, stale_lock:, stale_heartbeat:, heartbeat_recent:, latest:)
+    return "unsafe_multiple_exposure" if confirmed_active.size > 1
     return "orphan_process_running" if orphan_process
-    return "running" if process_running && heartbeat_payload["status"] == "running" && heartbeat_recent
+    return "running" if running_healthy
+    return "unsafe_unknown_exposure" if unknown_venues.any?
+    return "active_venue_mismatch" if confirmed_active.one? && confirmed_active.first != production_venue(direct)
     return "unsafe_gates_left_enabled" if gates_state.values.any? && !process_running
     return "stale_lock" if stale_lock
     return "stale_heartbeat" if stale_heartbeat
@@ -473,9 +518,11 @@ class MigrationRandomProductionRunner
     status_payload["status"].presence || "stopped"
   end
 
-  def current_direct_market_safe?(direct, active_venues)
+  def current_direct_market_safe?(direct, confirmed_active, unknown_venues)
     direct_open_orders_zero?(direct) &&
-      active_venues.one? &&
+      unknown_venues.empty? &&
+      confirmed_active.one? &&
+      confirmed_active.first == production_venue(direct) &&
       direct[:inside_tolerance] == true &&
       Array(direct[:blockers]).empty?
   end
@@ -493,10 +540,14 @@ class MigrationRandomProductionRunner
     false
   end
 
-  def status_blockers(status, direct, active_venues)
+  def status_blockers(status, direct, confirmed_active, unknown_venues)
     case status
     when "unsafe_multiple_exposure"
       [ multiple_exposure_blocker(direct) ]
+    when "unsafe_unknown_exposure"
+      [ "venue readback could not be confirmed for #{unknown_venues.join(', ')}; failing closed (stale snapshot is diagnostic only)" ]
+    when "active_venue_mismatch"
+      [ active_venue_mismatch_blocker ]
     when "orphan_process_running"
       [ "runner process exists but lock is missing" ]
     when "unsafe_gates_left_enabled"
