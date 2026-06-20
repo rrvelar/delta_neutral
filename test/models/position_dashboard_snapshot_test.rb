@@ -16,6 +16,38 @@ class PositionDashboardSnapshotTest < ActiveSupport::TestCase
     assert_empty snapshot.missing_migration_fields
   end
 
+  test "carried-forward Extended exposure is diagnostic only and never confirmed live exposure" do
+    snapshot = position_dashboard_snapshot(
+      extended_short_eth: nil,
+      extended_carried_forward_short_eth: "1.997",
+      extended_status: "error",
+      extended_source_status: "stale",
+      extended_critical_read_status: "error_carried_forward"
+    )
+
+    assert_equal true, snapshot.extended_exposure_carried_forward?
+
+    state = snapshot.venue_state("extended")
+    assert_nil state[:short_size], "stale value must not surface as confirmed live exposure"
+    assert_equal true, state[:carried_forward_exposure]
+    assert_equal BigDecimal("1.997"), state[:carried_forward_short_eth]
+    assert_equal "1.997", state[:carried_forward_short_eth_display]
+    refute_equal "active", state[:status]
+
+    # The unknown Extended readback fails closed for migration readiness.
+    assert_equal false, snapshot.migration_complete_for_proof?
+    assert_includes snapshot.missing_migration_fields, "extended_short_eth"
+  end
+
+  test "fresh confirmed Extended read does not expose carry-forward diagnostic" do
+    snapshot = position_dashboard_snapshot
+
+    assert_equal false, snapshot.extended_exposure_carried_forward?
+    state = snapshot.venue_state("extended")
+    assert_equal false, state[:carried_forward_exposure]
+    assert_nil state[:carried_forward_short_eth]
+  end
+
   private
 
   def position_dashboard_snapshot(overrides = {})

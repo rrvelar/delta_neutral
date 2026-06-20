@@ -227,7 +227,7 @@ rescue ArgumentError, TypeError
 end %>
 <% production_status_color = case random_production_status
 when "running" then "border-green-800 bg-green-950/50 text-green-100"
-when "unsafe_multiple_exposure", "orphan_process_running", "unsafe_gates_left_enabled", "blocked" then "border-red-800 bg-red-950/50 text-red-100"
+when "unsafe_multiple_exposure", "unsafe_unknown_exposure", "active_venue_mismatch", "orphan_process_running", "unsafe_gates_left_enabled", "blocked" then "border-red-800 bg-red-950/50 text-red-100"
 when "stale lock", "stale_lock", "stale_heartbeat" then "border-yellow-800 bg-yellow-950/50 text-yellow-100"
 else "border-gray-700 bg-gray-950 text-gray-300"
 end %>
@@ -552,6 +552,9 @@ end %>
               </div>
               <span class="rounded-full border <%= state[:status] == 'flat' ? 'border-green-800 bg-green-950/60 text-green-300' : (state[:status].in?([ 'active', 'short' ]) ? 'border-indigo-800 bg-indigo-950/60 text-indigo-200' : 'border-gray-700 bg-gray-950 text-gray-300') %> px-2 py-1 text-xs"><%= state[:status].presence || "unknown" %></span>
             </div>
+            <% if state[:carried_forward_exposure] %>
+              <p class="mt-2 rounded-lg border border-amber-800 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">Live readback failed — exposure unknown. Last known (stale) value <%= format_venue_eth_amount(state[:carried_forward_short_eth]) %> ETH shown for diagnostics only, not counted as live exposure.</p>
+            <% end %>
             <dl class="mt-3 space-y-1 text-xs">
               <div class="flex justify-between gap-3"><dt class="text-gray-500">Notional</dt><dd class="text-white"><%= format_venue_usd_amount(state[:notional_usd]) %></dd></div>
               <div class="flex justify-between gap-3"><dt class="text-gray-500">Leverage</dt><dd class="text-white"><%= state[:leverage].present? ? "#{state[:leverage]}x" : "not loaded yet - snapshot lacks leverage" %></dd></div>

@@ -257,7 +257,7 @@ class ExtendedAutoOperationalHealth
   end
 
   def extended_exposure_unknown?(snapshot)
-    snapshot.extended_short_eth.nil? && snapshot.extended_source_status.in?(%w[error not_configured unknown])
+    snapshot.extended_short_eth.nil? && snapshot.extended_source_status.in?(%w[error not_configured unknown stale])
   end
 
   def short_positive?(value)

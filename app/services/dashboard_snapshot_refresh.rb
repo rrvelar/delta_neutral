@@ -221,10 +221,14 @@ class DashboardSnapshotRefresh
     previous = position.position_dashboard_snapshot
     return venue_error(error) unless venue == "extended" && previous&.extended_short_eth
 
+    # The live readback failed: the previous short is no longer confirmed, so it must NOT be
+    # written into the live exposure field. Keep it only as labelled diagnostic context so no
+    # execution/status consumer can mistake a stale value for confirmed live exposure.
     {
       status: "error",
       source_status: "stale",
-      short_eth: previous.extended_short_eth,
+      short_eth: nil,
+      carried_forward_short_eth: previous.extended_short_eth,
       notional_usd: previous.extended_notional_usd,
       entry_price: previous.extended_entry_price,
       mark_price: previous.extended_mark_price,
@@ -239,7 +243,7 @@ class DashboardSnapshotRefresh
       optional_read_duration_ms: nil,
       optional_read_status: "not_attempted",
       value_stale_as_of: previous.refreshed_at,
-      error: "#{sanitized_error(error)}; carried forward previous Extended snapshot ##{previous.id}"
+      error: "#{sanitized_error(error)}; previous Extended short #{decimal_or_nil(previous.extended_short_eth)&.to_s('F')} retained as stale diagnostic only (snapshot ##{previous.id})"
     }
   end
 
@@ -258,6 +262,7 @@ class DashboardSnapshotRefresh
   def venue_attrs(results)
     {
       extended_short_eth: results.dig("extended", :short_eth),
+      extended_carried_forward_short_eth: results.dig("extended", :carried_forward_short_eth),
       ethereal_short_eth: results.dig("ethereal", :short_eth),
       nado_short_eth: results.dig("nado", :short_eth),
       extended_status: results.dig("extended", :status),
