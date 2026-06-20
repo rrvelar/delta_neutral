@@ -44,14 +44,24 @@ class PositionDashboardSnapshot < ApplicationRecord
     missing
   end
 
+  # True when the Extended venue's live readback failed and only a stale, carried-forward
+  # value remains. The carried-forward value is diagnostic context, never confirmed exposure.
+  def extended_exposure_carried_forward?
+    extended_source_status.to_s == "stale" || extended_critical_read_status.to_s == "error_carried_forward"
+  end
+
   def venue_state(venue)
     key = venue.to_s
+    carried_forward = key == "extended" && extended_exposure_carried_forward?
     {
       venue: key,
       venue_name: HedgeVenues.label(key),
       short_size: public_send("#{key}_short_eth"),
       short_size_eth: decimal_string(public_send("#{key}_short_eth")),
       status: public_send("#{key}_status").presence || "unknown",
+      carried_forward_exposure: carried_forward,
+      carried_forward_short_eth: carried_forward ? extended_carried_forward_short_eth : nil,
+      carried_forward_short_eth_display: carried_forward ? decimal_string(extended_carried_forward_short_eth) : nil,
       notional_usd: public_send("#{key}_notional_usd"),
       leverage: key == "extended" ? extended_leverage : nil,
       effective_leverage: key == "extended" ? extended_effective_leverage : ethereal_effective_leverage,

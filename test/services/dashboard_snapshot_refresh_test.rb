@@ -344,14 +344,25 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     ).refresh
 
     assert_equal previous.id, snapshot.id
-    assert_equal BigDecimal("0.7"), snapshot.extended_short_eth
+    # The stale value must not appear as confirmed live exposure...
+    assert_nil snapshot.extended_short_eth
+    # ...it is retained only as labelled diagnostic context.
+    assert_equal BigDecimal("0.7"), snapshot.extended_carried_forward_short_eth
+    assert_equal true, snapshot.extended_exposure_carried_forward?
     assert_equal "error", snapshot.extended_status
     assert_equal "stale", snapshot.extended_source_status
     assert_equal "error_carried_forward", snapshot.extended_critical_read_status
     assert_equal previous_refreshed_at.to_i, snapshot.extended_value_stale_as_of.to_i
-    assert_equal BigDecimal("0.7"), snapshot.combined_short_eth
-    assert_equal BigDecimal("0.55"), snapshot.drift_eth
-    assert_equal false, snapshot.inside_tolerance
+    # Combined exposure cannot be confirmed while Extended is unknown: fail closed, do not
+    # fabricate a combined/drift figure from the stale carry-forward value.
+    assert_nil snapshot.combined_short_eth
+    assert_nil snapshot.drift_eth
+    assert_nil snapshot.inside_tolerance
+    # venue_state surfaces the stale value as a labelled diagnostic, not as live short size.
+    venue_state = snapshot.venue_state("extended")
+    assert_nil venue_state[:short_size]
+    assert_equal true, venue_state[:carried_forward_exposure]
+    assert_equal BigDecimal("0.7"), venue_state[:carried_forward_short_eth]
   end
 
   test "critical extended timeout without previous snapshot leaves extended error unknown" do
@@ -375,6 +386,51 @@ class DashboardSnapshotRefreshTest < ActiveSupport::TestCase
     assert_nil snapshot.combined_short_eth
     assert_nil snapshot.drift_eth
     assert_nil snapshot.inside_tolerance
+  end
+
+  test "fresh flat Extended read overrides stale snapshot short and clears carry-forward diagnostic" do
+    position = create_position_with_hedge
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: 5.minutes.ago,
+      refresh_status: "ok",
+      stale: false,
+      production_venue: "extended",
+      selected_venue: "extended",
+      target_short_eth: "1.25",
+      tolerance_ratio: "0.05",
+      tolerance_abs_eth: "0.0625",
+      combined_short_eth: "1.997",
+      drift_eth: "0",
+      inside_tolerance: true,
+      extended_short_eth: "1.997",
+      extended_carried_forward_short_eth: "1.5",
+      ethereal_short_eth: "0",
+      nado_short_eth: "0",
+      extended_status: "active",
+      ethereal_status: "flat",
+      nado_status: "flat",
+      extended_source_status: "ok",
+      ethereal_source_status: "ok",
+      nado_source_status: "ok"
+    )
+
+    snapshot = DashboardSnapshotRefresh.new(
+      position: position,
+      env: snapshot_env,
+      venue_builder: fake_builder(
+        "extended" => { position: nil, account_state: { open_orders_count: 0 } },
+        "ethereal" => { position: nil },
+        "nado" => { position: nil }
+      ),
+      signer_client: fake_signer(ok: true)
+    ).refresh
+
+    # Fresh flat read wins: Extended is 0, not the old 1.997 live exposure.
+    assert_equal BigDecimal("0"), snapshot.extended_short_eth
+    assert_equal "flat", snapshot.extended_status
+    assert_equal "ok", snapshot.extended_source_status
+    assert_equal false, snapshot.extended_exposure_carried_forward?
+    assert_nil snapshot.extended_carried_forward_short_eth, "a confirmed fresh read must clear the stale diagnostic"
   end
 
   test "refresh uses fresh Mellow target before building snapshot" do

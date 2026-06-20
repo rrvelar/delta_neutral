@@ -418,7 +418,135 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     assert_includes File.read(doc), "migration:random_production_runner"
   end
 
+  test "status does not fabricate multiple exposure from a stale carried-forward venue read" do
+    position = migration_position
+    dir = tmp_dir
+    factory = ->(position:, stage:) {
+      detailed_preflight(
+        production_venue: "ethereal",
+        inside: true,
+        venues: {
+          "extended" => { short_eth: BigDecimal("1.997"), position_status: "error", source_status: "stale", critical_read_status: "error_carried_forward" },
+          "ethereal" => { short_eth: BigDecimal("1.9666"), position_status: "ok" }
+        }
+      )
+    }
+    service = runner(position: position, log_dir: dir, preflight_factory: factory)
+
+    status = service.status
+
+    assert_equal "unsafe_unknown_exposure", status.fetch(:status)
+    refute_equal "unsafe_multiple_exposure", status.fetch(:status)
+    assert_equal [ "ethereal" ], status.fetch(:active_short_venues)
+    assert_equal "unknown", status.fetch(:direct_venue_shorts).fetch("extended")
+    assert_equal "1.9666", status.fetch(:direct_venue_shorts).fetch("ethereal")
+    assert_equal false, status.fetch(:current_direct_market_safe)
+    assert_match "venue readback could not be confirmed for extended", status.fetch(:blockers).join(" ")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status treats fresh confirmed single venue as safe and reports flat venue as zero" do
+    position = migration_position
+    dir = tmp_dir
+    factory = ->(position:, stage:) {
+      detailed_preflight(
+        production_venue: "ethereal",
+        inside: true,
+        venues: {
+          "extended" => { short_eth: BigDecimal("0"), position_status: "ok" },
+          "ethereal" => { short_eth: BigDecimal("1.9666"), position_status: "ok" }
+        }
+      )
+    }
+    service = runner(position: position, log_dir: dir, preflight_factory: factory)
+
+    status = service.status
+
+    assert_equal true, status.fetch(:current_direct_market_safe)
+    assert_equal [ "ethereal" ], status.fetch(:active_short_venues)
+    assert_equal "0.0", status.fetch(:direct_venue_shorts).fetch("extended")
+    refute_includes %w[unsafe_multiple_exposure unsafe_unknown_exposure active_venue_mismatch], status.fetch(:status)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "start blocks when fresh active venue differs from production venue" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "extended")
+    dir = tmp_dir
+    factory = ->(position:, stage:) {
+      detailed_preflight(
+        production_venue: "extended",
+        inside: true,
+        venues: {
+          "extended" => { short_eth: BigDecimal("0"), position_status: "ok" },
+          "ethereal" => { short_eth: BigDecimal("1.9666"), position_status: "ok" }
+        }
+      )
+    }
+    invoked = false
+    result = runner(position: position, log_dir: dir, preflight_factory: factory, runner_factory: ->(**) { invoked = true; FakeBurnInRunner.new }).run
+
+    assert_equal "blocked", result.status
+    assert_includes result.blockers, "active venue differs from production venue; use supervised adopt/sync production venue"
+    assert_equal false, invoked
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "status with dead lock keeps direct market safe and surfaces clear stale lock action" do
+    position = migration_position
+    dir = tmp_dir
+    FileUtils.mkdir_p(dir)
+    File.write(dir.join("lock_position_#{position.id}.json"), JSON.generate(runner: "random_production_runner", pid: 99_999_999))
+    service = runner(position: position, log_dir: dir, preflight_factory: safe_preflight_factory(venue: "nado"))
+
+    status = service.status
+
+    assert_equal "stale_lock", status.fetch(:status)
+    assert_equal true, status.fetch(:current_direct_market_safe)
+    assert_equal [ "lock points to a dead process" ], status.fetch(:blockers)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   private
+
+  def detailed_preflight(production_venue:, inside:, venues:, blockers: [], open_orders_status: "zero")
+    venue_details = HedgeVenues::SUPPORTED_KEYS.to_h do |venue|
+      overrides = venues.fetch(venue, { short_eth: BigDecimal("0"), position_status: "ok" })
+      details = {
+        short_eth: overrides[:short_eth],
+        position_status: overrides.fetch(:position_status, "ok"),
+        open_orders_status: overrides.fetch(:open_orders_status, open_orders_status),
+        open_orders_count: overrides.fetch(:open_orders_status, open_orders_status) == "zero" ? 0 : 1
+      }
+      details[:source_status] = overrides[:source_status] if overrides[:source_status]
+      details[:critical_read_status] = overrides[:critical_read_status] if overrides[:critical_read_status]
+      [ venue, details ]
+    end
+    # Mirror the real preflight: active_short_venues is computed from short>epsilon for
+    # every venue regardless of whether the readback was confirmed, stale, or errored.
+    positive = venue_details.select { |_v, d| d[:short_eth] && d[:short_eth].positive? }.keys
+    combined = venue_details.values.sum(BigDecimal("0")) { |d| d[:short_eth] || BigDecimal("0") }
+    {
+      preflight_source: "test_random_production_preflight",
+      accepted: blockers.empty?,
+      blockers: blockers,
+      warnings: [],
+      production_venue: production_venue,
+      target: { target_short_eth: BigDecimal("2.12"), target_source: "test", target_fresh: true },
+      venues: venue_details,
+      active_short_venues: positive,
+      combined_short_eth: combined,
+      drift_eth: BigDecimal("2.12") - combined,
+      inside_tolerance: inside,
+      proof_report: { routes: [], completed_route_proofs: [], missing_route_proofs: [], stale_route_proofs: [] },
+      readiness: { blockers: [] },
+      signer: { status: "ok", payload: { ok: true } }
+    }
+  end
 
   def runner(position:, live: true, duration_minutes: 0, log_dir:, preflight_factory: safe_preflight_factory, runner_factory: nil)
     MigrationRandomProductionRunner.new(

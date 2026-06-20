@@ -526,6 +526,26 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Migration complete: production venue Extended.", response.body
   end
 
+  test "show surfaces carried-forward Extended exposure as stale diagnostic not live exposure" do
+    position = create_aerodrome_position
+    Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")
+    create_dashboard_snapshot(position, extended_short_eth: "1.997", ethereal_short_eth: "0", nado_short_eth: "0")
+    position.position_dashboard_snapshot.update!(
+      extended_short_eth: nil,
+      extended_carried_forward_short_eth: "1.997",
+      extended_status: "error",
+      extended_source_status: "stale",
+      extended_critical_read_status: "error_carried_forward"
+    )
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "Live readback failed", response.body
+    assert_match "not counted as live exposure", response.body
+    assert_match "1.997000 ETH shown for diagnostics only", response.body
+  end
+
   test "show extended production venue keeps cached snapshot values consistent" do
     position = create_aerodrome_position
     hedge = Hedge.create!(position: position, target: "1.0", tolerance: "0.05", active: true, execution_venue: "extended")

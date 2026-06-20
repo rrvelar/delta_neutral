@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_03_000200) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_20_000100) do
   create_table "aerodrome_hedge_proposals", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.boolean "execution_enabled", default: false, null: false
@@ -117,6 +117,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_03_000200) do
     t.string "ethereal_source_status"
     t.string "ethereal_status"
     t.boolean "extended_auto_enabled"
+    t.decimal "extended_carried_forward_short_eth", precision: 30, scale: 18
     t.integer "extended_critical_read_duration_ms"
     t.string "extended_critical_read_status"
     t.decimal "extended_effective_leverage", precision: 20, scale: 10
