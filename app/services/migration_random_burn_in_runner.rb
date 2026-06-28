@@ -974,7 +974,7 @@ class MigrationRandomBurnInRunner
     record_direct_preflight(direct)
     active_venues = active_short_venues(direct)
     safe = direct_market_safe?(direct, active_venues: active_venues)
-    check.merge(
+    recovered = check.merge(
       reason: safe ? "recovered_after_direct_market_safe_preflight" : check[:reason],
       active_rebalance_recovered: safe,
       active_rebalance_recovery_reason: safe ? active_rebalance_recovery_reason(check) : nil,
@@ -984,7 +984,34 @@ class MigrationRandomBurnInRunner
       terminal_reason: safe ? nil : direct_market_terminal_reason(direct, active_venues: active_venues),
       recovery_direct_preflight_blockers: Array(direct[:blockers]),
       blockers: safe ? [] : Array(check[:blockers])
-    ).compact
+    )
+    recovered = recovered.merge(authoritative_direct_readback_fields(check, direct)) if safe
+    recovered.compact
+  end
+
+  # The hold-monitor pre-check can fire on a stale short readback while the one-shot rebalance
+  # re-reads the venue and finds it already inside tolerance (no_op / blocked_before_submit).
+  # When recovery confirms the direct market is safe, the authoritative fresh readback values
+  # must replace the stale pre-check values so the event is internally consistent, while the
+  # pre-check values are preserved under pre_rebalance_* for diagnostics.
+  def authoritative_direct_readback_fields(check, direct)
+    venue = HedgeVenues.normalize(direct[:production_venue])
+    final_short = venue_short(direct, venue)
+    final_target = decimal_or_nil(direct.dig(:target, :target_short_eth))
+    final_drift = final_target ? final_target - final_short : nil
+    {
+      pre_rebalance_current_short_eth: check[:current_short_eth],
+      pre_rebalance_target_short_eth: check[:target_short_eth],
+      pre_rebalance_drift_eth: check[:drift_eth],
+      pre_rebalance_inside_tolerance: check[:inside_tolerance],
+      final_direct_current_short_eth: decimal_string(final_short),
+      final_direct_target_short_eth: decimal_string(final_target),
+      final_direct_drift_eth: decimal_string(final_drift),
+      current_short_eth: decimal_string(final_short),
+      target_short_eth: decimal_string(final_target) || check[:target_short_eth],
+      drift_eth: decimal_string(final_drift) || check[:drift_eth],
+      inside_tolerance: true
+    }
   end
 
   def zero_submit_active_rebalance_block?(check)
@@ -997,15 +1024,19 @@ class MigrationRandomBurnInRunner
 
   def transient_active_rebalance_blockers?(blockers)
     blockers.any? &&
-      blockers.all? { |blocker| false_missing_exposure_blocker?(blocker) || open_orders_uncertainty_blocker?(blocker) }
+      blockers.all? do |blocker|
+        false_missing_exposure_blocker?(blocker) ||
+          open_orders_uncertainty_blocker?(blocker) ||
+          noop_unsubmitted_status_blocker?(blocker)
+      end
   end
 
   def active_rebalance_recovery_reason(check)
-    if Array(check[:blockers]).any? { |blocker| open_orders_uncertainty_blocker?(blocker) }
-      "recovered_after_open_orders_uncertainty_readback"
-    else
-      "recovered_after_false_missing_exposure_readback"
-    end
+    blockers = Array(check[:blockers])
+    return "recovered_after_open_orders_uncertainty_readback" if blockers.any? { |blocker| open_orders_uncertainty_blocker?(blocker) }
+    return "recovered_after_noop_direct_market_safe_readback" if blockers.any? { |blocker| noop_unsubmitted_status_blocker?(blocker) }
+
+    "recovered_after_false_missing_exposure_readback"
   end
 
   def false_missing_exposure_blocker?(blocker)
@@ -1014,6 +1045,13 @@ class MigrationRandomBurnInRunner
 
   def open_orders_uncertainty_blocker?(blocker)
     blocker.to_s.match?(/open orders could not be confirmed zero|active venue open orders are not zero|open orders cannot be confirmed zero/i)
+  end
+
+  # A zero-submit one-shot rebalance that re-read the venue and took no action (no_op /
+  # blocked_before_submit). This is only transient when the fresh direct readback later proves
+  # the market is safe; otherwise direct_market_safe? keeps it terminal (fail closed).
+  def noop_unsubmitted_status_blocker?(blocker)
+    blocker.to_s.match?(/one-shot rebalance status is (blocked_before_submit|no_op)/i)
   end
 
   def direct_market_safe?(report, active_venues:)
