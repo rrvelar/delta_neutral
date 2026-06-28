@@ -796,6 +796,71 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     clear_random_production_files(position&.id)
   end
 
+  test "operator control center renders recommended action venue cards and progress" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position)
+
+    assert_response :success
+    primary = css_select("#production-control-center").first.text
+    assert_match "Running normally — no action needed", primary
+    assert_match "Recommended action", primary
+    assert_match "No action needed", primary
+    assert_match "Do not press Start again", primary
+    assert_match "Active hedge", primary
+    assert_match "Route / cycle progress", primary
+    assert_match "Runner internals (diagnostics)", primary
+    # Top operator view must not dump raw JSON payloads at the operator.
+    refute_match(/status_payload|=>|\{"/, primary)
+    refute_match(/\bUnavailable\b/, primary)
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "operator control center shows carried-forward extended value as diagnostic only" do
+    position = production_random_position
+    position.position_dashboard_snapshot.update!(
+      extended_source_status: "stale",
+      extended_critical_read_status: "error_carried_forward",
+      extended_carried_forward_short_eth: "1.997"
+    )
+    write_random_production_files(position)
+
+    get position_path(position)
+
+    assert_response :success
+    primary = css_select("#production-control-center").first.text
+    assert_match "Previous stale value: 1.997", primary
+    assert_match "Diagnostic only — not counted as live exposure", primary
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "operator control center flags multiple exposure as red blocker without start recommendation" do
+    position = production_random_position
+    status = {
+      status: "unsafe_multiple_exposure",
+      current_production_venue: "nado",
+      direct_preflight_blockers: [],
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: { "extended" => "1.0", "ethereal" => "0", "nado" => "2.12" },
+      inside_tolerance: false,
+      route_proofs_summary: random_production_route_summary
+    }
+    write_random_production_files(position, status: status)
+
+    get position_path(position)
+
+    assert_response :success
+    primary = css_select("#production-control-center").first.text
+    assert_match "Blocked — multiple exposure", primary
+    assert_match "Do not start 24/7 production", primary
+    refute_match "No action needed", primary
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
   test "production summary uses runner venue over manual selected venue" do
     position = production_random_position
     status = {
