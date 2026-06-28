@@ -786,7 +786,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "24/7 Random Rotation: RUNNING", response.body
     assert_match "Production Random Runner", response.body
     assert_match "24/7 random rotation control", response.body
-    assert_match "Bot is running normally. No action required.", response.body
+    assert_match "Running normally — no action needed", response.body
     assert_match "Route proofs", response.body
     assert_match "6/6 READY_FOR_RANDOM", response.body
     assert_match "Start 24h Canary", response.body
@@ -902,8 +902,11 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Production runner venue: Ethereal", response.body
     assert_match "Advanced / manual controls", response.body
     assert_match "Manual UI selected venue", response.body
-    assert_match "Current hedge: Ethereal short 2.120000 ETH", response.body
-    assert_match "Advanced / manual controls", response.body
+    # Active venue short comes from the runner's direct readback (Ethereal 2.12),
+    # not the manually selected Extended venue.
+    primary = css_select("#production-control-center").first.text
+    assert_match "Active venue short", primary
+    assert_match "2.120000 ETH", primary
   ensure
     clear_random_production_files(position&.id)
   end
@@ -988,7 +991,174 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     primary_text = css_select("#production-control-center").first.text
     assert_no_match(/\bUnavailable\b/, primary_text)
-    assert_match "unknown - direct readback not cached", primary_text
+    assert_match "unknown — not read back yet", primary_text
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  # Regression for the exact production bug: authoritative status is safe with no
+  # current blockers, but a stale heartbeat / previous-run event carries an old
+  # "blocked_before_submit" blocker and an old combined short. The rendered
+  # dashboard must trust the authoritative direct status, not the stale data.
+  def stale_blocker_bug_files(position)
+    status = {
+      status: "running",
+      current_direct_market_safe: true,
+      updated_at: Time.current.utc.iso8601,
+      blockers: [],
+      direct_preflight_blockers: [],
+      current_production_venue: "ethereal",
+      direct_open_orders: random_production_open_orders("zero"),
+      direct_venue_shorts: { "extended" => "0", "ethereal" => "2.4027", "nado" => "0" },
+      inside_tolerance: true,
+      route_proofs_summary: random_production_route_summary
+    }
+    heartbeat = {
+      runner: "random_production_runner",
+      position_id: position.id,
+      pid: Process.pid,
+      started_at: Time.current.utc.iso8601,
+      updated_at: Time.current.utc.iso8601,
+      last_cycle: 18,
+      last_route: "nado->ethereal",
+      current_production_venue: "ethereal",
+      target_short_eth: "2.554154",
+      combined_short_eth: "2.5627",
+      inside_tolerance: true,
+      open_orders_zero: true,
+      status: "running"
+    }
+    latest_event = {
+      event: "cycle",
+      cycle: 18,
+      route: "nado->ethereal",
+      timestamp: 1.hour.ago.utc.iso8601,
+      blockers: [ "active venue one-shot rebalance status is blocked_before_submit" ]
+    }
+    write_random_production_files(position, status: status, heartbeat: heartbeat, latest_event: latest_event)
+  end
+
+  test "stale blocked_before_submit is not the current top blocker when backend blockers are empty" do
+    position = production_random_position
+    stale_blocker_bug_files(position)
+
+    get position_path(position)
+
+    assert_response :success
+    primary = css_select("#production-control-center").first.text
+    # Banner is safe, not red action-required.
+    assert_match "Running normally — no action needed", primary
+    refute_match "Resolve blockers", primary
+    # Top active short is the authoritative direct readback, not the stale combined.
+    assert_match "2.402700 ETH", primary
+    # The stale blocker is only present as a collapsed historical diagnostic,
+    # never as the current recommended action.
+    assert_match "Historical last event", primary
+    assert_match "blocked_before_submit", primary
+    assert_match "No action needed", primary
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "random_production_status json endpoint returns a coherent view-model" do
+    position = production_random_position
+    stale_blocker_bug_files(position)
+
+    get random_production_status_position_path(position, format: :json)
+
+    assert_response :success
+    vm = JSON.parse(response.body)
+    assert_equal true, vm["market_safe"]
+    assert_empty vm["current_blockers"]
+    refute_equal "red", vm["banner_tone"]
+    assert_equal "2.4027", vm["active_short_eth"].to_s
+    assert_equal "2.5627", vm["combined_short_eth"].to_s
+    assert vm["latest_event_stale"]
+    assert vm["freshness"].present?
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "full page wires the auto-refresh controller and refresh endpoint" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get position_path(position)
+
+    assert_response :success
+    assert_match "data-controller=\"production-status-refresh\"", response.body
+    assert_match "production-status-refresh-url-value", response.body
+    assert_match "production-status-refresh#refreshNow", response.body
+    assert_match "Last refreshed", response.body
+    assert_match "Auto-refreshing every 8s", response.body
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  # End-to-end auto-refresh: the refresh fragment must reflect a CHANGED
+  # authoritative status without any full-page reload, and the stale historical
+  # blocker must never be promoted to a current blocker across refreshes. Saves
+  # real rendered HTML/JSON artifacts for the report.
+  test "auto-refresh fragment updates as authoritative status changes over time" do
+    position = production_random_position
+    stale_blocker_bug_files(position)
+    evidence_dir = "/tmp/dn_dashboard_evidence"
+    FileUtils.mkdir_p(evidence_dir)
+
+    # First render: authoritative direct short is 2.4027, stale blocker present.
+    get position_path(position)
+    assert_response :success
+    File.write(File.join(evidence_dir, "full_page.html"), response.body)
+    full = css_select("#production-control-center").first.text
+    assert_match "2.402700 ETH", full
+    assert_match "Running normally — no action needed", full
+
+    get random_production_status_position_path(position)
+    assert_response :success
+    File.write(File.join(evidence_dir, "fragment_before.html"), response.body)
+    assert_match "2.402700 ETH", response.body
+    refute_match(/Recommended action[^!]*Resolve blockers/, response.body)
+
+    get random_production_status_position_path(position, format: :json)
+    File.write(File.join(evidence_dir, "status_before.json"), response.body)
+    before_vm = JSON.parse(response.body)
+    assert_equal "2.4027", before_vm["active_short_eth"].to_s
+    assert_empty before_vm["current_blockers"]
+
+    # The runner rebalances: authoritative direct short changes to 2.5000.
+    status = JSON.parse(File.read(random_production_dir.join("status_position_#{position.id}.json")))
+    status["direct_venue_shorts"]["ethereal"] = "2.5000"
+    status["updated_at"] = Time.current.utc.iso8601
+    File.write(random_production_dir.join("status_position_#{position.id}.json"), JSON.pretty_generate(status))
+
+    # Second fragment render reflects the new value with no full page reload.
+    get random_production_status_position_path(position)
+    assert_response :success
+    File.write(File.join(evidence_dir, "fragment_after.html"), response.body)
+    assert_match "2.500000 ETH", response.body
+    refute_match "2.402700 ETH", response.body
+
+    get random_production_status_position_path(position, format: :json)
+    after_vm = JSON.parse(response.body)
+    assert_equal "2.5000", after_vm["active_short_eth"].to_s
+    # The stale blocker still never becomes a current blocker.
+    assert_empty after_vm["current_blockers"]
+    refute_equal "red", after_vm["banner_tone"]
+  ensure
+    clear_random_production_files(position&.id)
+  end
+
+  test "random_production_status html endpoint returns the control-center fragment" do
+    position = production_random_position
+    write_random_production_files(position)
+
+    get random_production_status_position_path(position)
+
+    assert_response :success
+    assert_match "Production Control Center", response.body
+    assert_match "Active venue short", response.body
+    # It is a fragment, not a full-page render.
+    assert_no_match(/<html/, response.body)
   ensure
     clear_random_production_files(position&.id)
   end

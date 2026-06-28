@@ -15,13 +15,25 @@ class MigrationRandomProductionDashboard
     control_result = read_json(control_result_path)
     latest_events = latest_jsonl_events(tail_lines)
     latest_event = latest_events.last
-    blockers = Array(status["blockers"]).presence || Array(latest_event&.fetch("blockers", nil))
+    # Authoritative current blockers come only from the live status payload the
+    # runner writes each cycle. The JSONL latest_event is a previous-cycle
+    # snapshot and must never be promoted to a current blocker.
+    current_blockers = (Array(status["blockers"]) + Array(status["direct_preflight_blockers"]))
+      .map { |blocker| blocker.to_s.strip }.reject(&:blank?).uniq
+    historical_blocker = Array(latest_event&.fetch("blockers", nil)).first
+    event_stale = latest_event_stale?(latest_event, status, heartbeat)
     current_venue = status["current_production_venue"] || active_venue_from_shorts(status) || heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue
     target_short = heartbeat["target_short_eth"]
     combined_short = heartbeat["combined_short_eth"]
 
     {
       status: display_status(status: status, heartbeat: heartbeat, lock: lock),
+      current_direct_market_safe: status["current_direct_market_safe"],
+      status_updated_at: status["updated_at"],
+      heartbeat_started_at: heartbeat["started_at"],
+      current_blockers: current_blockers,
+      historical_blocker: historical_blocker,
+      latest_event_stale: event_stale,
       mode: production_mode(heartbeat),
       policy_label: "3 migrations/day · interval #{MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS}s · hold check #{MigrationRandomProductionRunner::DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS}s",
       status_payload: status,
@@ -55,12 +67,18 @@ class MigrationRandomProductionDashboard
       next_rotation_at: next_rotation_at(heartbeat),
       lock_pid: lock["pid"],
       gates_state: status["gates_state"] || gates_state,
-      latest_blocker: blockers.first,
+      latest_blocker: historical_blocker,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }
   rescue => e
     {
       status: "unknown",
+      current_direct_market_safe: nil,
+      status_updated_at: nil,
+      heartbeat_started_at: nil,
+      current_blockers: [ "#{e.class}: #{e.message}" ],
+      historical_blocker: nil,
+      latest_event_stale: false,
       mode: "unknown",
       policy_label: "3 migrations/day · interval #{MigrationRandomProductionRunner::DEFAULT_INTERVAL_SECONDS}s · hold check #{MigrationRandomProductionRunner::DEFAULT_REBALANCE_HOLD_INTERVAL_SECONDS}s",
       status_payload: {},
@@ -102,6 +120,28 @@ class MigrationRandomProductionDashboard
   private
 
   attr_reader :position, :log_dir, :preflight_factory
+
+  # The JSONL latest_event is a snapshot of a past cycle. It is "stale" (a
+  # historical diagnostic, not current state) whenever the runner is not
+  # actively running, or when the event predates the current run's start time.
+  def latest_event_stale?(latest_event, status, heartbeat)
+    return false if latest_event.blank?
+    return true unless status["status"] == "running"
+
+    started_at = parse_time(heartbeat["started_at"])
+    event_at = parse_time(latest_event["timestamp"] || latest_event["recorded_at"])
+    return false unless started_at && event_at
+
+    event_at < started_at
+  end
+
+  def parse_time(value)
+    return nil if value.blank?
+
+    Time.zone.parse(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
+  end
 
   def display_status(status:, heartbeat:, lock:)
     return "stale lock" if lock.present? && !process_alive?(lock["pid"])

@@ -555,6 +555,26 @@ class PositionsController < ApplicationController
       notice: "Production random runner status refreshed. No orders, signatures, or cancels were created."
   end
 
+  # Read-only near-real-time status endpoint powering the Production Control
+  # Center auto-refresh. HTML returns the control-center partial fragment;
+  # JSON returns the coherent operator view-model. Submits nothing.
+  def random_production_status
+    @position = load_position_for_migration
+    random_production = safe_dashboard_section("load_random_production_status_endpoint", fallback: unavailable_random_production_runner_status) do
+      MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300)
+    end
+    venue_states = (cached_hedge_dashboard_snapshot || {})[:venue_states] || {}
+
+    respond_to do |format|
+      format.html do
+        render partial: "positions/production_control_center",
+          locals: { random_production: random_production, position: @position, venue_states: venue_states },
+          layout: false
+      end
+      format.json { render json: helpers.operator_view_model(random_production, @position) }
+    end
+  end
+
   def hedge_emergency_restore
     position = load_position_for_migration
     live = ActiveModel::Type::Boolean.new.cast(params[:live])
@@ -1622,9 +1642,18 @@ class PositionsController < ApplicationController
     direct_preflight_blockers = [ "Production random runner status unavailable; refresh status." ] if direct_preflight_blockers.blank?
     lock_stale = lock_payload.present? && !cached_process_alive?(lock_payload["pid"])
 
+    current_blockers = (Array(status_payload["blockers"]) + direct_preflight_blockers)
+      .map { |b| b.to_s.strip }.reject(&:blank?).uniq
+
     {
       status: lock_stale ? "stale lock" : "unavailable",
       reason: "unavailable",
+      current_direct_market_safe: status_payload["current_direct_market_safe"],
+      status_updated_at: status_payload["updated_at"],
+      heartbeat_started_at: nil,
+      current_blockers: current_blockers,
+      historical_blocker: nil,
+      latest_event_stale: true,
       status_payload: status_payload,
       heartbeat: {},
       lock: lock_payload,

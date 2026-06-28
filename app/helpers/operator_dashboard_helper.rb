@@ -31,6 +31,7 @@ module OperatorDashboardHelper
     status = operator_runner_status(random_production)
     inside_tolerance = random_production[:inside_tolerance]
     open_orders_zero = random_production[:open_orders_zero]
+    market_safe = random_production[:current_direct_market_safe]
     blockers = operator_blockers(random_production)
     venue_name = HedgeVenues.label(HedgeVenues.normalize(random_production[:current_production_venue].presence || position&.hedge&.execution_venue))
     active_count = operator_active_venue_count(random_production)
@@ -86,7 +87,7 @@ module OperatorDashboardHelper
         }
       end
     else
-      operator_stopped_state(random_production, venue_name, blockers, inside_tolerance, active_count)
+      operator_stopped_state(random_production, venue_name, blockers, inside_tolerance, active_count, market_safe)
     end
   end
 
@@ -139,7 +140,7 @@ module OperatorDashboardHelper
   # the brief asks for a safe estimate when exact telemetry is missing.
   def operator_hold_progress(random_production)
     random_production ||= {}
-    event = random_production[:latest_event] || {}
+    event = operator_current_event(random_production)
     current = [
       event["hold_rebalance_checks_count"],
       event["hold_rebalance_checks"]&.size,
@@ -152,8 +153,8 @@ module OperatorDashboardHelper
 
   def operator_route_progress(random_production)
     random_production ||= {}
-    event = random_production[:latest_event] || {}
-    route = random_production[:last_route].presence || event["route"].presence
+    event = operator_current_event(random_production)
+    route = operator_event_stale?(random_production) ? nil : (random_production[:last_route].presence || event["route"].presence)
     finalized = event["production_venue_finalized"] == true || event["status"].to_s == "success"
     from, to = route.to_s.split("->", 2)
     {
@@ -173,7 +174,110 @@ module OperatorDashboardHelper
     "in about #{distance_of_time_in_words(Time.current, at)} (#{l(at, format: :short)})"
   end
 
+  # Freshness of the authoritative status payload. Drives the "last refreshed /
+  # data source / age / health" line and the stale-data yellow warning.
+  def operator_status_freshness(random_production)
+    random_production ||= {}
+    at = operator_parse_time(random_production[:status_updated_at])
+    age = at ? (Time.current - at).to_i : nil
+    stale = age.nil? || age > MigrationRandomProductionRunner::HEARTBEAT_STALE_AFTER_SECONDS
+    {
+      source: "runner status file (read-only)",
+      updated_at: at,
+      updated_at_text: at ? "#{l(at, format: :short)}" : "not written yet",
+      age_seconds: age,
+      age_text: age ? "#{operator_duration_words(age)} ago" : "unknown age",
+      stale: stale,
+      tone: stale ? :amber : :green
+    }
+  end
+
+  # The historical (previous-cycle) blocker, shown only as a collapsed, clearly
+  # stale diagnostic. Returns nil when there is nothing historical to show.
+  def operator_historical_blocker(random_production)
+    random_production ||= {}
+    blocker = random_production[:historical_blocker].presence || random_production[:latest_blocker].presence
+    return nil if blocker.blank?
+    # Don't repeat a blocker that is also a current authoritative blocker.
+    return nil if operator_blockers(random_production).include?(blocker.to_s)
+
+    {
+      text: blocker.to_s,
+      stale: random_production[:latest_event_stale] != false,
+      cycle: (random_production[:latest_event] || {})["cycle"],
+      label: "Previous stopped run / last recorded event"
+    }
+  end
+
+  # Authoritative current active short for the production venue (direct readback).
+  # Never falls back to the stale heartbeat combined/target short.
+  def operator_active_short_eth(random_production, venue = nil)
+    random_production ||= {}
+    venue ||= HedgeVenues.normalize(random_production[:current_production_venue].presence)
+    shorts = random_production[:direct_venue_shorts] || {}
+    value = shorts[venue] || shorts[venue.to_s] || shorts[venue.to_sym]
+    operator_decimal_known?(value) ? value : nil
+  end
+
+  # True when the latest JSONL event is a previous-run/previous-cycle snapshot
+  # and must not be presented as the current route/cycle.
+  def operator_event_stale?(random_production)
+    rp = random_production || {}
+    return rp[:latest_event_stale] if rp.key?(:latest_event_stale)
+
+    rp[:latest_event].blank?
+  end
+
+  # Single coherent view-model consumed by the JSON refresh endpoint and by the
+  # control-center partial. Pure: built entirely from the passed-in report.
+  def operator_view_model(random_production, position)
+    rp = random_production || {}
+    state = operator_state(rp, position)
+    freshness = operator_status_freshness(rp)
+    venue = HedgeVenues.normalize(rp[:current_production_venue].presence || position&.hedge&.execution_venue)
+    {
+      status: operator_runner_status(rp),
+      running: operator_runner_status(rp) == "running",
+      market_safe: rp[:current_direct_market_safe],
+      production_venue: venue,
+      production_venue_name: HedgeVenues.label(venue),
+      active_venue_count: operator_active_venue_count(rp),
+      active_short_eth: operator_active_short_eth(rp, venue),
+      target_short_eth: rp[:target_short_eth],
+      combined_short_eth: rp[:combined_short_eth],
+      drift_eth: rp[:drift_eth],
+      tolerance_eth: rp[:tolerance_eth],
+      inside_tolerance: rp[:inside_tolerance],
+      open_orders_zero: rp[:open_orders_zero],
+      current_blockers: operator_blockers(rp),
+      historical_blocker: operator_historical_blocker(rp),
+      latest_event_stale: operator_event_stale?(rp),
+      banner_tone: state[:tone],
+      banner_title: state[:title],
+      banner_detail: state[:detail],
+      action_title: state[:action_title],
+      action_body: state[:action_body],
+      allow_start: state[:allow_start],
+      freshness: freshness
+    }
+  end
+
   private
+
+  # The latest event only when it represents the CURRENT run; otherwise an empty
+  # hash so callers render "waiting for first cycle event" instead of stale data.
+  def operator_current_event(random_production)
+    return {} if operator_event_stale?(random_production)
+
+    (random_production || {})[:latest_event] || {}
+  end
+
+  def operator_duration_words(seconds)
+    return "#{seconds}s" if seconds < 60
+    return "#{seconds / 60}m #{seconds % 60}s" if seconds < 3600
+
+    "#{seconds / 3600}h #{(seconds % 3600) / 60}m"
+  end
 
   def operator_runner_status(random_production)
     return "stale lock" if random_production[:lock_stale]
@@ -181,9 +285,16 @@ module OperatorDashboardHelper
     random_production[:status].to_s.presence || "unknown"
   end
 
+  # Authoritative current blockers only. The runner writes these into the live
+  # status payload every cycle. We deliberately do NOT fall back to the JSONL
+  # latest_event blocker here: a historical/stale blocker must never drive the
+  # current recommended action. See {operator_historical_blocker} for that.
   def operator_blockers(random_production)
-    Array(random_production[:direct_preflight_blockers]).presence ||
-      Array(random_production[:latest_blocker]).compact
+    blockers = Array(random_production[:current_blockers])
+    return blockers if blockers.present?
+
+    # Back-compat for callers/tests that only set :direct_preflight_blockers.
+    Array(random_production[:direct_preflight_blockers]).map { |b| b.to_s.strip }.reject(&:blank?)
   end
 
   def operator_blocked(key, title, detail, action_body)
@@ -194,31 +305,36 @@ module OperatorDashboardHelper
     }
   end
 
-  def operator_stopped_state(random_production, venue_name, blockers, inside_tolerance, active_count)
+  def operator_stopped_state(random_production, venue_name, blockers, inside_tolerance, active_count, market_safe)
     if blockers.present?
       return {
         tone: :red, key: "stopped", allow_start: false,
         title: "Action required — review blockers",
-        detail: "The runner is stopped and at least one blocker is present.",
+        detail: "The runner is stopped and at least one current blocker is present.",
         action_title: "Resolve blockers before starting",
         action_body: "Do not start 24/7 production yet: #{blockers.first}"
       }
     end
 
-    target = operator_decimal(random_production[:target_short_eth])
-    if active_count.zero? && operator_decimal_known?(random_production[:target_short_eth]) && target > ACTIVE_SHORT_THRESHOLD_ETH
-      return {
-        tone: :red, key: "hedge_missing", allow_start: false,
-        title: "Action required — hedge missing",
-        detail: "No venue is holding the hedge, but the position needs a #{format_venue_eth_amount(random_production[:target_short_eth])} ETH short.",
-        action_title: "Restore the hedge",
-        action_body: "Open the hedge on the production venue (supervised) before starting 24/7 production."
-      }
+    # When the authoritative direct readback says the market is safe, the
+    # stopped runner is always safe-to-start — never red. We only fall through
+    # to the hedge-missing / confirm paths when safety is NOT confirmed.
+    unless market_safe == true
+      target = operator_decimal(random_production[:target_short_eth])
+      if active_count.zero? && operator_decimal_known?(random_production[:target_short_eth]) && target > ACTIVE_SHORT_THRESHOLD_ETH
+        return {
+          tone: :red, key: "hedge_missing", allow_start: false,
+          title: "Action required — hedge missing",
+          detail: "No venue is holding the hedge, but the position needs a #{format_venue_eth_amount(random_production[:target_short_eth])} ETH short.",
+          action_title: "Restore the hedge",
+          action_body: "Open the hedge on the production venue (supervised) before starting 24/7 production."
+        }
+      end
     end
 
-    if active_count <= 1 && inside_tolerance != false
+    if market_safe == true || (active_count <= 1 && inside_tolerance != false)
       {
-        tone: :amber, key: "stopped_safe", allow_start: true,
+        tone: :blue, key: "stopped_safe", allow_start: true,
         title: "Stopped but hedge is safe",
         detail: "24/7 random rotation is stopped. Market is currently safe on #{venue_name}.",
         action_title: "Safe to start when ready",

@@ -1,0 +1,146 @@
+<%# Authoritative, self-contained Production Control Center. %>
+<%# Driven entirely by the read-only view-model so it renders identically on the %>
+<%# full page and from the near-real-time refresh endpoint. %>
+<% vm = operator_view_model(random_production, position) %>
+<% freshness = vm[:freshness] %>
+<% state = { tone: vm[:banner_tone], title: vm[:banner_title], detail: vm[:banner_detail], action_title: vm[:action_title], action_body: vm[:action_body] } %>
+<% venue_states = local_assigns.fetch(:venue_states, {}) || {} %>
+<% operator_cards = operator_venue_cards(random_production, venue_states) %>
+<% operator_hold = operator_hold_progress(random_production) %>
+<% operator_route = operator_route_progress(random_production) %>
+<% historical = vm[:historical_blocker] %>
+<% snapshot_diag = Array((random_production[:dashboard_snapshot_diagnostic] || {})[:blockers] || (random_production[:dashboard_snapshot_diagnostic] || {})["blockers"]) %>
+<% eth = ->(value, missing) { value.present? ? "#{format_venue_eth_amount(value)} ETH" : missing } %>
+<% running = vm[:running] %>
+
+<section id="production-control-center" class="rounded-2xl border <%= running ? 'border-green-900 bg-green-950/20' : 'border-gray-800 bg-gray-900/80' %> p-5 shadow-2xl shadow-black/20">
+  <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+    <div class="min-w-0">
+      <p class="text-xs uppercase tracking-wide text-gray-500">Production Control Center</p>
+      <h1 class="mt-1 text-2xl font-semibold text-white">24/7 Random Rotation: <%= vm[:status].to_s.upcase.tr("_", " ") %></h1>
+      <div class="mt-3 rounded-xl border p-3 <%= operator_tone_classes(state[:tone]) %>">
+        <p class="text-base font-semibold"><%= state[:title] %></p>
+        <p class="mt-1 max-w-5xl text-sm opacity-90"><%= state[:detail] %></p>
+      </div>
+    </div>
+    <span class="shrink-0 rounded-full border px-3 py-1 text-xs font-semibold <%= operator_tone_classes(state[:tone]) %>"><%= vm[:status] %></span>
+  </div>
+
+  <%# Freshness / data-source line — the answer to "when was this refreshed?". %>
+  <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs <%= freshness[:stale] ? 'text-yellow-200' : 'text-gray-400' %>">
+    <span>Source: <%= freshness[:source] %></span>
+    <span>Status written: <%= freshness[:updated_at_text] %> (<%= freshness[:age_text] %>)</span>
+    <span class="font-semibold"><%= freshness[:stale] ? "STALE — runner status file is older than expected" : "FRESH" %></span>
+    <span class="<%= vm[:market_safe] == true ? 'text-green-300' : (vm[:market_safe] == false ? 'text-red-300' : 'text-yellow-200') %>">Direct market safe: <%= vm[:market_safe].nil? ? "unknown" : (vm[:market_safe] ? "yes" : "no") %></span>
+  </div>
+
+  <% if freshness[:stale] %>
+    <div class="mt-3 rounded-xl border border-yellow-900 bg-yellow-950/20 p-3 text-sm text-yellow-100">
+      Authoritative status file has not updated recently (<%= freshness[:age_text] %>). Values below may lag the live runner — confirm via <code>bin/rails migration:random_production_status position_id=<%= position&.id %></code> before acting.
+    </div>
+  <% end %>
+
+  <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Production runner venue</p><p class="mt-1 text-lg font-semibold text-white"><%= vm[:production_venue_name] %></p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active venue short</p><p class="mt-1 text-lg font-semibold text-white"><%= eth.call(vm[:active_short_eth], "not read back yet") %></p><p class="mt-1 text-[11px] text-gray-500">direct readback</p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= eth.call(vm[:target_short_eth], "not loaded yet") %></p><p class="mt-1 text-[11px] text-gray-500">from last heartbeat</p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Drift / tolerance</p><p class="mt-1 text-lg font-semibold text-white"><%= vm[:drift_eth].present? ? format_venue_eth_amount(vm[:drift_eth]) : "—" %> / <%= vm[:tolerance_eth].present? ? "#{format_venue_eth_amount(vm[:tolerance_eth])} ETH" : "—" %></p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Inside tolerance</p><p class="<%= vm[:inside_tolerance] == true ? 'text-green-300' : (vm[:inside_tolerance] == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= vm[:inside_tolerance].nil? ? "unknown — not read back yet" : (vm[:inside_tolerance] ? "yes" : "no") %></p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Open orders</p><p class="<%= vm[:open_orders_zero] == true ? 'text-green-300' : (vm[:open_orders_zero] == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= vm[:open_orders_zero].nil? ? "unknown — not read back yet" : (vm[:open_orders_zero] ? "zero" : "nonzero") %></p></div>
+  </div>
+
+  <div class="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div class="rounded-xl border p-4 <%= operator_tone_classes(state[:tone]) %> lg:col-span-2">
+      <p class="text-xs font-semibold uppercase tracking-wide opacity-80">Recommended action</p>
+      <p class="mt-1 text-lg font-semibold"><%= state[:action_title] %></p>
+      <p class="mt-1 text-sm opacity-90"><%= state[:action_body] %></p>
+    </div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+      <p class="text-xs font-semibold uppercase tracking-wide text-gray-500">What happens next</p>
+      <% if vm[:latest_event_stale] && running %>
+        <p class="mt-1 text-sm text-blue-200">Runner started — waiting for the first cycle event. Route/cycle below will populate after the next hold check.</p>
+      <% else %>
+        <p class="mt-1 text-sm text-gray-200">24/7 random rotation performs about one migration every 8 hours and checks hedge drift every 5 minutes.</p>
+      <% end %>
+      <div class="mt-3">
+        <div class="flex items-center justify-between text-xs text-gray-400"><span>Hold checks</span><span><%= operator_hold[:label] %></span></div>
+        <div class="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-800"><div class="h-full rounded-full bg-blue-500" style="width: <%= operator_hold[:percent] %>%"></div></div>
+      </div>
+      <p class="mt-3 text-xs text-gray-400">Next migration <%= operator_next_migration_eta_text(random_production) %></p>
+    </div>
+  </div>
+
+  <div class="mt-4">
+    <p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Venues</p>
+    <div class="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
+      <% operator_cards.each do |card| %>
+        <div class="rounded-xl border p-4 <%= operator_tone_classes(card[:tone]) %>">
+          <div class="flex items-center justify-between">
+            <p class="text-base font-semibold"><%= card[:name] %></p>
+            <% if card[:production] %><span class="rounded-full border border-green-700 bg-green-950/60 px-2 py-0.5 text-[11px] font-semibold text-green-200">Production</span><% end %>
+          </div>
+          <p class="mt-1 text-sm font-medium"><%= card[:status_label] %></p>
+          <dl class="mt-3 space-y-1 text-xs opacity-90">
+            <div class="flex justify-between"><dt class="opacity-70">Short</dt><dd><%= card[:short_text] %></dd></div>
+            <div class="flex justify-between"><dt class="opacity-70">Open orders</dt><dd><%= card[:open_orders_text] %></dd></div>
+            <div class="flex justify-between"><dt class="opacity-70">Readback</dt><dd><%= card[:readback_text] %></dd></div>
+          </dl>
+          <% if card[:carried_forward] %>
+            <div class="mt-3 rounded-lg border border-yellow-900 bg-yellow-950/30 p-2 text-[11px] text-yellow-100">
+              Previous stale value: <%= card[:carried_forward_text] || "unknown" %>. Diagnostic only — not counted as live exposure.
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+    <div class="flex items-center justify-between">
+      <p class="text-xs font-semibold uppercase tracking-wide text-gray-500">Route / cycle progress</p>
+      <p class="text-sm text-gray-200"><%= operator_route[:from_name] && operator_route[:to_name] ? "#{operator_route[:from_name]} → #{operator_route[:to_name]}" : "No current route yet — waiting for first cycle event" %></p>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2 text-xs">
+      <% [
+        [ "Source closed", operator_route[:source_closed] ],
+        [ "Target opened", operator_route[:target_opened] ],
+        [ "Production venue finalized", operator_route[:production_venue_finalized] ]
+      ].each do |label, done| %>
+        <span class="rounded-full border px-3 py-1 font-medium <%= done ? 'border-green-800 bg-green-950/50 text-green-200' : 'border-gray-700 bg-gray-950 text-gray-400' %>"><%= done ? "✓" : "•" %> <%= label %></span>
+      <% end %>
+      <span class="rounded-full border border-gray-700 bg-gray-950 px-3 py-1 font-medium text-gray-300">Hold checks <%= operator_hold[:label] %></span>
+    </div>
+  </div>
+
+  <%# Historical / stale blocker — diagnostics only, never the current action. %>
+  <% if historical.present? %>
+    <details class="mt-4 rounded-xl border border-yellow-900 bg-yellow-950/20 p-3">
+      <summary class="cursor-pointer text-sm font-semibold text-yellow-100">Historical last event (stale diagnostic)</summary>
+      <div class="mt-2 text-xs text-yellow-100">
+        <p><span class="font-semibold">Stale blocker:</span> <%= historical[:text] %></p>
+        <p class="mt-1 opacity-80"><%= historical[:label] %><%= historical[:cycle].present? ? " · cycle #{historical[:cycle]}" : "" %>. This is a previous-cycle snapshot and is NOT a current blocker — authoritative current blockers are <%= vm[:current_blockers].present? ? vm[:current_blockers].join("; ") : "none" %>.</p>
+      </div>
+    </details>
+  <% end %>
+
+  <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/40 p-3">
+    <summary class="cursor-pointer text-sm font-semibold text-gray-300">Runner internals (diagnostics)</summary>
+    <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div><p class="text-xs text-gray-500">Mode</p><p class="text-white"><%= random_production[:mode].presence || "24/7 production" %></p></div>
+      <div><p class="text-xs text-gray-500">Policy</p><p class="text-white"><%= random_production[:policy_label].presence || "—" %></p></div>
+      <div><p class="text-xs text-gray-500">Current blockers (authoritative)</p><p class="<%= vm[:current_blockers].present? ? 'text-red-300' : 'text-green-300' %>"><%= vm[:current_blockers].present? ? vm[:current_blockers].join("; ") : "none" %></p></div>
+      <div><p class="text-xs text-gray-500">Heartbeat written</p><p class="text-white"><%= random_production[:heartbeat_updated_at].presence || "not loaded yet" %></p></div>
+      <div><p class="text-xs text-gray-500">Last route (heartbeat)</p><p class="text-white"><%= random_production[:last_route].presence || "not recorded yet" %></p></div>
+      <div><p class="text-xs text-gray-500">Last cycle (heartbeat)</p><p class="text-white"><%= random_production[:last_cycle].presence || "not recorded yet" %></p></div>
+      <div><p class="text-xs text-gray-500">Lock pid</p><p class="text-white"><%= random_production[:lock_pid].presence || "none" %></p></div>
+      <div><p class="text-xs text-gray-500">Combined short (heartbeat)</p><p class="text-white"><%= eth.call(vm[:combined_short_eth], "—") %></p></div>
+    </div>
+  </details>
+
+  <% if snapshot_diag.present? %>
+    <div class="mt-4 rounded-xl border border-yellow-900 bg-yellow-950/20 p-3">
+      <p class="text-sm font-semibold text-yellow-100">Optional diagnostics partial; execution safety still follows authoritative production status</p>
+      <p class="mt-1 break-words text-xs text-yellow-100"><%= snapshot_diag.first %></p>
+    </div>
+  <% end %>
+</section>

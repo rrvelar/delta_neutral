@@ -48,7 +48,7 @@ class OperatorDashboardHelperTest < ActionView::TestCase
     status = running_safe_status.merge(status: "unavailable", target_short_eth: "2.12")
     state = operator_state(status, nado_position)
 
-    assert_equal :amber, state[:tone]
+    assert_equal :blue, state[:tone]
     assert_equal "Stopped but hedge is safe", state[:title]
     assert_equal true, state[:allow_start]
     assert_match "You may start 24/7 production", state[:action_body]
@@ -143,5 +143,104 @@ class OperatorDashboardHelperTest < ActionView::TestCase
     assert_equal "Nado", route[:to_name]
     assert route[:source_closed]
     assert route[:production_venue_finalized]
+  end
+
+  # The exact production bug: authoritative status is safe with no current
+  # blockers, but a stale heartbeat / previous-run event carries an old blocker
+  # and an old combined short. The dashboard must trust the authoritative status.
+  def ethereal_position
+    Position.new(Hedge.new("ethereal"))
+  end
+
+  def stale_blocker_bug_status(status: "running")
+    {
+      status: status,
+      current_direct_market_safe: true,
+      current_blockers: [],
+      historical_blocker: "active venue one-shot rebalance status is blocked_before_submit",
+      latest_event_stale: true,
+      current_production_venue: "ethereal",
+      inside_tolerance: true,
+      open_orders_zero: true,
+      direct_venue_shorts: { "extended" => "0", "ethereal" => "2.4027", "nado" => "0" },
+      direct_open_orders: HedgeVenues::SUPPORTED_KEYS.to_h { |v| [ v, { "status" => "zero", "count" => 0 } ] },
+      target_short_eth: "2.554154",
+      combined_short_eth: "2.5627",
+      last_cycle: 18,
+      latest_event: { "route" => "nado->ethereal", "cycle" => 18, "blockers" => [ "active venue one-shot rebalance status is blocked_before_submit" ] }
+    }
+  end
+
+  test "stale historical blocker is ignored when authoritative current blockers are empty" do
+    state = operator_state(stale_blocker_bug_status(status: "running"), ethereal_position)
+
+    refute_equal :red, state[:tone]
+    refute_match(/Resolve blockers/, state[:action_title].to_s)
+    assert_empty operator_blockers(stale_blocker_bug_status)
+  end
+
+  test "stopped but safe is blue and start-enabled despite a stale historical blocker" do
+    state = operator_state(stale_blocker_bug_status(status: "stopped"), ethereal_position)
+
+    assert_equal :blue, state[:tone]
+    assert_equal true, state[:allow_start]
+    refute_match(/Resolve blockers/, state[:action_title].to_s)
+  end
+
+  test "current unsafe blockers are shown red and block start" do
+    status = running_safe_status.merge(
+      status: "blocked",
+      current_direct_market_safe: false,
+      current_blockers: [ "direct preflight open orders are nonzero or unknown" ]
+    )
+    state = operator_state(status, nado_position)
+
+    assert_equal :red, state[:tone]
+    assert_equal false, state[:allow_start]
+    assert_match "open orders", state[:action_body]
+  end
+
+  test "active short uses the direct current venue short not the stale heartbeat combined" do
+    vm = operator_view_model(stale_blocker_bug_status, ethereal_position)
+
+    assert_equal "2.4027", vm[:active_short_eth].to_s
+    refute_equal "2.5627", vm[:active_short_eth].to_s
+    assert_equal "2.5627", vm[:combined_short_eth].to_s
+  end
+
+  test "historical blocker is surfaced separately as a stale diagnostic" do
+    historical = operator_historical_blocker(stale_blocker_bug_status)
+
+    assert_equal "active venue one-shot rebalance status is blocked_before_submit", historical[:text]
+    assert historical[:stale]
+    assert_equal 18, historical[:cycle]
+  end
+
+  test "stale latest_event is not shown as the current route" do
+    route = operator_route_progress(stale_blocker_bug_status)
+
+    assert_nil route[:route]
+    assert_nil route[:from_name]
+  end
+
+  test "view-model is internally coherent for the safe-running case" do
+    vm = operator_view_model(stale_blocker_bug_status, ethereal_position)
+
+    assert_equal true, vm[:market_safe]
+    assert_empty vm[:current_blockers]
+    refute_equal :red, vm[:banner_tone]
+    assert_equal "2.4027", vm[:active_short_eth].to_s
+  end
+
+  test "status freshness flags a stale status file by age" do
+    fresh = operator_status_freshness(status_updated_at: Time.current.iso8601)
+    stale = operator_status_freshness(status_updated_at: 1.hour.ago.iso8601)
+    missing = operator_status_freshness({})
+
+    refute fresh[:stale]
+    assert_equal :green, fresh[:tone]
+    assert stale[:stale]
+    assert_equal :amber, stale[:tone]
+    assert missing[:stale]
   end
 end
