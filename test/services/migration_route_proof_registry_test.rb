@@ -432,9 +432,10 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     position = position_with_snapshot("ethereal")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
+    ready_timestamp = 3.days.ago.utc.iso8601
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T20:00:00Z",
+      timestamp: ready_timestamp,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -453,7 +454,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     )
     ignored_path = HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T21:01:04Z",
+      timestamp: (3.days.ago + 1.hour).utc.iso8601,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -470,7 +471,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_empty route.fetch(:blockers)
     assert_equal ignored_path.to_s, route.fetch(:ignored_failed_receipt)
     assert_equal "no_submit_no_final_readback", route.fetch(:ignored_failed_reason)
-    assert_equal "2026-06-06T20:00:00Z", route.fetch(:proof_timestamp)
+    assert_equal ready_timestamp, route.fetch(:proof_timestamp)
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -638,7 +639,154 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_nil repaired.fetch(:route_policy_blocker)
   end
 
+  # --- Production random cycle proof ingestion ---
+
+  test "successful production cycle marks each rotation route ready from cycle evidence" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    [ [ "extended", "ethereal" ], [ "ethereal", "nado" ], [ "nado", "extended" ] ].each do |from, to|
+      write_production_cycle(dir: dir, position: position, from: from, to: to, timestamp: 2.hours.ago.utc.iso8601)
+    end
+
+    [ [ "extended", "ethereal" ], [ "ethereal", "nado" ], [ "nado", "extended" ] ].each do |from, to|
+      route = registry.route_status(position: position, from: from, to: to)
+      assert_equal "READY_FOR_RANDOM", route.fetch(:status), "#{from}->#{to} should be ready"
+      assert_equal "production_random_cycle", route.fetch(:proof_source)
+      assert_equal to, route.fetch(:final_venue)
+      assert_empty route.fetch(:blockers)
+      assert route.fetch(:proof_timestamp).present?
+    end
+  end
+
+  test "newer production cycle overrides an older stale legacy canary receipt" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary", timestamp: 45.days.ago.utc.iso8601, position_id: position.id,
+      from_venue: "extended", to_venue: "ethereal", final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true, source_leg_readback_confirmed: true, final_inside_tolerance: true,
+      source_flat_after: true, target_holds_expected_short: true, open_orders_after: 0, production_venue_finalized: true,
+      orders_submitted: 2, orders_placed: 2, signatures_created: 2, cancels_submitted: 0
+    )
+    stale = registry.route_status(position: position, from: "extended", to: "ethereal")
+    assert_equal "STALE", stale.fetch(:status)
+
+    write_production_cycle(dir: dir, position: position, from: "extended", to: "ethereal", timestamp: 1.hour.ago.utc.iso8601)
+    refreshed = registry_for(dir).route_status(position: position, from: "extended", to: "ethereal")
+
+    assert_equal "READY_FOR_RANDOM", refreshed.fetch(:status)
+    assert_equal "production_random_cycle", refreshed.fetch(:proof_source)
+  end
+
+  test "blocked production cycle does not refresh proof" do
+    assert_production_cycle_not_ready(status: "blocked", blockers: [ "route result is partial" ])
+  end
+
+  test "production cycle with blockers does not refresh proof" do
+    assert_production_cycle_not_ready(blockers: [ "target venue does not hold expected short" ])
+  end
+
+  test "production cycle with final_inside_tolerance false does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { final_inside_tolerance: false })
+  end
+
+  test "production cycle with nonzero open orders does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { open_orders_after: 2 })
+  end
+
+  test "production cycle with unknown open orders does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { open_orders_clear_after: nil, open_orders_after: nil })
+  end
+
+  test "production cycle with source not flat does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { source_flat_after: false, source_flat_confirmed: false })
+  end
+
+  test "production cycle with manual intervention does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { manual_action_required: true })
+  end
+
+  test "production cycle with target venue not finalized does not refresh proof" do
+    assert_production_cycle_not_ready(execution: { production_venue_finalized: false })
+  end
+
+  test "production cycle finalized to the wrong venue does not refresh proof" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_production_cycle(dir: dir, position: position, from: "extended", to: "ethereal", timestamp: 1.hour.ago.utc.iso8601)
+    # Corrupt the post_cycle_hedge production_venue via a second, wrong-venue cycle would
+    # differ; here we assert the happy path already matched, then a mismatch is rejected.
+    path = dir.join("production", "wrongvenue_position_#{position.id}.jsonl")
+    File.write(path, JSON.generate(
+      "event" => "cycle", "cycle" => 9, "started_at" => 30.minutes.ago.utc.iso8601,
+      "from_venue" => "extended", "to_venue" => "nado", "route" => "extended->nado", "status" => "success", "blockers" => [],
+      "execution" => { "status" => "MIGRATION_FINALIZED", "source_flat_after" => true, "target_holds_expected_short" => true,
+        "third_venue_flat" => true, "open_orders_clear_after" => true, "open_orders_after" => 0, "final_inside_tolerance" => true,
+        "production_venue_finalized" => true, "manual_action_required" => false },
+      "post_cycle_hedge" => { "production_venue" => "ethereal" }
+    ) + "\n")
+
+    route = registry.route_status(position: position, from: "extended", to: "nado")
+    refute_equal "READY_FOR_RANDOM", route.fetch(:status)
+  end
+
+  test "stale production cycle outside the freshness window does not refresh proof" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_production_cycle(dir: dir, position: position, from: "extended", to: "ethereal", timestamp: 45.days.ago.utc.iso8601)
+
+    route = registry.route_status(position: position, from: "extended", to: "ethereal")
+
+    assert_equal "STALE", route.fetch(:status)
+  end
+
+  # Regression for the real production scenario: legacy June canary receipts have
+  # gone stale, but the runner has newer successful production cycles for the
+  # rotation routes. Those routes must report READY_FOR_RANDOM from the cycle.
+  test "regression: stale legacy receipts do not block routes with fresh production cycle evidence" do
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    rotation = [ [ "extended", "ethereal" ], [ "ethereal", "nado" ], [ "nado", "extended" ] ]
+    rotation.each do |from, to|
+      HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+        action: "manual_live_canary", timestamp: 31.days.ago.utc.iso8601, position_id: position.id,
+        from_venue: from, to_venue: to, final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+        target_leg_readback_confirmed: true, source_leg_readback_confirmed: true, final_inside_tolerance: true,
+        source_flat_after: true, target_holds_expected_short: true, open_orders_after: 0, production_venue_finalized: true,
+        orders_submitted: 2, orders_placed: 2, signatures_created: 2, cancels_submitted: 0
+      )
+      write_production_cycle(dir: dir, position: position, from: from, to: to, timestamp: 3.hours.ago.utc.iso8601)
+    end
+
+    report = registry_for(dir).report(position: position)
+    ready_routes = report.fetch(:completed_route_proofs).map { |route| route[:route] }
+
+    rotation.each { |from, to| assert_includes ready_routes, "#{from}->#{to}" }
+    report.fetch(:completed_route_proofs).each do |route|
+      next unless rotation.include?([ route[:from_venue], route[:to_venue] ])
+
+      assert_equal "production_random_cycle", route[:proof_source]
+    end
+  end
+
   private
+
+  def assert_production_cycle_not_ready(status: "success", execution: {}, blockers: [])
+    position = position_with_snapshot("extended")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_production_cycle(dir: dir, position: position, from: "extended", to: "ethereal",
+      timestamp: 1.hour.ago.utc.iso8601, status: status, execution: execution, blockers: blockers)
+
+    route = registry.route_status(position: position, from: "extended", to: "ethereal")
+
+    refute_equal "READY_FOR_RANDOM", route.fetch(:status)
+    refute_equal "production_random_cycle", route.fetch(:proof_source)
+  end
 
   def registry_for(dir)
     MigrationRouteProofRegistry.new(
@@ -647,8 +795,45 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       recovery_dir: dir.join("recoveries"),
       continuation_dir: dir.join("continuations"),
       random_dir: dir.join("random"),
-      latency_proof_dir: dir.join("latency_proofs")
+      latency_proof_dir: dir.join("latency_proofs"),
+      production_dir: dir.join("production")
     )
+  end
+
+  # Writes a production runner "cycle" JSONL event (the real shape the runner
+  # emits, with readback evidence nested under "execution" and stamped with
+  # "started_at"). Overrides let negative tests corrupt a single field.
+  def write_production_cycle(dir:, position:, from:, to:, timestamp:, status: "success", execution: {}, blockers: [])
+    FileUtils.mkdir_p(dir.join("production"))
+    default_execution = {
+      "status" => "MIGRATION_FINALIZED",
+      "source_flat_after" => true,
+      "target_holds_expected_short" => true,
+      "third_venue_flat" => true,
+      "open_orders_clear_after" => true,
+      "open_orders_after" => 0,
+      "final_inside_tolerance" => true,
+      "production_venue_finalized" => true,
+      "manual_action_required" => false,
+      "orders_submitted" => 1,
+      "orders_placed" => 1,
+      "signatures_created" => 1
+    }
+    event = {
+      "event" => "cycle",
+      "cycle" => 7,
+      "started_at" => timestamp,
+      "from_venue" => from,
+      "to_venue" => to,
+      "route" => "#{from}->#{to}",
+      "status" => status,
+      "blockers" => blockers,
+      "execution" => default_execution.merge(execution.transform_keys(&:to_s)),
+      "post_cycle_hedge" => { "production_venue" => to }
+    }
+    path = dir.join("production", "#{timestamp.tr(':-', '').tr('TZ', '_')}_position_#{position.id}.jsonl")
+    File.open(path, "a") { |file| file.puts(JSON.generate(event)) }
+    path
   end
 
   def write_latency_proof(dir:, position:, from:, timestamp:, source_flat_to_execution_confirmed_seconds: "4", route_production_safe: true, latency_proof_status: "passed")

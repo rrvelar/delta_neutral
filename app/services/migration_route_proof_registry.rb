@@ -11,13 +11,14 @@ class MigrationRouteProofRegistry
     failed: "FAILED_NEEDS_REPAIR"
   }.freeze
 
-  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: MigrationTargetFirstSourceRecovery::RECEIPT_DIR, continuation_dir: MigrationTargetNadoContinuation::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), latency_proof_dir: Rails.root.join("storage/hedge_migration_route_latency_proofs"), now: -> { Time.current }, source_commit: nil, stale_after: 30.days, env: ENV, route_policy: nil)
+  def initialize(route_proof_dir: HedgeVenueMigrationRouteMatrix::PROOF_RECEIPT_DIR, canary_dir: MigrationManualLiveCanaryRunner::RECEIPT_DIR, recovery_dir: MigrationTargetFirstSourceRecovery::RECEIPT_DIR, continuation_dir: MigrationTargetNadoContinuation::RECEIPT_DIR, random_dir: Rails.root.join("storage/hedge_migration_random_rehearsals"), latency_proof_dir: Rails.root.join("storage/hedge_migration_route_latency_proofs"), production_dir: MigrationRandomProductionRunner::LOG_DIR, now: -> { Time.current }, source_commit: nil, stale_after: 30.days, env: ENV, route_policy: nil)
     @route_proof_dir = Pathname(route_proof_dir)
     @canary_dir = Pathname(canary_dir)
     @recovery_dirs = Array(recovery_dir).map { |dir| Pathname(dir) }
     @continuation_dir = Pathname(continuation_dir)
     @random_dir = Pathname(random_dir)
     @latency_proof_dir = Pathname(latency_proof_dir)
+    @production_dir = Pathname(production_dir)
     @now = now
     @source_commit = source_commit || current_commit
     @stale_after = stale_after
@@ -61,15 +62,20 @@ class MigrationRouteProofRegistry
     recovery = latest_event(position: position, from: from, to: to, dirs: recovery_dirs) do |event|
       recovery_proof?(event)
     end
+    # Successful production random-rotation cycles are the freshest, strongest
+    # real evidence a route is safe. They renew route-proof freshness so the
+    # runner is not stopped by an expired canary receipt after it has already
+    # migrated the same route successfully in production.
+    production = latest_production_cycle_proof(position: position, from: from, to: to)
     failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, latency_proof_dir, *recovery_dirs, random_dir ]) do |event|
       blocking_failed_proof?(event)
     end
     ignored_failed = latest_event(position: position, from: from, to: to, dirs: [ route_proof_dir, canary_dir, continuation_dir, latency_proof_dir, *recovery_dirs, random_dir ]) do |event|
       ignored_failed_proof?(event)
     end
-    latest = [ dry, live, continuation, latency, recovery, failed, ignored_failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
-    status = status_for(dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, ignored_failed: ignored_failed, latest: latest)
-    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, failed: failed, ignored_failed: ignored_failed, latest: latest)
+    latest = [ dry, live, continuation, latency, recovery, production, failed, ignored_failed ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+    status = status_for(dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, production: production, failed: failed, ignored_failed: ignored_failed, latest: latest)
+    proof_event = proof_event_for(status: status, dry: dry, live: live, continuation: continuation, latency: latency, recovery: recovery, production: production, failed: failed, ignored_failed: ignored_failed, latest: latest)
     route_policy_status = route_policy.route_status(from: from, to: to)
     if status == STATUSES[:ready] && !route_policy_status.fetch(:enabled)
       status = STATUSES[:not_safe_latency]
@@ -87,6 +93,7 @@ class MigrationRouteProofRegistry
       recovery_receipt: receipt_ref(recovery),
       finalization_receipt: receipt_ref(proof_event),
       proof_timestamp: proof_event&.fetch("timestamp", nil),
+      proof_source: proof_event&.fetch("receipt_source", nil),
       source_commit: proof_event&.fetch("source_commit", nil) || proof_event&.fetch("commit_sha", nil),
       final_venue: final_venue_for(event: proof_event, status: status, to: to),
       final_readback_summary: final_readback_summary(proof_event),
@@ -133,10 +140,14 @@ class MigrationRouteProofRegistry
 
   private
 
-  attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :latency_proof_dir, :now, :source_commit, :stale_after, :env, :route_policy
+  attr_reader :route_proof_dir, :canary_dir, :recovery_dirs, :continuation_dir, :random_dir, :latency_proof_dir, :production_dir, :now, :source_commit, :stale_after, :env, :route_policy
 
-  def status_for(dry:, live:, continuation:, latency:, recovery:, failed:, ignored_failed:, latest:)
+  def status_for(dry:, live:, continuation:, latency:, recovery:, production:, failed:, ignored_failed:, latest:)
     return STATUSES[:not_started] unless latest
+
+    if production && later_than?(production, recovery) && later_than?(production, live) && later_than?(production, latency) && later_than?(production, continuation) && later_than?(production, failed)
+      return stale?(production) ? STATUSES[:stale] : STATUSES[:ready]
+    end
 
     if continuation && !manual_intervention?(continuation) && production_safe_latency?(continuation) && later_than?(continuation, recovery) && later_than?(continuation, live) && later_than?(continuation, latency) && later_than?(continuation, failed)
       return stale?(continuation) ? STATUSES[:stale] : STATUSES[:ready]
@@ -171,10 +182,10 @@ class MigrationRouteProofRegistry
     STATUSES[:not_started]
   end
 
-  def proof_event_for(status:, dry:, live:, continuation:, latency:, recovery:, failed:, ignored_failed:, latest:)
+  def proof_event_for(status:, dry:, live:, continuation:, latency:, recovery:, production:, failed:, ignored_failed:, latest:)
     case status
     when STATUSES[:ready], STATUSES[:live]
-      [ continuation, latency, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
+      [ production, continuation, latency, live, recovery ].compact.max_by { |event| event_time(event) || Time.zone.at(0) }
     when STATUSES[:recovery]
       recovery
     when STATUSES[:dry_run]
@@ -205,6 +216,107 @@ class MigrationRouteProofRegistry
     rescue SystemCallError
       []
     end
+  end
+
+  # The freshest successful production random-rotation cycle for this route that
+  # satisfies every strict safety criterion. Read-only: never mutates anything.
+  def latest_production_cycle_proof(position:, from:, to:)
+    production_cycle_events(position)
+      .select { |event| event["from_venue"] == from && event["to_venue"] == to }
+      .select { |event| production_cycle_proof?(event) }
+      .max_by { |event| event_time(event) || Time.zone.at(0) }
+  end
+
+  def production_cycle_events(position)
+    @production_cycle_events ||= {}
+    @production_cycle_events[position.id.to_s] ||= read_production_cycle_events(position)
+  end
+
+  def read_production_cycle_events(position)
+    Dir.glob(production_dir.join("*_position_#{position.id}.jsonl"))
+      .reject { |path| File.basename(path).start_with?("latest_") }
+      .flat_map do |path|
+        File.readlines(path).filter_map do |line|
+          event = JSON.parse(line)
+          next unless event["event"] == "cycle"
+
+          normalize_production_cycle_event(event, path: path, position: position)
+        rescue JSON::ParserError
+          nil
+        end
+      end
+  rescue SystemCallError
+    []
+  end
+
+  # Flatten a production runner "cycle" JSONL event into the flat proof shape the
+  # registry predicates expect. The runner records the readback evidence inside a
+  # nested "execution" hash and stamps the event with "started_at" (not
+  # "timestamp"); individual cycle lines carry no position_id, so we take it from
+  # the per-position file name.
+  def normalize_production_cycle_event(event, path:, position:)
+    execution = event["execution"] || {}
+    post = event["post_cycle_hedge"] || {}
+    {
+      "receipt_source" => "production_random_cycle",
+      "action" => "production_random_cycle",
+      "position_id" => position.id.to_s,
+      "cycle" => event["cycle"],
+      "from_venue" => event["from_venue"],
+      "to_venue" => event["to_venue"],
+      "route" => event["route"],
+      "timestamp" => event["started_at"] || event["timestamp"],
+      "cycle_status" => event["status"],
+      "final_status" => execution["status"],
+      "blockers" => Array(event["blockers"]),
+      "source_flat_after" => execution["source_flat_after"],
+      "source_flat_confirmed" => execution["source_flat_confirmed"],
+      "target_holds_expected_short" => execution["target_holds_expected_short"],
+      "target_holds_hedge_confirmed" => execution["target_holds_hedge_confirmed"],
+      "third_venue_flat" => execution["third_venue_flat"],
+      "other_venues_flat" => execution["third_venue_flat"],
+      "open_orders_clear_after" => execution["open_orders_clear_after"],
+      "open_orders_after" => execution["open_orders_after"],
+      "final_inside_tolerance" => execution["final_inside_tolerance"],
+      "production_venue_finalized" => execution["production_venue_finalized"],
+      "manual_action_required" => execution["manual_action_required"],
+      "orders_submitted" => execution["orders_submitted"],
+      "orders_placed" => execution["orders_placed"],
+      "signatures_created" => execution["signatures_created"],
+      "final_venue" => post["production_venue"] || event["final_production_venue"],
+      "production_venue" => post["production_venue"],
+      "receipt_path" => path
+    }
+  end
+
+  # Strict, fail-closed evidence gate. A production cycle only renews route-proof
+  # freshness when it finalized cleanly to the target venue with the source flat,
+  # the target holding, the third venue flat, zero open orders, inside tolerance,
+  # no manual intervention and no blockers. Anything unknown/false is rejected.
+  def production_cycle_proof?(event)
+    return false unless event["receipt_source"] == "production_random_cycle"
+    return false unless canonical_cycle_success?(event["cycle_status"])
+    return false unless Array(event["blockers"]).empty?
+    return false if event["from_venue"].blank? || event["to_venue"].blank?
+    return false unless truthy?(event["source_flat_after"]) || truthy?(event["source_flat_confirmed"])
+    return false unless truthy?(event["target_holds_expected_short"]) || truthy?(event["target_holds_hedge_confirmed"])
+    return false unless truthy?(event["third_venue_flat"])
+    return false unless truthy?(event["open_orders_clear_after"])
+    return false unless event["open_orders_after"].to_i.zero?
+    return false unless truthy?(event["final_inside_tolerance"])
+    return false unless truthy?(event["production_venue_finalized"])
+    return false if truthy?(event["manual_action_required"])
+
+    production_cycle_final_venue_matches_target?(event)
+  end
+
+  def canonical_cycle_success?(status)
+    status.to_s.in?(%w[success MIGRATION_FINALIZED]) || clean_live_final_status?(status)
+  end
+
+  def production_cycle_final_venue_matches_target?(event)
+    final = (event["final_venue"] || event["production_venue"]).to_s
+    final.blank? || final == event["to_venue"].to_s
   end
 
   def continuation_events(position:, from:, to:)

@@ -128,6 +128,8 @@ class MigrationRandomProductionRunner
       status: effective_status,
       historical_stop_reason: historical_stop_reason(latest),
       current_direct_market_safe: current_market_safe,
+      restart_blocked_by_route_proofs: route_proof_restart_blockers(direct).any?,
+      route_proof_restart_blockers: route_proof_restart_blockers(direct),
       pid: lock_payload["pid"],
       lock: lock_payload.presence,
       lock_stale: stale_lock,
@@ -309,6 +311,8 @@ class MigrationRandomProductionRunner
       status: status,
       historical_stop_reason: historical_stop_reason(latest_event || latest_event_from_log),
       current_direct_market_safe: current_direct_market_safe?(direct, confirmed_active_short_venues(direct), unknown_short_venues(direct)),
+      restart_blocked_by_route_proofs: route_proof_restart_blockers(direct).any?,
+      route_proof_restart_blockers: route_proof_restart_blockers(direct),
       blockers: blockers,
       lock: lock_payload.presence,
       lock_stale: lock_stale?,
@@ -513,18 +517,44 @@ class MigrationRandomProductionRunner
     return "stale_heartbeat" if stale_heartbeat
     return "stopped" if latest&.fetch("status", nil) == "stopped"
     return "success" if latest&.fetch("status", nil) == "success"
-    return "blocked" if Array(direct[:blockers]).any?
+    # Route-proof staleness blocks *restart*, not the live market: it must not be
+    # rendered as a "blocked" (market-unsafe) status. Only real market-safety
+    # blockers mark the runner blocked; route-proof restart blockers are surfaced
+    # via restart_blocked_by_route_proofs instead.
+    return "blocked" if market_safety_blockers(direct).any?
 
     status_payload["status"].presence || "stopped"
   end
 
+  # Current market safety reflects the live direct readback only. Route-proof
+  # freshness is a *restart readiness* concern, not a live market-safety concern:
+  # a stopped runner with an inside-tolerance single-venue hedge and zero open
+  # orders is market-safe even if a route proof has expired. Those restart
+  # blockers are reported separately via {route_proof_restart_blockers}.
   def current_direct_market_safe?(direct, confirmed_active, unknown_venues)
     direct_open_orders_zero?(direct) &&
       unknown_venues.empty? &&
       confirmed_active.one? &&
       confirmed_active.first == production_venue(direct) &&
       direct[:inside_tolerance] == true &&
-      Array(direct[:blockers]).empty?
+      market_safety_blockers(direct).empty?
+  end
+
+  # Blockers that describe restart readiness (route proofs), not live market
+  # safety. Kept as an explicit list so the status can say "market safe, restart
+  # blocked by route proofs" instead of implying the live market is unsafe.
+  ROUTE_PROOF_RESTART_BLOCKER_PATTERN = /route proofs? must be READY_FOR_RANDOM|stale route proofs must be resolved|route proof.*must be resolved/i
+
+  def route_proof_restart_blocker?(blocker)
+    blocker.to_s.match?(ROUTE_PROOF_RESTART_BLOCKER_PATTERN)
+  end
+
+  def route_proof_restart_blockers(direct)
+    Array(direct[:blockers]).select { |blocker| route_proof_restart_blocker?(blocker) }
+  end
+
+  def market_safety_blockers(direct)
+    Array(direct[:blockers]).reject { |blocker| route_proof_restart_blocker?(blocker) }
   end
 
   def historical_stop_reason(latest)

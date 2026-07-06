@@ -471,6 +471,60 @@ class MigrationRandomProductionRunnerTest < ActiveSupport::TestCase
     FileUtils.rm_rf(dir) if dir
   end
 
+  test "market is safe and status is not blocked when only route proofs block restart" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "extended")
+    dir = tmp_dir
+    factory = ->(position:, stage:) {
+      detailed_preflight(
+        production_venue: "extended",
+        inside: true,
+        venues: {
+          "extended" => { short_eth: BigDecimal("1.672"), position_status: "ok" },
+          "ethereal" => { short_eth: BigDecimal("0"), position_status: "ok" },
+          "nado" => { short_eth: BigDecimal("0"), position_status: "ok" }
+        },
+        blockers: [ "all enabled route proofs must be READY_FOR_RANDOM", "stale route proofs must be resolved" ]
+      )
+    }
+    service = runner(position: position, log_dir: dir, preflight_factory: factory)
+
+    status = service.status
+
+    assert_equal true, status.fetch(:current_direct_market_safe)
+    assert_equal true, status.fetch(:restart_blocked_by_route_proofs)
+    assert_includes status.fetch(:route_proof_restart_blockers), "all enabled route proofs must be READY_FOR_RANDOM"
+    assert_includes status.fetch(:route_proof_restart_blockers), "stale route proofs must be resolved"
+    refute_equal "blocked", status.fetch(:status)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  test "market safety still fails when a real market blocker is present alongside route proofs" do
+    position = migration_position
+    position.hedge.update!(execution_venue: "extended")
+    dir = tmp_dir
+    factory = ->(position:, stage:) {
+      detailed_preflight(
+        production_venue: "extended",
+        inside: false,
+        venues: {
+          "extended" => { short_eth: BigDecimal("1.672"), position_status: "ok" }
+        },
+        blockers: [ "current hedge outside tolerance", "stale route proofs must be resolved" ]
+      )
+    }
+    service = runner(position: position, log_dir: dir, preflight_factory: factory)
+
+    status = service.status
+
+    assert_equal false, status.fetch(:current_direct_market_safe)
+    assert_equal "blocked", status.fetch(:status)
+    assert_includes status.fetch(:route_proof_restart_blockers), "stale route proofs must be resolved"
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   test "start blocks when fresh active venue differs from production venue" do
     position = migration_position
     position.hedge.update!(execution_venue: "extended")

@@ -65,7 +65,91 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
     FileUtils.rm_rf(recovery_dir) if recovery_dir
   end
 
+  test "current venue regains a live eligible route from fresh production cycle evidence" do
+    canary_dir = Rails.root.join("tmp/test-readiness-canaries-#{SecureRandom.hex(4)}")
+    production_dir = Rails.root.join("tmp/test-readiness-production-#{SecureRandom.hex(4)}")
+    empty_dir = Rails.root.join("tmp/test-readiness-empty-#{SecureRandom.hex(4)}")
+    position = migration_position("extended")
+    # Extended holds the production hedge (source of the rotation route).
+    position.position_dashboard_snapshot.update!(
+      extended_short_eth: "1.18", extended_status: "active", nado_short_eth: "0", nado_status: "flat"
+    )
+    # Legacy canary receipts have gone stale; only production cycle evidence is fresh.
+    write_stale_canary(canary_dir, position: position, from: "extended", to: "ethereal")
+    write_production_cycle_event(production_dir, position: position, from: "extended", to: "ethereal", timestamp: 2.hours.ago)
+    registry = MigrationRouteProofRegistry.new(
+      canary_dir: canary_dir, recovery_dir: empty_dir, route_proof_dir: empty_dir,
+      random_dir: empty_dir, continuation_dir: empty_dir, latency_proof_dir: empty_dir,
+      production_dir: production_dir
+    )
+    stub_matrix = { routes: [ {
+      from_venue: "extended", to_venue: "ethereal", preview_available: true,
+      route_status: "READY_FOR_DRY_RUN", open_orders_status: "clear", blockers: []
+    } ] }
+    planner = MigrationRandomPlanner.new(proof_registry: registry, route_matrix: stub_matrix)
+
+    report = MigrationRandomReadiness.new(position: position, proof_registry: registry, planner: planner, canary_dir: canary_dir).report
+
+    ethereal_route = report.fetch(:route_proof_statuses).find { |route| route[:route] == "extended->ethereal" }
+    assert_equal "READY_FOR_RANDOM", ethereal_route.fetch(:status)
+    assert_equal "production_random_cycle", ethereal_route.fetch(:proof_source)
+    assert_includes report.fetch(:completed_route_proofs).map { |route| route[:route] }, "extended->ethereal"
+    assert_includes report.fetch(:current_live_eligible_routes).map { |route| route[:route] }, "extended->ethereal"
+  ensure
+    [ canary_dir, production_dir, empty_dir ].each { |dir| FileUtils.rm_rf(dir) if dir }
+  end
+
   private
+
+  def write_stale_canary(dir, position:, from:, to:)
+    write_event(dir, {
+      action: "manual_live_canary",
+      position_id: position.id,
+      from_venue: from,
+      to_venue: to,
+      production_venue: to,
+      final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true,
+      source_leg_readback_confirmed: true,
+      final_inside_tolerance: true,
+      source_flat_after: true,
+      target_holds_expected_short: true,
+      open_orders_after: 0,
+      orders_submitted: 1,
+      orders_placed: 1,
+      signatures_created: 1,
+      timestamp: 45.days.ago.utc.iso8601
+    })
+  end
+
+  def write_production_cycle_event(dir, position:, from:, to:, timestamp:)
+    FileUtils.mkdir_p(dir)
+    event = {
+      event: "cycle",
+      cycle: 12,
+      started_at: timestamp.utc.iso8601,
+      from_venue: from,
+      to_venue: to,
+      route: "#{from}->#{to}",
+      status: "success",
+      blockers: [],
+      execution: {
+        status: "MIGRATION_FINALIZED",
+        source_flat_after: true,
+        target_holds_expected_short: true,
+        third_venue_flat: true,
+        open_orders_clear_after: true,
+        open_orders_after: 0,
+        final_inside_tolerance: true,
+        production_venue_finalized: true,
+        manual_action_required: false,
+        orders_submitted: 1,
+        signatures_created: 1
+      },
+      post_cycle_hedge: { production_venue: to }
+    }
+    File.open(Pathname(dir).join("20260706_120000_position_#{position.id}.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
+  end
 
   def migration_position(venue)
     position = Position.create!(
