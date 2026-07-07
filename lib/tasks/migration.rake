@@ -455,6 +455,27 @@ namespace :migration do
     puts JSON.pretty_generate(result.receipt)
   end
 
+  desc "Read-only: show which gates a supervised manual canary needs and their current state"
+  task manual_canary_gate_status: :environment do
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    puts JSON.pretty_generate(MigrationManualCanaryGates.new(from: from, to: to).status)
+  end
+
+  desc "Arm the DB-backed gates for ONE supervised manual canary (requires confirmation). Always disarm afterwards."
+  task arm_manual_canary_gates: :environment do
+    from = ENV["from"].presence || ENV["FROM"].presence
+    to = ENV["to"].presence || ENV["TO"].presence
+    confirmation = ENV["confirmation"].presence || ENV["CONFIRMATION"].presence
+    result = MigrationManualCanaryGates.new(from: from, to: to).arm!(confirmation: confirmation)
+    puts JSON.pretty_generate(result)
+  end
+
+  desc "Disarm ALL manual-canary DB gates back to false (fail-closed cleanup; run after every canary or failure)"
+  task disarm_manual_canary_gates: :environment do
+    puts JSON.pretty_generate(MigrationManualCanaryGates.disarm!)
+  end
+
   desc "Prove route latency safety for a migration route"
   task prove_route_latency: :environment do
     position = migration_position_from_env(action: "prove_route_latency")

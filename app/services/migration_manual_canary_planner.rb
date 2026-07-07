@@ -60,10 +60,10 @@ class MigrationManualCanaryPlanner
       open_orders_status: open_orders_status,
       route_support: route_support,
       live_path_implemented: live_path_implemented?,
-      supported_sequences: %w[target_first],
+      supported_sequences: supported_sequences,
       requested_sequence: sequence,
-      recommended_sequence: "target_first",
-      source_first_supported: false,
+      recommended_sequence: recommended_sequence,
+      source_first_supported: source_first_route?,
       source_first_allowed: source_first_allowed?(target),
       target_leg_preview: target_leg,
       source_close_preview: source_leg,
@@ -78,7 +78,7 @@ class MigrationManualCanaryPlanner
       migration_gate_blockers: migration_gate_blockers,
       full_migration_gate_blockers: full_migration_gate_blockers,
       required_confirmation_phrase: CONFIRMATION,
-      expected_temporary_risk: "target_first opens target before source close, temporarily overhedging until source readback confirms",
+      expected_temporary_risk: temporary_risk_description,
       expected_final_combined_short: decimal_string(expected_final_combined),
       expected_final_inside_tolerance: final_inside_tolerance?,
       ready_for_supervised_canary: blockers.empty?,
@@ -131,9 +131,32 @@ class MigrationManualCanaryPlanner
       known: route_known?,
       dry_run_ready: live_path_implemented? && source_short.positive? && fresh_target_report[:status] == "ok",
       live_path_implemented: live_path_implemented?,
-      target_first_supported: live_path_implemented?,
-      source_first_supported: false
+      target_first_supported: live_path_implemented? && !source_first_route?,
+      source_first_supported: live_path_implemented? && source_first_route?
     }
+  end
+
+  # The single source of truth for a route's intended sequence is the operational
+  # route policy (e.g. nado-target routes default to source_first). The manual
+  # canary must recommend the same sequence the production runner and route-proof
+  # registry use, so readiness, planner, policy and the canary command agree.
+  def route_policy
+    @route_policy ||= MigrationRouteOperationalPolicy.new(env: env)
+  end
+
+  def recommended_sequence
+    @recommended_sequence ||= begin
+      strategy = route_policy.route_strategy(from: from, to: to)
+      strategy.to_s.in?(%w[target_first source_first]) ? strategy : "target_first"
+    end
+  end
+
+  def source_first_route?
+    recommended_sequence == "source_first"
+  end
+
+  def supported_sequences
+    [ recommended_sequence ]
   end
 
   def migration_gate_blockers
@@ -313,8 +336,16 @@ class MigrationManualCanaryPlanner
   def warnings
     [
       "Canonical manual canary plan only; readiness submits no orders and creates no signatures.",
-      "Target-first sequence temporarily overhedges until source venue reduction confirms."
+      temporary_risk_description
     ]
+  end
+
+  def temporary_risk_description
+    if recommended_sequence == "source_first"
+      "Source-first sequence temporarily underhedges until the target open confirms (requires MIGRATION_SOURCE_FIRST_CANARY_ALLOWED)."
+    else
+      "Target-first sequence temporarily overhedges until source venue reduction confirms."
+    end
   end
 
   def fresh_target_report

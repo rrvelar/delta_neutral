@@ -37,7 +37,7 @@ class MigrationManualCanaryPlannerTest < ActiveSupport::TestCase
     assert_includes report.fetch(:blockers), "source venue must have a real short before canary."
   end
 
-  test "all directed target first routes are represented by canonical planner" do
+  test "all directed routes recommend the route-policy sequence in the canonical planner" do
     routes = [
       [ "extended", "ethereal" ],
       [ "ethereal", "extended" ],
@@ -51,12 +51,28 @@ class MigrationManualCanaryPlannerTest < ActiveSupport::TestCase
       position_for_route(from)
       report = planner(from: from, to: to).report
 
+      # The manual canary must recommend the same sequence the route policy /
+      # production runner use: nado-target routes are source_first, else target_first.
+      expected = to == "nado" ? "source_first" : "target_first"
       assert_equal "#{from}->#{to}", report.fetch(:route)
       assert_equal true, report.fetch(:live_path_implemented)
-      assert_equal "target_first", report.fetch(:recommended_sequence)
+      assert_equal expected, report.fetch(:recommended_sequence), "#{from}->#{to}"
+      assert_equal [ expected ], report.fetch(:supported_sequences), "#{from}->#{to}"
+      assert_equal(expected == "source_first", report.fetch(:source_first_supported), "#{from}->#{to}")
       assert_equal 0, report.fetch(:orders_submitted)
       assert_equal 0, report.fetch(:signatures_created)
     end
+  end
+
+  test "extended to nado recommends source_first agreeing with route policy and readiness" do
+    position_for_route("extended")
+    report = planner(from: "extended", to: "nado").report
+
+    assert_equal "source_first", report.fetch(:recommended_sequence)
+    assert_equal true, report.fetch(:source_first_supported)
+    assert_equal [ "source_first" ], report.fetch(:supported_sequences)
+    # The route policy is the single source of truth both surfaces read from.
+    assert_equal "source_first", MigrationRouteOperationalPolicy.new.route_strategy(from: "extended", to: "nado")
   end
 
   test "extended to nado can be ready when mocked Nado target preflight is clean" do

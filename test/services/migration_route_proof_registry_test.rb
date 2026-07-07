@@ -480,9 +480,11 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     position = position_with_snapshot("ethereal")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
+    earlier = 3.days.ago.utc.iso8601
+    later = (3.days.ago + 1.hour).utc.iso8601
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T20:00:00Z",
+      timestamp: earlier,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -501,7 +503,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     )
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T21:01:04Z",
+      timestamp: later,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -530,9 +532,11 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     position = position_with_snapshot("ethereal")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
+    earlier = 3.days.ago.utc.iso8601
+    later = (3.days.ago + 1.hour).utc.iso8601
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T20:00:00Z",
+      timestamp: earlier,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -549,7 +553,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     )
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-06T21:01:04Z",
+      timestamp: later,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -571,7 +575,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_empty route.fetch(:blockers)
-    assert_equal "2026-06-06T21:01:04Z", route.fetch(:proof_timestamp)
+    assert_equal later, route.fetch(:proof_timestamp)
   ensure
     FileUtils.rm_rf(dir) if dir
   end
