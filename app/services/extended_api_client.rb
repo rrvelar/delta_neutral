@@ -58,6 +58,22 @@ class ExtendedApiClient
     post("/user/order", payload)
   end
 
+  # Read-only order/fill lookups (GET, API-key auth, no writes). Used for
+  # authoritative fast fill confirmation. `order_by_id` returns a completed order
+  # (validated: filled orders are retrievable by id, unlike the open-orders-only
+  # /user/orders). history/trades are corroborating fallbacks.
+  def order_by_id(order_id)
+    get("/user/orders/#{URI.encode_www_form_component(order_id.to_s)}")
+  end
+
+  def order_history(market:)
+    get("/user/orders/history", market: market)
+  end
+
+  def trades(market:)
+    get("/user/trades", market: market)
+  end
+
   private
 
   def get(path, params = {})

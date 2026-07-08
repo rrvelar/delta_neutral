@@ -690,6 +690,111 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_equal 0, api_client.submit_calls
   end
 
+  # --- fast authoritative order-fill confirmation (default OFF) ---
+
+  test "live open confirms via fast order fill even when position readback lags" do
+    # after_positions flat (position endpoint lagging) -> slow poll could NOT confirm;
+    # the authoritative FILLED order fill is what confirms.
+    api_client = live_api_client(after_positions: [])
+    result = build_service(
+      env: live_env.merge("EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED" => "true"),
+      api_client: api_client, signer_client: CountingSigner.new(ok: true),
+      order_probe: fake_order_probe(probe_order(reduce_only: false, side: "SELL"))
+    ).run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "success", result.status
+    assert_equal "extended_order_by_id_fill", result.receipt.fetch(:readback_confirmation_source)
+    ofc = result.receipt.fetch(:open_fill_confirmation)
+    assert_equal true, ofc[:confirmed]
+    assert_equal "extended_order_by_id_fill", ofc[:source]
+    assert_equal false, ofc[:reduce_only]
+    assert ofc[:confirmed_at].present?
+    assert_nil result.receipt.fetch(:close_fill_confirmation)
+  end
+
+  test "live close confirms via fast reduce-only order fill even when position readback lags" do
+    # before short present; after_positions still shows the short (flat readback lags).
+    short = { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21", openPrice: "2100", markPrice: "2100", status: "OPEN", marginMode: "isolated", leverage: "1" }
+    api_client = live_api_client(before_positions: [ short ], after_positions: [ short ])
+    result = build_service(
+      env: live_env.merge("EXTENDED_CLOSE_FILL_CONFIRMATION_ENABLED" => "true"),
+      api_client: api_client, signer_client: CountingSigner.new(ok: true),
+      order_probe: fake_order_probe(probe_order(reduce_only: true, side: "BUY"))
+    ).run(position: fake_position, mode: "close_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "success", result.status
+    assert_equal "extended_order_by_id_fill", result.receipt.fetch(:readback_confirmation_source)
+    cfc = result.receipt.fetch(:close_fill_confirmation)
+    assert_equal true, cfc[:confirmed]
+    assert_equal true, cfc[:reduce_only]
+    assert cfc[:confirmed_at].present?
+    assert_nil result.receipt.fetch(:open_fill_confirmation)
+  end
+
+  test "partial open fill never fast-confirms and falls back to position readback" do
+    # Fill short of the open size -> :partial -> fallback. after_positions flat -> not confirmed.
+    api_client = live_api_client(after_positions: [])
+    result = build_service(
+      env: live_env.merge("EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED" => "true"),
+      api_client: api_client, signer_client: CountingSigner.new(ok: true),
+      order_probe: fake_order_probe(probe_order(status: "NEW", filled: "0.004", qty: "0.01", reduce_only: false))
+    ).run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    refute_equal "success", result.status
+    assert_equal "extended_position_readback", result.receipt.fetch(:readback_confirmation_source)
+    assert_nil result.receipt.fetch(:open_fill_confirmation)
+  end
+
+  test "cancelled/rejected/expired order never fast-confirms an open" do
+    %w[CANCELLED REJECTED EXPIRED].each do |terminal|
+      api_client = live_api_client(after_positions: [])
+      result = build_service(
+        env: live_env.merge("EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED" => "true"),
+        api_client: api_client, signer_client: CountingSigner.new(ok: true),
+        order_probe: fake_order_probe(probe_order(status: terminal, filled: "0.0", qty: "0.01", remaining: "0.01"))
+      ).run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+      assert_equal "extended_position_readback", result.receipt.fetch(:readback_confirmation_source), "status=#{terminal}"
+      assert_nil result.receipt.fetch(:open_fill_confirmation), "status=#{terminal}"
+    end
+  end
+
+  test "reduce-only mismatch rejects an open fill confirmation" do
+    api_client = live_api_client(after_positions: [])
+    result = build_service(
+      env: live_env.merge("EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED" => "true"),
+      api_client: api_client, signer_client: CountingSigner.new(ok: true),
+      # reduceOnly true on an OPEN must never confirm the open.
+      order_probe: fake_order_probe(probe_order(reduce_only: true, side: "SELL"))
+    ).run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "extended_position_readback", result.receipt.fetch(:readback_confirmation_source)
+    assert_nil result.receipt.fetch(:open_fill_confirmation)
+  end
+
+  test "side/market mismatch rejects a fill confirmation" do
+    api_client = live_api_client(after_positions: [])
+    result = build_service(
+      env: live_env.merge("EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED" => "true"),
+      api_client: api_client, signer_client: CountingSigner.new(ok: true),
+      order_probe: fake_order_probe(probe_order(reduce_only: false, side: "BUY", market: "BTC-USD"))
+    ).run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "extended_position_readback", result.receipt.fetch(:readback_confirmation_source)
+    assert_nil result.receipt.fetch(:open_fill_confirmation)
+  end
+
+  test "fast fill confirmation is disabled by default and does not query the order probe" do
+    probe = Class.new { def find_order(_id) = raise("order probe must not be queried when disabled") }.new
+    api_client = live_api_client(after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ])
+    result = build_service(env: live_env, api_client: api_client, signer_client: CountingSigner.new(ok: true), order_probe: probe)
+      .run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "success", result.status
+    assert_equal "extended_position_readback", result.receipt.fetch(:readback_confirmation_source)
+    assert_nil result.receipt.fetch(:open_fill_confirmation)
+  end
+
   private
 
   CountingSigner = Struct.new(:ok, :verified_algorithm, :signing_enabled, :sign_calls, keyword_init: true) do
@@ -726,13 +831,26 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     end
   end
 
-  def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client, sleeper: ->(_) { })
+  def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client, sleeper: ->(_) { }, order_probe: nil)
     venue = HedgeVenues::Extended.new(env: env, api_client: api_client)
     signer_client ||= Struct.new(:health, keyword_init: true) do
       def supports_extended_order_signing? = false
       def verified_algorithm? = false
     end.new(health: { ok: false, reason: "not configured" })
-    ExtendedMainnetLifecycleCheck.new(env: env, venue: venue, signer_client: signer_client, sleeper: sleeper)
+    ExtendedMainnetLifecycleCheck.new(env: env, venue: venue, signer_client: signer_client, sleeper: sleeper, order_probe: order_probe)
+  end
+
+  # Fake read-only order probe returning a pre-normalized order hash (probe output shape).
+  def fake_order_probe(order)
+    Class.new do
+      define_method(:initialize) { |o| @order = o }
+      define_method(:find_order) { |_id| @order }
+    end.new(order)
+  end
+
+  def probe_order(status: "FILLED", filled: "0.01", qty: "0.01", reduce_only: false, side: "SELL", market: "ETH-USD", remaining: nil)
+    rem = remaining || (BigDecimal(qty) - BigDecimal(filled)).to_s("F")
+    { id: "abc123", status: status, market: market, side: side, qty_eth: qty, filled_eth: filled, cancelled_eth: "0.0", remaining_eth: rem, reduce_only: reduce_only, raw: {} }
   end
 
   def fake_position

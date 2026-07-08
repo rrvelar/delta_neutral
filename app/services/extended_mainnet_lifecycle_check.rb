@@ -4,13 +4,19 @@ class ExtendedMainnetLifecycleCheck
   MODES = %w[open_only rebalance_delta close_only delta_round_trip close_reopen].freeze
   DEFAULT_READBACK_ATTEMPTS = 6
   DEFAULT_READBACK_INTERVAL_SECONDS = BigDecimal("0.5")
+  FILL_CONFIRM_ATTEMPTS = 6
+  FILL_CONFIRM_INTERVAL_SECONDS = BigDecimal("0.25")
+  FILL_LOT_TOLERANCE_ETH = BigDecimal("0.001")
+  TERMINAL_FILLED_ORDER_STATUSES = %w[FILLED].freeze
+  FILL_MARKET_SYMBOL = "ETH-USD".freeze
 
-  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
+  def initialize(env: ENV, venue: HedgeVenues::Extended.new(env: env), signer_client: ExtendedStarkSignerClient.new(env: env), now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) }, order_probe: nil)
     @env = env
     @venue = venue
     @signer_client = signer_client
     @now = now
     @sleeper = sleeper
+    @order_probe = order_probe || HedgeBackends::ExtendedReadOnlyProbe.new(env: env)
   end
 
   def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil, size_source: "probe_cap")
@@ -264,10 +270,12 @@ class ExtendedMainnetLifecycleCheck
     mark_timing!(timing, :submit_started_at)
     submit_response = @venue.submit_order(submit_payload)
     mark_timing!(timing, :submit_finished_at)
-    timing[:exchange_accept_at] = timing[:submit_finished_at] if exchange_order_id(submit_response, signer_response).present?
+    order_id = exchange_order_id(submit_response, signer_response)
+    timing[:exchange_accept_at] = timing[:submit_finished_at] if order_id.present?
     mark_timing!(timing, :readback_started_at)
-    readback_attempts = mode == "close_only" ? poll_flat_readback : poll_short_readback(expected_size: expected_short)
-    confirmed = readback_attempts.any? { |attempt| attempt[:confirmed] }
+    confirmation = confirm_after_submit(mode: mode, order_preview: order_preview, expected_short: expected_short, order_id: order_id)
+    readback_attempts = confirmation[:attempts]
+    confirmed = confirmation[:confirmed]
     mark_timing!(timing, confirmed ? :readback_confirmed_at : :readback_finished_at)
     final_status = confirmed ? "success" : unconfirmed_status(readback_attempts: readback_attempts, expected_short: expected_short, mode: mode)
     {
@@ -276,8 +284,11 @@ class ExtendedMainnetLifecycleCheck
       signer_response: sanitize_signer_response(signer_response),
       submit_payload: sanitize_submit_payload(submit_payload),
       submit_response: sanitize_submit_response(submit_response),
-      exchange_order_id: exchange_order_id(submit_response, signer_response),
+      exchange_order_id: order_id,
       readback_attempts: readback_attempts,
+      readback_confirmation_source: confirmation[:confirmation_source],
+      open_fill_confirmation: build_open_fill_confirmation(mode: mode, confirmation: confirmation, timing: timing, order_preview: order_preview),
+      close_fill_confirmation: build_close_fill_confirmation(mode: mode, confirmation: confirmation, timing: timing, order_preview: order_preview),
       expected_after_short_eth: expected_short.to_s("F"),
       readback_short_after_submit: last_readback_size(readback_attempts)&.to_s("F"),
       readback_delta_eth: readback_delta(readback_attempts: readback_attempts, expected_short: expected_short)&.to_s("F"),
@@ -326,6 +337,9 @@ class ExtendedMainnetLifecycleCheck
       submit_payload: execution && execution[:submit_payload],
       submit_response: execution && execution[:submit_response],
       exchange_order_id: execution && execution[:exchange_order_id],
+      readback_confirmation_source: execution && execution[:readback_confirmation_source],
+      open_fill_confirmation: execution && execution[:open_fill_confirmation],
+      close_fill_confirmation: execution && execution[:close_fill_confirmation],
       execution_timing: execution && execution[:timing],
       leg_summaries: execution && execution[:legs]&.map { |leg| leg_summary(leg) },
       readback_attempts: execution ? execution[:readback_attempts] : [],
@@ -565,6 +579,162 @@ class ExtendedMainnetLifecycleCheck
     BigDecimal(@env.fetch("EXTENDED_POST_SUBMIT_READBACK_INTERVAL_SECONDS", DEFAULT_READBACK_INTERVAL_SECONDS).to_s)
   rescue ArgumentError
     DEFAULT_READBACK_INTERVAL_SECONDS
+  end
+
+  # Confirms a submitted order. When the (default-OFF) fast fill flag for the action
+  # is enabled and an order id is present, first try the authoritative order-fill
+  # readback (order-by-id). Only a terminal FILLED order of the right reduce-only
+  # sense and at least the submitted size confirms. Anything partial/ambiguous/
+  # unavailable falls back fail-closed to the existing slow position readback.
+  def confirm_after_submit(mode:, order_preview:, expected_short:, order_id:)
+    close = mode == "close_only"
+    if order_id.present?
+      if close && close_fill_confirmation_enabled?
+        fast = fast_close_fill_readback(order_id: order_id, close_size: order_size(order_preview))
+        return fast unless fast[:fall_back]
+      elsif !close && open_fill_confirmation_enabled?
+        fast = fast_open_fill_readback(order_id: order_id, open_size: order_size(order_preview))
+        return fast unless fast[:fall_back]
+      end
+    end
+
+    attempts = close ? poll_flat_readback : poll_short_readback(expected_size: expected_short)
+    { attempts: attempts, confirmed: attempts.any? { |attempt| attempt[:confirmed] }, confirmation_source: "extended_position_readback" }
+  end
+
+  def open_fill_confirmation_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["EXTENDED_OPEN_FILL_CONFIRMATION_ENABLED"])
+  end
+
+  def close_fill_confirmation_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["EXTENDED_CLOSE_FILL_CONFIRMATION_ENABLED"])
+  end
+
+  def order_size(order_preview)
+    decimal_or_nil(order_preview.fetch(:payload)[:rounded_size_eth]) || BigDecimal("0")
+  end
+
+  def fast_open_fill_readback(order_id:, open_size:)
+    fast_fill_readback(order_id: order_id) { |order| classify_open_fill(order, size: open_size) }
+  end
+
+  def fast_close_fill_readback(order_id:, close_size:)
+    fast_fill_readback(order_id: order_id) { |order| classify_close_fill(order, size: close_size) }
+  end
+
+  # Bounded poll of the authoritative order status. Never confirms a partial: a
+  # :partial short-circuits to the fail-closed position-readback fallback, and an
+  # unresolved/unavailable order after the attempts also falls back.
+  def fast_fill_readback(order_id:)
+    attempts = []
+    FILL_CONFIRM_ATTEMPTS.times do |index|
+      order = @order_probe.find_order(order_id)
+      classification = yield(order)
+      attempts << { attempt: index + 1, source: "extended_order_by_id_fill", classification: classification.to_s, order_status: order_status_digest(order) }
+      if classification == :filled
+        return {
+          attempts: attempts,
+          confirmed: true,
+          confirmation_source: "extended_order_by_id_fill",
+          fill: { filled_eth: order[:filled_eth], remaining_eth: order[:remaining_eth], status: order[:status], reduce_only: order[:reduce_only], side: order[:side], market: order[:market] },
+          fall_back: false
+        }
+      end
+      break if classification == :partial
+
+      @sleeper.call(FILL_CONFIRM_INTERVAL_SECONDS.to_f)
+    end
+    { attempts: attempts, confirmed: false, confirmation_source: "extended_order_by_id_fill_unresolved", fall_back: true }
+  end
+
+  # :filled only when the order is non-reduce-only, terminally FILLED, on the hedge
+  # market, on the SELL side, filled at least the open size (remaining within one
+  # lot). :partial when some filled but not complete. else :unknown -> fallback.
+  def classify_open_fill(order, size:)
+    classify_fill(order, size: size, reduce_only_expected: false, expected_side: "SELL")
+  end
+
+  # :filled only when the order is reduce-only, terminally FILLED, on the hedge
+  # market, on the BUY side, filled at least the close size (remaining within one lot).
+  def classify_close_fill(order, size:)
+    classify_fill(order, size: size, reduce_only_expected: true, expected_side: "BUY")
+  end
+
+  def classify_fill(order, size:, reduce_only_expected:, expected_side:)
+    return :unknown unless order.is_a?(Hash)
+    return :unknown unless order[:reduce_only] == reduce_only_expected
+    return :unknown unless order[:market].to_s.upcase == FILL_MARKET_SYMBOL.upcase
+    return :unknown unless order[:side].to_s.upcase == expected_side
+
+    filled = decimal_or_nil(order[:filled_eth])
+    remaining = decimal_or_nil(order[:remaining_eth])
+    return :unknown if filled.nil?
+
+    lot = FILL_LOT_TOLERANCE_ETH
+    terminal = order[:status].to_s.upcase.in?(TERMINAL_FILLED_ORDER_STATUSES)
+    fully_filled = terminal && filled >= (decimal(size) - lot) && (remaining.nil? || remaining.abs <= lot)
+    return :filled if fully_filled
+    return :partial if filled.positive?
+
+    :unknown
+  end
+
+  def order_status_digest(order)
+    return nil unless order.is_a?(Hash)
+
+    order.slice(:status, :filled_eth, :remaining_eth, :reduce_only, :side, :market)
+  end
+
+  # Authoritative target-open / source-close fill confirmation metadata for the
+  # migration executor. Present only when the fast order-fill path confirmed.
+  # `confirmed_at` is the readback-confirmation time (when we authoritatively knew
+  # the order filled).
+  def build_open_fill_confirmation(mode:, confirmation:, timing:, order_preview:)
+    return nil if mode == "close_only"
+    return nil unless confirmation[:confirmation_source] == "extended_order_by_id_fill"
+
+    fill = confirmation[:fill] || {}
+    {
+      confirmed: true,
+      source: "extended_order_by_id_fill",
+      reduce_only: false,
+      confirmed_at: timing[:readback_confirmed_at],
+      open_size_eth: order_size(order_preview).to_s("F"),
+      filled_eth: fill[:filled_eth],
+      remaining_eth: fill[:remaining_eth],
+      order_status: fill[:status]
+    }
+  end
+
+  def build_close_fill_confirmation(mode:, confirmation:, timing:, order_preview:)
+    return nil unless mode == "close_only"
+    return nil unless confirmation[:confirmation_source] == "extended_order_by_id_fill"
+
+    fill = confirmation[:fill] || {}
+    {
+      confirmed: true,
+      source: "extended_order_by_id_fill",
+      reduce_only: true,
+      confirmed_at: timing[:readback_confirmed_at],
+      close_size_eth: order_size(order_preview).to_s("F"),
+      filled_eth: fill[:filled_eth],
+      remaining_eth: fill[:remaining_eth],
+      order_status: fill[:status]
+    }
+  end
+
+  def decimal(value)
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    BigDecimal("0")
+  end
+
+  def decimal_or_nil(value)
+    return nil if value.nil? || value.to_s.strip.empty?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def mark_timing!(timing, key)

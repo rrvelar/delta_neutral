@@ -2032,6 +2032,38 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     refute_equal "authoritative_fill", r[:double_exposure_start_source]
   end
 
+  # --- executor consumes Extended-shaped fill confirmations (venue-agnostic) ---
+
+  test "target_first consumes an Extended authoritative target-open fill for the window start" do
+    fill_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 5.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: nil, verifier_safe: true, max_double_exposure: "5",
+      target_open_confirmation: {
+        confirmed: true, reduce_only: false, source: "extended_order_by_id_fill",
+        confirmed_at: fill_at, open_size_eth: "0.8", filled_eth: "0.8", remaining_eth: "0", order_status: "FILLED"
+      }
+    )
+    r = result.receipt
+
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_start_source)
+    assert_equal "extended_order_by_id_fill", r.fetch(:target_open_confirmation_source)
+    assert_equal fill_at, r.fetch(:double_exposure_started_at)
+  end
+
+  test "target_first ends double-exposure at an Extended authoritative source-close fill" do
+    confirmed_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 12.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: { confirmed: true, reduce_only: true, source: "extended_order_by_id_fill", confirmed_at: confirmed_at, filled_eth: "0.8", remaining_eth: "0" },
+      verifier_safe: true, max_double_exposure: "5"
+    )
+    r = result.receipt
+
+    assert_equal "success", result.status
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_end_source)
+    assert_equal confirmed_at, r.fetch(:double_exposure_ended_at)
+    assert_equal true, r.fetch(:source_close_fill_readback_agreement)
+  end
+
   private
 
   # Runs a target_first migration (extended->nado, the proven executor test setup)
