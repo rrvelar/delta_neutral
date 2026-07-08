@@ -128,6 +128,42 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "canary receipt surfaces authoritative-fill and per-leg latency diagnostics" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "success", source_flat_confirmed: true, target_holds_hedge_confirmed: true,
+          final_inside_tolerance: true, orders_placed: 1, signatures_created: 1,
+          double_exposure_start_source: "authoritative_fill", double_exposure_end_source: "authoritative_fill",
+          target_open_confirmation_source: "ethereal_order_list_open_fill",
+          source_close_confirmation_source: "extended_order_by_id_fill",
+          target_open_fill_readback_agreement: true, source_close_fill_readback_agreement: true,
+          target_total_latency_seconds: 9.63, source_close_total_latency_seconds: 37.64,
+          total_migration_latency_seconds: 51.02,
+          to_leg_execution: { confirmed: true, timing: { slow_step: "readback", total_action_latency_seconds: 9.63, submit_latency_seconds: 0.79, readback_latency_seconds: 4.82, build_started_at: "2026-07-08T19:20:18.000000Z", build_finished_at: "2026-07-08T19:20:22.000000Z" } },
+          from_leg_execution: { confirmed: true, timing: { slow_step: "build", total_action_latency_seconds: 37.64, submit_latency_seconds: 1.0, readback_latency_seconds: 2.36, build_started_at: "2026-07-08T19:20:28.000000Z", build_finished_at: "2026-07-08T19:21:02.000000Z" } }
+        )
+        HedgeVenueMigrationExecutor::Result.new("success", [], [], receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_env, target_preflight: { blockers: [] }, fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"), executor: executor
+    ).run(position: ready_position, from: "extended", to: "ethereal", confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION)
+    r = result.receipt
+
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_start_source)
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_end_source)
+    assert_equal "ethereal_order_list_open_fill", r.fetch(:target_open_confirmation_source)
+    assert_equal "extended_order_by_id_fill", r.fetch(:source_close_confirmation_source)
+    assert_equal true, r.fetch(:source_close_fill_readback_agreement)
+    assert_equal 37.64, r.fetch(:source_close_total_latency_seconds)
+    assert_equal "build", r.dig(:source_leg_timing, :slow_step)
+    assert_in_delta 34.0, r.dig(:source_leg_timing, :build_latency_seconds), 0.01
+    assert_equal "readback", r.dig(:target_leg_timing, :slow_step)
+  end
+
   test "runner receipt reflects live target submit when executor stops after first leg" do
     executor = Class.new do
       def run_precomputed_plan(position:, plan:, confirmation:)

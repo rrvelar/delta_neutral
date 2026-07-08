@@ -36,10 +36,20 @@ class HedgeVenueMigrationReceiptWriter
 
   def sensitive_key?(key)
     text = key.to_s
-    return false if text == "confirmation_type"
-    return false if text == "target_confirmation_source"
+    return false if NON_SENSITIVE_CONFIRMATION_KEYS.include?(text)
     return false if text == "signatures_created"
 
     text.match?(/api[_-]?key|private|authorization|cookie|signature|secret|confirmation/i)
   end
+
+  # Non-sensitive keys that would otherwise match the /confirmation/ redaction rule.
+  # They carry diagnostic strings ("authoritative_fill", "extended_order_by_id_fill",
+  # "position_readback"), never secrets/keys/signatures.
+  NON_SENSITIVE_CONFIRMATION_KEYS = %w[
+    confirmation_type
+    target_confirmation_source
+    source_close_confirmation_source
+    target_open_confirmation_source
+    readback_confirmation_source
+  ].freeze
 end

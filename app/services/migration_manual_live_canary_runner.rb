@@ -114,6 +114,24 @@ class MigrationManualLiveCanaryRunner
       double_exposure_ended_at: receipt[:double_exposure_ended_at],
       underhedge_started_at: receipt[:underhedge_started_at],
       underhedge_ended_at: receipt[:underhedge_ended_at],
+      # --- authoritative fill / latency diagnostics (non-sensitive; surfaced so a
+      # canary receipt shows where the double-exposure window bounds came from and
+      # which leg phase was slow) ---
+      double_exposure_start_source: receipt[:double_exposure_start_source],
+      double_exposure_end_source: receipt[:double_exposure_end_source],
+      target_open_confirmation_source: receipt[:target_open_confirmation_source],
+      source_close_confirmation_source: receipt[:source_close_confirmation_source],
+      target_open_fill_confirmed_at: receipt[:target_open_fill_confirmed_at],
+      target_open_position_readback_confirmed_at: receipt[:target_open_position_readback_confirmed_at],
+      source_close_fill_confirmed_at: receipt[:source_close_fill_confirmed_at],
+      source_close_position_readback_confirmed_at: receipt[:source_close_position_readback_confirmed_at],
+      target_open_fill_readback_agreement: receipt[:target_open_fill_readback_agreement],
+      source_close_fill_readback_agreement: receipt[:source_close_fill_readback_agreement],
+      target_total_latency_seconds: receipt[:target_total_latency_seconds],
+      source_close_total_latency_seconds: receipt[:source_close_total_latency_seconds],
+      total_migration_latency_seconds: receipt[:total_migration_latency_seconds],
+      target_leg_timing: leg_timing_summary(receipt[:to_leg_execution]),
+      source_leg_timing: leg_timing_summary(receipt[:from_leg_execution]),
       exchange_order_ids: receipt[:exchange_order_ids],
       orders_submitted: receipt[:orders_placed].to_i,
       orders_placed: receipt[:orders_placed].to_i,
@@ -122,6 +140,29 @@ class MigrationManualLiveCanaryRunner
       blockers: result.blockers,
       warnings: result.warnings
     }
+  end
+
+  # Per-leg timing summary so a canary receipt shows the slow phase (e.g. build vs
+  # readback) without exposing sensitive fields. Reads the leg's own timing hash.
+  def leg_timing_summary(leg)
+    return nil unless leg.is_a?(Hash)
+
+    timing = leg[:timing] || {}
+    {
+      slow_step: timing[:slow_step],
+      total_action_latency_seconds: timing[:total_action_latency_seconds],
+      build_latency_seconds: seconds_between(timing[:build_started_at], timing[:build_finished_at]),
+      submit_latency_seconds: timing[:submit_latency_seconds],
+      readback_latency_seconds: timing[:readback_latency_seconds]
+    }.compact.presence
+  end
+
+  def seconds_between(start_at, finish_at)
+    return nil if start_at.blank? || finish_at.blank?
+
+    (Time.zone.parse(finish_at.to_s) - Time.zone.parse(start_at.to_s)).round(6)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def normalized_final_status(receipt, result)
