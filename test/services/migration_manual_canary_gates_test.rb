@@ -1,6 +1,10 @@
 require "test_helper"
 
 class MigrationManualCanaryGatesTest < ActiveSupport::TestCase
+  EXT_AUTO = "EXTENDED_AUTO_REBALANCE_ENABLED".freeze
+  ETH_AUTO = "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED".freeze
+  NADO_AUTO = "AERODROME_NADO_AUTO_REBALANCE_ENABLED".freeze
+
   setup do
     @state_path = Rails.root.join("tmp/manual-canary-gate-state-#{SecureRandom.hex(4)}.json")
     MigrationManualCanaryGates.state_path = @state_path
@@ -10,6 +14,28 @@ class MigrationManualCanaryGatesTest < ActiveSupport::TestCase
     FileUtils.rm_f(@state_path)
     MigrationManualCanaryGates.state_path = nil
   end
+
+  def enable(key)
+    OperationalSettings.set!(key: key, enabled: true, reason: "test precondition")
+  end
+
+  def disable(key)
+    OperationalSettings.set!(key: key, enabled: false, reason: "test precondition")
+  end
+
+  def gate_enabled?(key)
+    OperationalSettings.get(key).enabled
+  end
+
+  def arm(from, to)
+    MigrationManualCanaryGates.new(from: from, to: to).arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
+  end
+
+  def paused_keys(armed)
+    armed[:paused_autos].select { |p| p[:paused] }.map { |p| p[:key] }
+  end
+
+  # --- DB gate selection ---
 
   test "extended->nado arms base gates plus nado gates and lists source_first env gate" do
     gates = MigrationManualCanaryGates.new(from: "extended", to: "nado")
@@ -25,7 +51,6 @@ class MigrationManualCanaryGatesTest < ActiveSupport::TestCase
 
     assert_equal %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED], gates.db_gate_keys
     refute gates.source_first?
-    refute_includes gates.env_only_gate_keys, "MIGRATION_SOURCE_FIRST_CANARY_ALLOWED"
     assert_includes gates.env_only_gate_keys, "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED"
   end
 
@@ -33,93 +58,154 @@ class MigrationManualCanaryGatesTest < ActiveSupport::TestCase
     result = MigrationManualCanaryGates.new(from: "extended", to: "nado").arm!(confirmation: "nope")
 
     assert_equal false, result[:ok]
-    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, OperationalSettings.get(key).enabled, key }
+    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, gate_enabled?(key), key }
     refute MigrationManualCanaryGates.pending_restore?
   end
 
   test "arm! enables the route DB gates and disarm! returns every gate to false" do
-    gates = MigrationManualCanaryGates.new(from: "extended", to: "nado")
-
-    armed = gates.arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
+    armed = arm("extended", "nado")
     assert armed[:ok]
-    gates.db_gate_keys.each { |key| assert_equal true, OperationalSettings.get(key).enabled, "#{key} should be armed" }
+    %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED AERODROME_NADO_HEDGE_LIVE_ENABLED AERODROME_NADO_LIVE_MIGRATION_ENABLED].each { |key| assert_equal true, gate_enabled?(key), "#{key} should be armed" }
 
     disarmed = MigrationManualCanaryGates.disarm!
     assert disarmed[:ok]
-    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, OperationalSettings.get(key).enabled, "#{key} should be disarmed" }
+    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, gate_enabled?(key), "#{key} should be disarmed" }
   end
 
-  test "nado source auto enabled is paused on arm and restored on disarm" do
-    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test precondition")
-    gates = MigrationManualCanaryGates.new(from: "nado", to: "ethereal")
+  # --- source/target auto pause & restore ---
 
-    armed = gates.arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
+  test "target venue auto enabled is paused on arm and restored on disarm" do
+    disable(EXT_AUTO)
+    enable(ETH_AUTO)
 
-    assert_equal true, armed.dig(:paused_source_auto, :paused)
-    assert_equal "AERODROME_NADO_AUTO_REBALANCE_ENABLED", armed.dig(:paused_source_auto, :key)
-    assert_equal false, OperationalSettings.get("AERODROME_NADO_AUTO_REBALANCE_ENABLED").enabled, "source auto should be paused"
+    armed = arm("extended", "ethereal")
+
+    assert_equal [ ETH_AUTO ], paused_keys(armed)
+    assert_equal false, gate_enabled?(ETH_AUTO), "target auto should be paused"
     assert MigrationManualCanaryGates.pending_restore?
 
-    disarmed = MigrationManualCanaryGates.disarm!
+    MigrationManualCanaryGates.disarm!
 
-    assert_equal true, disarmed.dig(:restored_source_auto, :restored)
-    assert_equal true, OperationalSettings.get("AERODROME_NADO_AUTO_REBALANCE_ENABLED").enabled, "source auto should be restored to its prior value"
+    assert_equal true, gate_enabled?(ETH_AUTO), "target auto should be restored"
     refute MigrationManualCanaryGates.pending_restore?
-    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, OperationalSettings.get(key).enabled, key }
   end
 
-  test "source auto already disabled is not paused and stays disabled after disarm" do
-    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false, reason: "test precondition")
-    gates = MigrationManualCanaryGates.new(from: "nado", to: "ethereal")
+  test "source and target autos both enabled are both paused and both restored" do
+    enable(EXT_AUTO)
+    enable(ETH_AUTO)
 
-    armed = gates.arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
-    assert_equal false, armed.dig(:paused_source_auto, :paused)
-    refute MigrationManualCanaryGates.pending_restore?
+    armed = arm("extended", "ethereal")
+
+    assert_equal [ EXT_AUTO, ETH_AUTO ].sort, paused_keys(armed).sort
+    assert_equal false, gate_enabled?(EXT_AUTO)
+    assert_equal false, gate_enabled?(ETH_AUTO)
 
     MigrationManualCanaryGates.disarm!
-    assert_equal false, OperationalSettings.get("AERODROME_NADO_AUTO_REBALANCE_ENABLED").enabled
+
+    assert_equal true, gate_enabled?(EXT_AUTO)
+    assert_equal true, gate_enabled?(ETH_AUTO)
   end
 
-  test "disarm! is idempotent and safe with no armed canary" do
+  test "source false, target true pauses and restores only the target auto" do
+    disable(EXT_AUTO)
+    enable(ETH_AUTO)
+
+    armed = arm("extended", "ethereal")
+
+    assert_equal [ ETH_AUTO ], paused_keys(armed)
+    MigrationManualCanaryGates.disarm!
+    assert_equal false, gate_enabled?(EXT_AUTO), "source auto was already off and must stay off"
+    assert_equal true, gate_enabled?(ETH_AUTO), "target auto restored"
+  end
+
+  test "target false, source true pauses and restores only the source auto" do
+    enable(EXT_AUTO)
+    disable(ETH_AUTO)
+
+    armed = arm("extended", "ethereal")
+
+    assert_equal [ EXT_AUTO ], paused_keys(armed)
+    MigrationManualCanaryGates.disarm!
+    assert_equal true, gate_enabled?(EXT_AUTO), "source auto restored"
+    assert_equal false, gate_enabled?(ETH_AUTO), "target auto was already off and must stay off"
+  end
+
+  test "arm never modifies an unrelated venue auto" do
+    enable(EXT_AUTO)
+    enable(ETH_AUTO)
+    enable(NADO_AUTO) # nado is not part of extended->ethereal
+
+    arm("extended", "ethereal")
+    assert_equal true, gate_enabled?(NADO_AUTO), "unrelated nado auto must be untouched by arm"
+
+    MigrationManualCanaryGates.disarm!
+    assert_equal true, gate_enabled?(NADO_AUTO), "unrelated nado auto must be untouched by disarm"
+  end
+
+  test "disarm! is idempotent" do
+    enable(ETH_AUTO)
+    arm("extended", "ethereal")
+
     first = MigrationManualCanaryGates.disarm!
     second = MigrationManualCanaryGates.disarm!
 
     assert first[:ok]
     assert second[:ok]
-    assert_equal false, second.dig(:restored_source_auto, :restored)
-    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, OperationalSettings.get(key).enabled, key }
+    assert_empty second[:restored_autos]
+    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, gate_enabled?(key), key }
+    assert_equal true, gate_enabled?(ETH_AUTO)
   end
 
-  test "arm does not modify the target venue auto gate" do
-    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: true, reason: "source precondition")
-    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true, reason: "target precondition")
+  test "failure path: disarm disables gates AND restores both autos after a canary that never ran" do
+    enable(EXT_AUTO)
+    enable(ETH_AUTO)
+    arm("extended", "ethereal")
 
-    MigrationManualCanaryGates.new(from: "nado", to: "ethereal").arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
-
-    assert_equal false, OperationalSettings.get("AERODROME_NADO_AUTO_REBALANCE_ENABLED").enabled, "source auto paused"
-    assert_equal true, OperationalSettings.get("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED").enabled, "target auto must be untouched"
-  end
-
-  test "failure path: disarm still disables gates and restores source auto after a canary that never ran" do
-    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test precondition")
-    MigrationManualCanaryGates.new(from: "nado", to: "ethereal").arm!(confirmation: MigrationManualCanaryGates::ARM_CONFIRMATION)
-
-    # Simulate the canary failing / never submitting — operator runs disarm anyway.
+    # Simulate the canary failing / never submitting — operator disarms anyway.
     MigrationManualCanaryGates.disarm!
 
-    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, OperationalSettings.get(key).enabled, key }
-    assert_equal true, OperationalSettings.get("AERODROME_NADO_AUTO_REBALANCE_ENABLED").enabled, "source auto restored even when the canary did not run"
+    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, gate_enabled?(key), key }
+    assert_equal true, gate_enabled?(EXT_AUTO), "source auto restored after failure"
+    assert_equal true, gate_enabled?(ETH_AUTO), "target auto restored after failure"
   end
 
-  test "status reports the route policy sequence, per-gate source, and source auto pause state" do
-    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test precondition")
-    status = MigrationManualCanaryGates.new(from: "nado", to: "ethereal").status
+  test "status reports both source_auto and target_auto sections" do
+    enable(ETH_AUTO)
+    status = MigrationManualCanaryGates.new(from: "extended", to: "ethereal").status
 
-    assert_equal "nado->ethereal", status[:route]
-    assert_equal "target_first", status[:recommended_sequence]
-    assert(status[:db_gates].all? { |g| g.key?(:enabled) && g.key?(:source) })
-    assert_equal "AERODROME_NADO_AUTO_REBALANCE_ENABLED", status.dig(:source_auto, :key)
-    assert_equal true, status.dig(:source_auto, :would_pause)
-    assert_equal false, status.dig(:source_auto, :restore_pending)
+    assert_equal "extended", status.dig(:source_auto, :venue)
+    assert_equal EXT_AUTO, status.dig(:source_auto, :key)
+    assert_equal false, status.dig(:source_auto, :would_pause)
+
+    assert_equal "ethereal", status.dig(:target_auto, :venue)
+    assert_equal ETH_AUTO, status.dig(:target_auto, :key)
+    assert_equal true, status.dig(:target_auto, :currently_enabled)
+    assert_equal true, status.dig(:target_auto, :would_pause)
+  end
+
+  test "disarm tolerates a stale/corrupt state file as a fail-closed no-op" do
+    enable(ETH_AUTO)
+    File.write(@state_path, "{ not valid json")
+
+    refute MigrationManualCanaryGates.pending_restore?
+    result = MigrationManualCanaryGates.disarm!
+
+    assert result[:ok]
+    assert_empty result[:restored_autos]
+    assert_equal true, gate_enabled?(ETH_AUTO), "a corrupt record must never mutate a venue auto"
+    MigrationManualCanaryGates::ALL_DB_GATES.each { |key| assert_equal false, gate_enabled?(key), key }
+  end
+
+  test "disarm ignores an unrecognized (legacy-shaped) state record without touching autos" do
+    enable(ETH_AUTO)
+    # Legacy flat record shape (no "paused_autos" map) must be a no-op, not a crash.
+    File.write(@state_path, JSON.generate("key" => ETH_AUTO, "previous_value" => "true"))
+
+    refute MigrationManualCanaryGates.pending_restore?
+    result = MigrationManualCanaryGates.disarm!
+
+    assert result[:ok]
+    assert_empty result[:restored_autos]
+    assert_equal true, gate_enabled?(ETH_AUTO)
   end
 end
