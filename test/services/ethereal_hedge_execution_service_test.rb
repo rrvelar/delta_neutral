@@ -651,10 +651,264 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert get_calls.none? { |url| url.include?("#{uuid}.name") || url.include?("#{uuid}/name") }
   end
 
+  # --- fast reduce-only close fill confirmation ---
+
+  def close_fill_service(order_status_get:, position:, enabled: true, read_counter: nil, status_counter: nil)
+    venue = FakeVenue.new(position: position)
+    venue.define_singleton_method(:live_enabled?) { true }
+    venue.define_singleton_method(:read_position) do |symbol:|
+      read_counter << :read if read_counter
+      position
+    end
+    wrapped_status = lambda do |order_id|
+      status_counter << :status if status_counter
+      order_status_get.call(order_id)
+    end
+    build_service(
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, _payload) { { status: "SUBMITTED", id: "eth-close-1" } },
+      order_status_get: wrapped_status,
+      env_extra: enabled ? { "ETHEREAL_CLOSE_FILL_CONFIRMATION_ENABLED" => "true" } : {}
+    )
+  end
+
+  def run_close(service)
+    service.close_short(
+      position: fake_position,
+      size_eth: "1.7025",
+      current_position: ethereal_short("1.7025"),
+      confirmation: EtherealHedgeExecutionService::CONFIRMATION,
+      max_slippage: "0.01"
+    )
+  end
+
+  test "reduce-only close confirms via fast order fill before slow position polling" do
+    reads = []
+    filled = ->(_id) { { status: "FILLED", filled_eth: "1.702", remaining_eth: "0", reduce_only: true } }
+    # Position endpoint still reports a short (lagging); fill status is authoritative.
+    service = close_fill_service(order_status_get: filled, position: ethereal_short("1.7025"), read_counter: reads)
+
+    result = run_close(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "ethereal_order_list_fill", result.receipt.fetch(:readback_poll_attempts).first.fetch(:source)
+    assert_operator reads.size, :<=, 1, "should not fall back to the 12-attempt position poll"
+    # The authoritative close-fill confirmation is surfaced for the executor.
+    cfc = result.receipt.fetch(:close_fill_confirmation)
+    assert_equal true, cfc[:confirmed]
+    assert_equal "ethereal_order_list_fill", cfc[:source]
+    assert_equal true, cfc[:reduce_only]
+    assert cfc[:confirmed_at].present?
+  end
+
+  test "close falls back fail-closed to position readback when order fill is unavailable" do
+    reads = []
+    unavailable = ->(_id) { nil }
+    # Position reads flat, so the fallback poll confirms.
+    service = close_fill_service(order_status_get: unavailable, position: nil, read_counter: reads)
+
+    result = run_close(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    refute_equal "order_fill", result.receipt.fetch(:readback_poll_attempts).first.fetch(:source, nil)
+    assert_operator reads.size, :>=, 1
+  end
+
+  test "partial fill never confirms flat" do
+    partial = ->(_id) { { status: "PARTIALLY_FILLED", filled_eth: "0.5", remaining_eth: "1.2", reduce_only: true } }
+    # Position still short -> fallback poll also cannot confirm -> pending, never flat.
+    service = close_fill_service(order_status_get: partial, position: ethereal_short("1.2"))
+
+    result = run_close(service)
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert result.receipt.fetch(:readback_poll_attempts).none? { |a| a[:classification] == "filled" }
+  end
+
+  test "non-reduce-only order fill is ignored and falls back to position readback" do
+    reads = []
+    non_reduce = ->(_id) { { status: "FILLED", filled_eth: "1.702", remaining_eth: "0", reduce_only: false } }
+    service = close_fill_service(order_status_get: non_reduce, position: nil, read_counter: reads)
+
+    result = run_close(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_operator reads.size, :>=, 1, "must confirm via authoritative position readback, not a non-reduce-only fill"
+  end
+
+  test "fast fill confirmation is disabled by default and does not query order status" do
+    status_calls = []
+    filled = ->(_id) { { status: "FILLED", filled_eth: "1.702", remaining_eth: "0", reduce_only: true } }
+    # Feature OFF: even a FILLED order status is ignored; position (still short) drives the result.
+    service = close_fill_service(order_status_get: filled, position: ethereal_short("1.7025"), enabled: false, status_counter: status_calls)
+
+    result = run_close(service)
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_empty status_calls, "order status must not be queried when the feature is disabled"
+  end
+
+  # Real Ethereal order shape captured read-only from GET /v1/order?subaccountId=...
+  # for the Step 3 filled reduce-only close (order c91e028d-...).
+  def real_ethereal_filled_close_order
+    {
+      "id" => "c91e028d-748e-4770-adfb-a71d083c4983",
+      "clientOrderId" => "6close1",
+      "type" => "LIMIT",
+      "quantity" => "1.7025",
+      "availableQuantity" => "1.7025",
+      "side" => 0,
+      "productId" => "480014cc-536e-4fd4-958b-b2afcf8ce09f",
+      "status" => "FILLED",
+      "filled" => "1.7025",
+      "reduceOnly" => true,
+      "close" => true
+    }
+  end
+
+  test "normalize_ethereal_order maps the real filled reduce-only close shape" do
+    service = build_service
+    status = service.send(:normalize_ethereal_order, real_ethereal_filled_close_order)
+
+    assert_equal "FILLED", status[:status]
+    assert_equal "1.7025", status[:filled_eth]
+    assert_equal "0.0", status[:remaining_eth]
+    assert_equal true, status[:reduce_only]
+    assert_equal :filled, service.send(:classify_close_fill, status, close_size: BigDecimal("1.702"))
+  end
+
+  test "normalize_ethereal_order derives remaining from quantity minus filled, ignoring availableQuantity" do
+    service = build_service
+    # availableQuantity stays at quantity (as the live API reports) but the order is
+    # only partially filled -> remaining must come from quantity - filled.
+    order = real_ethereal_filled_close_order.merge("filled" => "1.0", "status" => "SUBMITTED")
+    status = service.send(:normalize_ethereal_order, order)
+
+    assert_equal "0.7025", status[:remaining_eth]
+    assert_equal :partial, service.send(:classify_close_fill, status, close_size: BigDecimal("1.702"))
+  end
+
+  test "get_order_status returns nil when the subaccount is not configured (fail closed)" do
+    service = build_service(env_extra: { "ETHEREAL_SUBACCOUNT_ID" => "" })
+
+    assert_nil service.send(:get_order_status, "c91e028d-748e-4770-adfb-a71d083c4983")
+  end
+
+  # --- fast target-open fill confirmation ---
+
+  def open_fill_service(order_status_get:, position:, enabled: true, read_counter: nil, status_counter: nil)
+    venue = FakeVenue.new(position: position)
+    venue.define_singleton_method(:live_enabled?) { true }
+    venue.define_singleton_method(:read_position) do |symbol:|
+      read_counter << :read if read_counter
+      position
+    end
+    wrapped_status = lambda do |order_id|
+      status_counter << :status if status_counter
+      order_status_get.call(order_id)
+    end
+    build_service(
+      venue: venue,
+      signer_post: ->(_uri, _payload) { { status: "signed", signature: "0xsig" } },
+      http_post: ->(_uri, _payload) { { status: "SUBMITTED", id: "eth-open-1" } },
+      order_status_get: wrapped_status,
+      env_extra: enabled ? { "ETHEREAL_OPEN_FILL_CONFIRMATION_ENABLED" => "true" } : {}
+    )
+  end
+
+  def run_open(service)
+    service.open_short(
+      position: fake_position(execution_venue: "extended"),
+      size_eth: "1.0",
+      current_position: nil,
+      confirmation: nil,
+      max_slippage: "0.01",
+      require_confirmation: false,
+      migration: true
+    )
+  end
+
+  test "target open confirms via fast order fill before slow position polling" do
+    reads = []
+    filled = ->(_id) { { status: "FILLED", filled_eth: "1.0", remaining_eth: "0", reduce_only: false } }
+    # Position endpoint still lags (flat); the non-reduce-only order fill is authoritative.
+    service = open_fill_service(order_status_get: filled, position: nil, read_counter: reads)
+
+    result = run_open(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_equal "ethereal_order_list_open_fill", result.receipt.fetch(:readback_poll_attempts).first.fetch(:source)
+    assert_operator reads.size, :<=, 1, "should not fall back to the 12-attempt position poll"
+    ofc = result.receipt.fetch(:open_fill_confirmation)
+    assert_equal true, ofc[:confirmed]
+    assert_equal "ethereal_order_list_open_fill", ofc[:source]
+    assert_equal false, ofc[:reduce_only]
+    assert_equal "1.0", ofc[:open_size_eth]
+    assert ofc[:confirmed_at].present?
+  end
+
+  test "partial target open never confirms via fast fill" do
+    partial = ->(_id) { { status: "PARTIALLY_FILLED", filled_eth: "0.5", remaining_eth: "0.5", reduce_only: false } }
+    # Position lags (flat) so the fallback poll also cannot confirm -> pending, never confirmed on a partial.
+    service = open_fill_service(order_status_get: partial, position: nil)
+
+    result = run_open(service)
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert result.receipt.fetch(:readback_poll_attempts).none? { |a| a[:classification] == "filled" }
+  end
+
+  test "reduce-only order fill is ignored for a target open and falls back to position readback" do
+    reads = []
+    reduce_only = ->(_id) { { status: "FILLED", filled_eth: "1.0", remaining_eth: "0", reduce_only: true } }
+    service = open_fill_service(order_status_get: reduce_only, position: ethereal_short("1.0"), read_counter: reads)
+
+    result = run_open(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_operator reads.size, :>=, 1, "must confirm via position readback, not a reduce-only fill on an open"
+  end
+
+  test "target open falls back fail-closed to position readback when order fill is unavailable" do
+    reads = []
+    unavailable = ->(_id) { nil }
+    service = open_fill_service(order_status_get: unavailable, position: ethereal_short("1.0"), read_counter: reads)
+
+    result = run_open(service)
+
+    assert_equal "submitted_and_confirmed", result.status
+    assert_operator reads.size, :>=, 1
+  end
+
+  test "target open fast fill confirmation is disabled by default and does not query order status" do
+    status_calls = []
+    filled = ->(_id) { { status: "FILLED", filled_eth: "1.0", remaining_eth: "0", reduce_only: false } }
+    service = open_fill_service(order_status_get: filled, position: nil, enabled: false, status_counter: status_calls)
+
+    result = run_open(service)
+
+    assert_equal "submitted_but_readback_pending", result.status
+    assert_empty status_calls, "order status must not be queried when the feature is disabled"
+  end
+
+  test "classify_open_fill confirms a terminal filled non-reduce-only open" do
+    service = build_service
+    order = real_ethereal_filled_close_order.merge("reduceOnly" => false, "close" => false)
+    status = service.send(:normalize_ethereal_order, order)
+
+    assert_equal false, status[:reduce_only]
+    assert_equal :filled, service.send(:classify_open_fill, status, open_size: BigDecimal("1.702"))
+    # A reduce-only order is never an authoritative OPEN confirmation.
+    reduce_status = service.send(:normalize_ethereal_order, real_ethereal_filled_close_order)
+    assert_equal :unknown, service.send(:classify_open_fill, reduce_status, open_size: BigDecimal("1.702"))
+  end
+
   private
 
-  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil, env_extra: {})
+  def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil, order_status_get: nil, env_extra: {})
     EtherealHedgeExecutionService.new(
+      order_status_get: order_status_get,
       env: {
         "AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED" => "true",
         "ETHEREAL_API_BASE_URL" => "https://ethereal.example",

@@ -1,6 +1,12 @@
 require "test_helper"
 
 class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
+  test "double exposure production-safe threshold default is unchanged at 5 seconds" do
+    executor = HedgeVenueMigrationExecutor.new(env: {})
+
+    assert_equal BigDecimal("5"), executor.send(:max_double_exposure_seconds)
+  end
+
   test "live execution blocks without env gate" do
     position = migration_position
     result = HedgeVenueMigrationExecutor.new(env: {}).run(
@@ -1900,7 +1906,181 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal "<redacted>", result.receipt.dig(:to_leg_execution, :signature)
   end
 
+  # --- authoritative source-close fill ends the double-exposure window ---
+
+  test "target_first ends double-exposure at the authoritative source-close fill when final readback agrees" do
+    confirmed_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 12.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: { confirmed: true, reduce_only: true, source: "ethereal_order_list_fill", confirmed_at: confirmed_at, filled_eth: "0.8", remaining_eth: "0" },
+      verifier_safe: true
+    )
+    r = result.receipt
+
+    assert_equal "success", result.status
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_end_source)
+    assert_equal confirmed_at, r.fetch(:double_exposure_ended_at)
+    assert_equal confirmed_at, r.fetch(:source_close_flat_confirmed_at)
+    assert_equal true, r.fetch(:source_close_fill_readback_agreement)
+    # Overhedge window is the ~2s to the fill, well under the 5s budget: no incident,
+    # so the route certifies (vs the ~40s slow-position-readback path).
+    assert_operator BigDecimal(r.fetch(:double_exposure_seconds).to_s), :<, BigDecimal("5")
+    assert_equal false, r.fetch(:latency_incident, false)
+    # The slow position readback still ran and is later than the fill confirmation.
+    assert_operator r.fetch(:source_close_position_readback_confirmed_at), :>, confirmed_at
+  end
+
+  test "target_first fails closed when the source-close fill disagrees with the final readback" do
+    confirmed_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 12.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: { confirmed: true, reduce_only: true, source: "ethereal_order_list_fill", confirmed_at: confirmed_at, filled_eth: "0.8", remaining_eth: "0" },
+      verifier_safe: false
+    )
+    r = result.receipt
+
+    refute_equal "success", result.status
+    assert_equal false, r.fetch(:source_close_fill_readback_agreement)
+    assert_equal "position_readback", r.fetch(:double_exposure_end_source)
+    refute_equal true, r.fetch(:route_production_safe, nil)
+  end
+
+  test "target_first partial (non-confirmed) fill falls back to position readback and stays unsafe" do
+    result = run_ethereal_to_extended(
+      # A non-authoritative confirmation (confirmed:false) must be ignored.
+      source_close_confirmation: { confirmed: false, reduce_only: true, source: "ethereal_order_list_fill", confirmed_at: (Time.zone.local(2026, 7, 8, 12, 0, 0) + 12.seconds).utc.iso8601(6) },
+      verifier_safe: true, max_double_exposure: "5"
+    )
+    r = result.receipt
+
+    assert_equal "success", result.status
+    assert_equal "position_readback", r.fetch(:double_exposure_end_source)
+    assert_operator BigDecimal(r.fetch(:double_exposure_seconds).to_s), :>, BigDecimal("5")
+    assert_equal false, r.fetch(:route_production_safe)
+    assert_equal true, r.fetch(:latency_incident)
+  end
+
+  test "target_first with no authoritative fill uses the slow position readback (existing behavior)" do
+    result = run_ethereal_to_extended(source_close_confirmation: nil, verifier_safe: true, max_double_exposure: "5")
+    r = result.receipt
+
+    assert_equal "success", result.status
+    assert_equal "position_readback", r.fetch(:double_exposure_end_source)
+    assert_operator BigDecimal(r.fetch(:double_exposure_seconds).to_s), :>, BigDecimal("5")
+    assert_equal false, r.fetch(:route_production_safe)
+    assert_equal true, r.fetch(:latency_incident)
+  end
+
+  # --- authoritative target-open fill starts the double-exposure window ---
+
+  test "target_first starts the double-exposure window at the authoritative target-open fill" do
+    fill_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 5.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: nil, verifier_safe: true, max_double_exposure: "5",
+      target_open_confirmation: {
+        confirmed: true, reduce_only: false, source: "ethereal_order_list_open_fill",
+        confirmed_at: fill_at, open_size_eth: "0.8", filled_eth: "0.8", remaining_eth: "0", order_status: "FILLED"
+      }
+    )
+    r = result.receipt
+
+    assert_equal "success", result.status
+    assert_equal "authoritative_fill", r.fetch(:double_exposure_start_source)
+    assert_equal "ethereal_order_list_open_fill", r.fetch(:target_open_confirmation_source)
+    assert_equal fill_at, r.fetch(:target_open_fill_confirmed_at)
+    assert_equal fill_at, r.fetch(:target_leg_accepted_at)
+    assert_equal fill_at, r.fetch(:double_exposure_started_at)
+    # Window start moved EARLIER than the leg-return timestamp -> never masks exposure.
+    assert_operator r.fetch(:double_exposure_started_at), :<, r.fetch(:target_leg_submit_finished_at)
+    assert_equal true, r.fetch(:target_open_fill_readback_agreement)
+    assert r.fetch(:open_fill_confirmation).present?
+  end
+
+  test "target_first without an authoritative target-open fill keeps the submit-finished window start" do
+    result = run_ethereal_to_extended(source_close_confirmation: nil, verifier_safe: true, max_double_exposure: "5")
+    r = result.receipt
+
+    assert_equal "position_readback", r.fetch(:double_exposure_start_source)
+    assert_equal r.fetch(:target_leg_submit_finished_at), r.fetch(:double_exposure_started_at)
+    assert_nil r[:target_open_fill_confirmed_at]
+    assert_nil r[:target_open_fill_readback_agreement]
+  end
+
+  test "target_first flags disagreement when the final readback does not confirm the target open" do
+    fill_at = (Time.zone.local(2026, 7, 8, 12, 0, 0) + 5.seconds).utc.iso8601(6)
+    result = run_ethereal_to_extended(
+      source_close_confirmation: nil, verifier_safe: false,
+      target_open_confirmation: {
+        confirmed: true, reduce_only: false, source: "ethereal_order_list_open_fill",
+        confirmed_at: fill_at, open_size_eth: "0.8", filled_eth: "0.8", remaining_eth: "0", order_status: "FILLED"
+      }
+    )
+    r = result.receipt
+
+    refute_equal "success", result.status
+    assert_equal false, r.fetch(:target_open_fill_readback_agreement)
+  end
+
+  test "target_first does not submit the source close when the target open is not authoritatively confirmed" do
+    result = run_ethereal_to_extended(
+      source_close_confirmation: nil, verifier_safe: false, target_leg_confirmed: false,
+      # A non-authoritative open fill (confirmed:false) must never release the source close.
+      target_open_confirmation: { confirmed: false, reduce_only: false, source: "ethereal_order_list_open_fill", confirmed_at: (Time.zone.local(2026, 7, 8, 12, 0, 0) + 5.seconds).utc.iso8601(6) }
+    )
+    r = result.receipt
+
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_nil r[:source_close_submit_started_at]
+    refute_equal "authoritative_fill", r[:double_exposure_start_source]
+  end
+
   private
+
+  # Runs a target_first migration (extended->nado, the proven executor test setup)
+  # with a stubbed leg runner whose source-close (2nd) leg optionally carries an
+  # authoritative close-fill confirmation. The executor's authoritative-fill logic
+  # is venue-agnostic; Ethereal-specific production is covered in the service test.
+  # `now` advances 10s per mark so the slow position-readback path measures ~40s.
+  def run_ethereal_to_extended(source_close_confirmation:, verifier_safe: true, max_double_exposure: nil, target_open_confirmation: nil, target_leg_confirmed: true)
+    position = migration_position
+    clock = Time.zone.local(2026, 7, 8, 12, 0, 0)
+    now = -> { value = clock; clock += 10.seconds; value }
+    calls = 0
+    runner = ->(leg, context:) do
+      calls += 1
+      if calls == 1
+        leg_result = {
+          status: target_leg_confirmed ? "confirmed" : "submitted_pending_readback",
+          confirmed: target_leg_confirmed, orders_placed: 1, signatures_created: 1,
+          exchange_order_id: "nado-target",
+          readback: { short_size: target_leg_confirmed ? "0.8" : "0" }
+        }
+        leg_result[:open_fill_confirmation] = target_open_confirmation if target_open_confirmation
+        leg_result
+      else
+        leg_result = {
+          status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1,
+          exchange_order_id: "extended-close",
+          readback: { short_size: "0" }
+        }
+        leg_result[:close_fill_confirmation] = source_close_confirmation if source_close_confirmation
+        leg_result
+      end
+    end
+    env = live_env.merge(
+      "AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true",
+      "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true",
+      "MIGRATION_TARGET_TO_SOURCE_CLOSE_MAX_LATENCY_SECONDS" => "600"
+    )
+    env["MIGRATION_MAX_DOUBLE_EXPOSURE_SECONDS"] = max_double_exposure if max_double_exposure
+    HedgeVenueMigrationExecutor.new(
+      env: env, leg_runner: runner, now: now,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado", safe: verifier_safe)
+    ).run(
+      position: position, from_venue: "extended", to_venue: "nado",
+      dry_run: false, confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true, mode: "full"
+    )
+  end
 
   FakeVenue = Struct.new(:position) do
     def read_position(symbol:) = position

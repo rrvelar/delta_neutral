@@ -78,6 +78,7 @@ class HedgeVenueMigrationExecutor
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     record_target_acceptance_timing!(receipt, first_leg, first_planned_leg)
+    apply_authoritative_target_open_confirmation!(receipt, first_leg)
     receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
@@ -124,7 +125,9 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
-      mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
+      mark_time!(receipt, :source_close_position_readback_confirmed_at) if receipt[:source_flat_after]
+      apply_authoritative_source_close_confirmation!(receipt, second_leg)
+      record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
       compute_double_exposure_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
@@ -507,6 +510,8 @@ class HedgeVenueMigrationExecutor
         warnings: result.warnings,
         timing: timing,
         slow_step: timing[:slow_step],
+        close_fill_confirmation: receipt[:close_fill_confirmation],
+        open_fill_confirmation: receipt[:open_fill_confirmation],
         receipt: receipt
       }
     end
@@ -601,6 +606,7 @@ class HedgeVenueMigrationExecutor
     receipt[:from_leg_execution] = sanitize_sensitive(first_leg) if first_planned_leg.fetch(:venue) == receipt[:from_venue]
     receipt[:leg_readbacks] << first_leg[:readback] if first_leg[:readback]
     record_target_acceptance_timing!(receipt, first_leg, first_planned_leg)
+    apply_authoritative_target_open_confirmation!(receipt, first_leg)
     receipt[:target_leg_status] = leg_lifecycle_status(leg: first_leg, planned_leg: first_planned_leg, role: "target")
     receipt[:target_readback_attempts] = first_leg[:readback] if first_planned_leg.fetch(:venue) == receipt[:to_venue]
     receipt[:target_late_reconciliation] = late_reconciled?(first_leg)
@@ -647,7 +653,9 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
-      mark_time!(receipt, :source_close_flat_confirmed_at) if receipt[:source_flat_after]
+      mark_time!(receipt, :source_close_position_readback_confirmed_at) if receipt[:source_flat_after]
+      apply_authoritative_source_close_confirmation!(receipt, second_leg)
+      record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
       compute_double_exposure_latency!(receipt)
       if receipt[:final_status] != "success" && receipt[:migration_sequence] == "target_first"
@@ -719,6 +727,103 @@ class HedgeVenueMigrationExecutor
   def compute_source_close_latency!(receipt)
     receipt[:source_close_submit_to_flat_seconds] = seconds_between(receipt[:source_close_submit_finished_at], receipt[:source_close_flat_confirmed_at])
     receipt[:source_close_submit_start_after_target_confirm_seconds] = receipt[:target_confirm_to_source_close_submit_latency_seconds]
+  end
+
+  # For target_first migrations, end the overhedge window at the authoritative
+  # reduce-only source-close FILL confirmation (when present) instead of the slow
+  # position readback — but ONLY when the final position readback also confirms the
+  # source is flat. Fail-closed: no authoritative fill, or a fill that disagrees
+  # with the final readback, preserves the existing position-readback timestamp and
+  # is flagged so the proof is not certified on the shortened window.
+  def apply_authoritative_source_close_confirmation!(receipt, source_leg)
+    return unless receipt[:migration_sequence].to_s == "target_first"
+
+    position_ts = receipt[:source_close_position_readback_confirmed_at]
+    fill = authoritative_source_close_fill(source_leg)
+
+    if fill && receipt[:source_flat_after] == true
+      receipt[:source_close_confirmation_source] = fill[:source]
+      receipt[:source_close_fill_confirmed_at] = fill[:confirmed_at]
+      receipt[:source_close_fill_readback_agreement] = true
+      receipt[:source_close_flat_confirmed_at] = fill[:confirmed_at]
+      receipt[:double_exposure_end_source] = "authoritative_fill"
+      return
+    end
+
+    if fill
+      # Fill claims closed-to-flat but the final readback did not confirm source flat:
+      # keep the slow window and flag the disagreement so the proof cannot certify.
+      receipt[:source_close_confirmation_source] = fill[:source]
+      receipt[:source_close_fill_confirmed_at] = fill[:confirmed_at]
+      receipt[:source_close_fill_readback_agreement] = false
+    else
+      receipt[:source_close_confirmation_source] = "position_readback"
+    end
+    receipt[:source_close_flat_confirmed_at] = position_ts if receipt[:source_flat_after]
+    receipt[:double_exposure_end_source] = "position_readback"
+  end
+
+  # For target_first migrations, START the overhedge window at the authoritative
+  # Ethereal target-open FILL confirmation (when present) instead of after the slow
+  # position readback. This corrects the measurement (the receipt no longer understates
+  # the real overhedge) AND reflects that, with the fast target-open confirmation, the
+  # source close is submitted immediately after a trusted target fill. Fail-closed: with
+  # no authoritative open fill the existing submit-finished timestamp is preserved
+  # unchanged. The window start can only move EARLIER (never later) than
+  # target_leg_submit_finished_at, so it never masks real exposure.
+  def apply_authoritative_target_open_confirmation!(receipt, target_leg)
+    return unless receipt[:migration_sequence].to_s == "target_first"
+
+    receipt[:open_fill_confirmation] = target_leg[:open_fill_confirmation] if target_leg.is_a?(Hash) && target_leg[:open_fill_confirmation].present?
+    fill = authoritative_target_open_fill(target_leg)
+    if fill
+      receipt[:target_open_confirmation_source] = fill[:source]
+      receipt[:target_open_fill_confirmed_at] = fill[:confirmed_at]
+      receipt[:target_leg_accepted_at] = fill[:confirmed_at]
+      receipt[:double_exposure_start_source] = "authoritative_fill"
+    else
+      receipt[:target_open_confirmation_source] = "position_readback"
+      receipt[:double_exposure_start_source] = "position_readback"
+    end
+  end
+
+  # Only trust a confirmed, non-reduce-only, timestamped target-open fill. Never marks
+  # the target confirmed on submit alone -- the venue must have reported the open order
+  # terminally FILLED for the expected size (validated by classify_open_fill).
+  def authoritative_target_open_fill(target_leg)
+    confirmation = target_leg.is_a?(Hash) ? target_leg[:open_fill_confirmation] : nil
+    return nil unless confirmation.is_a?(Hash)
+    return nil unless confirmation[:confirmed] == true
+    return nil unless confirmation[:reduce_only] == false
+    return nil if confirmation[:confirmed_at].blank?
+    return nil if confirmation[:source].to_s.blank?
+
+    confirmation
+  end
+
+  # Records whether the authoritative target-open fill agrees with the final position
+  # readback (target actually holds the expected short). Certification already requires
+  # target_holds_expected_short for success, so a disagreement fails closed; this only
+  # surfaces the diagnostic. nil when there was no authoritative open fill.
+  def record_target_open_fill_agreement!(receipt)
+    return unless receipt[:migration_sequence].to_s == "target_first"
+
+    receipt[:target_open_position_readback_confirmed_at] ||= receipt[:target_readback_confirmed_at]
+    return if receipt[:target_open_fill_confirmed_at].blank?
+
+    receipt[:target_open_fill_readback_agreement] = receipt[:target_holds_expected_short] == true
+  end
+
+  # Only trust a confirmed, reduce-only, timestamped close-to-flat fill.
+  def authoritative_source_close_fill(source_leg)
+    confirmation = source_leg.is_a?(Hash) ? source_leg[:close_fill_confirmation] : nil
+    return nil unless confirmation.is_a?(Hash)
+    return nil unless confirmation[:confirmed] == true
+    return nil unless confirmation[:reduce_only] == true
+    return nil if confirmation[:confirmed_at].blank?
+    return nil if confirmation[:source].to_s.blank?
+
+    confirmation
   end
 
   def compute_double_exposure_latency!(receipt)

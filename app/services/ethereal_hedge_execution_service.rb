@@ -14,6 +14,12 @@ class EtherealHedgeExecutionService
   DEFAULT_MAX_SLIPPAGE = BigDecimal("0.01")
   POST_SUBMIT_READBACK_ATTEMPTS = 12
   POST_SUBMIT_READBACK_DELAY_SECONDS = 0.25
+  # Fast reduce-only close confirmation via order fill status (bounded), used
+  # before the slow position readback. Off by default: opt in via
+  # ETHEREAL_CLOSE_FILL_CONFIRMATION_ENABLED after validating the order-list read.
+  CLOSE_FILL_CONFIRM_ATTEMPTS = 6
+  CLOSE_FILL_CONFIRM_DELAY_SECONDS = 0.25
+  TERMINAL_FILLED_ORDER_STATUSES = %w[FILLED CLOSED DONE COMPLETE COMPLETED].freeze
   DOMAIN = {
     name: "Ethereal",
     version: "1",
@@ -23,12 +29,13 @@ class EtherealHedgeExecutionService
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
-  def initialize(env: ENV, venue: nil, http_get: nil, http_post: nil, signer_post: nil, now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
+  def initialize(env: ENV, venue: nil, http_get: nil, http_post: nil, signer_post: nil, order_status_get: nil, now: -> { Time.current }, sleeper: ->(seconds) { sleep(seconds) })
     @env = env
     @venue = venue || HedgeVenues::Ethereal.new(env: env, probe: nil)
     @http_get = http_get || method(:http_get)
     @http_post = http_post || method(:http_post)
     @signer_post = signer_post || method(:signer_post)
+    @order_status_get = order_status_get || method(:get_order_status)
     @now = now
     @sleeper = sleeper
   end
@@ -570,7 +577,7 @@ class EtherealHedgeExecutionService
     timing[:exchange_accept_at] = timing[:submit_finished_at]
     expected = expected_short_after(action: action, size_eth: size_eth, current_position: current_position)
     mark_timing!(timing, :readback_started_at)
-    readback = poll_post_submit_readback(expected_short: expected, action: action)
+    readback = confirm_post_submit_readback(expected_short: expected, action: action, order_id: parsed[:exchange_order_id], order: order)
     mark_timing!(timing, readback[:confirmed] ? :readback_confirmed_at : :readback_finished_at)
     status = readback[:confirmed] ? "submitted_and_confirmed" : "submitted_but_readback_pending"
     result(status, [], order, position, action, current_position, parsed, readback[:position], readback, timing: timing)
@@ -632,10 +639,58 @@ class EtherealHedgeExecutionService
       poll_attempts: timing[:poll_attempts],
       poll_interval_seconds: timing[:poll_interval_seconds],
       slow_step: timing[:slow_step],
+      readback_confirmation_source: readback_poll&.dig(:confirmation_source),
+      close_fill_confirmation: close_fill_confirmation(action: action, status: status, readback_poll: readback_poll, timing: timing, order: order),
+      open_fill_confirmation: open_fill_confirmation(action: action, status: status, readback_poll: readback_poll, timing: timing, order: order),
       blockers: blockers,
       warnings: order.fetch(:warnings, [])
     }
     Result.new(status, blockers, order.fetch(:warnings, []), receipt)
+  end
+
+  # Authoritative reduce-only close-to-flat confirmation metadata, present only when
+  # the close order was confirmed FILLED via the order-list read. `confirmed_at` is
+  # the moment we authoritatively knew the close filled (the readback confirmation
+  # time), which the migration executor uses to end the double-exposure window.
+  def close_fill_confirmation(action:, status:, readback_poll:, timing:, order:)
+    return nil unless action.to_s == "close"
+    return nil unless status == "submitted_and_confirmed"
+    return nil unless readback_poll&.dig(:confirmation_source) == "ethereal_order_list_fill"
+
+    fill = readback_poll[:fill] || {}
+    {
+      confirmed: true,
+      source: "ethereal_order_list_fill",
+      reduce_only: fill[:reduce_only] == true,
+      confirmed_at: timing[:readback_confirmed_at],
+      close_size_eth: order.dig(:summary, :rounded_size_eth),
+      filled_eth: fill[:filled_eth],
+      remaining_eth: fill[:remaining_eth],
+      order_status: fill[:status]
+    }
+  end
+
+  # Authoritative target-open fill confirmation metadata, present only when the open
+  # order was confirmed FILLED via the order-list read. `confirmed_at` is the moment we
+  # authoritatively knew the open filled (the readback confirmation time), which the
+  # migration executor uses to START the double-exposure window at the real fill time
+  # instead of after the slow position readback.
+  def open_fill_confirmation(action:, status:, readback_poll:, timing:, order:)
+    return nil unless action.to_s == "open"
+    return nil unless status == "submitted_and_confirmed"
+    return nil unless readback_poll&.dig(:confirmation_source) == "ethereal_order_list_open_fill"
+
+    fill = readback_poll[:fill] || {}
+    {
+      confirmed: true,
+      source: "ethereal_order_list_open_fill",
+      reduce_only: fill[:reduce_only] == true,
+      confirmed_at: timing[:readback_confirmed_at],
+      open_size_eth: order.dig(:summary, :rounded_size_eth),
+      filled_eth: fill[:filled_eth],
+      remaining_eth: fill[:remaining_eth],
+      order_status: fill[:status]
+    }
   end
 
   def mark_timing!(timing, key)
@@ -672,6 +727,180 @@ class EtherealHedgeExecutionService
     (Time.zone.parse(finish_at.to_s) - Time.zone.parse(start_at.to_s)).round(6)
   rescue ArgumentError, TypeError
     nil
+  end
+
+  # Confirms a filled order. For a reduce-only close-to-flat, first try the fast,
+  # bounded order-fill status path (when enabled); fall back fail-closed to the
+  # authoritative position readback for everything else. The double-exposure
+  # window only closes on authoritative confirmation here (fill-to-zero or a flat
+  # position readback), never on submit alone.
+  def confirm_post_submit_readback(expected_short:, action:, order_id:, order:)
+    if action.to_s == "close" && decimal(expected_short).zero? && close_fill_confirmation_enabled? && order_id.present?
+      fast = fast_close_fill_readback(order_id: order_id, close_size: close_leg_size(order))
+      return fast unless fast[:fall_back]
+    end
+
+    if action.to_s == "open" && decimal(expected_short).positive? && open_fill_confirmation_enabled? && order_id.present?
+      fast = fast_open_fill_readback(order_id: order_id, open_size: open_leg_size(order))
+      return fast unless fast[:fall_back]
+    end
+
+    poll_post_submit_readback(expected_short: expected_short, action: action)
+  end
+
+  def close_fill_confirmation_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["ETHEREAL_CLOSE_FILL_CONFIRMATION_ENABLED"])
+  end
+
+  def open_fill_confirmation_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["ETHEREAL_OPEN_FILL_CONFIRMATION_ENABLED"])
+  end
+
+  def close_leg_size(order)
+    decimal_or_nil(order&.dig(:summary, :rounded_size_eth)) || BigDecimal("0")
+  end
+
+  def open_leg_size(order)
+    decimal_or_nil(order&.dig(:summary, :rounded_size_eth)) || BigDecimal("0")
+  end
+
+  # Bounded fast path: poll the order fill status a few times. Only a reduce-only
+  # order that the venue reports terminally FILLED for at least the close size is
+  # treated as authoritative source-flat. Partial or unknown/unavailable status
+  # never claims flat — it falls back to the position readback (fail closed).
+  def fast_close_fill_readback(order_id:, close_size:)
+    attempts = []
+    CLOSE_FILL_CONFIRM_ATTEMPTS.times do |index|
+      status = safe_order_status(order_id)
+      fill = classify_close_fill(status, close_size: close_size)
+      attempts << { attempt: index + 1, source: "ethereal_order_list_fill", classification: fill.to_s, order_status: order_status_digest(status) }
+      if fill == :filled
+        position = read_position
+        return {
+          attempts: attempts,
+          position: (position == :unavailable ? nil : position),
+          confirmed: true,
+          confirmation_source: "ethereal_order_list_fill",
+          fill: { filled_eth: status[:filled_eth], remaining_eth: status[:remaining_eth], reduce_only: true, status: status[:status], close_size_eth: decimal(close_size).to_s("F") },
+          fall_back: false
+        }
+      end
+      break if fill == :partial # never fast-confirm a partial; let position readback decide, fail closed
+
+      @sleeper.call(CLOSE_FILL_CONFIRM_DELAY_SECONDS)
+    end
+    { attempts: attempts, confirmed: false, confirmation_source: "ethereal_order_list_fill_unresolved", fall_back: true }
+  end
+
+  # :filled only when the order is reduce-only, terminally filled, and filled at
+  # least the close size (remaining within one lot). :partial when some filled but
+  # not complete. :unknown for anything ambiguous/unavailable -> fail-closed fallback.
+  def classify_close_fill(status, close_size:)
+    return :unknown unless status.is_a?(Hash)
+    return :unknown unless status[:reduce_only] == true
+
+    filled = decimal_or_nil(status[:filled_eth])
+    remaining = decimal_or_nil(status[:remaining_eth])
+    return :unknown if filled.nil?
+
+    lot = ETHUSD_LOT_SIZE
+    terminal = status[:status].to_s.upcase.in?(TERMINAL_FILLED_ORDER_STATUSES)
+    fully_filled = terminal && filled >= (decimal(close_size) - lot) && (remaining.nil? || remaining.abs <= lot)
+    return :filled if fully_filled
+    return :partial if filled.positive?
+
+    :unknown
+  end
+
+  # Bounded fast path for a target OPEN: poll the order fill status a few times. Only a
+  # non-reduce-only order that the venue reports terminally FILLED for at least the open
+  # size (remaining within one lot) is treated as an authoritative target fill. Partial
+  # or unknown/unavailable status never claims filled -- it falls back to the slow
+  # position readback (fail closed), so the source is never closed on an unconfirmed
+  # target open.
+  def fast_open_fill_readback(order_id:, open_size:)
+    attempts = []
+    CLOSE_FILL_CONFIRM_ATTEMPTS.times do |index|
+      status = safe_order_status(order_id)
+      fill = classify_open_fill(status, open_size: open_size)
+      attempts << { attempt: index + 1, source: "ethereal_order_list_open_fill", classification: fill.to_s, order_status: order_status_digest(status) }
+      if fill == :filled
+        position = read_position
+        return {
+          attempts: attempts,
+          position: (position == :unavailable ? nil : position),
+          confirmed: true,
+          confirmation_source: "ethereal_order_list_open_fill",
+          fill: { filled_eth: status[:filled_eth], remaining_eth: status[:remaining_eth], reduce_only: false, status: status[:status], open_size_eth: decimal(open_size).to_s("F") },
+          fall_back: false
+        }
+      end
+      break if fill == :partial # never fast-confirm a partial open; let position readback decide, fail closed
+
+      @sleeper.call(CLOSE_FILL_CONFIRM_DELAY_SECONDS)
+    end
+    { attempts: attempts, confirmed: false, confirmation_source: "ethereal_order_list_open_fill_unresolved", fall_back: true }
+  end
+
+  # :filled only when the order is NOT reduce-only, terminally filled, and filled at
+  # least the open size (remaining within one lot). :partial when some filled but not
+  # complete. :unknown for anything ambiguous/unavailable -> fail-closed fallback.
+  def classify_open_fill(status, open_size:)
+    return :unknown unless status.is_a?(Hash)
+    return :unknown unless status[:reduce_only] == false
+
+    filled = decimal_or_nil(status[:filled_eth])
+    remaining = decimal_or_nil(status[:remaining_eth])
+    return :unknown if filled.nil?
+
+    lot = ETHUSD_LOT_SIZE
+    terminal = status[:status].to_s.upcase.in?(TERMINAL_FILLED_ORDER_STATUSES)
+    fully_filled = terminal && filled >= (decimal(open_size) - lot) && (remaining.nil? || remaining.abs <= lot)
+    return :filled if fully_filled
+    return :partial if filled.positive?
+
+    :unknown
+  end
+
+  def safe_order_status(order_id)
+    @order_status_get.call(order_id)
+  rescue
+    nil
+  end
+
+  def order_status_digest(status)
+    return nil unless status.is_a?(Hash)
+
+    status.slice(:status, :filled_eth, :remaining_eth, :reduce_only)
+  end
+
+  # Default order-status reader. Ethereal has no GET /v1/order/{id} (it 404s); the
+  # production-proven path is the authenticated subaccount+product order list used
+  # by the read-only probe. We look the order up there (filled orders included) and
+  # normalize it. Returns nil on anything missing/erroring -> :unknown -> position
+  # readback (fail closed).
+  def get_order_status(order_id)
+    order = HedgeBackends::EtherealReadOnlyProbe.new(env: @env).find_order(order_id)
+    order.is_a?(Hash) ? normalize_ethereal_order(order) : nil
+  rescue StandardError
+    nil
+  end
+
+  # Pure mapping of a raw Ethereal order to the fill fields classify_close_fill
+  # expects. Validated shape: status ("FILLED"), quantity, filled (cumulative),
+  # reduceOnly. Remaining is derived as quantity - filled -- NOT from
+  # `availableQuantity`, which the live API reports equal to quantity even when
+  # fully filled (validated read-only against the Step 3 close order).
+  def normalize_ethereal_order(order)
+    quantity = decimal_or_nil(order["quantity"])
+    filled = decimal_or_nil(order["filled"])
+    remaining = (quantity - filled if quantity && filled)
+    {
+      status: order["status"],
+      filled_eth: filled&.to_s("F"),
+      remaining_eth: remaining&.to_s("F"),
+      reduce_only: ActiveModel::Type::Boolean.new.cast(order["reduceOnly"])
+    }
   end
 
   def poll_post_submit_readback(expected_short:, action:)
@@ -1029,6 +1258,10 @@ class EtherealHedgeExecutionService
     BigDecimal(value.to_s)
   rescue
     nil
+  end
+
+  def decimal(value)
+    decimal_or_nil(value) || BigDecimal("0")
   end
 
   def uri_for(path)
