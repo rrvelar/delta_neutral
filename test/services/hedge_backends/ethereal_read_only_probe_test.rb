@@ -141,6 +141,29 @@ class HedgeBackendsEtherealReadOnlyProbeTest < ActiveSupport::TestCase
     assert_equal PRODUCT_ID, orders.fetch(:product_id)
   end
 
+  test "find_order returns the matching order (including filled) from the order list" do
+    stub_product
+    stub_request(:get, "#{API_BASE}/v1/order")
+      .with(query: { subaccountId: SUBACCOUNT_ID, productIds: PRODUCT_ID, limit: "100" })
+      .to_return(status: 200, body: { data: [ { id: "order-1", status: "FILLED", filled: "1.7" }, { id: "order-2" } ] }.to_json)
+
+    order = enabled_probe.find_order("order-1")
+
+    assert_equal "FILLED", order["status"]
+    assert_equal "1.7", order["filled"]
+  end
+
+  test "find_order returns nil when the id is absent and never raises on error" do
+    stub_product
+    stub_request(:get, "#{API_BASE}/v1/order")
+      .with(query: { subaccountId: SUBACCOUNT_ID, productIds: PRODUCT_ID, limit: "100" })
+      .to_return(status: 200, body: { data: [ { id: "other" } ] }.to_json)
+
+    assert_nil enabled_probe.find_order("missing")
+    assert_nil enabled_probe.find_order(nil)
+    assert_nil enabled_probe("ETHEREAL_SUBACCOUNT_ID" => nil).find_order("order-1")
+  end
+
   test "timeout raises typed network error" do
     stub_request(:get, "#{API_BASE}/v1/product")
       .with(query: { ticker: "ETHUSD", limit: "100" })

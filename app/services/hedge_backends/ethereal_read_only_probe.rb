@@ -174,6 +174,25 @@ module HedgeBackends
       raise ParseError, "Ethereal open orders response could not be normalized: #{e.message}"
     end
 
+    # Read-only lookup of a single order (including filled/historical) by id, via
+    # the same authenticated subaccount+product order list the open-orders readback
+    # uses. Returns the raw order hash or nil (never raises) so callers can fail
+    # closed. `isWorking` is omitted so filled orders are included.
+    def find_order(order_id, asset = DEFAULT_ASSET)
+      return nil if order_id.blank?
+
+      subaccount_id = @env["ETHEREAL_SUBACCOUNT_ID"].presence
+      return nil unless subaccount_id
+
+      product = product_for(asset)
+      return nil unless product
+
+      response = get_json("/v1/order", subaccountId: subaccount_id, productIds: product.fetch("id"), limit: 100)
+      Array(response["data"]).find { |order| [ order["id"], order["orderId"], order["clientOrderId"] ].include?(order_id) }
+    rescue NetworkError, RateLimitError, ParseError, StandardError
+      nil
+    end
+
     def run_probe
       warnings = []
       errors = []
