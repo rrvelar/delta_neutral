@@ -488,6 +488,72 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_includes result.blockers, "source venue auto must be disabled during migration canary: extended"
   end
 
+  # --- Part A: frozen source-position proof builder (guarded) ---
+
+  def armed_env
+    {
+      "MIGRATION_LIVE_ENABLED" => "true", "MIGRATION_MANUAL_LIVE_CANARY_ENABLED" => "true",
+      "MIGRATION_FULL_ALLOWED" => "true", "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "false"
+    }
+  end
+
+  def proof_plan(open_orders: "zero", stale: false, size: "1.8703")
+    { open_orders_status: open_orders, exposure_stale: stale, planned_second_leg: { size_eth: size },
+      source_snapshot_refreshed_at: "2026-07-09T00:00:00Z" }
+  end
+
+  def stopped_runner_status
+    { status: "stopped", pid: nil, duplicate_runner_process: false }
+  end
+
+  def proof_runner(env, runner_status: stopped_runner_status)
+    MigrationManualLiveCanaryRunner.new(
+      env: env,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"),
+      production_runner_status: ->(_position) { runner_status }
+    )
+  end
+
+  def build_proof(env: armed_env, plan: proof_plan, from: "ethereal", sequence: "target_first", runner_status: stopped_runner_status)
+    proof_runner(env, runner_status: runner_status).send(:frozen_source_position_proof, position: position, plan: plan, from: from, sequence: sequence)
+  end
+
+  test "frozen proof is built when all invariants hold" do
+    proof = build_proof
+    assert proof, "expected a frozen proof when all invariants hold"
+    assert_equal "ethereal", proof[:source_venue]
+    assert_equal "1.8703", proof[:short_size]
+    assert_equal true, proof[:invariants_proven]
+  end
+
+  test "frozen proof is nil when migration DB gates are not armed" do
+    assert_nil build_proof(env: armed_env.merge("MIGRATION_LIVE_ENABLED" => "false"))
+  end
+
+  test "frozen proof is nil when the Ethereal source auto is not paused" do
+    assert_nil build_proof(env: armed_env.merge("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED" => "true"))
+  end
+
+  test "frozen proof is nil when open orders are not zero" do
+    assert_nil build_proof(plan: proof_plan(open_orders: "1"))
+  end
+
+  test "frozen proof is nil when the source snapshot is stale" do
+    assert_nil build_proof(plan: proof_plan(stale: true))
+  end
+
+  test "frozen proof is nil when the production runner is active" do
+    assert_nil build_proof(runner_status: { status: "running", pid: 4321, duplicate_runner_process: false })
+  end
+
+  test "frozen proof is nil when the planned source size is missing" do
+    assert_nil build_proof(plan: { open_orders_status: "zero", exposure_stale: false, planned_second_leg: {} })
+  end
+
+  test "frozen proof is nil for a non-target_first sequence" do
+    assert_nil build_proof(sequence: "source_first")
+  end
+
   private
 
   def ready_env

@@ -338,7 +338,7 @@ class ExtendedMainnetLifecycleCheck
       readback_delta_eth: readback_delta,
       inside_tolerance_after_submit: readback_delta ? BigDecimal(readback_delta.to_s).abs <= BigDecimal("0.001") : nil,
       current_position: current_position,
-      read_only_account_diagnostics: @venue.read_only_account_diagnostics(current_position: current_position),
+      read_only_account_diagnostics: read_only_account_diagnostics_for(execution: execution, current_position: current_position),
       market_metadata: @venue.market_metadata_diagnostics,
       order_payload_summaries: orders.map { |order| order[:payload] },
       signer_health: sanitize_signer_health(signer_health),
@@ -699,6 +699,26 @@ class ExtendedMainnetLifecycleCheck
   # migration executor. Present only when the fast order-fill path confirmed.
   # `confirmed_at` is the readback-confirmation time (when we authoritatively knew
   # the order filled).
+  # Part B: when the leg confirmed via an authoritative FULL order-by-id fill, defer the
+  # post-submit account diagnostics (GET /v1/subaccount... balance/leverage/open_orders,
+  # ~3s) so the leg returns to the executor right at the fill — the executor then starts
+  # the source close ~3s sooner. This defers only a RECEIPT DIAGNOSTIC; the leg's fill
+  # confirmation already ran and the executor's final readback still runs and is recorded.
+  # Fail-closed: without an authoritative full fill, the account diagnostics are read as
+  # before.
+  def read_only_account_diagnostics_for(execution:, current_position:)
+    return { status: "deferred", reason: "deferred off double-exposure critical path after authoritative full fill" } if authoritative_full_fill_confirmed?(execution)
+
+    @venue.read_only_account_diagnostics(current_position: current_position)
+  end
+
+  def authoritative_full_fill_confirmed?(execution)
+    return false unless execution.is_a?(Hash)
+
+    fill = execution[:open_fill_confirmation] || execution[:close_fill_confirmation]
+    fill.is_a?(Hash) && fill[:confirmed] == true && fill[:source].to_s == "extended_order_by_id_fill"
+  end
+
   def build_open_fill_confirmation(mode:, confirmation:, timing:, order_preview:)
     return nil if mode == "close_only"
     return nil unless confirmation[:confirmation_source] == "extended_order_by_id_fill"

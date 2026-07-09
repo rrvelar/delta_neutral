@@ -4,13 +4,14 @@ class MigrationManualLiveCanaryRunner
 
   Result = Data.define(:status, :blockers, :warnings, :receipt)
 
-  def initialize(env: ENV, now: -> { Time.current }, receipt_dir: RECEIPT_DIR, executor: nil, target_preflight: nil, fresh_target: nil)
+  def initialize(env: ENV, now: -> { Time.current }, receipt_dir: RECEIPT_DIR, executor: nil, target_preflight: nil, fresh_target: nil, production_runner_status: nil)
     @env = env
     @now = now
     @receipt_dir = Pathname(receipt_dir)
     @executor = executor
     @target_preflight = target_preflight
     @fresh_target = fresh_target
+    @production_runner_status = production_runner_status
   end
 
   def run(position:, from:, to:, confirmation:, sequence: "target_first")
@@ -25,6 +26,7 @@ class MigrationManualLiveCanaryRunner
       return Result.new("blocked_before_submit", blockers, plan.fetch(:warnings), receipt)
     end
 
+    receipt[:frozen_source_position] = frozen_source_position_proof(position: position, plan: receipt, from: from, sequence: sequence)
     result = executor.run_precomputed_plan(
       position: position,
       plan: receipt,
@@ -81,6 +83,61 @@ class MigrationManualLiveCanaryRunner
       signatures_created: 0,
       would_execute_live: false
     )
+  end
+
+  # Part A: build a FROZEN source-position proof for the Ethereal source close, ONLY when
+  # every invariant is proven at execution time. Returns nil (⇒ leg runner reads fresh)
+  # unless: target_first, source ethereal, open orders zero, source snapshot fresh, all
+  # three migration DB gates armed, the Ethereal source auto is paused (disabled), the
+  # production runner is inactive, and a positive planned source size exists. The leg
+  # runner re-validates and only uses it to SIZE the close; the fill confirmation + final
+  # flat readback still read fresh. Fail-closed on any error.
+  def frozen_source_position_proof(position:, plan:, from:, sequence:)
+    return nil unless sequence.to_s == "target_first"
+    return nil unless from.to_s == "ethereal"
+    return nil unless plan[:open_orders_status].to_s == "zero"
+    return nil unless plan[:exposure_stale] == false
+    return nil unless migration_db_gates_armed?
+    return nil if OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", env: env)
+    return nil unless production_runner_inactive?(position)
+
+    size = frozen_decimal(plan.dig(:planned_second_leg, :size_eth)) || frozen_decimal(plan[:current_source_short])
+    return nil unless size&.positive?
+
+    {
+      source_venue: from.to_s,
+      short_size: size.to_s("F"),
+      invariants_proven: true,
+      confirmed_at: plan[:source_snapshot_refreshed_at],
+      reason: "target_first ethereal canary invariants proven: gates armed, ethereal source auto paused, open orders zero, runner inactive, fresh source snapshot"
+    }
+  rescue StandardError
+    nil
+  end
+
+  def migration_db_gates_armed?
+    %w[MIGRATION_LIVE_ENABLED MIGRATION_MANUAL_LIVE_CANARY_ENABLED MIGRATION_FULL_ALLOWED].all? do |key|
+      OperationalSettings.enabled?(key, env: env)
+    end
+  end
+
+  def production_runner_inactive?(position)
+    status = if @production_runner_status
+      @production_runner_status.call(position)
+    else
+      MigrationRandomProductionRunner.new(position: position, trap_signals: false).status
+    end
+    status[:status].to_s.in?(%w[stopped failed]) && status[:pid].nil? && status[:duplicate_runner_process] != true
+  rescue StandardError
+    false
+  end
+
+  def frozen_decimal(value)
+    return nil if value.nil? || value.to_s.strip.empty?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def from_executor_result(result)

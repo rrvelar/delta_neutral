@@ -81,6 +81,24 @@ class EtherealHedgeExecutionService
     execute(position: position, action: "close", size_eth: size_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, migration: migration)
   end
 
+  # Read-only: whether the Ethereal product-metadata env constants are present so the
+  # ~3s GET /v1/product read can be avoided on the pre-submit critical path. Does NOT
+  # invent values — only reports presence. When any is absent, /v1/product is still
+  # read (existing behavior) and double_exposure < 5s may be unreachable.
+  def ethereal_product_metadata_env_status
+    keys = { lot_size: "ETHEREAL_LOT_SIZE", tick_size: "ETHEREAL_TICK_SIZE", onchain_id: "ETHEREAL_ONCHAIN_ID" }
+    present = keys.transform_values { |env_key| @env[env_key].present? }
+    all_present = present.values.all?
+    {
+      present: present,
+      all_present: all_present,
+      product_read_avoided_on_critical_path: all_present,
+      note: all_present ?
+        "Ethereal /v1/product read avoided via env constants (supports double_exposure < 5s)." :
+        "Ethereal /v1/product (~3s) still read on the critical path; set #{keys.values.join(', ')} to avoid it. double_exposure < 5s may be unreachable without them."
+    }
+  end
+
   def rebalance_short(position:, delta_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
     execute(position: position, action: "rebalance", size_eth: delta_eth, current_position: current_position, confirmation: confirmation, max_slippage: max_slippage, require_confirmation: require_confirmation, migration: migration)
   end
@@ -220,7 +238,7 @@ class EtherealHedgeExecutionService
     close_reopen_probe_result(status: "failed_before_submit", blockers: [ "#{e.class}: #{e.message}" ], position: position, mode: mode, dry_run: dry_run, before_position: current_position, close_order: close_order, reopen_order: reopen_order)
   end
 
-  def build_order_preview(position:, action:, size_eth:, current_position:, max_slippage:)
+  def build_order_preview(position:, action:, size_eth:, current_position:, max_slippage:, migration: false)
     action = action.to_s
     signed_size = BigDecimal(size_eth.to_s)
     current_short = short_size(current_position)
@@ -231,8 +249,13 @@ class EtherealHedgeExecutionService
     side = reduce_only ? "buy" : "sell"
     price = limit_price(mark_price, side: side, max_slippage: max_slippage)
     notional = rounded_size * price if price
-    account_state = @venue.account_state
-    account_value = decimal_or_nil(account_state[:account_value_usd]) || decimal_or_nil(account_state[:collateral_usd])
+    # account_state (GET /v1/subaccount/balance, ~3s) feeds ONLY the summary diagnostics
+    # (account_value_usd / estimated_effective_leverage) — never a blocker or order
+    # construction. Defer it off the migration source-close critical path to cut
+    # double-exposure; the receipt marks it deferred. Non-migration behavior unchanged.
+    defer_account_diagnostics = migration && action == "close"
+    account_state = defer_account_diagnostics ? nil : @venue.account_state
+    account_value = account_state && (decimal_or_nil(account_state[:account_value_usd]) || decimal_or_nil(account_state[:collateral_usd]))
     effective = account_value&.positive? && notional ? notional.abs / account_value : nil
     client_order_id = ethereal_client_order_id("#{position.id}#{action}#{@now.call.to_i}#{rounded_size.to_s('F').delete('.')}")
     mapping_error = nil
@@ -276,11 +299,13 @@ class EtherealHedgeExecutionService
         margin_mode: "cross",
         account_value_usd: decimal_string(account_value),
         estimated_effective_leverage: decimal_string(effective),
+        account_diagnostics_deferred: defer_account_diagnostics,
         expected_after_short_eth: decimal_string(expected_short_after(action: action, size_eth: expected_size, current_position: current_position)),
         client_order_id: client_order_id,
         onchain_id: ethereal_onchain_id
       },
       blockers: preview_blockers(rounded_size: rounded_size, price: price, mapping_error: mapping_error),
+      product_metadata_env_status: (migration ? ethereal_product_metadata_env_status : nil),
       warnings: [ "Ethereal uses cross margin only; effective leverage is estimated from notional / account value." ]
     }
   end
@@ -552,7 +577,7 @@ class EtherealHedgeExecutionService
   def execute(position:, action:, size_eth:, current_position:, confirmation:, max_slippage:, require_confirmation: true, migration: false)
     timing = {}
     mark_timing!(timing, :build_started_at)
-    order = build_order_preview(position: position, action: action, size_eth: size_eth, current_position: current_position, max_slippage: max_slippage)
+    order = build_order_preview(position: position, action: action, size_eth: size_eth, current_position: current_position, max_slippage: max_slippage, migration: migration)
     mark_timing!(timing, :build_finished_at)
     blockers = live_blockers(position: position, action: action, size_eth: size_eth, current_position: current_position, confirmation: confirmation, order: order, require_confirmation: require_confirmation, migration: migration)
     return result("blocked_before_submit", blockers, order, position, action, current_position, nil, nil, nil, timing: timing) if blockers.any?

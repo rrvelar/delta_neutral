@@ -902,6 +902,48 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     end
   end
 
+  # --- Part B: defer read-only account diagnostics off the double-exposure critical path ---
+
+  def authoritative_fill(source: "extended_order_by_id_fill", key: :open_fill_confirmation)
+    { key => { confirmed: true, source: source } }
+  end
+
+  test "read-only account diagnostics are deferred after an authoritative full fill" do
+    service = build_service
+    venue = service.instance_variable_get(:@venue)
+    calls = 0
+    venue.define_singleton_method(:read_only_account_diagnostics) { |current_position:| calls += 1; { margin_gate_status: "pass" } }
+
+    diagnostics = service.send(:read_only_account_diagnostics_for, execution: authoritative_fill, current_position: nil)
+
+    assert_equal 0, calls, "diagnostics must not touch the venue on the double-exposure critical path"
+    assert_equal "deferred", diagnostics[:status]
+    assert_match(/double-exposure critical path/, diagnostics[:reason])
+  end
+
+  test "read-only account diagnostics run normally without an authoritative full fill" do
+    service = build_service
+    venue = service.instance_variable_get(:@venue)
+    calls = 0
+    venue.define_singleton_method(:read_only_account_diagnostics) { |current_position:| calls += 1; { margin_gate_status: "pass" } }
+
+    diagnostics = service.send(:read_only_account_diagnostics_for, execution: nil, current_position: nil)
+
+    assert_equal 1, calls
+    assert_equal "pass", diagnostics[:margin_gate_status]
+  end
+
+  test "authoritative full fill confirmation requires the allowlisted order-by-id source" do
+    service = build_service
+
+    assert service.send(:authoritative_full_fill_confirmed?, authoritative_fill)
+    assert service.send(:authoritative_full_fill_confirmed?, authoritative_fill(key: :close_fill_confirmation))
+    refute service.send(:authoritative_full_fill_confirmed?, nil)
+    refute service.send(:authoritative_full_fill_confirmed?, {})
+    refute service.send(:authoritative_full_fill_confirmed?, { open_fill_confirmation: { confirmed: true, source: "accepted_status" } })
+    refute service.send(:authoritative_full_fill_confirmed?, { open_fill_confirmation: { confirmed: false, source: "extended_order_by_id_fill" } })
+  end
+
   def build_service(env: extended_env, signer_client: nil, api_client: fake_api_client, sleeper: ->(_) { }, order_probe: nil)
     venue = HedgeVenues::Extended.new(env: env, api_client: api_client)
     signer_client ||= Struct.new(:health, keyword_init: true) do

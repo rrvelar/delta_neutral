@@ -7,6 +7,26 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal BigDecimal("5"), executor.send(:max_double_exposure_seconds)
   end
 
+  test "all migration production-safe latency thresholds are unchanged" do
+    executor = HedgeVenueMigrationExecutor.new(env: {})
+
+    assert_equal BigDecimal("5"), executor.send(:max_double_exposure_seconds)
+    assert_equal BigDecimal("10"), executor.send(:max_unhedged_seconds)
+    assert_equal BigDecimal("15"), executor.send(:max_target_leg_latency_seconds)
+    assert_equal BigDecimal("45"), executor.send(:max_total_route_latency_seconds)
+  end
+
+  test "migration route proof registry route set is unchanged" do
+    assert_equal(
+      [
+        [ "extended", "ethereal" ], [ "ethereal", "extended" ],
+        [ "extended", "nado" ], [ "nado", "extended" ],
+        [ "ethereal", "nado" ], [ "nado", "ethereal" ]
+      ],
+      MigrationRouteProofRegistry::ROUTES
+    )
+  end
+
   test "live execution blocks without env gate" do
     position = migration_position
     result = HedgeVenueMigrationExecutor.new(env: {}).run(
@@ -2062,6 +2082,54 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal "authoritative_fill", r.fetch(:double_exposure_end_source)
     assert_equal confirmed_at, r.fetch(:double_exposure_ended_at)
     assert_equal true, r.fetch(:source_close_fill_readback_agreement)
+  end
+
+  # --- Part A: frozen Ethereal source position (guarded) ---
+
+  def frozen_leg_runner
+    HedgeVenueMigrationExecutor::DefaultLegRunner.new(env: {})
+  end
+
+  def frozen_close_leg(size: "1.8703")
+    { venue: "ethereal", side: "buy", size_eth: size, expected_after_short_eth: "0" }
+  end
+
+  def frozen_context(proof:, sequence: "target_first")
+    { receipt: { migration_sequence: sequence, frozen_source_position: proof } }
+  end
+
+  def valid_proof(size: "1.8703")
+    { source_venue: "ethereal", short_size: size, invariants_proven: true }
+  end
+
+  test "frozen source position is used when all invariants hold and size matches" do
+    pos = frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg, frozen_context(proof: valid_proof))
+    assert pos, "expected a frozen synthesized position"
+    assert_equal "short", pos[:side]
+    assert_equal "1.8703", pos[:short_size]
+    assert_equal true, pos[:frozen_source_position]
+  end
+
+  test "no frozen source position when the proof is absent (fresh read)" do
+    assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg, frozen_context(proof: nil))
+  end
+
+  test "no frozen source position when invariants are not proven" do
+    proof = valid_proof.merge(invariants_proven: false)
+    assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg, frozen_context(proof: proof))
+  end
+
+  test "no frozen source position when the planned size mismatches the frozen size" do
+    assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg(size: "1.5"), frozen_context(proof: valid_proof(size: "1.8703")))
+  end
+
+  test "no frozen source position when the leg is not a close-to-flat" do
+    open_leg = { venue: "ethereal", side: "sell", size_eth: "1.8703", expected_after_short_eth: "1.8703" }
+    assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, open_leg, frozen_context(proof: valid_proof))
+  end
+
+  test "no frozen source position when the sequence is not target_first" do
+    assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg, frozen_context(proof: valid_proof, sequence: "source_first"))
   end
 
   private

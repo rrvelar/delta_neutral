@@ -904,6 +904,69 @@ class EtherealHedgeExecutionServiceTest < ActiveSupport::TestCase
     assert_equal :unknown, service.send(:classify_open_fill, reduce_status, open_size: BigDecimal("1.702"))
   end
 
+  # --- Part C: defer Ethereal account_state off the source-close critical path ---
+
+  test "migration close preview defers account diagnostics without reading account_state" do
+    venue = FakeVenue.new(position: nil)
+    calls = 0
+    venue.define_singleton_method(:account_state) { calls += 1; { account_value_usd: "5000", collateral_usd: "5000" } }
+    service = build_service(venue: venue)
+
+    order = service.build_order_preview(position: fake_position, action: "close", size_eth: "-1.87",
+      current_position: ethereal_short("1.87"), max_slippage: "0.01", migration: true)
+
+    assert_equal 0, calls, "account_state must not be read on the migration source-close critical path"
+    assert_equal true, order.dig(:summary, :account_diagnostics_deferred)
+    assert_nil order.dig(:summary, :account_value_usd)
+    assert_nil order.dig(:summary, :estimated_effective_leverage)
+  end
+
+  test "non-migration close preview still reads account_state" do
+    venue = FakeVenue.new(position: nil)
+    calls = 0
+    venue.define_singleton_method(:account_state) { calls += 1; { account_value_usd: "5000", collateral_usd: "5000" } }
+    service = build_service(venue: venue)
+
+    order = service.build_order_preview(position: fake_position, action: "close", size_eth: "-1.87",
+      current_position: ethereal_short("1.87"), max_slippage: "0.01")
+
+    assert_equal 1, calls
+    assert_equal false, order.dig(:summary, :account_diagnostics_deferred)
+    assert_equal "5000.0", order.dig(:summary, :account_value_usd)
+  end
+
+  # --- Part D: env-constant product metadata status reporter ---
+
+  test "product metadata env status reports constants present and avoids /v1/product" do
+    status = build_service.ethereal_product_metadata_env_status
+
+    assert_equal true, status[:all_present]
+    assert_equal true, status[:product_read_avoided_on_critical_path]
+    assert_equal({ lot_size: true, tick_size: true, onchain_id: true }, status[:present])
+    assert_match(/avoided/, status[:note])
+  end
+
+  test "product metadata env status reports missing constants and keeps /v1/product" do
+    service = build_service(env_extra: { "ETHEREAL_TICK_SIZE" => "", "ETHEREAL_ONCHAIN_ID" => "", "ETHEREAL_LOT_SIZE" => "" })
+    status = service.ethereal_product_metadata_env_status
+
+    assert_equal false, status[:all_present]
+    assert_equal false, status[:product_read_avoided_on_critical_path]
+    assert_equal({ lot_size: false, tick_size: false, onchain_id: false }, status[:present])
+    assert_match(%r{/v1/product}, status[:note])
+  end
+
+  test "migration close preview includes product metadata env status; non-migration omits it" do
+    service = build_service
+    migration_order = service.build_order_preview(position: fake_position, action: "close", size_eth: "-1.87",
+      current_position: ethereal_short("1.87"), max_slippage: "0.01", migration: true)
+    plain_order = service.build_order_preview(position: fake_position, action: "close", size_eth: "-1.87",
+      current_position: ethereal_short("1.87"), max_slippage: "0.01")
+
+    assert_equal true, migration_order.dig(:product_metadata_env_status, :all_present)
+    assert_nil plain_order[:product_metadata_env_status]
+  end
+
   private
 
   def build_service(venue: FakeVenue.new(position: nil), signer_post: nil, http_post: nil, http_get: nil, order_status_get: nil, env_extra: {})

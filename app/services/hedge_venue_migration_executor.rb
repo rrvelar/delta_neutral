@@ -338,7 +338,7 @@ class HedgeVenueMigrationExecutor
     def run_ethereal_leg(leg, context)
       venue = @venue_builder.build("ethereal", env: @env)
       service = EtherealHedgeExecutionService.new(env: @env, venue: venue, sleeper: @sleeper)
-      current = venue.read_position(symbol: "ETH")
+      current = frozen_ethereal_source_position(leg, context) || venue.read_position(symbol: "ETH")
       size = BigDecimal(leg.fetch(:size_eth).to_s)
       result = if leg.fetch(:side) == "sell"
         if short_size(current).positive?
@@ -402,6 +402,48 @@ class HedgeVenueMigrationExecutor
 
     def close_to_flat_leg?(leg)
       leg.fetch(:side) == "buy" && BigDecimal(leg.fetch(:expected_after_short_eth).to_s).zero?
+    end
+
+    FROZEN_SOURCE_SIZE_TOLERANCE = BigDecimal("0.01")
+
+    # Part A: for the Ethereal source close-to-flat in a target_first canary, use the
+    # runner-provided FROZEN source position and skip the ~3s pre-submit read_position
+    # ONLY when the runner proved every invariant (gates armed, source auto paused, open
+    # orders zero, runner inactive, fresh pre-arm source snapshot) AND the planned close
+    # size matches the frozen size within tolerance. The mandatory post-submit order-list
+    # fill confirmation and the executor's final flat readback still read fresh. Any
+    # missing/mismatched signal returns nil -> caller reads fresh (fail-closed to existing
+    # behavior). Never confirms the close from this snapshot.
+    def frozen_ethereal_source_position(leg, context)
+      return nil unless close_to_flat_leg?(leg)
+      return nil unless leg.fetch(:venue).to_s == "ethereal"
+
+      receipt = context[:receipt]
+      return nil unless receipt.is_a?(Hash)
+      return nil unless receipt[:migration_sequence].to_s == "target_first"
+
+      proof = receipt[:frozen_source_position]
+      return nil unless proof.is_a?(Hash) && proof[:invariants_proven] == true
+      return nil unless proof[:source_venue].to_s == "ethereal"
+
+      frozen = frozen_decimal(proof[:short_size])
+      planned = frozen_decimal(leg[:size_eth])
+      return nil unless frozen&.positive? && planned&.positive?
+      return nil unless (frozen - planned).abs <= FROZEN_SOURCE_SIZE_TOLERANCE
+
+      {
+        venue: "Ethereal", symbol: "ETH-PERP", market_symbol: "ETH-PERP",
+        side: "short", size: (-frozen).to_s("F"), short_size: frozen.to_s("F"),
+        margin_mode: "cross", frozen_source_position: true
+      }
+    end
+
+    def frozen_decimal(value)
+      return nil if value.nil? || value.to_s.strip.empty?
+
+      BigDecimal(value.to_s)
+    rescue ArgumentError, TypeError
+      nil
     end
 
     def run_nado_leg(leg, context)
