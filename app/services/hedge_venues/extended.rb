@@ -12,9 +12,41 @@ module HedgeVenues
       "EXTENDED_MARKET_SYMBOL" => "EXTENDED_MARKET_SYMBOL missing"
     }.freeze
 
+    # Read-only GETs that change when an order fills. They may be reused within a
+    # build-phase snapshot but must NEVER be reused after submit — the post-submit
+    # readback passes force: true and the executor invalidates them after submit.
+    VOLATILE_READ_METHODS = %i[positions balance open_orders].freeze
+
     def initialize(env: ENV, api_client: nil, **kwargs)
       super(env: env, **kwargs)
       @api_client = api_client || ExtendedApiClient.new(env: env)
+      @read_snapshot = nil
+    end
+
+    # --- per-leg read snapshot (opt-in; default OFF so every other caller is
+    # unchanged and always reads fresh) ---
+    # While a snapshot is active, read-only GETs are memoized so the order preview,
+    # every readiness blocker, and the receipt diagnostics reuse ONE read per
+    # endpoint instead of re-fetching. Static reads stay cached for the whole leg;
+    # volatile reads (positions/balance/open_orders) are dropped after submit so
+    # nothing stale survives into the readback/diagnostics.
+    def read_snapshot_active?
+      !@read_snapshot.nil?
+    end
+
+    def begin_read_snapshot!
+      @read_snapshot ||= {}
+      self
+    end
+
+    def end_read_snapshot!
+      @read_snapshot = nil
+      self
+    end
+
+    def invalidate_volatile_reads!
+      @read_snapshot&.reject! { |(method_name, _kwargs), _value| VOLATILE_READ_METHODS.include?(method_name) }
+      self
     end
 
     def venue_name
@@ -41,16 +73,18 @@ module HedgeVenues
       ExtendedMainnetLifecycleCheck::CONFIRMATION
     end
 
-    def read_position(symbol:)
+    # force: true bypasses the build snapshot for a fresh read — REQUIRED for the
+    # post-submit readback so it never confirms against pre-submit state.
+    def read_position(symbol:, force: false)
       return nil if config_blockers.any?
 
-      positions = array_payload(read_only_call(:positions, market: market_symbol))
+      positions = array_payload(read_only_call(:positions, force: force, market: market_symbol))
       row = positions.filter_map { |item| normalize_position_row(item) }.find do |position|
         position[:market_symbol].to_s.casecmp?(market_symbol) && position[:side].in?(%w[short long])
       end
       return nil unless row
 
-      row.merge(account_value_fields)
+      row.merge(account_value_fields(force: force))
     end
 
     def open_short_preview(symbol:, size_eth:, max_slippage:)
@@ -590,9 +624,17 @@ module HedgeVenues
       value ? value.to_s("F") : "unknown"
     end
 
-    def read_only_call(method_name, **kwargs)
+    def read_only_call(method_name, force: false, **kwargs)
       return nil if config_blockers.any?
+      return uncached_read(method_name, **kwargs) if force || @read_snapshot.nil?
 
+      key = [ method_name, kwargs ]
+      return @read_snapshot[key] if @read_snapshot.key?(key)
+
+      @read_snapshot[key] = uncached_read(method_name, **kwargs)
+    end
+
+    def uncached_read(method_name, **kwargs)
       api_client.public_send(method_name, **kwargs)
     rescue => e
       { "error" => "#{e.class}: #{e.message}" }
@@ -645,8 +687,8 @@ module HedgeVenues
       size
     end
 
-    def account_value_fields
-      balance = read_only_call(:balance)
+    def account_value_fields(force: false)
+      balance = read_only_call(:balance, force: force)
       account_value_fields_from(balance: balance, account_info: nil)
     end
 

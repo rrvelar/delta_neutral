@@ -362,28 +362,42 @@ class HedgeVenueMigrationExecutor
       size = BigDecimal(leg.fetch(:size_eth).to_s)
       env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
       venue = @venue_builder.build("extended", env: env)
-      service = ExtendedHedgeExecutionService.new(venue: venue)
-      current = venue.read_position(symbol: "ETH")
-      result = if leg.fetch(:side) == "sell"
-        if short_size(current).positive?
-          service.rebalance_short(position: context.fetch(:position), delta_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+      with_extended_read_snapshot(venue) do
+        service = ExtendedHedgeExecutionService.new(venue: venue)
+        current = venue.read_position(symbol: "ETH")
+        result = if leg.fetch(:side) == "sell"
+          if short_size(current).positive?
+            service.rebalance_short(position: context.fetch(:position), delta_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+          else
+            service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+          end
         else
-          service.open_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+          service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
         end
-      else
-        service.rebalance_short(position: context.fetch(:position), delta_eth: -size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        normalize_service_result(result, leg)
       end
-      normalize_service_result(result, leg)
     end
 
     def run_extended_source_close_leg(leg, context)
       size = BigDecimal(leg.fetch(:size_eth).to_s)
       env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
       venue = @venue_builder.build("extended", env: env)
-      service = ExtendedHedgeExecutionService.new(venue: venue)
-      current = venue.read_position(symbol: "ETH")
-      result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
-      normalize_service_result(result, leg)
+      with_extended_read_snapshot(venue) do
+        service = ExtendedHedgeExecutionService.new(venue: venue)
+        current = venue.read_position(symbol: "ETH")
+        result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+        normalize_service_result(result, leg)
+      end
+    end
+
+    # Opens a per-leg Extended read snapshot so the pre-read + the lifecycle build reuse
+    # one read per endpoint. Always closed; the lifecycle invalidates volatile reads
+    # after submit and forces fresh reads for the readback.
+    def with_extended_read_snapshot(venue)
+      venue.begin_read_snapshot! if venue.respond_to?(:begin_read_snapshot!)
+      yield
+    ensure
+      venue.end_read_snapshot! if venue.respond_to?(:end_read_snapshot!)
     end
 
     def close_to_flat_leg?(leg)

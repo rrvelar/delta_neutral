@@ -20,6 +20,11 @@ class ExtendedMainnetLifecycleCheck
   end
 
   def run(position:, mode:, size_eth:, confirmation:, dry_run: true, max_slippage: "0.01", delta_eth: nil, size_source: "probe_cap")
+    # Open a per-leg read snapshot for the BUILD phase so blockers/preview/diagnostics
+    # reuse one read per Extended endpoint. Only own it if a caller (the migration leg
+    # runner) has not already opened one. Post-submit reads stay fresh (see sign_and_submit).
+    owns_snapshot = @venue.respond_to?(:begin_read_snapshot!) && !@venue.read_snapshot_active?
+    @venue.begin_read_snapshot! if owns_snapshot
     mode = mode.to_s
     timing = {}
     mark_timing!(timing, :build_started_at)
@@ -99,6 +104,8 @@ class ExtendedMainnetLifecycleCheck
       sizing: sizing,
       timing: signed_result[:timing] || finalized_timing(timing)
     )
+  ensure
+    @venue.end_read_snapshot! if owns_snapshot
   end
 
   private
@@ -272,6 +279,9 @@ class ExtendedMainnetLifecycleCheck
     mark_timing!(timing, :submit_finished_at)
     order_id = exchange_order_id(submit_response, signer_response)
     timing[:exchange_accept_at] = timing[:submit_finished_at] if order_id.present?
+    # Post-submit: drop the build snapshot's volatile reads (positions/balance/open_orders)
+    # so the readback and receipt diagnostics never reuse pre-submit state.
+    @venue.invalidate_volatile_reads! if @venue.respond_to?(:invalidate_volatile_reads!)
     mark_timing!(timing, :readback_started_at)
     confirmation = confirm_after_submit(mode: mode, order_preview: order_preview, expected_short: expected_short, order_id: order_id)
     readback_attempts = confirmation[:attempts]
@@ -508,7 +518,7 @@ class ExtendedMainnetLifecycleCheck
   def poll_short_readback(expected_size:)
     extended_readback_attempts.times.map do |index|
       @sleeper.call(extended_readback_interval_seconds.to_f) if index.positive?
-      position = @venue.read_position(symbol: "ETH")
+      position = @venue.read_position(symbol: "ETH", force: true)
       size = position ? short_size(position) : nil
       {
         attempt: index + 1,
@@ -558,7 +568,7 @@ class ExtendedMainnetLifecycleCheck
   def poll_flat_readback
     extended_readback_attempts.times.map do |index|
       @sleeper.call(extended_readback_interval_seconds.to_f) if index.positive?
-      position = @venue.read_position(symbol: "ETH")
+      position = @venue.read_position(symbol: "ETH", force: true)
       size = short_size(position)
       {
         attempt: index + 1,

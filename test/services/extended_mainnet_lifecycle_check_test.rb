@@ -795,6 +795,77 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_nil result.receipt.fetch(:open_fill_confirmation)
   end
 
+  # --- per-leg read snapshot: build reads consolidated, readback stays fresh ---
+
+  test "live open build issues <=8 GETs and <=1 per endpoint before submit; readback re-reads fresh" do
+    counts = Hash.new(0)
+    at_submit = {}
+    api = counting_api_client(before_positions: [], after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN", marginMode: "isolated", leverage: "1" } ], counts: counts, at_submit: at_submit)
+    result = build_service(env: live_env, api_client: api, signer_client: CountingSigner.new(ok: true))
+      .run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "success", result.status, "blockers must still pass identically with the snapshot"
+    assert_operator at_submit.values.sum, :<=, 8, "before-submit GET total: #{at_submit.inspect}"
+    %i[positions balance leverage account_info market open_orders fees].each do |ep|
+      assert_operator at_submit.fetch(ep, 0), :<=, 1, "#{ep} read #{at_submit.fetch(ep, 0)}x before submit: #{at_submit.inspect}"
+    end
+    assert_operator counts[:positions], :>, at_submit.fetch(:positions, 0), "readback must re-read positions fresh (not the build snapshot)"
+    assert_operator counts[:balance], :>, at_submit.fetch(:balance, 0), "readback must re-read balance fresh"
+  end
+
+  test "live close build issues <=8 GETs and <=1 per endpoint before submit; readback re-reads fresh" do
+    short = { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21", openPrice: "2100", markPrice: "2100", status: "OPEN", marginMode: "isolated", leverage: "1" }
+    counts = Hash.new(0)
+    at_submit = {}
+    api = counting_api_client(before_positions: [ short ], after_positions: [], counts: counts, at_submit: at_submit)
+    result = build_service(env: live_env, api_client: api, signer_client: CountingSigner.new(ok: true))
+      .run(position: fake_position, mode: "close_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "success", result.status
+    assert_operator at_submit.values.sum, :<=, 8, "before-submit GET total: #{at_submit.inspect}"
+    %i[positions balance leverage account_info market open_orders fees].each do |ep|
+      assert_operator at_submit.fetch(ep, 0), :<=, 1, "#{ep} read #{at_submit.fetch(ep, 0)}x before submit: #{at_submit.inspect}"
+    end
+    assert_operator counts[:positions], :>, at_submit.fetch(:positions, 0), "close readback must re-read positions fresh"
+  end
+
+  test "read snapshot is OFF by default so other callers always read fresh (not cached)" do
+    counts = Hash.new(0)
+    at_submit = {}
+    api = counting_api_client(before_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21", markPrice: "2100", status: "OPEN", marginMode: "isolated", leverage: "1" } ], after_positions: [], counts: counts, at_submit: at_submit)
+    venue = HedgeVenues::Extended.new(env: live_env, api_client: api)
+
+    refute venue.read_snapshot_active?
+    venue.read_position(symbol: "ETH")
+    venue.read_position(symbol: "ETH")
+
+    assert_equal 2, counts[:positions], "without an active snapshot each read must hit the API fresh"
+  end
+
+  test "blockers evaluate identically with the snapshot: leverage 10x still blocks before submit" do
+    counts = Hash.new(0)
+    at_submit = {}
+    api = counting_api_client(before_positions: [], after_positions: [], counts: counts, at_submit: at_submit,
+                              leverage_payload: { "data" => [ { "market" => "ETH-USD", "leverage" => "10", "marginMode" => "isolated" } ] })
+    result = build_service(env: live_env, api_client: api, signer_client: CountingSigner.new(ok: true))
+      .run(position: fake_position, mode: "open_only", size_eth: "0.01", confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, dry_run: false)
+
+    assert_equal "blocked_before_submit", result.status
+    assert_includes result.blockers, "Extended current leverage 10.0 does not match required 1.0x. Run extended:set_leverage dry_run=true."
+    assert_empty at_submit, "no submit occurred, so no order was placed"
+  end
+
+  test "a read that errors inside a snapshot fails closed (nil position)" do
+    raising = Class.new do
+      def positions(market:) = raise("boom")
+      def balance = { "status" => "OK", "data" => {} }
+    end.new
+    venue = HedgeVenues::Extended.new(env: live_env, api_client: raising)
+    venue.begin_read_snapshot!
+
+    assert_nil venue.read_position(symbol: "ETH"), "an errored positions read must fail closed to nil"
+  end
+
   private
 
   CountingSigner = Struct.new(:ok, :verified_algorithm, :signing_enabled, :sign_calls, keyword_init: true) do
@@ -894,6 +965,72 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
         }
       end
     end.new
+  end
+
+  # Live-shaped api client that COUNTS read GETs per endpoint and snapshots the
+  # per-endpoint counts at the moment submit_order is called (i.e. "before submit").
+  def counting_api_client(before_positions:, after_positions:, counts:, at_submit:, leverage_payload: nil)
+    Class.new do
+      attr_reader :submit_calls, :submitted_payload
+
+      define_method(:initialize) do |before, after, cnt, snap, lev|
+        @before = before
+        @after = after
+        @counts = cnt
+        @at_submit = snap
+        @leverage_payload = lev
+        @submit_calls = 0
+      end
+
+      def positions(market:)
+        @counts[:positions] += 1
+        @submit_calls.positive? ? @after : @before
+      end
+
+      def balance
+        @counts[:balance] += 1
+        { "status" => "OK", "data" => { "equity" => "5000", "balance" => "5000" } }
+      end
+
+      def account_info
+        @counts[:account_info] += 1
+        { "status" => "ACTIVE", "data" => { "equity" => "5000", "balance" => "5000" } }
+      end
+
+      def leverage(market:)
+        @counts[:leverage] += 1
+        @leverage_payload || { "data" => [ { "market" => market, "leverage" => "1", "marginMode" => "isolated" } ] }
+      end
+
+      def fees(market:)
+        @counts[:fees] += 1
+        { "data" => [ { "market" => market, "takerFeeRate" => "0.0005" } ] }
+      end
+
+      def open_orders(market:)
+        @counts[:open_orders] += 1
+        []
+      end
+
+      def market(market:)
+        @counts[:market] += 1
+        {
+          data: {
+            name: market,
+            tradingConfig: { minOrderSize: "0.01", minOrderSizeChange: "0.001", minPriceChange: "0.1" },
+            marketStats: { markPrice: "2120" },
+            l2Config: { collateralId: "0x31857064564ed0ff978e687456963cba09c2c6985d8f9300a1de4962fafa054", syntheticId: "0x4554482d3800000000000000000000", collateralResolution: 1000000, syntheticResolution: 1000000 }
+          }
+        }
+      end
+
+      def submit_order(payload)
+        @submit_calls += 1
+        @submitted_payload = payload
+        @at_submit.merge!(@counts) # snapshot per-endpoint counts at the submit boundary
+        { "status" => "OK", "data" => { "id" => "abc123" } }
+      end
+    end.new(before_positions, after_positions, counts, at_submit, leverage_payload)
   end
 
   def live_api_client(before_positions: [], after_positions: [], open_orders: [], submit_response: nil, leverage_payload: nil, account_value: "1999.79")
