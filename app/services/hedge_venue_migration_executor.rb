@@ -125,7 +125,7 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
-      mark_time!(receipt, :source_close_position_readback_confirmed_at) if receipt[:source_flat_after]
+      record_source_close_position_readback_time!(receipt, second_leg) if receipt[:source_flat_after]
       apply_authoritative_source_close_confirmation!(receipt, second_leg)
       record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
@@ -709,7 +709,7 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
-      mark_time!(receipt, :source_close_position_readback_confirmed_at) if receipt[:source_flat_after]
+      record_source_close_position_readback_time!(receipt, second_leg) if receipt[:source_flat_after]
       apply_authoritative_source_close_confirmation!(receipt, second_leg)
       record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
@@ -783,6 +783,21 @@ class HedgeVenueMigrationExecutor
   def compute_source_close_latency!(receipt)
     receipt[:source_close_submit_to_flat_seconds] = seconds_between(receipt[:source_close_submit_finished_at], receipt[:source_close_flat_confirmed_at])
     receipt[:source_close_submit_start_after_target_confirm_seconds] = receipt[:target_confirm_to_source_close_submit_latency_seconds]
+  end
+
+  # End the double-exposure window at the close leg's own flat readback timestamp
+  # (its position readback already confirmed the source flat) instead of stamping
+  # the wall clock after the slow final all-venue verification, which otherwise
+  # inflates the window by the entire verification duration. The final verification
+  # still runs first and still gates success — this only re-anchors the timestamp.
+  # Falls back to stamping now when the leg carried no readback timestamp.
+  def record_source_close_position_readback_time!(receipt, source_leg)
+    leg_readback_confirmed_at = source_leg.is_a?(Hash) ? source_leg.dig(:timing, :readback_confirmed_at) : nil
+    if leg_readback_confirmed_at.present?
+      receipt[:source_close_position_readback_confirmed_at] = leg_readback_confirmed_at
+    else
+      mark_time!(receipt, :source_close_position_readback_confirmed_at)
+    end
   end
 
   # For target_first migrations, end the overhedge window at the authoritative

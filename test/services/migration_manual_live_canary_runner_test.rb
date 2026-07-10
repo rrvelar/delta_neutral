@@ -546,6 +546,27 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_nil build_proof(runner_status: { status: "running", pid: 4321, duplicate_runner_process: false })
   end
 
+  test "frozen proof is built for unsafe_gates_left_enabled with no runner process" do
+    # unsafe_gates_left_enabled is the NORMAL armed-canary status: gates armed, no
+    # runner process. With nil pid and no duplicate process it must count as inactive.
+    proof = build_proof(runner_status: { status: "unsafe_gates_left_enabled", pid: nil, duplicate_runner_process: false })
+    assert proof, "expected a frozen proof for the armed-canary runner status"
+    assert_equal true, proof[:invariants_proven]
+  end
+
+  test "frozen proof is nil for unsafe_gates_left_enabled with a live pid" do
+    assert_nil build_proof(runner_status: { status: "unsafe_gates_left_enabled", pid: 4321, duplicate_runner_process: false })
+  end
+
+  test "frozen proof is nil for unsafe_gates_left_enabled with a duplicate runner process" do
+    assert_nil build_proof(runner_status: { status: "unsafe_gates_left_enabled", pid: nil, duplicate_runner_process: true })
+  end
+
+  test "frozen proof is nil for locked or unknown runner statuses" do
+    assert_nil build_proof(runner_status: { status: "stale_lock", pid: nil, duplicate_runner_process: false })
+    assert_nil build_proof(runner_status: { status: "orphan_process_running", pid: nil, duplicate_runner_process: false })
+  end
+
   test "frozen proof is nil when the planned source size is missing" do
     assert_nil build_proof(plan: { open_orders_status: "zero", exposure_stale: false, planned_second_leg: {} })
   end

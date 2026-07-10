@@ -121,13 +121,18 @@ class MigrationManualLiveCanaryRunner
     end
   end
 
+  # "unsafe_gates_left_enabled" is the NORMAL status during an armed manual canary:
+  # the runner reports it whenever any migration gate is armed with no runner process,
+  # which is exactly the state this proof requires (gates armed + runner inactive).
+  # It only counts as inactive with the same no-process guarantees as stopped/failed:
+  # nil pid and no duplicate runner process.
   def production_runner_inactive?(position)
     status = if @production_runner_status
       @production_runner_status.call(position)
     else
       MigrationRandomProductionRunner.new(position: position, trap_signals: false).status
     end
-    status[:status].to_s.in?(%w[stopped failed]) && status[:pid].nil? && status[:duplicate_runner_process] != true
+    status[:status].to_s.in?(%w[stopped failed unsafe_gates_left_enabled]) && status[:pid].nil? && status[:duplicate_runner_process] != true
   rescue StandardError
     false
   end
@@ -176,6 +181,13 @@ class MigrationManualLiveCanaryRunner
       # which leg phase was slow) ---
       double_exposure_start_source: receipt[:double_exposure_start_source],
       double_exposure_end_source: receipt[:double_exposure_end_source],
+      target_leg_submit_started_at: receipt[:target_leg_submit_started_at],
+      target_leg_submit_finished_at: receipt[:target_leg_submit_finished_at],
+      target_action_timing: receipt[:target_action_timing],
+      source_close_submit_started_at: receipt[:source_close_submit_started_at],
+      source_close_submit_finished_at: receipt[:source_close_submit_finished_at],
+      source_close_action_timing: receipt[:source_close_action_timing],
+      target_confirm_to_source_close_submit_latency_seconds: receipt[:target_confirm_to_source_close_submit_latency_seconds],
       target_open_confirmation_source: receipt[:target_open_confirmation_source],
       source_close_confirmation_source: receipt[:source_close_confirmation_source],
       target_open_fill_confirmed_at: receipt[:target_open_fill_confirmed_at],

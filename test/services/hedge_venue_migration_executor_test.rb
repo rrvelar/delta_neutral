@@ -860,6 +860,97 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
   end
 
+  test "double exposure ends at the close leg's own readback timestamp when present" do
+    position = migration_position
+    calls = []
+    current_time = Time.zone.local(2026, 6, 6, 12, 0, 0)
+    now = -> {
+      value = current_time
+      current_time += 3.seconds
+      value
+    }
+    leg_flat_confirmed_at = "2026-06-06T12:00:20.500000Z"
+    runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: calls.size == 1 ? "0xnado-target" : "extended-close",
+        readback: { short_size: calls.size == 1 ? "0.8" : "0" },
+        timing: calls.size == 2 ? { readback_confirmed_at: leg_flat_confirmed_at } : {}
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      leg_runner: runner,
+      now: now,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    # Final verification still ran and gated success.
+    assert_equal "success", result.status, result.blockers.inspect
+    assert_equal true, result.receipt.fetch(:source_flat_confirmed)
+    # Window end re-anchored to the leg-internal flat readback, not a later stamp.
+    assert_equal leg_flat_confirmed_at, result.receipt.fetch(:source_close_position_readback_confirmed_at)
+    assert_equal leg_flat_confirmed_at, result.receipt.fetch(:source_close_flat_confirmed_at)
+    assert_equal leg_flat_confirmed_at, result.receipt.fetch(:double_exposure_ended_at)
+    assert_equal "position_readback", result.receipt.fetch(:double_exposure_end_source)
+  end
+
+  test "double exposure end falls back to a stamped time when the close leg has no readback timestamp" do
+    position = migration_position
+    calls = []
+    current_time = Time.zone.local(2026, 6, 6, 12, 0, 0)
+    now = -> {
+      value = current_time
+      current_time += 3.seconds
+      value
+    }
+    runner = ->(leg, context:) do
+      calls << leg
+      {
+        status: "confirmed",
+        confirmed: true,
+        orders_placed: 1,
+        signatures_created: 1,
+        exchange_order_id: calls.size == 1 ? "0xnado-target" : "extended-close",
+        readback: { short_size: calls.size == 1 ? "0.8" : "0" }
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env.merge("AERODROME_NADO_HEDGE_LIVE_ENABLED" => "true", "AERODROME_NADO_LIVE_MIGRATION_ENABLED" => "true"),
+      leg_runner: runner,
+      now: now,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "nado")
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "nado",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "success", result.status, result.blockers.inspect
+    assert result.receipt.fetch(:source_close_position_readback_confirmed_at)
+    assert_equal result.receipt.fetch(:source_close_position_readback_confirmed_at), result.receipt.fetch(:double_exposure_ended_at)
+  end
+
   test "target confirmation to source close latency beyond threshold returns manual action before source submit" do
     position = migration_position
     calls = []
