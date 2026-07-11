@@ -860,6 +860,19 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_equal false, OperationalSettings.enabled?("MIGRATION_RANDOM_ROTATION_LIVE_ENABLED")
   end
 
+  test "defensive pause records previously enabled venue autos in the receipt" do
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test setup")
+    OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: false, reason: "test setup")
+    executor = HedgeVenueMigrationExecutor.new(env: {})
+    receipt = {}
+
+    executor.send(:pause_autonomous_migration!, migration_position, receipt)
+
+    assert_includes receipt[:defensively_paused_venue_autos], "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED"
+    refute_includes receipt[:defensively_paused_venue_autos], "EXTENDED_AUTO_REBALANCE_ENABLED"
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+  end
+
   test "double exposure ends at the close leg's own readback timestamp when present" do
     position = migration_position
     calls = []

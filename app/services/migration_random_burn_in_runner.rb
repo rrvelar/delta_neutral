@@ -314,6 +314,9 @@ class MigrationRandomBurnInRunner
     post_target = target_payload(post_report, previous_target: decimal_or_nil(pre_target[:target_short_eth]))
     post_hedge = hedge_payload(post_report)
     blockers, status = cycle_blockers(route: route, execution: execution, post_report: post_report, post_target: post_target)
+    if status == "success" && direct_market_safe?(post_report, active_venues: active_short_venues(post_report))
+      restore_active_venue_auto_after_safe_recovery!(post_report)
+    end
     post_migration_rebalance = run_active_rebalance(reason: "post_migration") if status == "success" && rebalance_after_migration
     if post_migration_rebalance && Array(post_migration_rebalance[:blockers]).any?
       blockers = (blockers + Array(post_migration_rebalance[:blockers])).uniq
@@ -831,6 +834,11 @@ class MigrationRandomBurnInRunner
     Result.new(status, blockers, [], receipt_path.to_s, final_summary(status: status, blockers: blockers))
   end
 
+  # Intentionally does NOT restore venue autos here: this runs during shutdown,
+  # after disable_after has quiesced every gate/auto, and the fail-closed exit
+  # posture (everything off until an operator or the next runner start
+  # re-establishes autos) must win. Mid-run restoration is handled at the cycle
+  # success and hold-rebalance recovery points instead.
   def final_blocker_status(blockers)
     if last_blocker_status == "stopped_active_rebalance" &&
         direct_market_safe?(last_direct_preflight_report, active_venues: active_short_venues(last_direct_preflight_report))
@@ -967,6 +975,31 @@ class MigrationRandomBurnInRunner
     status.to_s == "blocked_before_submit" ? "blocked" : "stopped"
   end
 
+  # Re-asserts the active venue's auto after a defensive executor pause once
+  # recovery has proven the direct market safe. The defensive paths
+  # (pause_autonomous_migration!) disable EVERY venue auto; leaving the active
+  # venue without its auto blocks the hold one-shot rebalance, so the runner
+  # stops cleanly on the next target drift and the position sits outside
+  # tolerance unattended (observed 2026-07-11). Fail-closed: callers must have
+  # proven direct_market_safe? on a fresh direct preflight (one active venue
+  # matching the production venue, open orders zero, no blockers, inside
+  # tolerance); additionally skips unless live, unless the report's production
+  # venue matches the hedge execution venue, and no-ops when already enabled.
+  def restore_active_venue_auto_after_safe_recovery!(report)
+    return { restored: false, reason: "not_live" } unless live?
+
+    venue = HedgeVenues.normalize(report[:production_venue])
+    key = OperationalSettings.auto_key_for(venue)
+    return { restored: false, reason: "unknown_venue" } unless key
+    return { restored: false, key: key, reason: "hedge_venue_mismatch" } unless HedgeVenues.normalize(position.hedge&.execution_venue) == venue
+    return { restored: false, key: key, reason: "already_enabled" } if OperationalSettings.enabled?(key, env: env)
+
+    result = ActiveVenueAutoPolicy.new(position: position).enable_current!(reason: "restore venue auto after defensive recovery reconciled safe")
+    { restored: result.ok, key: key, errors: result.errors.presence }.compact
+  rescue StandardError => e
+    { restored: false, key: key, error: "#{e.class}: #{e.message}" }
+  end
+
   def recover_hold_rebalance_check(check)
     return check unless zero_submit_active_rebalance_block?(check)
 
@@ -974,7 +1007,9 @@ class MigrationRandomBurnInRunner
     record_direct_preflight(direct)
     active_venues = active_short_venues(direct)
     safe = direct_market_safe?(direct, active_venues: active_venues)
+    auto_restore = safe ? restore_active_venue_auto_after_safe_recovery!(direct) : nil
     recovered = check.merge(
+      active_venue_auto_restore: auto_restore,
       reason: safe ? "recovered_after_direct_market_safe_preflight" : check[:reason],
       active_rebalance_recovered: safe,
       active_rebalance_recovery_reason: safe ? active_rebalance_recovery_reason(check) : nil,

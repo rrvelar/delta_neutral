@@ -963,7 +963,7 @@ class HedgeVenueMigrationExecutor
   end
 
   def apply_latency_incident!(position, receipt)
-    pause_autonomous_migration!(position)
+    pause_autonomous_migration!(position, receipt)
     safe_finalized = receipt[:production_venue_finalized] == true &&
       receipt[:source_flat_after] == true &&
       receipt[:target_holds_expected_short] == true &&
@@ -1007,7 +1007,7 @@ class HedgeVenueMigrationExecutor
   end
 
   def apply_source_first_target_failed_manual_action!(position, receipt, blockers)
-    pause_autonomous_migration!(position)
+    pause_autonomous_migration!(position, receipt)
     receipt[:final_status] = "MANUAL_ACTION_REQUIRED_SOURCE_FLAT_TARGET_NOT_OPEN"
     receipt[:lifecycle_state] = receipt[:final_status]
     receipt[:manual_action_required] = true
@@ -1041,7 +1041,7 @@ class HedgeVenueMigrationExecutor
   end
 
   def apply_source_first_nado_ambiguous_manual_action!(position, receipt, target_leg)
-    pause_autonomous_migration!(position)
+    pause_autonomous_migration!(position, receipt)
     receipt[:final_status] = "SOURCE_FIRST_TARGET_AMBIGUOUS_AFTER_TIMEOUT"
     receipt[:lifecycle_state] = receipt[:final_status]
     receipt[:manual_action_required] = true
@@ -1254,7 +1254,7 @@ class HedgeVenueMigrationExecutor
   end
 
   def apply_target_open_source_still_open_manual_action!(position, receipt, blockers)
-    pause_autonomous_migration!(position)
+    pause_autonomous_migration!(position, receipt)
     receipt[:final_status] = "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
     receipt[:lifecycle_state] = "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN"
     receipt[:manual_action_required] = true
@@ -1301,11 +1301,19 @@ class HedgeVenueMigrationExecutor
     expected.positive? && (actual - expected).abs <= tolerance
   end
 
-  def pause_autonomous_migration!(position)
+  # Records which venue autos were enabled before the defensive pause so the
+  # receipt shows what a safe recovery must restore (the runner re-asserts the
+  # active venue's auto once recovery reconciles safe; without that the active
+  # venue loses its hold rebalance and the runner stops on the next drift).
+  def pause_autonomous_migration!(position, receipt = nil)
+    previously_enabled = OperationalSettings::AUTO_KEYS_BY_VENUE.values.select do |key|
+      OperationalSettings.enabled?(key, env: @env)
+    end
     ActiveVenueAutoPolicy.new(position: position).disable_all!(reason: "migration executor pauses after target-open source-still-open manual action")
     %w[MIGRATION_AUTO_ENABLED MIGRATION_RANDOM_ROTATION_LIVE_ENABLED].each do |key|
       OperationalSettings.set!(key: key, enabled: false, reason: "migration executor pauses after target-open source-still-open manual action")
     end
+    receipt[:defensively_paused_venue_autos] = previously_enabled if receipt
   end
 
   def live_blockers(position:, receipt:, dry_run:, confirmation:, execution_preflight: nil)
