@@ -166,6 +166,14 @@ class MigrationManualLiveCanaryRunner
       source_flat_after: receipt[:source_flat_confirmed],
       target_holds_expected_short: receipt[:target_holds_hedge_confirmed],
       open_orders_after: receipt.fetch(:open_orders_after, 0),
+      # Finalization flags must reach the canary receipt: the proof registry
+      # qualifies routes on this receipt (not the executor's), and
+      # finalized_route_readback? needs them to auto-resolve stale pending
+      # Nado continuation artifacts.
+      production_venue_finalized: receipt[:production_venue_finalized],
+      open_orders_clear_after: receipt[:open_orders_clear_after],
+      third_venue_flat: receipt[:third_venue_flat],
+      other_venues_flat: receipt[:other_venues_flat],
       route_latency_proof: receipt[:route_latency_proof],
       production_safe_route: receipt[:production_safe_route],
       route_production_safe: receipt[:route_production_safe],

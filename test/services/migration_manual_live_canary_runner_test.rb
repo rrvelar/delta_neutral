@@ -128,6 +128,31 @@ class MigrationManualLiveCanaryRunnerTest < ActiveSupport::TestCase
     assert_equal 0, result.receipt.fetch(:signatures_created)
   end
 
+  test "canary receipt carries executor finalization flags for the proof registry" do
+    executor = Class.new do
+      def run_precomputed_plan(position:, plan:, confirmation:)
+        receipt = plan.merge(
+          final_status: "success", source_flat_confirmed: true, target_holds_hedge_confirmed: true,
+          final_inside_tolerance: true, orders_placed: 1, signatures_created: 1,
+          production_venue_finalized: true, open_orders_clear_after: true,
+          third_venue_flat: true, other_venues_flat: true
+        )
+        HedgeVenueMigrationExecutor::Result.new("success", [], [], receipt)
+      end
+    end.new
+
+    result = MigrationManualLiveCanaryRunner.new(
+      env: ready_env, target_preflight: { blockers: [] }, fresh_target: fresh_target,
+      receipt_dir: Rails.root.join("tmp/test-canary-runner-#{SecureRandom.hex(4)}"), executor: executor
+    ).run(position: ready_position, from: "extended", to: "ethereal", confirmation: MigrationManualLiveCanaryRunner::CONFIRMATION)
+    r = result.receipt
+
+    assert_equal true, r.fetch(:production_venue_finalized)
+    assert_equal true, r.fetch(:open_orders_clear_after)
+    assert_equal true, r.fetch(:third_venue_flat)
+    assert_equal true, r.fetch(:other_venues_flat)
+  end
+
   test "canary receipt surfaces authoritative-fill and per-leg latency diagnostics" do
     executor = Class.new do
       def run_precomputed_plan(position:, plan:, confirmation:)
