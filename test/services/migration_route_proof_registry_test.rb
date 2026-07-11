@@ -35,6 +35,45 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_empty route.fetch(:blockers)
   end
 
+  test "target_first canary certified by authoritative fill and readback agreement is READY_FOR_RANDOM" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary", timestamp: 2.hours.ago.utc.iso8601, position_id: position.id,
+      from_venue: "ethereal", to_venue: "extended", final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true, source_leg_readback_confirmed: true, final_inside_tolerance: true,
+      source_flat_after: true, target_holds_expected_short: true, open_orders_after: 0, production_venue_finalized: true,
+      # window ended on the authoritative fill (~2s), not the slow position readback
+      double_exposure_seconds: "2", double_exposure_end_source: "authoritative_fill",
+      source_close_confirmation_source: "ethereal_order_list_fill", source_close_fill_readback_agreement: true,
+      route_production_safe: true, orders_submitted: 1, orders_placed: 1, signatures_created: 1, cancels_submitted: 0
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "extended")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_empty route.fetch(:blockers)
+  end
+
+  test "target_first canary whose fill disagrees with final readback is not READY_FOR_RANDOM" do
+    position = position_with_snapshot("ethereal")
+    dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary", timestamp: 2.hours.ago.utc.iso8601, position_id: position.id,
+      from_venue: "ethereal", to_venue: "extended", final_status: "FAILED_NEEDS_REPAIR",
+      live: true, manual_action_required: true,
+      source_close_fill_readback_agreement: false, double_exposure_end_source: "position_readback",
+      source_flat_after: false, target_holds_expected_short: false, final_inside_tolerance: false,
+      production_venue_finalized: false, orders_submitted: 1, orders_placed: 1, signatures_created: 1
+    )
+
+    route = registry.route_status(position: position, from: "ethereal", to: "extended")
+
+    refute_equal "READY_FOR_RANDOM", route.fetch(:status)
+  end
+
   test "readback reconciliation receipt without source flat proof is not ready" do
     position = position_with_snapshot("nado")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
@@ -240,7 +279,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("recoveries")).write(
       action: "recover_target_first_source_close",
-      timestamp: "2026-06-06T20:34:48Z",
+      timestamp: 2.days.ago.utc.change(hour: 20, min: 34, sec: 48).iso8601,
       position_id: position.id,
       from_venue: "ethereal",
       to_venue: "nado",
@@ -262,7 +301,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       dir: dir,
       position: position,
       from: "ethereal",
-      timestamp: "2026-06-07T12:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601,
       source_flat_to_execution_confirmed_seconds: "4.511719"
     )
 
@@ -276,7 +315,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_equal "4.511719", route.fetch(:source_flat_to_execution_confirmed_seconds)
     assert_equal latency_path.to_s, route.fetch(:latency_proof_receipt)
     assert_equal latency_path.to_s, route.fetch(:finalization_receipt)
-    assert_equal "2026-06-07T12:00:00Z", route.fetch(:proof_timestamp)
+    assert_equal 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601, route.fetch(:proof_timestamp)
     assert_empty route.fetch(:blockers)
   ensure
     FileUtils.rm_rf(dir) if dir
@@ -292,7 +331,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       dir: dir,
       position: position,
       from: "ethereal",
-      timestamp: "2026-06-07T12:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601,
       source_flat_to_execution_confirmed_seconds: "14",
       route_production_safe: false,
       latency_proof_status: "failed_latency_threshold"
@@ -314,10 +353,10 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     OperationalSettings.set!(key: "MIGRATION_ROUTE_ETHEREAL_TO_NADO_STRATEGY", enabled: "source_first")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
-    write_latency_proof(dir: dir, position: position, from: "ethereal", timestamp: "2026-06-07T12:00:00Z")
+    write_latency_proof(dir: dir, position: position, from: "ethereal", timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("latency_proofs")).write(
       action: "prove_route_latency",
-      timestamp: "2026-06-07T13:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 13, min: 0, sec: 0).iso8601,
       position_id: position.id,
       from_venue: "ethereal",
       to_venue: "nado",
@@ -339,7 +378,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_equal true, route.fetch(:route_production_safe)
     assert_empty route.fetch(:blockers)
-    assert_equal "2026-06-07T12:00:00Z", route.fetch(:proof_timestamp)
+    assert_equal 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601, route.fetch(:proof_timestamp)
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -352,7 +391,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("latency_proofs")).write(
       action: "prove_route_latency",
-      timestamp: "2026-06-07T13:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 13, min: 0, sec: 0).iso8601,
       position_id: position.id,
       from_venue: "ethereal",
       to_venue: "nado",
@@ -381,7 +420,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     registry = registry_for(dir)
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-07T12:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -400,7 +439,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     )
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
-      timestamp: "2026-06-07T13:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 13, min: 0, sec: 0).iso8601,
       position_id: position.id,
       from_venue: "nado",
       to_venue: "ethereal",
@@ -423,7 +462,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
 
     assert_equal "READY_FOR_RANDOM", route.fetch(:status)
     assert_empty route.fetch(:blockers)
-    assert_equal "2026-06-07T12:00:00Z", route.fetch(:proof_timestamp)
+    assert_equal 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601, route.fetch(:proof_timestamp)
   ensure
     FileUtils.rm_rf(dir) if dir
   end
@@ -588,12 +627,12 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_STRATEGY", enabled: "source_first")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
-    write_latency_proof(dir: dir, position: position, from: "ethereal", timestamp: "2026-06-07T12:00:00Z")
+    write_latency_proof(dir: dir, position: position, from: "ethereal", timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601)
     write_latency_proof(
       dir: dir,
       position: position,
       from: "extended",
-      timestamp: "2026-06-07T11:00:00Z",
+      timestamp: 1.day.ago.utc.change(hour: 11, min: 0, sec: 0).iso8601,
       source_flat_to_execution_confirmed_seconds: "18",
       route_production_safe: false,
       latency_proof_status: "failed_latency_threshold"
@@ -615,7 +654,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     OperationalSettings.set!(key: "MIGRATION_ROUTE_EXTENDED_TO_NADO_STRATEGY", enabled: "source_first")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
-    write_latency_proof(dir: dir, position: position, from: "extended", timestamp: "2026-06-07T12:00:00Z")
+    write_latency_proof(dir: dir, position: position, from: "extended", timestamp: 1.day.ago.utc.change(hour: 12, min: 0, sec: 0).iso8601)
 
     route = registry.route_status(position: position, from: "extended", to: "nado")
 
