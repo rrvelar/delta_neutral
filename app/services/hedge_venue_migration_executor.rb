@@ -440,6 +440,8 @@ class HedgeVenueMigrationExecutor
       { error: "#{e.class}: #{e.message}" }
     end
 
+    public :prewarm_extended_source_close!
+
     def consume_prewarmed_extended(size)
       prewarmed = @prewarmed_extended
       @prewarmed_extended = nil

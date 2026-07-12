@@ -84,6 +84,11 @@ class ExtendedClosePrewarmTest < ActiveSupport::TestCase
     assert_nil result.receipt[:pre_window_warmup_started_at]
   end
 
+  test "DefaultLegRunner exposes the prewarm hook publicly (executor guard depends on it)" do
+    assert HedgeVenueMigrationExecutor::DefaultLegRunner.new(env: {}).respond_to?(:prewarm_extended_source_close!),
+      "prewarm_extended_source_close! must be public or the executor silently skips warming"
+  end
+
   test "prewarmed venue is discarded on size mismatch (fail closed to fresh reads)" do
     fake_venue = Class.new do
       attr_reader :ended
