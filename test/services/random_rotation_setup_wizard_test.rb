@@ -45,6 +45,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
         signatures_created: 1
       }
       payload.merge!(nado_target_latency_proof_fields) if to == "nado"
+    payload.merge!(double_exposure_seconds: "2", route_production_safe: true) unless to == "nado"
       writer.write(payload)
     end
     readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
@@ -345,6 +346,9 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       dir = Rails.root.join("tmp/random-rotation-wizard-#{SecureRandom.hex(4)}")
       registry = isolated_registry(base_dir: dir)
       write_dry_run_route(dir: dir, position: position, from: from, to: to)
+      # Hardened registry: reconciliation refreshes freshness but production_safe
+      # requires measured latency evidence, so seed a measured passing proof.
+      write_ready_route(dir: dir, position: position, from: from, to: to)
       position.hedge.update!(execution_venue: to)
       set_completed_readback(position, from: from, to: to, production_venue: to)
       readiness = MigrationRandomReadiness.new(position: position, proof_registry: registry).report
@@ -352,8 +356,9 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       report = RandomRotationSetupWizard.new(position: position, readiness: readiness, proof_registry: registry).report
       route = registry.report(position: position).fetch(:routes).find { |item| item[:route] == "#{from}->#{to}" }
 
-      expected_status = to == "nado" ? "NOT_PRODUCTION_SAFE_LATENCY" : "READY_FOR_RANDOM"
-      assert_equal expected_status, route.fetch(:status), "#{from}->#{to}"
+      # With a measured passing proof seeded (hardened registry requirement),
+      # every route including Nado targets is READY after reconciliation.
+      assert_equal "READY_FOR_RANDOM", route.fetch(:status), "#{from}->#{to}"
       assert_not_equal "run_live_canary", report.fetch(:next_action), "#{from}->#{to}"
       assert_equal 0, report.fetch(:counters).fetch(:orders_submitted), "#{from}->#{to}"
       assert_equal 0, report.fetch(:counters).fetch(:orders_placed), "#{from}->#{to}"
@@ -573,6 +578,7 @@ class RandomRotationSetupWizardTest < ActiveSupport::TestCase
       signatures_created: 2
     }
     payload.merge!(nado_target_latency_proof_fields) if to == "nado"
+    payload.merge!(double_exposure_seconds: "2", route_production_safe: true) unless to == "nado"
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(payload)
   end
 

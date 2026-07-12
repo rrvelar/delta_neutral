@@ -161,7 +161,10 @@ class ExtendedMainnetLifecycleCheck
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers << "EXTENDED_SIGNER_URL is required" if @env["EXTENDED_SIGNER_URL"].blank?
     blockers.concat(mode_position_blockers(mode: mode, current_position: current_position))
-    blockers << "#{mode} live probe requires open_orders_count=0" unless @venue.account_state[:open_orders_count].to_i.zero?
+    # Same open-orders safety gate, via the dedicated single-call read: the full
+    # account_state aggregate (4 reads incl. the chronically slow account-info
+    # section) sat on the close leg's double-exposure critical path (~3s).
+    blockers << "#{mode} live probe requires open_orders_count=0" unless @venue.open_orders_count.to_i.zero?
     return blockers unless mode == "open_only" || rebalance_increase?(orders.first)
 
     account_value = BigDecimal(@venue.account_state.dig(:read_only_diagnostics, :account_value_usd).to_s)

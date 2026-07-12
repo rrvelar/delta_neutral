@@ -80,7 +80,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
   test "Nado target route is not ready for production random until latency proof is present" do
     canary_dir = Rails.root.join("tmp/test-canary-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
-    write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado"))
+    write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado", latency_fields: false))
 
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: canary_dir, route_proof_dir: canary_dir, random_dir: canary_dir).report(position: position)
     route = report.fetch(:routes).find { |entry| entry[:route] == "extended->nado" }
@@ -223,7 +223,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("extended")
     MigrationLiveRouteCapability::ROUTES.each do |from, to|
-      write_event(canary_dir, live_canary_event(position: position, from: from, to: to, production_venue: from))
+      write_event(canary_dir, live_canary_event(position: position, from: from, to: to, production_venue: from, latency_fields: to != "nado"))
     end
 
     report = MigrationRouteProofRegistry.new(canary_dir: canary_dir, recovery_dir: recovery_dir, route_proof_dir: recovery_dir, random_dir: recovery_dir).report(position: position)
@@ -425,7 +425,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     recovery_dir = Rails.root.join("tmp/test-recovery-proofs-#{SecureRandom.hex(4)}")
     position = migration_position("nado")
     write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "extended", timestamp: 10.minutes.ago))
-    write_event(proof_dir, live_canary_event(position: position, from: "extended", to: "nado", timestamp: 5.minutes.ago, production_venue: "nado"))
+    write_event(proof_dir, live_canary_event(position: position, from: "extended", to: "nado", timestamp: 5.minutes.ago, production_venue: "nado", latency_fields: false))
     position.position_dashboard_snapshot.update!(
       production_venue: "nado",
       selected_venue: "nado",
@@ -623,7 +623,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     write_event(canary_dir, live_canary_event(position: position, from: "extended", to: "nado", production_venue: "nado"))
     write_event(canary_dir, live_canary_event(position: position, from: "nado", to: "extended", production_venue: "extended"))
     write_event(canary_dir, partial_nado_target_canary_event(position: position, from: "ethereal", timestamp: 10.minutes.ago))
-    write_event(recovery_dir, recovery_event(position: position, from: "ethereal", to: "nado", timestamp: 5.minutes.ago, source_already_flat: true, orders_submitted: 0, signatures_created: 0))
+    write_event(recovery_dir, recovery_event(position: position, from: "ethereal", to: "nado", timestamp: 5.minutes.ago, source_already_flat: true, orders_submitted: 0, signatures_created: 0, latency_fields: false))
     write_event(random_dir, {
       action: "random_migration_rehearsal",
       position_id: position.id,
@@ -3520,7 +3520,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     ActiveVenueAutoPolicy.new(position: position).enable_venue!(venue: production_venue, reason: "test burn-in executor finalized")
   end
 
-  def live_canary_event(position:, from:, to:, timestamp: Time.current, final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS, production_venue: to, orders_submitted: 0, signatures_created: 0)
+  def live_canary_event(position:, from:, to:, timestamp: Time.current, final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS, production_venue: to, orders_submitted: 0, signatures_created: 0, latency_fields: true)
     {
       action: "manual_live_canary",
       position_id: position.id,
@@ -3535,11 +3535,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       source_flat_after: true,
       target_holds_expected_short: true,
       open_orders_after: 0,
+      double_exposure_seconds: latency_fields ? "2" : nil,
+      underhedge_seconds: latency_fields ? "3" : nil,
+      route_production_safe: latency_fields ? true : nil,
       orders_submitted: orders_submitted,
       orders_placed: orders_submitted,
       signatures_created: signatures_created,
       timestamp: timestamp.iso8601
-    }
+    }.compact
   end
 
   def partial_canary_event(position:, from:, to:, timestamp: Time.current, orders_submitted: 2)
@@ -3563,7 +3566,7 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
     }
   end
 
-  def recovery_event(position:, from:, to:, timestamp: Time.current, source_already_flat: true, source_close_confirmed: false, orders_submitted: 0, signatures_created: 0)
+  def recovery_event(position:, from:, to:, timestamp: Time.current, source_already_flat: true, source_close_confirmed: false, orders_submitted: 0, signatures_created: 0, latency_fields: true)
     {
       action: "recover_target_first_source_close",
       position_id: position.id,
@@ -3580,11 +3583,14 @@ class MigrationRandomSystemTest < ActiveSupport::TestCase
       final_inside_tolerance: true,
       production_venue_finalized: true,
       manual_action_required: false,
+      double_exposure_seconds: latency_fields ? "2" : nil,
+      underhedge_seconds: latency_fields ? "3" : nil,
+      route_production_safe: latency_fields ? true : nil,
       orders_submitted: orders_submitted,
       orders_placed: orders_submitted,
       signatures_created: signatures_created,
       timestamp: timestamp.iso8601
-    }
+    }.compact
   end
 
   def partial_nado_target_canary_event(position:, from:, timestamp: Time.current)

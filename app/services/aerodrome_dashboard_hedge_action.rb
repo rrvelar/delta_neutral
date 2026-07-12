@@ -236,8 +236,24 @@ class AerodromeDashboardHedgeAction
     @warnings << "Active hedge is missing; preview is informational only." unless @hedge&.active?
   end
 
+  # Venue live gates for direct dashboard hedge actions. These venues previously
+  # skipped every gate check, so a manual order needed only the confirmation
+  # phrase - unsafe while other automation can be trading the same position
+  # (2026-07-12 dashboard hardening).
+  VENUE_EXECUTION_GATES = {
+    "ethereal" => %w[AERODROME_ETHEREAL_HEDGE_LIVE_ENABLED],
+    "nado" => %w[AERODROME_NADO_HEDGE_LIVE_ENABLED],
+    "extended" => %w[EXTENDED_LIVE_ENABLED EXTENDED_MAINNET_PROBE_ENABLED]
+  }.freeze
+
   def execution_gate_blockers
-    return [] if @venue_key.in?(%w[nado ethereal extended])
+    if @venue_key.in?(%w[nado ethereal extended])
+      return [] unless @execute
+
+      return VENUE_EXECUTION_GATES.fetch(@venue_key).filter_map do |key|
+        "#{key} must be true for a live #{@venue_key} dashboard hedge action" unless OperationalSettings.enabled?(key)
+      end
+    end
 
     self.class.execution_gate_blockers(
       action: @action,

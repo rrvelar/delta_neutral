@@ -805,12 +805,13 @@ class NadoHedgeExecutionService
     parsed = parse_submit_response(response)
     timing[:exchange_accept_at] = timing[:submit_finished_at] if parsed[:status] == "submitted"
     expected_short = expected_short_after(action: action, size_eth: size_eth, current_position: current_position)
+    close_execution = close_execution_confirmation(action: action, parsed: parsed, size_eth: size_eth)
     mark_timing!(timing, :readback_started_at) if parsed[:status] == "submitted"
     readback_poll = parsed[:status] == "submitted" ? poll_post_submit_readback(action: action, expected_short: expected_short) : { attempts: [], position: nil }
     mark_timing!(timing, readback_poll[:confirmed] ? :readback_confirmed_at : :readback_finished_at) if parsed[:status] == "submitted"
     post_position = readback_poll.fetch(:position)
     status = final_status(parsed, post_position: post_position, action: action, expected_short: expected_short, confirmed: readback_poll[:confirmed])
-    result(status, [], order, position, action, current_position, parsed, post_position, readback_poll, timing: timing)
+    result(status, [], order, position, action, current_position, parsed, post_position, readback_poll, timing: timing, close_execution: close_execution, order_size_eth: size_eth)
   rescue => e
     result("failed_before_submit", [ "#{e.class}: #{e.message}" ], order || {}, position, action, current_position, nil, nil, nil, timing: timing)
   end
@@ -884,9 +885,54 @@ class NadoHedgeExecutionService
     blockers.uniq
   end
 
-  def result(status, blockers, order, position, action, pre_position, submit_result, post_position, readback_poll, timing: nil)
+  # Authoritative Nado close confirmation: after a reduce-only close is accepted,
+  # confirm the digest terminally through NadoExecutionConfirmation (gateway or
+  # archive execution row — the same canonical evidence source_first Nado target
+  # opens already trust). Never confirms on submit/accept alone; anything
+  # unconfirmed/ambiguous returns nil and the flow falls back to the position
+  # readback (fail closed). Gated by NADO_CLOSE_EXECUTION_CONFIRMATION_ENABLED.
+  def close_execution_confirmation(action:, parsed:, size_eth:)
+    return nil unless action.to_s == "close"
+    return nil unless close_execution_confirmation_enabled?
+    return nil unless parsed.is_a?(Hash) && parsed[:status] == "submitted"
+    digest = parsed[:exchange_order_id].to_s
+    return nil unless valid_digest?(digest)
+    return nil unless reduce_only_order?(action: action, size_eth: size_eth)
+
+    confirmation = NadoExecutionConfirmation.confirm_digest(digest: digest, env: @env)
+    return nil unless confirmation.is_a?(Hash) && confirmation[:confirmed] == true && confirmation[:confirmed_at].present?
+
+    confirmation
+  rescue StandardError
+    nil
+  end
+
+  def close_execution_confirmation_enabled?
+    ActiveModel::Type::Boolean.new.cast(@env["NADO_CLOSE_EXECUTION_CONFIRMATION_ENABLED"])
+  end
+
+  # Executor-compatible authoritative close confirmation payload (mirrors the
+  # Ethereal/Extended close_fill_confirmation shape consumed by
+  # apply_authoritative_source_close_confirmation!).
+  def close_fill_confirmation_payload(action:, close_execution:, order:, parsed:)
+    return nil unless action.to_s == "close" && close_execution
+
+    {
+      confirmed: true,
+      source: "nado_execution_confirmation:#{close_execution[:source]}",
+      reduce_only: true,
+      confirmed_at: close_execution[:confirmed_at],
+      digest: parsed&.dig(:exchange_order_id),
+      order_status: close_execution[:status],
+      close_size_eth: order.dig(:summary, :rounded_size_eth)
+    }
+  end
+
+  def result(status, blockers, order, position, action, pre_position, submit_result, post_position, readback_poll, timing: nil, close_execution: nil, order_size_eth: nil)
     timing = finalized_timing(timing, readback_poll: readback_poll, action: action)
     receipt = {
+      close_fill_confirmation: close_fill_confirmation_payload(action: action, close_execution: close_execution, order: order, parsed: submit_result),
+      nado_close_execution_confirmation: close_execution&.slice(:status, :confirmed, :confirmed_at, :source, :digest),
       timestamp: @now.call.utc.iso8601,
       action: action,
       venue: "nado",

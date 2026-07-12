@@ -80,6 +80,25 @@ class MigrationRouteProofRegistry
     if status == STATUSES[:ready] && !route_policy_status.fetch(:enabled)
       status = STATUSES[:not_safe_latency]
     end
+    # Latency trust hardening: READY_FOR_RANDOM / production_safe require a live
+    # execution that actually carried the modern latency measurement for the
+    # route's sequence. Blank-latency wrapper events (production random cycles,
+    # continuation receipts, reconciliation receipts) still refresh proof
+    # freshness but can no longer certify a route production-safe — that masked
+    # consistently failing honest measurements (audit 2026-07-12).
+    measured_candidates = [
+      latest_event(position: position, from: from, to: to, dirs: [ canary_dir, latency_proof_dir, random_dir, route_proof_dir ]) do |event|
+        measured_latency_event?(event, route_policy_status: route_policy_status)
+      end,
+      production_cycle_events(position)
+        .select { |event| event["from_venue"] == from && event["to_venue"] == to && measured_latency_event?(event, route_policy_status: route_policy_status) }
+        .max_by { |event| event_time(event) || Time.zone.at(0) }
+    ].compact
+    measured = measured_candidates.max_by { |event| event_time(event) || Time.zone.at(0) }
+    latency_trust = latency_trust_for(status: status, proof_event: proof_event, measured: measured, route_policy_status: route_policy_status)
+    if status == STATUSES[:ready] && !latency_trust[:production_safe]
+      status = STATUSES[:not_safe_latency]
+    end
 
     {
       route: route,
@@ -103,8 +122,13 @@ class MigrationRouteProofRegistry
       route_strategy_key: route_policy_status[:strategy_key],
       route_strategy: route_policy_status[:strategy],
       migration_sequence: route_policy_status[:migration_sequence],
-      route_production_safe: production_safe_latency?(proof_event),
-      latency_proof_status: latency_proof_status(proof_event),
+      route_production_safe: latency_trust[:production_safe],
+      latency_proof_status: latency_trust[:production_safe] ? "passed" : "failed_latency_threshold",
+      latency_untrusted_reason: latency_trust[:untrusted_reason],
+      latency_evidence_receipt: receipt_ref(measured),
+      latency_evidence_timestamp: measured&.fetch("timestamp", nil),
+      measured_double_exposure_seconds: measured&.fetch("double_exposure_seconds", nil),
+      measured_underhedge_seconds: measured&.fetch("underhedge_seconds", nil),
       target_confirmation_source: proof_event&.fetch("target_confirmation_source", nil),
       source_flat_to_execution_confirmed_seconds: proof_event&.fetch("source_flat_to_execution_confirmed_seconds", nil),
       double_exposure_seconds: proof_event&.fetch("double_exposure_seconds", nil),
@@ -283,6 +307,13 @@ class MigrationRouteProofRegistry
       "orders_submitted" => execution["orders_submitted"],
       "orders_placed" => execution["orders_placed"],
       "signatures_created" => execution["signatures_created"],
+      "double_exposure_seconds" => execution["double_exposure_seconds"],
+      "underhedge_seconds" => execution["underhedge_seconds"],
+      "total_route_seconds" => execution["total_route_seconds"],
+      "double_exposure_start_source" => execution["double_exposure_start_source"],
+      "double_exposure_end_source" => execution["double_exposure_end_source"],
+      "route_production_safe" => execution["route_production_safe"],
+      "latency_incident" => execution["latency_incident"],
       "final_venue" => post["production_venue"] || event["final_production_venue"],
       "production_venue" => post["production_venue"],
       "receipt_path" => path
@@ -465,6 +496,59 @@ class MigrationRouteProofRegistry
 
   def production_safe_latency?(event)
     !latency_unsafe?(event)
+  end
+
+  REQUIRED_LATENCY_FIELD_BY_SEQUENCE = {
+    "source_first" => "underhedge_seconds",
+    "target_first" => "double_exposure_seconds"
+  }.freeze
+
+  def required_latency_field(route_policy_status)
+    sequence = (route_policy_status[:migration_sequence] || route_policy_status[:strategy]).to_s
+    REQUIRED_LATENCY_FIELD_BY_SEQUENCE.fetch(sequence, "double_exposure_seconds")
+  end
+
+  # A live-executed event that carried the modern latency measurement for the
+  # route's sequence. Dry runs and blank wrapper events never qualify as
+  # latency evidence.
+  def measured_latency_event?(event, route_policy_status:)
+    return false if truthy?(event["dry_run"])
+    return false if event[required_latency_field(route_policy_status)].blank?
+
+    live_execution_evidence?(event)
+  end
+
+  def live_execution_evidence?(event)
+    event["orders_placed"].to_i.positive? ||
+      event["orders_submitted"].to_i.positive? ||
+      clean_live_final_status?(event["final_status"]) ||
+      event["latency_incident"] == true ||
+      event["final_status"].to_s == STATUSES[:not_safe_latency]
+  end
+
+  # production_safe verdict + why it is untrusted when it is not.
+  # Reasons: legacy_missing_latency_fields (a proof exists but no live event
+  # ever measured this route), missing_double_exposure / missing_underhedge
+  # (no proof evidence at all for the sequence), production_safe_false (the
+  # freshest honest measurement fails thresholds), stale (proof freshness
+  # expired — reported even when the measurement itself passed).
+  def latency_trust_for(status:, proof_event:, measured:, route_policy_status:)
+    if measured.nil?
+      reason = if proof_event
+        "legacy_missing_latency_fields"
+      elsif required_latency_field(route_policy_status) == "underhedge_seconds"
+        "missing_underhedge"
+      else
+        "missing_double_exposure"
+      end
+      return { production_safe: false, untrusted_reason: reason }
+    end
+    return { production_safe: false, untrusted_reason: "production_safe_false" } unless production_safe_latency?(measured)
+    if proof_event && latency_unsafe?(proof_event) && later_than?(proof_event, measured)
+      return { production_safe: false, untrusted_reason: "production_safe_false" }
+    end
+
+    { production_safe: true, untrusted_reason: (status == STATUSES[:stale] ? "stale" : nil) }
   end
 
   def latency_unsafe?(event)

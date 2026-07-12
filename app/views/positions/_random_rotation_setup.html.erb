@@ -232,6 +232,10 @@
 
     <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
       <p class="text-xs uppercase tracking-wide text-gray-500">Operational gates</p>
+      <% runner_lifecycle_active = local_assigns.fetch(:random_production_running, false) %>
+      <% if runner_lifecycle_active %>
+        <p class="mt-1 text-[11px] text-yellow-200">Runner is active: MIGRATION_* gates shown "on" are armed by the runner lifecycle (auto-disarmed on runner exit), not by a manual operator arm.</p>
+      <% end %>
       <div class="mt-2 space-y-1 text-xs">
         <% (setup[:migration_gates] || {}).each do |key, gate| %>
           <p class="flex justify-between gap-2"><span class="text-gray-400"><%= key %></span><span class="<%= gate[:enabled] ? 'text-green-300' : 'text-gray-500' %>"><%= gate[:enabled] ? "on" : "off" %></span></p>

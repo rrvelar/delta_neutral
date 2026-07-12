@@ -606,10 +606,10 @@ end %>
         <details class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
           <summary class="cursor-pointer text-sm font-semibold text-white">Advanced / legacy diagnostics: setup wizard and route matrix are diagnostic only</summary>
           <p class="mt-2 text-xs text-gray-400">Production runner status and route proofs above are authoritative for 24/7 operation.</p>
-          <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
+          <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status, random_production_running: defined?(random_production_running) ? random_production_running : @random_production_runner_status&.dig(:status).to_s == "running" %>
         </details>
       <% else %>
-        <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status %>
+        <%= render "random_rotation_setup", position: @position, setup: @random_rotation_setup, production_runner: @random_production_runner_status, random_production_running: defined?(random_production_running) ? random_production_running : @random_production_runner_status&.dig(:status).to_s == "running" %>
       <% end %>
 
       <% random_production_tail_visible = ActiveModel::Type::Boolean.new.cast(params[:show_random_production_tail]) %>
@@ -623,7 +623,7 @@ end %>
             <h3 class="mt-1 text-base font-semibold text-white">24/7 random rotation control</h3>
             <p class="mt-1 text-xs text-gray-400">Dashboard controls submit systemd start/stop requests only. The web request does not run the production loop. Policy: 3 migrations/day with 5-minute hold checks.</p>
             <% if random_production_running %>
-              <p class="mt-2 rounded-lg border border-green-900 bg-green-950/30 px-3 py-2 text-xs text-green-100">Already running. Use Stop Safely only if needed.</p>
+              <p class="mt-2 rounded-lg border border-green-900 bg-green-950/30 px-3 py-2 text-xs text-green-100">Already running. Use Request Stop After Current Cycle only if needed.</p>
             <% end %>
           </div>
           <span class="rounded-full border <%= random_production_status == 'running' ? 'border-green-800 bg-green-950/60 text-green-300' : (random_production_status.in?([ 'blocked', 'stale lock' ]) ? 'border-red-800 bg-red-950/50 text-red-100' : 'border-gray-700 bg-gray-900 text-gray-300') %> px-3 py-1 text-xs font-semibold"><%= random_production_status %></span>
@@ -714,7 +714,12 @@ end %>
             <% end %>
           <% end %>
           <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
-            <%= button_to "Stop Safely", random_production_stop_position_path(@position), method: :post, class: "w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            <%= form_with url: random_production_stop_position_path(@position), method: :post do |form| %>
+              <p class="text-[11px] text-gray-400">Stop = request stop after the current cycle completes; the runner never stops mid-leg. Type the exact phrase:</p>
+              <code class="mt-1 block break-all rounded border border-gray-800 bg-black/30 p-2 text-[11px] text-gray-300"><%= PositionsController::RANDOM_PRODUCTION_STOP_CONFIRMATION %></code>
+              <%= form.text_field :random_production_stop_confirmation, autocomplete: "off", placeholder: PositionsController::RANDOM_PRODUCTION_STOP_CONFIRMATION, class: "mt-2 w-full rounded-lg border border-gray-700 bg-gray-950 px-2 py-2 text-xs text-white placeholder-gray-600" %>
+              <%= form.submit "Request Stop After Current Cycle", class: "mt-2 w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
+            <% end %>
             <%= button_to "Refresh Status", random_production_refresh_position_path(@position), method: :post, class: "mt-2 w-full rounded-lg bg-gray-800 px-3 py-2 text-xs font-medium text-gray-100 hover:bg-gray-700" %>
             <%= link_to "View Tail", position_path(@position, tab: "migration", show_random_production_tail: true), class: "mt-2 block rounded-lg bg-gray-800 px-3 py-2 text-center text-xs font-medium text-gray-100 hover:bg-gray-700" %>
           </div>

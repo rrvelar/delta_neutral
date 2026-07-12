@@ -655,6 +655,7 @@ module HedgeVenues
 
       orders.size
     end
+    public :open_orders_count
 
     def normalize_position_row(row)
       source = row.to_h.with_indifferent_access

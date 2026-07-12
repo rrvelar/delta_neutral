@@ -125,7 +125,9 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      mark_time!(receipt, :final_all_venue_verification_at)
       record_source_close_position_readback_time!(receipt, second_leg) if receipt[:source_flat_after]
+      receipt[:final_position_readback_confirmed_at] = receipt[:source_close_position_readback_confirmed_at]
       apply_authoritative_source_close_confirmation!(receipt, second_leg)
       record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
@@ -384,7 +386,7 @@ class HedgeVenueMigrationExecutor
       venue = @venue_builder.build("extended", env: env)
       with_extended_read_snapshot(venue) do
         service = ExtendedHedgeExecutionService.new(venue: venue)
-        current = venue.read_position(symbol: "ETH")
+        current = frozen_source_position_for(leg, context, venue_key: "extended") || venue.read_position(symbol: "ETH")
         result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
         normalize_service_result(result, leg)
       end
@@ -415,8 +417,12 @@ class HedgeVenueMigrationExecutor
     # missing/mismatched signal returns nil -> caller reads fresh (fail-closed to existing
     # behavior). Never confirms the close from this snapshot.
     def frozen_ethereal_source_position(leg, context)
+      frozen_source_position_for(leg, context, venue_key: "ethereal")
+    end
+
+    def frozen_source_position_for(leg, context, venue_key:)
       return nil unless close_to_flat_leg?(leg)
-      return nil unless leg.fetch(:venue).to_s == "ethereal"
+      return nil unless leg.fetch(:venue).to_s == venue_key
 
       receipt = context[:receipt]
       return nil unless receipt.is_a?(Hash)
@@ -424,18 +430,22 @@ class HedgeVenueMigrationExecutor
 
       proof = receipt[:frozen_source_position]
       return nil unless proof.is_a?(Hash) && proof[:invariants_proven] == true
-      return nil unless proof[:source_venue].to_s == "ethereal"
+      return nil unless proof[:source_venue].to_s == venue_key
 
       frozen = frozen_decimal(proof[:short_size])
       planned = frozen_decimal(leg[:size_eth])
       return nil unless frozen&.positive? && planned&.positive?
       return nil unless (frozen - planned).abs <= FROZEN_SOURCE_SIZE_TOLERANCE
 
-      {
-        venue: "Ethereal", symbol: "ETH-PERP", market_symbol: "ETH-PERP",
+      base = {
         side: "short", size: (-frozen).to_s("F"), short_size: frozen.to_s("F"),
         margin_mode: "cross", frozen_source_position: true
       }
+      if venue_key == "ethereal"
+        base.merge(venue: "Ethereal", symbol: "ETH-PERP", market_symbol: "ETH-PERP")
+      else
+        base.merge(venue: "Extended", symbol: "ETH", market_symbol: "ETH-USD")
+      end
     end
 
     def frozen_decimal(value)
@@ -709,7 +719,9 @@ class HedgeVenueMigrationExecutor
     receipt[:source_late_reconciliation] = late_reconciled?(second_leg)
     if leg_confirmed?(second_leg) || leg_order_count(second_leg).positive?
       receipt.merge!(final_readback_status(position: position, receipt: receipt))
+      mark_time!(receipt, :final_all_venue_verification_at)
       record_source_close_position_readback_time!(receipt, second_leg) if receipt[:source_flat_after]
+      receipt[:final_position_readback_confirmed_at] = receipt[:source_close_position_readback_confirmed_at]
       apply_authoritative_source_close_confirmation!(receipt, second_leg)
       record_target_open_fill_agreement!(receipt)
       compute_source_close_latency!(receipt)
@@ -816,8 +828,11 @@ class HedgeVenueMigrationExecutor
       receipt[:source_close_confirmation_source] = fill[:source]
       receipt[:source_close_fill_confirmed_at] = fill[:confirmed_at]
       receipt[:source_close_fill_readback_agreement] = true
+      receipt[:source_close_authoritative_confirmed_at] = fill[:confirmed_at]
+      receipt[:source_close_authoritative_confirmation_agreement] = true
       receipt[:source_close_flat_confirmed_at] = fill[:confirmed_at]
-      receipt[:double_exposure_end_source] = "authoritative_fill"
+      receipt[:double_exposure_end_source] = fill[:source].to_s.start_with?("nado") ? fill[:source] : "authoritative_fill"
+      apply_nado_close_confirmation_fields!(receipt, fill)
       return
     end
 
@@ -827,11 +842,25 @@ class HedgeVenueMigrationExecutor
       receipt[:source_close_confirmation_source] = fill[:source]
       receipt[:source_close_fill_confirmed_at] = fill[:confirmed_at]
       receipt[:source_close_fill_readback_agreement] = false
+      receipt[:source_close_authoritative_confirmed_at] = fill[:confirmed_at]
+      receipt[:source_close_authoritative_confirmation_agreement] = false
+      apply_nado_close_confirmation_fields!(receipt, fill)
     else
       receipt[:source_close_confirmation_source] = "position_readback"
     end
     receipt[:source_close_flat_confirmed_at] = position_ts if receipt[:source_flat_after]
     receipt[:double_exposure_end_source] = "position_readback"
+  end
+
+  # Surfaces the Nado terminal-execution evidence in the mandated receipt fields
+  # when the authoritative close confirmation came from Nado.
+  def apply_nado_close_confirmation_fields!(receipt, fill)
+    return unless fill[:source].to_s.start_with?("nado")
+
+    receipt[:nado_close_confirmation_source] = fill[:source]
+    receipt[:nado_close_tx_hash] = fill[:digest]
+    receipt[:nado_close_tx_status] = fill[:order_status]
+    receipt[:nado_close_tx_confirmed_at] = fill[:confirmed_at]
   end
 
   # For target_first migrations, START the overhedge window at the authoritative

@@ -5,6 +5,16 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
     position = position_with_snapshot("ethereal")
     dir = Rails.root.join("tmp/route-proof-registry-#{SecureRandom.hex(4)}")
     registry = registry_for(dir)
+    # Hardened registry: the reconciliation receipt refreshes the proof, but
+    # production_safe requires a measured live event for the route.
+    HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
+      action: "manual_live_canary", timestamp: 2.hours.ago.utc.iso8601, position_id: position.id,
+      from_venue: "extended", to_venue: "ethereal", final_status: MigrationLiveCanaryChecker::CONFIRMED_STATUS,
+      target_leg_readback_confirmed: true, source_leg_readback_confirmed: true, final_inside_tolerance: true,
+      source_flat_after: true, target_holds_expected_short: true, open_orders_after: 0,
+      production_venue_finalized: true, route_production_safe: true, double_exposure_seconds: "2",
+      orders_submitted: 1, orders_placed: 1, signatures_created: 1
+    )
     HedgeVenueMigrationReceiptWriter.new(receipt_dir: dir.join("canaries")).write(
       action: "manual_live_canary",
       timestamp: Time.current.utc.iso8601,
@@ -433,6 +443,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       open_orders_after: 0,
       production_venue_finalized: true,
       route_production_safe: true,
+      double_exposure_seconds: "2",
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
@@ -487,6 +498,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       open_orders_after: 0,
       production_venue_finalized: true,
       route_production_safe: true,
+      double_exposure_seconds: "2",
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
@@ -536,6 +548,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       open_orders_after: 0,
       production_venue_finalized: true,
       route_production_safe: true,
+      double_exposure_seconds: "2",
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
@@ -605,6 +618,7 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       open_orders_after: 0,
       production_venue_finalized: true,
       route_production_safe: true,
+      double_exposure_seconds: "2",
       orders_submitted: 2,
       orders_placed: 2,
       signatures_created: 2
@@ -857,6 +871,10 @@ class MigrationRouteProofRegistryTest < ActiveSupport::TestCase
       "open_orders_after" => 0,
       "final_inside_tolerance" => true,
       "production_venue_finalized" => true,
+      "double_exposure_seconds" => "2",
+      "underhedge_seconds" => "3",
+      "total_route_seconds" => "20",
+      "route_production_safe" => true,
       "manual_action_required" => false,
       "orders_submitted" => 1,
       "orders_placed" => 1,

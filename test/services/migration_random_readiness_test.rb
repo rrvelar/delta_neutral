@@ -143,6 +143,9 @@ class MigrationRandomReadinessTest < ActiveSupport::TestCase
         final_inside_tolerance: true,
         production_venue_finalized: true,
         manual_action_required: false,
+        double_exposure_seconds: "2",
+        underhedge_seconds: "3",
+        route_production_safe: true,
         orders_submitted: 1,
         signatures_created: 1
       },

@@ -5,6 +5,19 @@ require "timeout"
 # All queries are scoped to {Current.user} to prevent cross-user data access.
 class PositionsController < ApplicationController
   around_action :log_position_show_total, only: :show
+  # 2026-07-12 hardening: manual live/operator endpoints are rejected server-side
+  # while the production runner is active for the position, regardless of gate
+  # state (the runner arms the global MIGRATION_* gates for its own lifecycle,
+  # which previously left these paths open to an operator with the phrase).
+  MANUAL_LIVE_ACTIONS = %i[
+    hedge_open hedge_rebalance hedge_close
+    migration_run migration_finalize migration_cancel
+    random_rotation_live_canary random_rotation_move_to_source
+    random_rotation_continue random_rotation_finalize random_rotation_cancel
+    random_rotation_enable hedge_emergency_restore auto_rebalance
+  ].freeze
+  RANDOM_PRODUCTION_STOP_CONFIRMATION = "REQUEST_STOP_AFTER_CURRENT_CYCLE".freeze
+  before_action :reject_manual_live_actions_while_runner_active, only: MANUAL_LIVE_ACTIONS
   # GET /positions
   #
   # Lists all active positions for the current user, eager-loading the
@@ -542,9 +555,24 @@ class PositionsController < ApplicationController
 
   def random_production_stop
     position = load_position_for_migration
+    unless params[:random_production_stop_confirmation].to_s == RANDOM_PRODUCTION_STOP_CONFIRMATION
+      return redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+        alert: "Stop requires the exact confirmation #{RANDOM_PRODUCTION_STOP_CONFIRMATION}. Stop means: request stop after the current cycle completes - never mid-leg."
+    end
+
+    was_running = begin
+      MigrationRandomProductionRunner.new(position: position, trap_signals: false).process_active?
+    rescue StandardError
+      nil
+    end
     result = random_production_control.stop(position: position)
+    running_note = case was_running
+    when true then "Runner was running; it will stop after the current cycle (never mid-leg)."
+    when false then "No runner process was running; the stop request recorded a no-op safeguard."
+    else "Runner state was unknown at request time."
+    end
     level = result.ok ? :notice : :alert
-    message = result.ok ? "Production random runner safe stop requested. No orders, signatures, or cancels were created by the dashboard request." : "Production random runner stop request failed: #{result.message}"
+    message = result.ok ? "Production random runner stop-after-current-cycle requested. #{running_note} No orders, signatures, or cancels were created by the dashboard request." : "Production random runner stop request failed: #{result.message}"
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
       flash: { level => message }
   end
@@ -617,6 +645,19 @@ class PositionsController < ApplicationController
     yield
   ensure
     log_dashboard_section_duration(name, started)
+  end
+
+  def reject_manual_live_actions_while_runner_active
+    position = Position.find(params[:id])
+    active = begin
+      MigrationRandomProductionRunner.new(position: position, trap_signals: false).process_active?
+    rescue StandardError
+      true # fail closed: unknown runner state blocks manual live actions
+    end
+    return unless active
+
+    redirect_to position_path(position),
+      alert: "Manual live actions are blocked while the production runner is active for this position (server-side fail-closed guard)."
   end
 
   def load_position_for_migration

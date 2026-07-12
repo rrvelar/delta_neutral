@@ -30,7 +30,7 @@
   <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs <%= freshness[:stale] ? 'text-yellow-200' : 'text-gray-400' %>">
     <span>Source: <%= freshness[:source] %></span>
     <span>Status written: <%= freshness[:updated_at_text] %> (<%= freshness[:age_text] %>)</span>
-    <span class="font-semibold"><%= freshness[:stale] ? "STALE — runner status file is older than expected" : "FRESH" %></span>
+    <span class="font-semibold"><%= freshness[:stale] ? "STALE — runner status file is older than expected; ALL numbers on this page may be outdated" : "FRESH" %></span>
     <span class="<%= vm[:market_safe] == true ? 'text-green-300' : (vm[:market_safe] == false ? 'text-red-300' : 'text-yellow-200') %>">Direct market safe: <%= vm[:market_safe].nil? ? "unknown" : (vm[:market_safe] ? "yes" : "no") %></span>
   </div>
 

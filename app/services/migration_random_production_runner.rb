@@ -96,6 +96,12 @@ class MigrationRandomProductionRunner
     result("failed", [ "#{e.class}: #{e.message}" ])
   end
 
+  # Lightweight liveness check for dashboard guards: lock/pid + process table
+  # only - no venue reads, safe to call on every controller request.
+  def process_active?
+    lock_running? || duplicate_runner_process_running?
+  end
+
   def status
     direct = direct_report
     direct_open_orders_payload = direct_open_orders(direct)
@@ -149,7 +155,92 @@ class MigrationRandomProductionRunner
       stale_heartbeat: stale_heartbeat,
       blockers: status_blockers(effective_status, direct, confirmed_active, unknown_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
+    }.merge(post_stop_operability(effective_status, direct, confirmed_active, unknown_venues))
+  end
+
+  # ---- 2026-07-12 post-stop status layer -------------------------------------
+  # Explains WHY the runner is stopped and what repair is eligible, so a
+  # fail-closed stop no longer requires manual receipt archaeology. Read-only:
+  # nothing here trades or restarts; the auto-recovery flags default to false
+  # and are surfaced only so operators can see them.
+  AUTO_RECOVERY_FLAG_KEYS = %w[
+    MIGRATION_AUTO_RECOVER_STOPPED_OUT_OF_TOLERANCE
+    MIGRATION_AUTO_RESTART_AFTER_SAFE_RECOVERY
+    MIGRATION_AUTO_REFRESH_STALE_PROOFS
+  ].freeze
+  PROOF_STALE_AFTER = 30.days
+  PROOF_EXPIRY_WARNING_WINDOW = 48.hours
+
+  def post_stop_operability(effective_status, direct, confirmed_active, unknown_venues)
+    blockers = status_blockers(effective_status, direct, confirmed_active, unknown_venues)
+    {
+      stopped_state_classification: stopped_state_classification(effective_status, blockers, confirmed_active, unknown_venues),
+      repair_eligibility: repair_eligibility(effective_status, direct, confirmed_active, blockers),
+      route_proofs_expiring_soon: route_proofs_expiring_soon(direct),
+      last_stop_request: last_stop_request_payload,
+      auto_recovery_flags: AUTO_RECOVERY_FLAG_KEYS.to_h { |key| [ key, ActiveModel::Type::Boolean.new.cast(env[key]) == true ] }
     }
+  rescue StandardError => e
+    { stopped_state_classification: "unsafe_unknown", post_stop_operability_error: "#{e.class}: #{e.message}" }
+  end
+
+  def stopped_state_classification(status, blockers, confirmed_active, unknown_venues)
+    return nil if status.to_s == "running"
+    return "unsafe_unknown" if unknown_venues.any? || confirmed_active.size > 1
+    return "operator_stop" if last_stop_request_payload.present?
+
+    latest = latest_event_from_log || {}
+    blocker_status = latest["blocker_status"].to_s
+    return "recovered_after_direct_market_safe_preflight" if blocker_status == "recovered_after_direct_market_safe_preflight"
+    return "stopped_active_rebalance" if blocker_status == "stopped_active_rebalance" || latest["status"].to_s == "stopped_active_rebalance"
+
+    tolerance_blockers, other_blockers = Array(blockers).partition { |blocker| blocker.to_s.include?("out_of_burn_in_tolerance") }
+    proof_blockers, other_blockers = other_blockers.partition { |blocker| route_proof_restart_blocker?(blocker) }
+    return "tolerance_only_block" if tolerance_blockers.any? && other_blockers.empty? && proof_blockers.empty?
+    return "proof_stale_block" if proof_blockers.any? && other_blockers.empty?
+    return "internal_fail_closed_stop" if latest["status"].to_s == "stopped" && Array(latest["blockers"]).any?
+
+    "stopped_clean"
+  end
+
+  def repair_eligibility(status, direct, confirmed_active, blockers)
+    stopped = status.to_s != "running"
+    one_leg = confirmed_active.one?
+    orders_zero = direct_open_orders_zero?(direct)
+    inside = direct[:inside_tolerance] == true
+    proof_blocked = Array(blockers).any? { |blocker| route_proof_restart_blocker?(blocker) }
+    {
+      eligible_for_same_venue_rebalance_when_stopped: stopped && one_leg && orders_zero && !inside,
+      eligible_for_proof_refresh: stopped && one_leg && orders_zero && inside && proof_blocked,
+      eligible_for_restart: stopped && Array(blockers).empty?,
+      blocked_reason: Array(blockers).first
+    }
+  end
+
+  def route_proofs_expiring_soon(direct)
+    routes = Array(direct.dig(:proof_report, :routes))
+    return { warning: false, routes: [], next_proof_expiry: nil } if routes.empty?
+
+    horizon = now.call + PROOF_EXPIRY_WARNING_WINDOW
+    expiring = routes.filter_map do |route|
+      timestamp = Time.zone.parse(route[:proof_timestamp].to_s) rescue nil
+      next unless timestamp
+      expiry = timestamp + PROOF_STALE_AFTER
+      { route: route[:route], proof_timestamp: route[:proof_timestamp], expires_at: expiry.utc.iso8601 } if expiry <= horizon
+    end
+    next_expiry = routes.filter_map { |route| (Time.zone.parse(route[:proof_timestamp].to_s) + PROOF_STALE_AFTER rescue nil) }.min
+    { warning: expiring.any?, routes: expiring, next_proof_expiry: next_expiry&.utc&.iso8601 }
+  end
+
+  def last_stop_request_payload
+    candidates = [ stop_path, Pathname(LOG_DIR).join("control_position_#{position.id}.json") ]
+    candidates.filter_map do |path|
+      next unless File.exist?(path)
+      payload = JSON.parse(File.read(path)) rescue nil
+      next unless payload.is_a?(Hash)
+      next unless path.to_s.include?("control_") ? payload["action"].to_s == "stop" : true
+      payload.merge("source_file" => File.basename(path.to_s))
+    end.max_by { |payload| payload["requested_at"].to_s }
   end
 
   def stop!

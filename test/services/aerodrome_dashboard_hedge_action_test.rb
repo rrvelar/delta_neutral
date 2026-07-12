@@ -367,6 +367,8 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     service = ExtendedServiceStub.new(status: "success", readback_short: "2.268371052741099")
 
     with_env(@env.merge(
+      "EXTENDED_LIVE_ENABLED" => "true",
+      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
       "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",
@@ -416,6 +418,8 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     service = ExtendedServiceStub.new(status: "success", readback_short: "2.268371052741099")
 
     with_env(@env.merge(
+      "EXTENDED_LIVE_ENABLED" => "true",
+      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
       "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",
@@ -450,6 +454,8 @@ class AerodromeDashboardHedgeActionTest < ActiveSupport::TestCase
     service = ExtendedServiceStub.new(status: "underfilled", readback_short: "0.01", readback_delta: "-2.26")
 
     with_env(@env.merge(
+      "EXTENDED_LIVE_ENABLED" => "true",
+      "EXTENDED_MAINNET_PROBE_ENABLED" => "true",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_ETH" => "3.9",
       "AERODROME_PRODUCTION_HARD_MAX_SHORT_NOTIONAL_USD" => "6500",
       "AERODROME_PRODUCTION_HARD_MAX_ORDER_SIZE_ETH" => "3.9",

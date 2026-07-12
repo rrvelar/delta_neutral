@@ -436,6 +436,18 @@ class MigrationRandomBurnInRunner
       final_inside_tolerance: receipt[:final_inside_tolerance],
       production_venue_finalized: receipt[:production_venue_finalized],
       manual_action_required: receipt[:manual_action_required]
+    ).merge(
+      # Modern latency evidence must travel with the cycle wrapper: the proof
+      # registry no longer trusts blank-latency cycle events as production-safe
+      # (2026-07-12 hardening), so a cycle can only certify a route when its
+      # honest measurements are present here.
+      double_exposure_seconds: receipt[:double_exposure_seconds],
+      underhedge_seconds: receipt[:underhedge_seconds],
+      total_route_seconds: receipt[:total_route_seconds] || receipt[:total_migration_latency_seconds],
+      double_exposure_start_source: receipt[:double_exposure_start_source],
+      double_exposure_end_source: receipt[:double_exposure_end_source],
+      route_production_safe: receipt[:route_production_safe],
+      latency_incident: receipt[:latency_incident]
     ).compact
   end
 

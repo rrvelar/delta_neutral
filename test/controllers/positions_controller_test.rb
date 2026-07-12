@@ -791,7 +791,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "6/6 READY_FOR_RANDOM", response.body
     assert_match "Start 24h Canary", response.body
     assert_match "Start 24/7 Production", response.body
-    assert_match "Stop Safely", response.body
+    assert_match "Request Stop After Current Cycle", response.body
   ensure
     clear_random_production_files(position&.id)
   end
@@ -932,7 +932,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     get position_path(position, tab: "migration")
 
     assert_response :success
-    assert_match "Already running. Use Stop Safely only if needed.", response.body
+    assert_match "Already running. Use Request Stop After Current Cycle only if needed.", response.body
     assert_select "input[value='Start 24h Canary'][disabled]"
     assert_select "input[value='Start 24/7 Production'][disabled]"
   ensure
@@ -1288,12 +1288,12 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     control = random_production_control_guard(ok: true)
 
     MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_stop_position_path(position)
+      post random_production_stop_position_path(position), params: { random_production_stop_confirmation: "REQUEST_STOP_AFTER_CURRENT_CYCLE" }
     end
 
     assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
     assert_equal [ [ :stop, position.id ] ], control.calls
-    assert_match "safe stop requested", flash[:notice]
+    assert_match "stop-after-current-cycle requested", flash[:notice]
   end
 
   test "production random stop writes bridge stop action and stop request" do
@@ -1301,7 +1301,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
     MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_stop_position_path(position)
+      post random_production_stop_position_path(position), params: { random_production_stop_confirmation: "REQUEST_STOP_AFTER_CURRENT_CYCLE" }
     end
 
     control_payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
@@ -1349,7 +1349,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Production Random Runner", response.body
     assert_match "unavailable", response.body
     assert_match "Start 24h Canary", response.body
-    assert_match "Stop Safely", response.body
+    assert_match "Request Stop After Current Cycle", response.body
   ensure
     clear_random_production_files(position&.id)
   end

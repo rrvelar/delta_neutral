@@ -94,11 +94,12 @@ class MigrationManualLiveCanaryRunner
   # flat readback still read fresh. Fail-closed on any error.
   def frozen_source_position_proof(position:, plan:, from:, sequence:)
     return nil unless sequence.to_s == "target_first"
-    return nil unless from.to_s == "ethereal"
+    return nil unless %w[ethereal extended].include?(from.to_s)
     return nil unless plan[:open_orders_status].to_s == "zero"
     return nil unless plan[:exposure_stale] == false
     return nil unless migration_db_gates_armed?
-    return nil if OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", env: env)
+    source_auto_key = OperationalSettings.auto_key_for(from.to_s)
+    return nil if source_auto_key.blank? || OperationalSettings.enabled?(source_auto_key, env: env)
     return nil unless production_runner_inactive?(position)
 
     size = frozen_decimal(plan.dig(:planned_second_leg, :size_eth)) || frozen_decimal(plan[:current_source_short])
@@ -109,7 +110,7 @@ class MigrationManualLiveCanaryRunner
       short_size: size.to_s("F"),
       invariants_proven: true,
       confirmed_at: plan[:source_snapshot_refreshed_at],
-      reason: "target_first ethereal canary invariants proven: gates armed, ethereal source auto paused, open orders zero, runner inactive, fresh source snapshot"
+      reason: "target_first #{from} canary invariants proven: gates armed, source auto paused, open orders zero, runner inactive, fresh source snapshot"
     }
   rescue StandardError
     nil
@@ -204,6 +205,14 @@ class MigrationManualLiveCanaryRunner
       source_close_position_readback_confirmed_at: receipt[:source_close_position_readback_confirmed_at],
       target_open_fill_readback_agreement: receipt[:target_open_fill_readback_agreement],
       source_close_fill_readback_agreement: receipt[:source_close_fill_readback_agreement],
+      source_close_authoritative_confirmed_at: receipt[:source_close_authoritative_confirmed_at],
+      source_close_authoritative_confirmation_agreement: receipt[:source_close_authoritative_confirmation_agreement],
+      nado_close_confirmation_source: receipt[:nado_close_confirmation_source],
+      nado_close_tx_hash: receipt[:nado_close_tx_hash],
+      nado_close_tx_status: receipt[:nado_close_tx_status],
+      nado_close_tx_confirmed_at: receipt[:nado_close_tx_confirmed_at],
+      final_position_readback_confirmed_at: receipt[:final_position_readback_confirmed_at],
+      final_all_venue_verification_at: receipt[:final_all_venue_verification_at],
       target_total_latency_seconds: receipt[:target_total_latency_seconds],
       source_close_total_latency_seconds: receipt[:source_close_total_latency_seconds],
       total_migration_latency_seconds: receipt[:total_migration_latency_seconds],
