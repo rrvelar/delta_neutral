@@ -57,6 +57,31 @@ class ManualLiveActionRunnerGuardTest < ActionDispatch::IntegrationTest
     assert_match(/No runner process was running|Runner was running|Runner state was unknown/, [ flash[:notice], flash[:alert] ].join(" "))
   end
 
+  test "stale runner status file is auto-refreshed for the rendered production control center" do
+    dir = MigrationRandomProductionRunner::LOG_DIR
+    FileUtils.mkdir_p(dir)
+    status_path = Pathname(dir).join("status_position_#{@position.id}.json")
+    File.write(status_path, JSON.pretty_generate(
+      runner: "random_production_runner", status: "stopped",
+      updated_at: "2026-07-11T16:39:00Z",
+      blockers: [ "all enabled route proofs must be READY_FOR_RANDOM" ],
+      current_production_venue: "nado",
+      direct_venue_shorts: { nado: "1.607", ethereal: "0.0", extended: "0.0" }
+    ))
+
+    get position_path(@position)
+
+    assert_response :success
+    # The panel must not render the 20h-old file as current truth: the dashboard
+    # auto-refreshes it through the live authoritative status service.
+    assert_match(/live authoritative status \(auto-refreshed/, response.body)
+    refute_match(/STALE — runner status file is older than expected/, response.body)
+    refreshed = JSON.parse(File.read(status_path))
+    assert_operator Time.zone.parse(refreshed["updated_at"]), :>, 5.minutes.ago
+  ensure
+    FileUtils.rm_f(status_path) if status_path
+  end
+
   private
 
   # Simulates an active runner via its lock file (the same signal process_active?
@@ -84,6 +109,14 @@ class ManualLiveActionRunnerGuardTest < ActionDispatch::IntegrationTest
       external_id: SecureRandom.hex(6), pool_address: "0x#{SecureRandom.hex(20)}", active: true
     )
     position.create_hedge!(target: "1.0", tolerance: "0.05", active: true, execution_venue: "ethereal")
+    position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current, refresh_status: "ok", stale: false,
+      production_venue: "ethereal", selected_venue: "ethereal",
+      target_short_eth: "1", tolerance_abs_eth: "0.05",
+      combined_short_eth: "1", drift_eth: "0", inside_tolerance: true,
+      extended_short_eth: "0", ethereal_short_eth: "1", nado_short_eth: "0",
+      signer_status: "ok"
+    )
     position
   end
 end

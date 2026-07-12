@@ -102,6 +102,21 @@ class MigrationRandomProductionRunner
     lock_running? || duplicate_runner_process_running?
   end
 
+  # Refreshes the persisted status file from a fresh authoritative read (the
+  # same computation behind migration:random_production_status), so the
+  # Production Control Center never renders a stale stopped-runner file as
+  # current truth. Only when no runner process is active - a live runner owns
+  # the file. Fail-closed: errors leave the file untouched and are reported.
+  def refresh_status_file!
+    return { refreshed: false, reason: "runner_process_active" } if process_active?
+
+    live = status
+    write_status(status: live[:status], blockers: live[:blockers])
+    { refreshed: true, status: live[:status], blockers: live[:blockers] }
+  rescue StandardError => e
+    { refreshed: false, reason: "#{e.class}: #{e.message}" }
+  end
+
   def status
     direct = direct_report
     direct_open_orders_payload = direct_open_orders(direct)

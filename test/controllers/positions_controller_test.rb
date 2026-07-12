@@ -1364,7 +1364,7 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
       end
     end
 
-    with_env("POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01") do
+    with_env("POSITIONS_DASHBOARD_SECTION_TIMEOUT_SECONDS" => "0.01", "POSITIONS_RANDOM_PRODUCTION_DASHBOARD_TIMEOUT_SECONDS" => "0.01") do
       MigrationRandomProductionDashboard.stub(:new, ->(*) { slow_dashboard.new }) do
         get position_path(position, tab: "migration")
       end

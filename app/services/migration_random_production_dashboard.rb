@@ -1,14 +1,35 @@
 class MigrationRandomProductionDashboard
   DEFAULT_TAIL_LINES = 300
 
-  def initialize(position:, log_dir: MigrationRandomProductionRunner::LOG_DIR, preflight_factory: nil)
+  def initialize(position:, log_dir: MigrationRandomProductionRunner::LOG_DIR, preflight_factory: nil, runner_factory: nil)
     @position = position
     @log_dir = Pathname(log_dir)
     @preflight_factory = preflight_factory
+    @runner_factory = runner_factory
   end
 
-  def report(tail_lines: DEFAULT_TAIL_LINES)
+  def report(tail_lines: DEFAULT_TAIL_LINES, refresh_when_stale: true)
     status = read_json(status_path)
+    @status_source = "runner status file (read-only)"
+    # A stale stopped-runner status file must never override fresh authoritative
+    # state: when the file is stale and no runner process is active, recompute
+    # the live status (same service as migration:random_production_status) and
+    # write it through to the file. Fail-closed: if the live refresh fails or is
+    # not allowed here (fast polling endpoint), the stale file is kept but
+    # clearly labeled so blockers read as historical.
+    if status_file_stale?(status) && !runner_for_refresh.process_active?
+      if refresh_when_stale
+        refresh = runner_for_refresh.refresh_status_file!
+        if refresh[:refreshed]
+          status = read_json(status_path)
+          @status_source = "live authoritative status (auto-refreshed; previous file was stale)"
+        else
+          @status_source = "runner status file (STALE — live refresh failed: #{refresh[:reason]}; blockers shown are historical, not current)"
+        end
+      else
+        @status_source = "runner status file (STALE — reload the page or press Refresh Status for authoritative state; blockers shown are historical, not current)"
+      end
+    end
     heartbeat = read_json(heartbeat_path)
     lock = read_json(lock_path)
     control_request = read_json(control_path)
@@ -28,6 +49,7 @@ class MigrationRandomProductionDashboard
 
     {
       status: display_status(status: status, heartbeat: heartbeat, lock: lock),
+      status_source: @status_source,
       current_direct_market_safe: status["current_direct_market_safe"],
       status_updated_at: status["updated_at"],
       heartbeat_started_at: heartbeat["started_at"],
@@ -316,6 +338,29 @@ class MigrationRandomProductionDashboard
     return false unless payload.is_a?(Hash)
 
     payload.values.any? { |enabled| ActiveModel::Type::Boolean.new.cast(enabled) }
+  end
+
+  def runner_for_refresh
+    @runner_for_refresh ||= if @runner_factory
+      @runner_factory.call(position: position)
+    else
+      MigrationRandomProductionRunner.new(position: position, trap_signals: false)
+    end
+  end
+
+  # Only a real stale artifact triggers the live auto-refresh: a status file
+  # that exists with a parseable updated_at older than the heartbeat staleness
+  # window. Missing/never-written files (runner never ran) stay as-is - the
+  # freshness line already reports "not written yet" honestly.
+  def status_file_stale?(status)
+    return false if status.blank?
+
+    at = Time.zone.parse(status["updated_at"].to_s)
+    return false if at.nil?
+
+    (Time.current - at) > MigrationRandomProductionRunner::HEARTBEAT_STALE_AFTER_SECONDS
+  rescue ArgumentError, TypeError
+    false
   end
 
   def status_path

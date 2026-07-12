@@ -164,7 +164,10 @@ class PositionsController < ApplicationController
       @aerodrome_production_dashboard_status = unavailable_production_dashboard_status
       @latest_hedge_migration_receipt = timed_show_section("load_latest_migration_receipt_cached") { latest_jsonl_receipt("storage/hedge_migration_checks/*.jsonl", "storage/extended_migration_checks/*.jsonl") }
       @latest_daily_random_rotation_receipt = timed_show_section("load_latest_random_rotation_receipt_cached") { latest_jsonl_receipt_for_position(@position.id, "storage/hedge_migration_random_rotation_daily/*.jsonl") }
-      @random_production_runner_status = safe_dashboard_section("load_random_production_dashboard", fallback: unavailable_random_production_runner_status) do
+      # Refresh-sized timeout: when the runner status file is stale and no runner
+      # is active, the dashboard self-heals by recomputing the authoritative live
+      # status (one slow load right after a stop; fast once the file is fresh).
+      @random_production_runner_status = safe_dashboard_section("load_random_production_dashboard", timeout_seconds: random_production_dashboard_timeout_seconds, fallback: unavailable_random_production_runner_status) do
         MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300)
       end
       @route_proof_cache = MigrationRouteProofCache.new(position: @position, source_dirs: cached_route_proof_source_dirs)
@@ -579,8 +582,14 @@ class PositionsController < ApplicationController
 
   def random_production_refresh
     position = load_position_for_migration
+    refresh = MigrationRandomProductionRunner.new(position: position, trap_signals: false).refresh_status_file!
+    message = if refresh[:refreshed]
+      "Production runner status refreshed from a live authoritative read. No orders, signatures, or cancels were created."
+    else
+      "Status refresh did not run (#{refresh[:reason]}). No orders, signatures, or cancels were created."
+    end
     redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
-      notice: "Production random runner status refreshed. No orders, signatures, or cancels were created."
+      notice: message
   end
 
   # Read-only near-real-time status endpoint powering the Production Control
@@ -589,7 +598,7 @@ class PositionsController < ApplicationController
   def random_production_status
     @position = load_position_for_migration
     random_production = safe_dashboard_section("load_random_production_status_endpoint", fallback: unavailable_random_production_runner_status) do
-      MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300)
+      MigrationRandomProductionDashboard.new(position: @position).report(tail_lines: 300, refresh_when_stale: false)
     end
     venue_states = (cached_hedge_dashboard_snapshot || {})[:venue_states] || {}
 
@@ -1524,6 +1533,14 @@ class PositionsController < ApplicationController
   rescue => e
     log_dashboard_section_duration(name, started, error: e)
     fallback_with_warning(fallback, "#{name} unavailable: #{e.class}: #{e.message}")
+  end
+
+  # Refresh-sized timeout for the production control center section: when the
+  # status file is a stale artifact the dashboard recomputes the live status.
+  def random_production_dashboard_timeout_seconds
+    BigDecimal(ENV.fetch("POSITIONS_RANDOM_PRODUCTION_DASHBOARD_TIMEOUT_SECONDS", "45")).to_f
+  rescue ArgumentError
+    45.0
   end
 
   def dashboard_section_timeout_seconds

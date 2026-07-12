@@ -182,7 +182,7 @@ module OperatorDashboardHelper
     age = at ? (Time.current - at).to_i : nil
     stale = age.nil? || age > MigrationRandomProductionRunner::HEARTBEAT_STALE_AFTER_SECONDS
     {
-      source: "runner status file (read-only)",
+      source: random_production[:status_source] || "runner status file (read-only)",
       updated_at: at,
       updated_at_text: at ? "#{l(at, format: :short)}" : "not written yet",
       age_seconds: age,
