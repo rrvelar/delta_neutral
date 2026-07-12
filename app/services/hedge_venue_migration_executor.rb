@@ -70,6 +70,7 @@ class HedgeVenueMigrationExecutor
     return execute_source_first(position: position, receipt: receipt, confirmation: confirmation) if receipt[:migration_sequence] == "source_first"
 
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
+    prewarm_extended_source_close!(receipt, second_planned_leg)
     mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
     mark_time!(receipt, :target_leg_submit_finished_at)
@@ -382,6 +383,19 @@ class HedgeVenueMigrationExecutor
 
     def run_extended_source_close_leg(leg, context)
       size = BigDecimal(leg.fetch(:size_eth).to_s)
+      prewarmed = consume_prewarmed_extended(size)
+      if prewarmed
+        venue = prewarmed.fetch(:venue)
+        begin
+          service = ExtendedHedgeExecutionService.new(venue: venue)
+          current = frozen_source_position_for(leg, context, venue_key: "extended") || venue.read_position(symbol: "ETH")
+          result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
+          return normalize_service_result(result, leg)
+        ensure
+          venue.end_read_snapshot! if venue.respond_to?(:end_read_snapshot!)
+        end
+      end
+
       env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
       venue = @venue_builder.build("extended", env: env)
       with_extended_read_snapshot(venue) do
@@ -390,6 +404,52 @@ class HedgeVenueMigrationExecutor
         result = service.close_short(position: context.fetch(:position), size_eth: size, current_position: current, confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION, max_slippage: max_slippage)
         normalize_service_result(result, leg)
       end
+    end
+
+    # Pre-window read warming for a planned Extended source close (target_first):
+    # opens the per-leg read snapshot BEFORE the target leg opens the
+    # double-exposure window and performs the close build's static reads
+    # (market metadata + slippage-bounded mark price, leverage/margin gate,
+    # position, balance) so the in-window build is assembly-only. The
+    # open-orders safety gate, submit, order fill confirmation, post-submit
+    # readback (volatile reads are invalidated after submit) and the final
+    # all-venue verification all remain fresh inside the window. Fail-closed:
+    # any error discards the warmup and the close leg reads fresh as before.
+    def prewarm_extended_source_close!(leg)
+      return nil unless close_to_flat_leg?(leg)
+      return nil unless leg.fetch(:venue).to_s == "extended"
+
+      size = BigDecimal(leg.fetch(:size_eth).to_s)
+      env = @env.to_h.merge("EXTENDED_PROBE_MAX_SIZE_ETH" => size.to_s("F"))
+      venue = @venue_builder.build("extended", env: env)
+      return nil unless venue.respond_to?(:begin_read_snapshot!)
+
+      venue.begin_read_snapshot!
+      warmed = []
+      venue.read_position(symbol: "ETH")
+      warmed << "positions"
+      venue.market_metadata_diagnostics
+      warmed << "market"
+      venue.blockers
+      warmed.concat(%w[leverage balance])
+      @prewarmed_extended = { venue: venue, size: size }
+      { reads: warmed, size_eth: size.to_s("F") }
+    rescue StandardError => e
+      venue.end_read_snapshot! if venue.respond_to?(:end_read_snapshot!)
+      @prewarmed_extended = nil
+      { error: "#{e.class}: #{e.message}" }
+    end
+
+    def consume_prewarmed_extended(size)
+      prewarmed = @prewarmed_extended
+      @prewarmed_extended = nil
+      return nil unless prewarmed
+      unless prewarmed.fetch(:size) == size
+        prewarmed.fetch(:venue).end_read_snapshot! if prewarmed.fetch(:venue).respond_to?(:end_read_snapshot!)
+        return nil
+      end
+
+      prewarmed
     end
 
     # Opens a per-leg Extended read snapshot so the pre-read + the lifecycle build reuse
@@ -664,6 +724,7 @@ class HedgeVenueMigrationExecutor
     return execute_source_first(position: position, receipt: receipt, confirmation: confirmation) if receipt[:migration_sequence] == "source_first"
 
     receipt[:lifecycle_state] = "READY_FOR_TARGET_FIRST"
+    prewarm_extended_source_close!(receipt, second_planned_leg)
     mark_time!(receipt, :target_leg_submit_started_at)
     first_leg = @leg_runner.call(first_planned_leg, context: leg_context(position, confirmation, receipt))
     mark_time!(receipt, :target_leg_submit_finished_at)
@@ -753,6 +814,26 @@ class HedgeVenueMigrationExecutor
   def mark_time!(receipt, key)
     time = @now.call
     receipt[key] = time.utc.iso8601(6)
+  end
+
+  # Pre-window read warming for target_first Extended source closes. Runs
+  # BEFORE the target leg (before the double-exposure window opens); records
+  # what was warmed so the receipt shows which reads were static-warm vs fresh.
+  # No-op unless the leg runner supports it; fail-closed to fresh reads.
+  def prewarm_extended_source_close!(receipt, second_planned_leg)
+    return unless receipt[:migration_sequence].to_s == "target_first"
+    return unless second_planned_leg.is_a?(Hash) && second_planned_leg[:venue].to_s == "extended"
+    return unless @leg_runner.respond_to?(:prewarm_extended_source_close!)
+
+    mark_time!(receipt, :pre_window_warmup_started_at)
+    result = @leg_runner.prewarm_extended_source_close!(second_planned_leg)
+    mark_time!(receipt, :pre_window_warmup_finished_at)
+    receipt[:pre_window_warmup_reads] = result.is_a?(Hash) ? result[:reads] : nil
+    receipt[:pre_window_warmup_error] = result.is_a?(Hash) ? result[:error] : nil
+    receipt[:metadata_source] = result.is_a?(Hash) && result[:reads].present? ? "pre_window_snapshot" : "live_read"
+  rescue StandardError => e
+    receipt[:pre_window_warmup_error] = "#{e.class}: #{e.message}"
+    receipt[:metadata_source] = "live_read"
   end
 
   def record_target_acceptance_timing!(receipt, leg, planned_leg)
