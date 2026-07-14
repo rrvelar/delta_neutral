@@ -44,8 +44,25 @@ class MigrationRandomProductionDashboard
     historical_blocker = Array(latest_event&.fetch("blockers", nil)).first
     event_stale = latest_event_stale?(latest_event, status, heartbeat)
     current_venue = status["current_production_venue"] || active_venue_from_shorts(status) || heartbeat["current_production_venue"] || status.dig("latest_event", "final_production_venue") || latest_event&.fetch("final_production_venue", nil) || position.hedge&.execution_venue
-    target_short = heartbeat["target_short_eth"]
-    combined_short = heartbeat["combined_short_eth"]
+    # The heartbeat is only current while the runner is actively running; once
+    # stopped it is a historical snapshot from the last cycle. Showing its
+    # target/combined/inside_tolerance leaks a stale target after a stop/repair
+    # (e.g. 1.599863 while the position is freshly 1.465). When not running,
+    # source fresh authoritative values and label them; never let the stale
+    # heartbeat drive the current target or inside_tolerance display.
+    runner_running = lock.present? && process_alive?(lock["pid"])
+    if runner_running
+      target_short = heartbeat["target_short_eth"]
+      combined_short = heartbeat["combined_short_eth"]
+      display_inside_tolerance = heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : status["inside_tolerance"]
+      target_source = "last heartbeat (runner active)"
+    else
+      fresh = fresh_authoritative_target(status)
+      target_short = fresh[:target_short_eth]
+      combined_short = fresh[:combined_short_eth]
+      display_inside_tolerance = status.key?("inside_tolerance") ? status["inside_tolerance"] : heartbeat["inside_tolerance"]
+      target_source = fresh[:source]
+    end
 
     {
       status: display_status(status: status, heartbeat: heartbeat, lock: lock),
@@ -75,7 +92,9 @@ class MigrationRandomProductionDashboard
       combined_short_eth: combined_short,
       drift_eth: drift_eth(target_short, combined_short),
       tolerance_eth: tolerance_eth(target_short),
-      inside_tolerance: heartbeat.key?("inside_tolerance") ? heartbeat["inside_tolerance"] : status["inside_tolerance"],
+      inside_tolerance: display_inside_tolerance,
+      target_source: target_source,
+      heartbeat_target_short_eth: heartbeat["target_short_eth"],
       direct_preflight_blockers: Array(status["direct_preflight_blockers"]),
       direct_open_orders: direct_open_orders(status),
       direct_venue_shorts: direct_venue_shorts(status),
@@ -338,6 +357,33 @@ class MigrationRandomProductionDashboard
     return false unless payload.is_a?(Hash)
 
     payload.values.any? { |enabled| ActiveModel::Type::Boolean.new.cast(enabled) }
+  end
+
+  # Fresh authoritative target/combined for display when the runner is stopped.
+  # Prefers the position dashboard snapshot (target = LP asset0) when it is
+  # fresh; otherwise falls back to the current combined short from the status
+  # file with no target. Never returns the stale heartbeat target.
+  def fresh_authoritative_target(status)
+    snap = position.position_dashboard_snapshot
+    if snap&.refreshed_at && (Time.current - snap.refreshed_at) <= MigrationRandomProductionRunner::HEARTBEAT_STALE_AFTER_SECONDS && snap.target_short_eth.present?
+      return {
+        target_short_eth: snap.target_short_eth.to_s,
+        combined_short_eth: (snap.combined_short_eth.presence || combined_short_from_status(status)).to_s,
+        source: "live position snapshot (runner stopped)"
+      }
+    end
+    { target_short_eth: nil, combined_short_eth: combined_short_from_status(status), source: "authoritative status; fresh target unavailable (runner stopped)" }
+  rescue StandardError
+    { target_short_eth: nil, combined_short_eth: combined_short_from_status(status), source: "authoritative status (runner stopped)" }
+  end
+
+  def combined_short_from_status(status)
+    shorts = status["direct_venue_shorts"]
+    return nil unless shorts.is_a?(Hash)
+
+    shorts.values.sum { |v| BigDecimal(v.to_s) rescue BigDecimal(0) }.to_s("F")
+  rescue StandardError
+    nil
   end
 
   def runner_for_refresh

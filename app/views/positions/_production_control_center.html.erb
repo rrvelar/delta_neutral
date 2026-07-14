@@ -43,7 +43,7 @@
   <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
     <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Production runner venue</p><p class="mt-1 text-lg font-semibold text-white"><%= vm[:production_venue_name] %></p></div>
     <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Active venue short</p><p class="mt-1 text-lg font-semibold text-white"><%= eth.call(vm[:active_short_eth], "not read back yet") %></p><p class="mt-1 text-[11px] text-gray-500">direct readback</p></div>
-    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= eth.call(vm[:target_short_eth], "not loaded yet") %></p><p class="mt-1 text-[11px] text-gray-500">from last heartbeat</p></div>
+    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Target short</p><p class="mt-1 text-lg font-semibold text-white"><%= eth.call(vm[:target_short_eth], "not loaded yet") %></p><p class="mt-1 text-[11px] text-gray-500"><%= vm[:target_source] || "from last heartbeat" %></p></div>
     <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Drift / tolerance</p><p class="mt-1 text-lg font-semibold text-white"><%= vm[:drift_eth].present? ? format_venue_eth_amount(vm[:drift_eth]) : "—" %> / <%= vm[:tolerance_eth].present? ? "#{format_venue_eth_amount(vm[:tolerance_eth])} ETH" : "—" %></p></div>
     <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Inside tolerance</p><p class="<%= vm[:inside_tolerance] == true ? 'text-green-300' : (vm[:inside_tolerance] == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= vm[:inside_tolerance].nil? ? "unknown — not read back yet" : (vm[:inside_tolerance] ? "yes" : "no") %></p></div>
     <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3"><p class="text-xs text-gray-500">Open orders</p><p class="<%= vm[:open_orders_zero] == true ? 'text-green-300' : (vm[:open_orders_zero] == false ? 'text-red-300' : 'text-yellow-200') %> mt-1 text-lg font-semibold"><%= vm[:open_orders_zero].nil? ? "unknown — not read back yet" : (vm[:open_orders_zero] ? "zero" : "nonzero") %></p></div>
@@ -133,7 +133,7 @@
       <div><p class="text-xs text-gray-500">Last route (heartbeat)</p><p class="text-white"><%= random_production[:last_route].presence || "not recorded yet" %></p></div>
       <div><p class="text-xs text-gray-500">Last cycle (heartbeat)</p><p class="text-white"><%= random_production[:last_cycle].presence || "not recorded yet" %></p></div>
       <div><p class="text-xs text-gray-500">Lock pid</p><p class="text-white"><%= random_production[:lock_pid].presence || "none" %></p></div>
-      <div><p class="text-xs text-gray-500">Combined short (heartbeat)</p><p class="text-white"><%= eth.call(vm[:combined_short_eth], "—") %></p></div>
+      <div><p class="text-xs text-gray-500">Combined short</p><p class="text-white"><%= eth.call(vm[:combined_short_eth], "—") %></p></div>
     </div>
   </details>
 

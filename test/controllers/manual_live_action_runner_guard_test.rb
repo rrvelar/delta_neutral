@@ -82,6 +82,42 @@ class ManualLiveActionRunnerGuardTest < ActionDispatch::IntegrationTest
     FileUtils.rm_f(status_path) if status_path
   end
 
+  test "stopped runner with stale heartbeat target renders fresh target, not the stale value" do
+    dir = MigrationRandomProductionRunner::LOG_DIR
+    FileUtils.mkdir_p(dir)
+    status_path = Pathname(dir).join("status_position_#{@position.id}.json")
+    hb_path = Pathname(dir).join("heartbeat_position_#{@position.id}.json")
+    File.write(status_path, JSON.pretty_generate(
+      status: "stopped", updated_at: Time.current.utc.iso8601,
+      current_production_venue: "extended", inside_tolerance: true,
+      direct_venue_shorts: { nado: "0.0", ethereal: "0.0", extended: "1.465" }, blockers: []
+    ))
+    File.write(hb_path, JSON.pretty_generate(
+      status: "stopped", updated_at: 8.hours.ago.utc.iso8601,
+      current_production_venue: "extended", target_short_eth: "1.599862590055613",
+      combined_short_eth: "1.711", inside_tolerance: false
+    ))
+    @position.position_dashboard_snapshot&.destroy
+    @position.create_position_dashboard_snapshot!(
+      refreshed_at: Time.current, refresh_status: "ok", stale: false,
+      production_venue: "extended", selected_venue: "extended",
+      target_short_eth: "1.468542942762735", tolerance_abs_eth: "0.044",
+      combined_short_eth: "1.465", drift_eth: "0.003", inside_tolerance: true,
+      extended_short_eth: "1.465", ethereal_short_eth: "0", nado_short_eth: "0", signer_status: "ok"
+    )
+
+    get position_path(@position)
+
+    assert_response :success
+    # The stale heartbeat target must not be rendered as the current target box.
+    refute_match(/1\.599863/, response.body)
+    assert_match(/1\.468543|1\.4685/, response.body)
+    assert_match(/live position snapshot \(runner stopped\)/, response.body)
+  ensure
+    FileUtils.rm_f(status_path) if status_path
+    FileUtils.rm_f(hb_path) if hb_path
+  end
+
   private
 
   # Simulates an active runner via its lock file (the same signal process_active?

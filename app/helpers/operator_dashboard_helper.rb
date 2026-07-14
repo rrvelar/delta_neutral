@@ -244,6 +244,7 @@ module OperatorDashboardHelper
       active_venue_count: operator_active_venue_count(rp),
       active_short_eth: operator_active_short_eth(rp, venue),
       target_short_eth: rp[:target_short_eth],
+      target_source: rp[:target_source],
       combined_short_eth: rp[:combined_short_eth],
       drift_eth: rp[:drift_eth],
       tolerance_eth: rp[:tolerance_eth],
