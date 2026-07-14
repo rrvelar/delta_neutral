@@ -314,6 +314,7 @@ class MigrationRouteProofRegistry
       "double_exposure_end_source" => execution["double_exposure_end_source"],
       "route_production_safe" => execution["route_production_safe"],
       "latency_incident" => execution["latency_incident"],
+      "migration_sequence" => (execution["migration_sequence"].presence || (route_policy.route_status(from: event["from_venue"], to: event["to_venue"])[:migration_sequence].to_s rescue nil)),
       "final_venue" => post["production_venue"] || event["final_production_venue"],
       "production_venue" => post["production_venue"],
       "receipt_path" => path
@@ -592,7 +593,24 @@ class MigrationRouteProofRegistry
   end
 
   def source_first_event?(event)
-    event["migration_sequence"].to_s == "source_first"
+    sequence_for_event(event) == "source_first"
+  end
+
+  # The event's own migration_sequence when present, else derived deterministically
+  # from route policy by from/to venue. Production-cycle events do not carry the
+  # sequence, so without this fallback a source_first route (e.g. ethereal->nado)
+  # was mis-classified as target_first and wrongly judged by the total-route bar.
+  def sequence_for_event(event)
+    explicit = event["migration_sequence"].presence
+    return explicit.to_s if explicit
+
+    from = event["from_venue"]
+    to = event["to_venue"]
+    return "" if from.blank? || to.blank?
+
+    route_policy.route_status(from: from, to: to)[:migration_sequence].to_s
+  rescue StandardError
+    ""
   end
 
   def source_first_underhedge_latency(event)

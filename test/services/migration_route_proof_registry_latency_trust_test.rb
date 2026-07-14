@@ -62,6 +62,46 @@ class MigrationRouteProofRegistryLatencyTrustTest < ActiveSupport::TestCase
     assert_equal "stale", route.fetch(:latency_untrusted_reason)
   end
 
+  test "source_first cycle with high total_route_seconds but passing underhedge stays production_safe" do
+    # Regression (2026-07-14): production-cycle events do not carry migration_sequence,
+    # so a source_first route (ethereal->nado) was mis-judged by the target_first
+    # total-route bar. Underhedge 4.54s (< 10) must qualify regardless of a 34.7s
+    # total_route_seconds, which is not the source_first metric.
+    position = nado_position
+    dir = Rails.root.join("tmp/latency-trust-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_cycle(dir: dir, position: position, from: "ethereal", to: "nado", execution_overrides: {
+      "status" => "SOURCE_FIRST_FINALIZED_BY_CANONICAL_NADO_READBACK",
+      "double_exposure_seconds" => "0", "underhedge_seconds" => "4.54",
+      "total_route_seconds" => "34.74", "route_production_safe" => true
+      # deliberately NO migration_sequence key
+    })
+
+    route = registry.route_status(position: position, from: "ethereal", to: "nado")
+
+    assert_equal "READY_FOR_RANDOM", route.fetch(:status)
+    assert_equal true, route.fetch(:route_production_safe)
+    assert_nil route.fetch(:latency_untrusted_reason)
+    assert_equal "4.54", route.fetch(:measured_underhedge_seconds)
+  end
+
+  test "target_first cycle is still gated by total_route_seconds over the bar" do
+    # The same 34.7s total-route on a TARGET_FIRST route (nado->extended) must
+    # still fail: the sequence-correct fix must not weaken target_first gating.
+    position = nado_position
+    dir = Rails.root.join("tmp/latency-trust-#{SecureRandom.hex(4)}")
+    registry = registry_for(dir)
+    write_cycle(dir: dir, position: position, from: "nado", to: "extended", execution_overrides: {
+      "double_exposure_seconds" => "1", "underhedge_seconds" => nil,
+      "total_route_seconds" => "34.74", "route_production_safe" => true
+    })
+
+    route = registry.route_status(position: position, from: "nado", to: "extended")
+
+    assert_equal false, route.fetch(:route_production_safe)
+    assert_equal "production_safe_false", route.fetch(:latency_untrusted_reason)
+  end
+
   test "source_first route requires underhedge measurement" do
     position = nado_position
     dir = Rails.root.join("tmp/latency-trust-#{SecureRandom.hex(4)}")
