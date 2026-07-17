@@ -2236,6 +2236,123 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_nil frozen_leg_runner.send(:frozen_ethereal_source_position, frozen_close_leg, frozen_context(proof: valid_proof, sequence: "source_first"))
   end
 
+  # --- Indeterminate target-leg timeout classification (2026-07-16 incident) ---
+  # A Net::ReadTimeout during the target submit surfaces as a "failed_before_submit"
+  # leg with orders_placed 0. The order may still have reached the venue and
+  # filled, so the executor must NOT clean-abort as TARGET_REJECTED; it must do an
+  # authoritative target readback and fail closed.
+
+  def timeout_target_leg
+    ->(_leg, context:) do
+      assert context.fetch(:position)
+      {
+        status: "failed_before_submit",
+        confirmed: false,
+        orders_placed: 0,
+        signatures_created: 0,
+        blockers: [ "Net::ReadTimeout: Net::ReadTimeout with #<TCPSocket:(closed)>" ]
+      }
+    end
+  end
+
+  test "target submit timeout with target live is classified TARGET_FILLED_CONFIRMATION_UNKNOWN and requires recovery" do
+    position = migration_position
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env,
+      leg_runner: timeout_target_leg,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal", safe: true)
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal "TARGET_FILLED_CONFIRMATION_UNKNOWN", result.receipt.fetch(:target_leg_status)
+    assert_equal true, result.receipt.fetch(:target_confirmation_timed_out)
+    assert_equal true, result.receipt.fetch(:target_possibly_live)
+    assert_equal "0.8", result.receipt.fetch(:target_authoritative_readback_short_eth)
+    assert_equal true, result.receipt.fetch(:random_and_auto_paused)
+    # The source close must NEVER be submitted when the target is possibly live.
+    assert_nil result.receipt[:source_close_submit_started_at]
+    options = result.receipt.fetch(:recovery_options)
+    assert_equal %w[A B C], options.map { |o| o[:option] }
+    revert = options.find { |o| o[:action] == "revert_migration" }
+    assert_match "migration:revert_target_first_target_close", revert.fetch(:command)
+    assert_includes result.blockers.join(" "), "the target filled"
+  end
+
+  test "target submit timeout with target confirmed flat is a clean reject that preserves the source" do
+    position = migration_position
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env,
+      leg_runner: timeout_target_leg,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal", safe: false)
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "TARGET_REJECTED_OR_NOT_CONFIRMED", result.status
+    assert_equal "TARGET_REJECTED_OR_NOT_CONFIRMED", result.receipt.fetch(:target_leg_status)
+    assert_equal "0.0", result.receipt.fetch(:target_authoritative_readback_short_eth)
+    assert_nil result.receipt[:target_possibly_live]
+    assert_includes result.blockers.join(" "), "is flat"
+  end
+
+  test "target submit timeout with unavailable readback fails closed to TARGET_CONFIRMATION_TIMEOUT" do
+    position = migration_position
+    unavailable_verifier = Class.new do
+      def verify
+        {
+          status: "recheck_required",
+          confirmed: false,
+          attempts: [],
+          latest_attempt: {
+            attempt: 1,
+            status: "recheck",
+            readback_source: "venue_readback_error",
+            blockers: [ "final readback unavailable: Net::ReadTimeout: execution expired" ]
+          },
+          blockers: [ "final readback unavailable" ]
+        }
+      end
+    end.new
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env,
+      leg_runner: timeout_target_leg,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: ->(position:, receipt:) { unavailable_verifier }
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal "TARGET_CONFIRMATION_TIMEOUT", result.receipt.fetch(:target_leg_status)
+    assert_equal true, result.receipt.fetch(:target_possibly_live)
+    assert_nil result.receipt.fetch(:target_authoritative_readback_short_eth)
+    assert_equal true, result.receipt.fetch(:random_and_auto_paused)
+    assert_includes result.blockers.join(" "), "readback is unavailable"
+  end
+
   private
 
   # Runs a target_first migration (extended->nado, the proven executor test setup)

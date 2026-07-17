@@ -1349,13 +1349,22 @@ class HedgeVenueMigrationExecutor
     receipt[:submitted] = receipt[:orders_placed].positive?
     receipt[:would_execute_live] = receipt[:submitted]
     receipt[:lifecycle_state] = receipt[:orders_placed].positive? ? "TARGET_SUBMITTED_PENDING_READBACK" : "TARGET_REJECTED_OR_NOT_CONFIRMED"
-    if first_planned_leg.fetch(:venue) == receipt[:to_venue] && receipt[:orders_placed].positive?
+    target_leg = first_planned_leg.fetch(:venue) == receipt[:to_venue]
+    if target_leg && receipt[:orders_placed].positive?
       apply_nado_manual_action_digest!(receipt, first_leg: first_leg, first_planned_leg: first_planned_leg)
       apply_target_open_source_still_open_manual_action!(
         position,
         receipt,
         Array(first_leg[:blockers]).presence || [ "Target leg was submitted but target readback did not confirm enough to safely close source." ]
       )
+    elsif target_leg && indeterminate_target_leg_failure?(first_leg)
+      # A timeout / connection error during the target submit means the order's
+      # fate is UNKNOWN, not "definitely not filled": the request may have
+      # reached the venue and filled even though no confirmation came back. We
+      # must NOT treat this as a clean rejection (which would leave a
+      # possibly-live target leg unmanaged next to the still-open source). Do an
+      # authoritative target-venue position readback and fail closed.
+      classify_indeterminate_target_leg!(position: position, receipt: receipt, first_leg: first_leg)
     else
       receipt[:final_status] = "TARGET_REJECTED_OR_NOT_CONFIRMED"
       receipt[:blockers] = Array(first_leg[:blockers]).presence || [ "First migration leg was not confirmed; second leg was not submitted." ]
@@ -1363,6 +1372,74 @@ class HedgeVenueMigrationExecutor
     end
     write_receipt(receipt)
     Result.new(receipt[:final_status], receipt[:blockers], Array(receipt[:warnings]), receipt)
+  end
+
+  # A target leg whose submit raised (DefaultLegRunner rescues every exception
+  # into status "failed_before_submit") or whose blockers name a timeout / socket
+  # error is INDETERMINATE: we cannot conclude the order failed to reach the
+  # venue. A clean venue-side rejection, by contrast, returns normally (not
+  # "failed_before_submit") and carries no timeout blocker.
+  INDETERMINATE_LEG_FAILURE_PATTERN = /timeout|timed out|ReadTimeout|OpenTimeout|WriteTimeout|execution expired|EOFError|Errno::|ECONNRESET|connection reset|connection refused|broken pipe|Net::/i
+  INDETERMINATE_TARGET_FLAT_EPSILON = BigDecimal("0.001")
+
+  def indeterminate_target_leg_failure?(leg)
+    return true if leg[:status].to_s == "failed_before_submit"
+
+    Array(leg[:blockers]).any? { |blocker| blocker.to_s.match?(INDETERMINATE_LEG_FAILURE_PATTERN) }
+  end
+
+  def classify_indeterminate_target_leg!(position:, receipt:, first_leg:)
+    receipt[:target_confirmation_timed_out] = true
+    target_short = authoritative_target_short(position: position, receipt: receipt)
+    receipt[:target_authoritative_readback_short_eth] = target_short&.to_s("F")
+    base_blockers = Array(first_leg[:blockers])
+
+    if target_short.nil?
+      # The authoritative readback itself is unavailable — we cannot prove the
+      # target is flat, so we fail closed and treat it as a possible double
+      # exposure requiring recovery.
+      receipt[:target_possibly_live] = true
+      receipt[:target_leg_status] = "TARGET_CONFIRMATION_TIMEOUT"
+      apply_target_open_source_still_open_manual_action!(
+        position,
+        receipt,
+        (base_blockers + [ "Target leg submit timed out and the authoritative target readback is unavailable; the target may be live. Fail-closed: treat as possible double exposure until recovery confirms the actual state." ]).uniq
+      )
+    elsif target_short > INDETERMINATE_TARGET_FLAT_EPSILON
+      # The target venue actually holds a short: the order filled despite the
+      # inline confirmation timing out.
+      receipt[:target_possibly_live] = true
+      receipt[:target_leg_status] = "TARGET_FILLED_CONFIRMATION_UNKNOWN"
+      apply_target_open_source_still_open_manual_action!(
+        position,
+        receipt,
+        (base_blockers + [ "Target leg submit timed out but the authoritative readback shows #{receipt[:to_venue]} holds #{target_short.to_s('F')} ETH short; the target filled with an unconfirmed inline confirmation. Source is still open." ]).uniq
+      )
+    else
+      # The authoritative readback proves the target venue is flat: the order did
+      # not reach the venue, so a clean abort that preserves the source is safe.
+      receipt[:target_leg_status] = "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      receipt[:lifecycle_state] = "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      receipt[:final_status] = "TARGET_REJECTED_OR_NOT_CONFIRMED"
+      receipt[:blockers] = (base_blockers + [ "Target leg submit timed out; the authoritative readback confirms #{receipt[:to_venue]} is flat, so the source is preserved and no double exposure exists." ]).uniq
+      receipt[:manual_action_required] = true
+    end
+  end
+
+  # Fresh authoritative read of the target venue short. Returns a BigDecimal, or
+  # nil when the read itself is unavailable (so callers can fail closed).
+  def authoritative_target_short(position:, receipt:)
+    verification = final_verifier(position: position, receipt: receipt).verify
+    receipt[:target_timeout_reconciliation] = verification
+    latest = verification.fetch(:latest_attempt)
+    return nil if latest[:readback_source].to_s == "venue_readback_error"
+
+    raw = latest[:target_venue_short_eth]
+    return nil if raw.nil?
+
+    BigDecimal(raw.to_s)
+  rescue ArgumentError, TypeError
+    nil
   end
 
   def apply_target_open_source_still_open_manual_action!(position, receipt, blockers)
@@ -1374,7 +1451,9 @@ class HedgeVenueMigrationExecutor
     receipt[:recommended_action] = "close source venue reduce-only"
     receipt[:source_venue] = receipt[:from_venue]
     receipt[:target_venue] = receipt[:to_venue]
+    receipt[:target_order_id] = target_open_order_id(receipt)
     receipt[:recovery_command] = recovery_command(receipt)
+    receipt[:recovery_options] = recovery_options(receipt)
     receipt[:random_and_auto_paused] = true
     receipt[:warnings] = (Array(receipt[:warnings]) + [
       "Target-first migration has target exposure with source not confirmed flat; autonomous random/auto loops paused until recovery finalizes."
@@ -1641,6 +1720,32 @@ class HedgeVenueMigrationExecutor
 
   def recovery_command(receipt)
     "bin/rails migration:recover_target_first_source_close position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} dry_run=true"
+  end
+
+  def revert_recovery_command(receipt)
+    "bin/rails migration:revert_target_first_target_close position_id=#{receipt[:position_id]} from=#{receipt[:from_venue]} to=#{receipt[:to_venue]} dry_run=true"
+  end
+
+  # The three operator choices for a target-first cycle that left the target
+  # possibly live with the source still open. The runner surfaces these; nothing
+  # is executed autonomously.
+  def recovery_options(receipt)
+    [
+      { option: "A", action: "complete_migration", reduce_only: true,
+        description: "Confirm the target is filled and inside tolerance, then close the source reduce-only and finalize the production venue to #{receipt[:to_venue]}.",
+        command: recovery_command(receipt) },
+      { option: "B", action: "revert_migration", reduce_only: true,
+        description: "Close the target (#{receipt[:to_venue]}) reduce-only and keep the source (#{receipt[:from_venue]}) as the production venue.",
+        command: revert_recovery_command(receipt) },
+      { option: "C", action: "no_op", reduce_only: nil,
+        description: "If the authoritative readback proves the target never filled, keep the source and take no action." }
+    ]
+  end
+
+  def target_open_order_id(receipt)
+    receipt[:nado_target_exchange_order_id] ||
+      Array(receipt[:exchange_order_ids]).compact.first ||
+      receipt.dig(:to_leg_execution, :exchange_order_id)
   end
 
   def leg_order_count(leg)

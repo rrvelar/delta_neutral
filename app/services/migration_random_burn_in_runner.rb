@@ -421,9 +421,14 @@ class MigrationRandomBurnInRunner
       timing: migration_timing_payload(receipt)
     }.merge(
       recovery_command: receipt[:recovery_command],
+      recovery_options: receipt[:recovery_options],
       recommended_action: receipt[:recommended_action],
       source_venue: receipt[:source_venue],
       target_venue: receipt[:target_venue],
+      target_order_id: receipt[:target_order_id],
+      target_possibly_live: receipt[:target_possibly_live],
+      target_confirmation_timed_out: receipt[:target_confirmation_timed_out],
+      target_authoritative_readback_short_eth: receipt[:target_authoritative_readback_short_eth],
       random_and_auto_paused: receipt[:random_and_auto_paused]
     ).merge(
       source_flat_after: receipt[:source_flat_after],
