@@ -92,6 +92,35 @@ class MigrationTargetFirstTargetRevertTest < ActiveSupport::TestCase
     assert_equal true, result.receipt.fetch(:production_venue_finalized)
   end
 
+  test "revert finalization never re-enables any venue auto gate as a side effect" do
+    position = migration_position(execution_venue: "extended")
+    OperationalSettings.set!(key: "AERODROME_NADO_AUTO_REBALANCE_ENABLED", enabled: false, reason: "test setup")
+    OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: false, reason: "test setup")
+    OperationalSettings.set!(key: "AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED", enabled: false, reason: "test setup")
+    leg_runner = ->(leg, context:) do
+      { status: "confirmed", confirmed: true, orders_placed: 1, signatures_created: 1, exchange_order_id: "extended-close", after_short_eth: "0" }
+    end
+
+    result = revert(
+      position: position,
+      from: "nado",
+      to: "extended",
+      nado_short: "1.297",
+      extended_short: "1.295",
+      live: true,
+      confirmation: MigrationTargetFirstTargetRevert::CONFIRMATION,
+      env: revert_env,
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "TARGET_REVERT_CONFIRMED", result.status, result.blockers.inspect
+    assert_equal "nado", position.hedge.reload.execution_venue
+    # 2026-07-17 regression: finalization must not flip any auto gate back on.
+    assert_equal false, OperationalSettings.enabled?("AERODROME_NADO_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("EXTENDED_AUTO_REBALANCE_ENABLED")
+    assert_equal false, OperationalSettings.enabled?("AERODROME_ETHEREAL_AUTO_REBALANCE_ENABLED")
+  end
+
   test "blocks when the source is flat because a revert must keep one live source leg" do
     position = migration_position(execution_venue: "nado")
     result = revert(

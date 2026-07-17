@@ -1375,15 +1375,17 @@ class HedgeVenueMigrationExecutor
   end
 
   # A target leg whose submit raised (DefaultLegRunner rescues every exception
-  # into status "failed_before_submit") or whose blockers name a timeout / socket
-  # error is INDETERMINATE: we cannot conclude the order failed to reach the
-  # venue. A clean venue-side rejection, by contrast, returns normally (not
-  # "failed_before_submit") and carries no timeout blocker.
-  INDETERMINATE_LEG_FAILURE_PATTERN = /timeout|timed out|ReadTimeout|OpenTimeout|WriteTimeout|execution expired|EOFError|Errno::|ECONNRESET|connection reset|connection refused|broken pipe|Net::/i
+  # into status "failed_before_submit"), errored at the venue ("submit_failed",
+  # e.g. HTTP 503), or whose blockers name a timeout / socket / HTTP-5xx error is
+  # INDETERMINATE: we cannot conclude the order failed to reach the venue. A
+  # clean venue-side rejection, by contrast, returns normally and carries no
+  # such blocker.
+  INDETERMINATE_LEG_FAILURE_PATTERN = /timeout|timed out|ReadTimeout|OpenTimeout|WriteTimeout|execution expired|EOFError|Errno::|ECONNRESET|connection reset|connection refused|broken pipe|Net::|HTTP 5\d\d|submit failed|acceptance unknown/i
+  INDETERMINATE_LEG_FAILURE_STATUSES = %w[failed_before_submit submit_failed].freeze
   INDETERMINATE_TARGET_FLAT_EPSILON = BigDecimal("0.001")
 
   def indeterminate_target_leg_failure?(leg)
-    return true if leg[:status].to_s == "failed_before_submit"
+    return true if INDETERMINATE_LEG_FAILURE_STATUSES.include?(leg[:status].to_s)
 
     Array(leg[:blockers]).any? { |blocker| blocker.to_s.match?(INDETERMINATE_LEG_FAILURE_PATTERN) }
   end

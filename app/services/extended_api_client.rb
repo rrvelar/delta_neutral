@@ -55,7 +55,12 @@ class ExtendedApiClient
   end
 
   def submit_order(payload)
-    post("/user/order", payload)
+    response = post("/user/order", payload)
+    record_submit_health(response)
+    response
+  rescue StandardError => e
+    ExtendedSubmitHealth.record_failure!(error: "#{e.class}: #{e.message}")
+    raise
   end
 
   # Read-only order/fill lookups (GET, API-key auth, no writes). Used for
@@ -99,6 +104,17 @@ class ExtendedApiClient
     JSON.parse(body)
   rescue JSON::ParserError => e
     { "error" => "#{e.class}: #{e.message}" }
+  end
+
+  # Order submits are the only writes; record their health so status/dashboard
+  # warnings can distinguish "reads work" from "submits work" (2026-07-17: 503s
+  # on submit while reads stayed healthy).
+  def record_submit_health(response)
+    if response.is_a?(Hash) && response["http_status"].to_i >= 400
+      ExtendedSubmitHealth.record_failure!(error: response["error"], http_status: response["http_status"])
+    else
+      ExtendedSubmitHealth.record_success!
+    end
   end
 
   def http_get(uri, headers)

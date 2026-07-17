@@ -65,6 +65,18 @@ class MigrationRandomProductionDashboardStaleTargetTest < ActiveSupport::TestCas
     assert_match(/fresh target unavailable/, report[:target_source])
   end
 
+  test "report surfaces fresh operational warnings" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+    OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test")
+
+    report = dashboard(dir).report
+
+    warnings = Array(report[:operational_warnings])
+    assert warnings.any? { |w| w.include?("EXTENDED_AUTO_REBALANCE_ENABLED") && w.include?("DB override") }, warnings.inspect
+  end
+
   test "running runner keeps heartbeat target as current" do
     @position = position_with_fresh_snapshot
     dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")

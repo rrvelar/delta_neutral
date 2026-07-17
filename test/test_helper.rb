@@ -17,3 +17,7 @@ module ActiveSupport
     # Add more helper methods to be used by all tests here...
   end
 end
+
+# Tests share the real storage/ mount on the VPS; never let a test write the
+# production Extended submit-health file (individual tests may still override).
+ExtendedSubmitHealth.path = Rails.root.join("tmp/test-extended-submit-health-default.json")

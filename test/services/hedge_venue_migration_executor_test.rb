@@ -2311,6 +2311,41 @@ class HedgeVenueMigrationExecutorTest < ActiveSupport::TestCase
     assert_includes result.blockers.join(" "), "is flat"
   end
 
+  test "target leg submit_failed (HTTP 503) is classified via authoritative readback, not clean-rejected" do
+    position = migration_position
+    runner = ->(_leg, context:) do
+      assert context.fetch(:position)
+      {
+        status: "submit_failed",
+        confirmed: false,
+        orders_placed: 0,
+        signatures_created: 1,
+        exchange_order_id: nil,
+        blockers: [ "Extended submit failed: HTTP 503 (JSON::ParserError: unexpected character)" ]
+      }
+    end
+
+    result = HedgeVenueMigrationExecutor.new(
+      env: live_env,
+      leg_runner: runner,
+      snapshot_refresher: ->(item) { item.position_dashboard_snapshot },
+      final_verifier_factory: final_verifier_factory(from: "extended", to: "ethereal", safe: true)
+    ).run(
+      position: position,
+      from_venue: "extended",
+      to_venue: "ethereal",
+      dry_run: false,
+      confirmation: HedgeVenueMigrationExecutor::CONFIRMATION,
+      full_migration_allowed: true,
+      mode: "full"
+    )
+
+    assert_equal "MANUAL_ACTION_REQUIRED_TARGET_OPEN_SOURCE_STILL_OPEN", result.status
+    assert_equal "TARGET_FILLED_CONFIRMATION_UNKNOWN", result.receipt.fetch(:target_leg_status)
+    assert_equal true, result.receipt.fetch(:target_confirmation_timed_out)
+    assert_nil result.receipt[:source_close_submit_started_at]
+  end
+
   test "target submit timeout with unavailable readback fails closed to TARGET_CONFIRMATION_TIMEOUT" do
     position = migration_position
     unavailable_verifier = Class.new do

@@ -89,6 +89,106 @@ class MigrationTargetFirstSourceRecoveryTest < ActiveSupport::TestCase
     assert_equal 1, result.receipt.fetch(:signatures_created)
   end
 
+  # 2026-07-17 incident regression: the Extended close 503'd at submit, the leg
+  # still carried after_short_eth "0.0" (expected value) while its own readback
+  # showed the source at 1.61 on every poll — the outer verification trusted the
+  # claim and falsely reported source flat + finalized the production venue.
+  test "unconfirmed source close cannot report source flat or finalize" do
+    position = migration_position(execution_venue: "extended")
+    leg_runner = ->(leg, context:) do
+      {
+        status: "submitted_but_readback_pending",
+        confirmed: false,
+        orders_placed: 1,
+        signatures_created: 1,
+        after_short_eth: "0.0",
+        readback: [ { short_size: "1.61", confirmed: false } ],
+        blockers: []
+      }
+    end
+
+    result = recovery(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      extended_short: "1.61",
+      ethereal_short: "1.6131",
+      target: "1.6131",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env.merge("EXTENDED_LIVE_ENABLED" => "true", "EXTENDED_MAINNET_PROBE_ENABLED" => "true"),
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
+    assert_equal "extended", position.hedge.reload.execution_venue, "must NOT finalize to the target on an unconfirmed close"
+    assert_equal false, result.receipt.fetch(:production_venue_finalized)
+    assert_equal "1.61", result.receipt.fetch(:final_source_short_eth), "final source short must come from the readback, not the claimed after_short_eth"
+    assert_equal true, result.receipt.fetch(:readback_mismatch)
+    assert_equal false, result.receipt.fetch(:readback_confirmed)
+    assert_includes result.blockers.join(" "), "not confirmed"
+    assert_includes result.receipt.fetch(:warnings).join(" "), "readback is authoritative"
+  end
+
+  test "submit_failed source close never reports source flat or finalizes" do
+    position = migration_position(execution_venue: "extended")
+    leg_runner = ->(leg, context:) do
+      {
+        status: "submit_failed",
+        confirmed: false,
+        orders_placed: 0,
+        signatures_created: 1,
+        after_short_eth: "0.0",
+        blockers: [ "Extended submit failed: HTTP 503" ]
+      }
+    end
+
+    result = recovery(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      extended_short: "1.61",
+      ethereal_short: "1.6131",
+      target: "1.6131",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env.merge("EXTENDED_LIVE_ENABLED" => "true", "EXTENDED_MAINNET_PROBE_ENABLED" => "true"),
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
+    assert_includes result.blockers.join(" "), "HTTP 503"
+    assert_equal "extended", position.hedge.reload.execution_venue
+    assert_equal false, result.receipt.fetch(:production_venue_finalized)
+    assert_equal "1.61", result.receipt.fetch(:final_source_short_eth)
+    assert_equal false, result.receipt.fetch(:readback_confirmed)
+  end
+
+  test "unconfirmed source close without a readback falls back to a fresh venue read" do
+    position = migration_position(execution_venue: "extended")
+    leg_runner = ->(leg, context:) do
+      { status: "submitted_but_readback_pending", confirmed: false, orders_placed: 1, signatures_created: 1, after_short_eth: "0.0", blockers: [] }
+    end
+
+    result = recovery(
+      position: position,
+      from: "extended",
+      to: "ethereal",
+      extended_short: "1.61",
+      ethereal_short: "1.6131",
+      target: "1.6131",
+      live: true,
+      confirmation: MigrationTargetFirstSourceRecovery::CONFIRMATION,
+      env: recovery_env.merge("EXTENDED_LIVE_ENABLED" => "true", "EXTENDED_MAINNET_PROBE_ENABLED" => "true"),
+      leg_runner: leg_runner
+    ).run
+
+    assert_equal "SOURCE_CLOSE_RECOVERY_BLOCKED", result.status
+    assert_equal "1.61", result.receipt.fetch(:final_source_short_eth), "fresh venue read is the fallback evidence"
+    assert_equal "extended", position.hedge.reload.execution_venue
+    assert_equal false, result.receipt.fetch(:production_venue_finalized)
+  end
+
   test "source already flat live finalization updates execution venue without orders" do
     position = migration_position(execution_venue: "ethereal")
 

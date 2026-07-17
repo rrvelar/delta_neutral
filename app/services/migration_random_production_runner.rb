@@ -298,8 +298,32 @@ class MigrationRandomProductionRunner
     blockers << "confirmation must equal #{CONFIRMATION}" if live? && confirmation != CONFIRMATION
     blockers << "duplicate_runner_process" if duplicate_runner_process_running?
     blockers.concat(active_lock_blockers)
+    blockers.concat(quarantine_blockers)
     blockers.concat(restart_safety_blockers)
     blockers.uniq
+  end
+
+  # A quarantined venue (e.g. Extended after its submit endpoint failed live)
+  # must not gain new exposure from autonomous production. The runner refuses to
+  # start unless the enabled route subset excludes the quarantined venue as a
+  # target AND it is not the current production venue. Recovery and manual
+  # migrate-out paths are unaffected.
+  def quarantine_blockers
+    quarantined = HedgeVenueQuarantine.quarantined_venues(env: env)
+    return [] if quarantined.empty?
+
+    policy_routes = MigrationRouteOperationalPolicy.new(env: env).report.fetch(:routes)
+    quarantined.flat_map do |venue|
+      blockers = []
+      if HedgeVenues.normalize(position.hedge&.execution_venue) == venue
+        blockers << "#{venue} is quarantined and is the current production venue; migrate off #{venue} via a supervised/recovery path before starting the runner"
+      end
+      targeting = policy_routes.select { |route| route[:to_venue] == venue && route[:production_execution_enabled] }.map { |route| route[:route] }
+      if targeting.any?
+        blockers << "#{venue} is quarantined; enabled routes still target it (#{targeting.join(', ')}) — disable those routes or lift the quarantine before starting the runner"
+      end
+      blockers
+    end
   end
 
   def active_lock_blockers
@@ -433,9 +457,14 @@ class MigrationRandomProductionRunner
       proof_report: proof_report_payload(direct[:proof_report]),
       route_proofs_summary: route_proofs_summary(direct[:proof_report]),
       gates_state: gates_state,
+      operational_warnings: operational_warnings_payload,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.compact
     File.write(status_path, JSON.pretty_generate(payload))
+  end
+
+  def operational_warnings_payload
+    MigrationOperationalWarnings.for(position: position, env: env).presence
   end
 
   def write_lock!(runner:)

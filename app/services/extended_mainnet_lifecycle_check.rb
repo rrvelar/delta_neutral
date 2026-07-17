@@ -280,7 +280,36 @@ class ExtendedMainnetLifecycleCheck
     mark_timing!(timing, :submit_started_at)
     submit_response = @venue.submit_order(submit_payload)
     mark_timing!(timing, :submit_finished_at)
-    order_id = exchange_order_id(submit_response, signer_response)
+    # A submit that errored (HTTP >= 400 / error hash) or returned no
+    # authoritative exchange order id is a SUBMIT FAILURE, never a pending
+    # accepted order. 2026-07-17 incident: a 503'd close fell back to the
+    # SIGNER's order id, set exchange_accept_at and proceeded as
+    # "submitted_but_readback_pending" — masking the failure. The signer id is
+    # local metadata only; acceptance is proven solely by the venue's own id.
+    failure_reason = submit_failure_reason(submit_response)
+    if failure_reason
+      return {
+        final_status: "submit_failed",
+        unsigned_order: unsigned_order,
+        signer_response: sanitize_signer_response(signer_response),
+        submit_payload: sanitize_submit_payload(submit_payload),
+        submit_response: sanitize_submit_response(submit_response),
+        exchange_order_id: nil,
+        signer_order_id: signer_response[:order_id].to_s,
+        local_order_id: signer_response[:order_id].to_s,
+        submit_confirmation_unknown: true,
+        submit_failure_reason: failure_reason,
+        expected_after_short_eth: expected_short.to_s("F"),
+        readback_attempts: [],
+        orders_placed: 0,
+        signatures_created: 1,
+        submitted: false,
+        blockers: [ failure_reason ],
+        timing: finalized_timing(timing)
+      }
+    end
+
+    order_id = exchange_order_id(submit_response)
     timing[:exchange_accept_at] = timing[:submit_finished_at] if order_id.present?
     # Post-submit: drop the build snapshot's volatile reads (positions/balance/open_orders)
     # so the readback and receipt diagnostics never reuse pre-submit state.
@@ -298,6 +327,7 @@ class ExtendedMainnetLifecycleCheck
       submit_payload: sanitize_submit_payload(submit_payload),
       submit_response: sanitize_submit_response(submit_response),
       exchange_order_id: order_id,
+      signer_order_id: signer_response[:order_id].to_s,
       readback_attempts: readback_attempts,
       readback_confirmation_source: confirmation[:confirmation_source],
       open_fill_confirmation: build_open_fill_confirmation(mode: mode, confirmation: confirmation, timing: timing, order_preview: order_preview),
@@ -350,6 +380,10 @@ class ExtendedMainnetLifecycleCheck
       submit_payload: execution && execution[:submit_payload],
       submit_response: execution && execution[:submit_response],
       exchange_order_id: execution && execution[:exchange_order_id],
+      signer_order_id: execution && execution[:signer_order_id],
+      local_order_id: execution && execution[:local_order_id],
+      submit_confirmation_unknown: execution && execution[:submit_confirmation_unknown],
+      submit_failure_reason: execution && execution[:submit_failure_reason],
       readback_confirmation_source: execution && execution[:readback_confirmation_source],
       open_fill_confirmation: execution && execution[:open_fill_confirmation],
       close_fill_confirmation: execution && execution[:close_fill_confirmation],
@@ -836,11 +870,31 @@ class ExtendedMainnetLifecycleCheck
     payload[:action].to_s == "increase_short" || (payload[:extended_side].to_s == "SELL" && payload[:reduce_only] == false)
   end
 
-  def exchange_order_id(submit_response, signer_response)
+  # Authoritative only: the exchange order id must come from the venue's submit
+  # response. Never fall back to the signer's local order id — that masked a
+  # failed submit as an accepted order (2026-07-17).
+  def exchange_order_id(submit_response)
     data = submit_response.is_a?(Hash) ? submit_response.with_indifferent_access[:data] : nil
     return data[:id].to_s if data.is_a?(Hash) && data[:id].present?
 
-    signer_response[:order_id].to_s
+    nil
+  end
+
+  # Non-nil when the submit response proves failure or cannot prove acceptance.
+  def submit_failure_reason(submit_response)
+    return "Extended submit returned no parseable response; order acceptance unknown." unless submit_response.is_a?(Hash)
+
+    payload = submit_response.with_indifferent_access
+    http_status = payload[:http_status].to_i
+    if payload[:error].present? || http_status >= 400
+      detail = payload[:error].presence || "HTTP #{http_status}"
+      detail = "#{detail} (#{payload[:message]})" if payload[:message].present?
+      return "Extended submit failed: #{detail}"
+    end
+    data = payload[:data]
+    return "Extended submit response lacked an authoritative exchange order id; order acceptance unknown." unless data.is_a?(Hash) && data[:id].present?
+
+    nil
   end
 
   def expected_redacted_stark_public_key

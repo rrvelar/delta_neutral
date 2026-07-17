@@ -108,6 +108,7 @@ class MigrationRandomProductionDashboard
       next_rotation_at: next_rotation_at(heartbeat),
       lock_pid: lock["pid"],
       gates_state: status["gates_state"] || gates_state,
+      operational_warnings: operational_warnings,
       latest_blocker: historical_blocker,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }
@@ -161,6 +162,15 @@ class MigrationRandomProductionDashboard
   private
 
   attr_reader :position, :log_dir, :preflight_factory
+
+  # Fresh anomaly warnings, computed live (never from the status file, which can
+  # be stale after a stop): Extended survivor with failed submit health or
+  # quarantine, Extended auto DB override, recovery readback mismatch.
+  def operational_warnings
+    MigrationOperationalWarnings.for(position: position)
+  rescue => e
+    [ "operational warnings unavailable: #{e.class}: #{e.message}" ]
+  end
 
   # The JSONL latest_event is a snapshot of a past cycle. It is "stale" (a
   # historical diagnostic, not current state) whenever the runner is not

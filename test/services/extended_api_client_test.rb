@@ -34,6 +34,49 @@ class ExtendedApiClientTest < ActiveSupport::TestCase
     assert_no_match(/redacted-test-key|must-not-leak|apiKey/i, payload.to_json)
   end
 
+  test "submit order records a submit-health failure on HTTP 503" do
+    with_submit_health_file do
+      client = ExtendedApiClient.new(
+        env: extended_env,
+        http_post: ->(_uri, _headers, _payload) { http_response(Net::HTTPServiceUnavailable, "503", "<html>down</html>") }
+      )
+
+      payload = client.submit_order({ "market" => "ETH-USD" })
+
+      assert_equal "HTTP 503", payload.fetch("error")
+      assert_equal true, ExtendedSubmitHealth.recently_failed?
+      assert_equal 503, ExtendedSubmitHealth.snapshot["last_http_status"]
+    end
+  end
+
+  test "submit order records submit-health success and clears a prior failure" do
+    with_submit_health_file do
+      ExtendedSubmitHealth.record_failure!(error: "HTTP 503", http_status: 503)
+      client = ExtendedApiClient.new(
+        env: extended_env,
+        http_post: ->(_uri, _headers, _payload) { http_response(Net::HTTPOK, "200", { status: "OK", data: { id: 1 } }.to_json) }
+      )
+
+      client.submit_order({ "market" => "ETH-USD" })
+
+      assert_equal false, ExtendedSubmitHealth.recently_failed?
+      assert_equal 0, ExtendedSubmitHealth.snapshot["consecutive_failures"]
+    end
+  end
+
+  test "submit order records a submit-health failure when the HTTP call raises" do
+    with_submit_health_file do
+      client = ExtendedApiClient.new(
+        env: extended_env,
+        http_post: ->(_uri, _headers, _payload) { raise Net::ReadTimeout, "socket closed" }
+      )
+
+      assert_raises(Net::ReadTimeout) { client.submit_order({ "market" => "ETH-USD" }) }
+      assert_equal true, ExtendedSubmitHealth.recently_failed?
+      assert_match(/Net::ReadTimeout/, ExtendedSubmitHealth.snapshot["last_error"])
+    end
+  end
+
   test "submit order posts documented endpoint with api key header" do
     client = ExtendedApiClient.new(
       env: extended_env,
@@ -98,6 +141,13 @@ class ExtendedApiClientTest < ActiveSupport::TestCase
   end
 
   private
+
+  def with_submit_health_file
+    ExtendedSubmitHealth.path = Rails.root.join("tmp/test-extended-submit-health-#{SecureRandom.hex(4)}.json")
+    yield
+  ensure
+    ExtendedSubmitHealth.path = Rails.root.join("tmp/test-extended-submit-health-default.json")
+  end
 
   def extended_env
     {

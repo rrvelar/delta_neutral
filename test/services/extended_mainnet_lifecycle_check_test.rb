@@ -370,6 +370,71 @@ class ExtendedMainnetLifecycleCheckTest < ActiveSupport::TestCase
     assert_no_match(/0xsignature|api-secret/i, result.receipt.to_json)
   end
 
+  # 2026-07-17 incident regression: a 503'd submit fell back to the SIGNER's
+  # order id and proceeded as "submitted_but_readback_pending", masking the
+  # failure. An errored submit must classify as submit_failed with no
+  # exchange_order_id; the signer id survives only as local metadata.
+  test "HTTP 503 submit response is a submit failure, never a pending accepted order" do
+    api_client = live_api_client(
+      submit_response: { "error" => "HTTP 503", "http_status" => 503, "message" => "JSON::ParserError: unexpected character: '<html>' at line 1 column 1" }
+    )
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "submit_failed", result.status
+    refute_equal "submitted_but_readback_pending", result.status
+    assert_nil result.receipt.fetch(:exchange_order_id)
+    assert_equal "signed-order-id", result.receipt.fetch(:signer_order_id)
+    assert_equal "signed-order-id", result.receipt.fetch(:local_order_id)
+    assert_equal true, result.receipt.fetch(:submit_confirmation_unknown)
+    assert_equal 0, result.receipt.fetch(:orders_placed)
+    assert_equal 1, result.receipt.fetch(:signatures_created)
+    assert_equal false, result.receipt.fetch(:submitted)
+    assert result.blockers.any? { |b| b.include?("HTTP 503") }, result.blockers.inspect
+  end
+
+  test "submit response without an authoritative exchange order id is a submit failure without signer fallback" do
+    api_client = live_api_client(submit_response: { "status" => "OK", "data" => {} })
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "submit_failed", result.status
+    assert_nil result.receipt.fetch(:exchange_order_id)
+    assert_equal "signed-order-id", result.receipt.fetch(:signer_order_id)
+    assert result.blockers.any? { |b| b.include?("acceptance unknown") }, result.blockers.inspect
+  end
+
+  test "successful submit keeps the venue exchange order id and the signer id as metadata" do
+    api_client = live_api_client(after_positions: [ { market: "ETH-USD", side: "SHORT", size: "0.01", value: "21.2", openPrice: "2120", markPrice: "2120", status: "OPEN" } ])
+    signer = CountingSigner.new(ok: true)
+
+    result = build_service(env: live_env, api_client: api_client, signer_client: signer).run(
+      position: fake_position,
+      mode: "open_only",
+      size_eth: "0.01",
+      confirmation: ExtendedMainnetLifecycleCheck::CONFIRMATION,
+      dry_run: false
+    )
+
+    assert_equal "success", result.status
+    assert_equal "abc123", result.receipt.fetch(:exchange_order_id)
+    assert_equal "signed-order-id", result.receipt.fetch(:signer_order_id)
+  end
+
   test "dashboard live open uses full server target size without probe cap" do
     api_client = live_api_client(
       account_value: "8000",

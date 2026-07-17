@@ -35,14 +35,16 @@ class MigrationTargetFirstSourceRecovery
 
     if live? && blockers.empty? && context.fetch(:source_short).positive?
       execution = leg_runner.call(context.fetch(:planned_source_close_leg), context: { position: position, confirmation: confirmation, receipt: context })
-      context = context.merge(
-        final_source_short: decimal_or_nil(execution[:after_short_eth]) || short_size(venue_for(from).read_position(symbol: "ETH")),
-        execution: execution
-      )
-      blockers = Array(execution[:blockers]) unless recovery_confirmed?(context)
+      final_source = authoritative_final_source_short(execution)
+      context = context.merge(final_source_short: final_source, execution: execution)
+      context[:readback_mismatch] = execution_readback_mismatch?(execution, final_source)
+      unless recovery_confirmed?(context)
+        blockers = Array(execution[:blockers]).presence ||
+          [ "#{HedgeVenues.label(from)} source close was not confirmed by the execution readback; refusing to report source flat or finalize" ]
+      end
     end
 
-    finalize_production_venue(context) if live? && blockers.empty? && finalization_safe?(context)
+    finalize_production_venue(context) if live? && blockers.empty? && (execution ? recovery_confirmed?(context) : finalization_safe?(context))
     receipt = receipt_for(context: context, blockers: blockers, execution: execution)
     write_receipt(receipt)
     Result.new(receipt.fetch(:final_status), blockers, receipt.fetch(:warnings), receipt)
@@ -170,9 +172,57 @@ class MigrationTargetFirstSourceRecovery
 
   def recovery_confirmed?(context)
     execution = context.fetch(:execution)
-    return false unless execution[:confirmed] || execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed])
+    return false unless execution_confirmed?(execution)
 
     finalization_safe?(context)
+  end
+
+  def execution_confirmed?(execution)
+    return false unless execution
+
+    ActiveModel::Type::Boolean.new.cast(execution[:confirmed]) ||
+      execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed])
+  end
+
+  # The source short AFTER the close, from evidence — never from the leg's
+  # claimed after_short_eth unless the execution itself confirmed. 2026-07-17
+  # incident: an Extended close 503'd at submit, yet the leg carried
+  # after_short_eth "0.0" (the expected value) while its own readback showed the
+  # source still at 1.61 on every poll; the outer verification trusted the claim
+  # and falsely reported source flat + finalized the production venue.
+  def authoritative_final_source_short(execution)
+    if execution_confirmed?(execution)
+      claimed = decimal_or_nil(execution[:after_short_eth])
+      return claimed if claimed
+    end
+    readback = source_short_from_execution_readback(execution)
+    return readback if readback
+
+    short_size(venue_for(from).read_position(symbol: "ETH"))
+  end
+
+  def source_short_from_execution_readback(execution)
+    payload = execution[:readback]
+    payload = payload.last if payload.is_a?(Array)
+    return nil unless payload.respond_to?(:[])
+
+    value = payload[:short_size] || payload["short_size"] ||
+      payload[:current_short_eth] || payload["current_short_eth"] ||
+      payload[:actual_short_eth] || payload["actual_short_eth"]
+    return nil if value.nil?
+
+    BigDecimal(value.to_s)
+  rescue ArgumentError, TypeError
+    nil
+  end
+
+  def execution_readback_mismatch?(execution, final_source)
+    return false if execution_confirmed?(execution)
+
+    claimed = decimal_or_nil(execution[:after_short_eth])
+    return false unless claimed && final_source
+
+    (claimed - final_source).abs > BigDecimal("0.001")
   end
 
   def finalization_safe?(context)
@@ -248,6 +298,7 @@ class MigrationTargetFirstSourceRecovery
       final_source_short_eth: decimal_string(final_source),
       final_combined_short_eth: decimal_string(final_combined),
       final_inside_tolerance: inside_tolerance?(final_combined, context),
+      readback_mismatch: context[:readback_mismatch] == true,
       readback_confirmed: execution ? recovery_confirmed?(context.merge(final_source_short: final_source, execution: execution)) : source_already_flat && safe_to_finalize,
       production_venue_finalized: context[:production_venue_finalized] == true || already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
       already_finalized: already_finalized?(source_already_flat: source_already_flat, safe_to_finalize: safe_to_finalize),
@@ -291,8 +342,11 @@ class MigrationTargetFirstSourceRecovery
     }
   end
 
-  def warnings(_context, source_already_flat:)
+  def warnings(context, source_already_flat:)
     base = [ "Recovery is target-first only: it never opens more target exposure and never closes the target venue." ]
+    if context[:readback_mismatch]
+      base << "Inner execution readback disagrees with the leg's claimed after-close size; the readback is authoritative and the source is NOT treated as flat."
+    end
     if source_already_flat && HedgeVenues.normalize(position.hedge&.execution_venue) == to
       base << "Migration already finalized; no recovery action required."
     elsif source_already_flat

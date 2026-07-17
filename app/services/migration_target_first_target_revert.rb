@@ -42,7 +42,7 @@ class MigrationTargetFirstTargetRevert
     if live? && blockers.empty? && context.fetch(:target_short).positive?
       execution = leg_runner.call(context.fetch(:planned_target_close_leg), context: { position: position, confirmation: confirmation, receipt: context })
       context = context.merge(
-        final_target_short: decimal_or_nil(execution[:after_short_eth]) || short_size(venue_for(to).read_position(symbol: "ETH")),
+        final_target_short: authoritative_final_target_short(execution),
         execution: execution
       )
       blockers = Array(execution[:blockers]) unless revert_confirmed?(context)
@@ -158,10 +158,37 @@ class MigrationTargetFirstTargetRevert
 
   def revert_confirmed?(context)
     execution = context[:execution]
-    return false unless execution
-    return false unless execution[:confirmed] || execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed])
+    return false unless execution_confirmed?(execution)
 
     final_state_verification(context).fetch(:status) == "confirmed"
+  end
+
+  def execution_confirmed?(execution)
+    return false unless execution
+
+    ActiveModel::Type::Boolean.new.cast(execution[:confirmed]) ||
+      execution[:status].to_s.in?(%w[success confirmed submitted_and_confirmed])
+  end
+
+  # The target short AFTER the close, from evidence — the leg's claimed
+  # after_short_eth is trusted only when the execution itself confirmed
+  # (mirrors the 2026-07-17 source-recovery hardening: an errored submit can
+  # still carry the expected "0" as its claimed after-size).
+  def authoritative_final_target_short(execution)
+    if execution_confirmed?(execution)
+      claimed = decimal_or_nil(execution[:after_short_eth])
+      return claimed if claimed
+    end
+    payload = execution[:readback]
+    payload = payload.last if payload.is_a?(Array)
+    if payload.respond_to?(:[])
+      value = payload[:short_size] || payload["short_size"] ||
+        payload[:current_short_eth] || payload["current_short_eth"]
+      readback = decimal_or_nil(value)
+      return readback if readback
+    end
+
+    short_size(venue_for(to).read_position(symbol: "ETH"))
   end
 
   # Success end-state for a revert: target flat, source preserved, third flat,
@@ -189,16 +216,18 @@ class MigrationTargetFirstTargetRevert
     }
   end
 
+  # Re-points the production venue to the preserved source. Deliberately does
+  # NOT touch any venue auto gate: a recovery must never re-enable an auto
+  # rebalancer as a side effect (2026-07-17: enable_venue! here silently flipped
+  # EXTENDED_AUTO_REBALANCE_ENABLED back to true after the operator required it
+  # false). Re-enabling autos is an explicit operator action, not a revert side
+  # effect.
   def finalize_source_as_production_venue(context)
     return if context[:production_venue_finalized]
     return unless position.hedge
     return if HedgeVenues.normalize(position.hedge.execution_venue) == from
 
     position.hedge.update!(execution_venue: from)
-    ActiveVenueAutoPolicy.new(position: position).enable_venue!(
-      venue: from,
-      reason: "target revert re-pointed production venue to preserved source"
-    )
     context[:production_venue_finalized] = true
     context[:finalized_hedge_id] = position.hedge.id
   end
