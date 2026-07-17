@@ -168,6 +168,7 @@ class MigrationRandomProductionRunner
       gates_state: gates_state,
       duplicate_runner_process: orphan_process,
       stale_heartbeat: stale_heartbeat,
+      operational_warnings: operational_warnings_payload,
       blockers: status_blockers(effective_status, direct, confirmed_active, unknown_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.merge(post_stop_operability(effective_status, direct, confirmed_active, unknown_venues))
