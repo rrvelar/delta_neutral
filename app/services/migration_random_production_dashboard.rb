@@ -110,6 +110,7 @@ class MigrationRandomProductionDashboard
       gates_state: status["gates_state"] || gates_state,
       extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended"),
       route_subset: MigrationApprovedRouteSubset.new.report,
+      start_confirmation_notice: start_confirmation_notice,
       operational_warnings: operational_warnings,
       latest_blocker: historical_blocker,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
@@ -172,6 +173,37 @@ class MigrationRandomProductionDashboard
     MigrationOperationalWarnings.for(position: position)
   rescue => e
     [ "operational warnings unavailable: #{e.class}: #{e.message}" ]
+  end
+
+  # Prominent pre-start notice while an approved route subset is active, e.g.
+  # "Starting production with 2-route subset: Nado ↔ Ethereal. Extended
+  # quarantined and excluded." Shown above the start buttons and used as the
+  # start buttons' confirm dialog.
+  def start_confirmation_notice
+    subset = MigrationApprovedRouteSubset.new
+    return nil unless subset.active?
+
+    allowed = subset.allowed_routes
+    return nil if allowed.empty?
+
+    extended_note = case HedgeVenueQuarantine.state("extended")
+    when "quarantined" then "Extended quarantined and excluded."
+    when "probation" then "Extended in probation and excluded."
+    else
+      allowed.any? { |route| route.include?("extended") } ? nil : "Extended excluded."
+    end
+    "Starting production with #{allowed.size}-route subset: #{pretty_route_subset(allowed)}. #{extended_note}".strip
+  rescue => e
+    "route subset notice unavailable: #{e.class}: #{e.message}"
+  end
+
+  def pretty_route_subset(allowed)
+    if allowed.size == 2 && allowed.map { |route| route.split("->").sort }.uniq.size == 1
+      a, b = allowed.first.split("->")
+      "#{a.capitalize} ↔ #{b.capitalize}"
+    else
+      allowed.join(", ")
+    end
   end
 
   # The JSONL latest_event is a snapshot of a past cycle. It is "stale" (a

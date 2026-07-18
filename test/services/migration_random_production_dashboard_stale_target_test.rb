@@ -77,6 +77,28 @@ class MigrationRandomProductionDashboardStaleTargetTest < ActiveSupport::TestCas
     assert warnings.any? { |w| w.include?("EXTENDED_AUTO_REBALANCE_ENABLED") && w.include?("DB override") }, warnings.inspect
   end
 
+  test "report builds the Path A start confirmation notice from subset and quarantine" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+    OperationalSettings.set!(key: "MIGRATION_ALLOWED_ROUTES", enabled: "nado->ethereal,ethereal->nado", reason: "test")
+    OperationalSettings.set!(key: "EXTENDED_VENUE_QUARANTINED", enabled: true, reason: "test")
+
+    report = dashboard(dir).report
+
+    assert_equal "Starting production with 2-route subset: Nado ↔ Ethereal. Extended quarantined and excluded.", report[:start_confirmation_notice]
+  end
+
+  test "report has no start confirmation notice without an active subset" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+
+    report = dashboard(dir).report
+
+    assert_nil report[:start_confirmation_notice]
+  end
+
   test "report surfaces route subset mode" do
     @position = position_with_fresh_snapshot
     dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")

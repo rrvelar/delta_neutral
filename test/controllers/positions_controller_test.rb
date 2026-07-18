@@ -1214,11 +1214,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = production_random_position
     control = random_production_control_guard(ok: true)
 
-    MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_start_position_path(position), params: {
-        production_runner_mode: "canary",
-        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
-      }
+    stub_clean_start_preflight do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "canary",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
     end
 
     assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
@@ -1230,11 +1232,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = production_random_position
     control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
-    MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_start_position_path(position), params: {
-        production_runner_mode: "canary",
-        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
-      }
+    stub_clean_start_preflight do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "canary",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
     end
 
     payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
@@ -1251,11 +1255,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = production_random_position
     control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
-    MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_start_position_path(position), params: {
-        production_runner_mode: "canary",
-        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
-      }
+    stub_clean_start_preflight do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "canary",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
     end
 
     payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
@@ -1269,11 +1275,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = production_random_position
     control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
-    MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_start_position_path(position), params: {
-        production_runner_mode: "production",
-        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
-      }
+    stub_clean_start_preflight do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "production",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
     end
 
     payload = JSON.parse(File.read(random_production_dir.join("control_position_#{position.id}.json")))
@@ -1281,6 +1289,45 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "production_24x7", payload["mode"]
   ensure
     clear_random_production_files(position&.id)
+  end
+
+  test "production random start is rejected by fresh backend preflight blockers" do
+    position = production_random_position
+    control = random_production_control_guard(ok: true)
+    blocked_runner = Class.new do
+      def start_preflight_blockers = [ "extended is quarantined; enabled routes involve it (nado->extended)" ]
+    end.new
+
+    MigrationRandomProductionRunner.stub(:new, ->(**_kwargs) { blocked_runner }) do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "production",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
+    end
+
+    assert_redirected_to position_path(position, hedge_venue: "nado", tab: "migration")
+    assert_match "blocked by fresh preflight", flash[:alert]
+    assert_match "quarantined", flash[:alert]
+    assert_equal [], control.calls, "control adapter must never be invoked when the fresh preflight blocks"
+  end
+
+  test "show renders Path A route subset, extended admission state and start confirmation notice" do
+    position = production_random_position
+    OperationalSettings.set!(key: "MIGRATION_ALLOWED_ROUTES", enabled: "nado->ethereal,ethereal->nado", reason: "test")
+    OperationalSettings.set!(key: "EXTENDED_VENUE_QUARANTINED", enabled: true, reason: "test")
+
+    get position_path(position, hedge_venue: "nado", tab: "migration")
+
+    assert_response :success
+    assert_match "Route subset mode: ACTIVE", response.body
+    assert_match "nado-&gt;ethereal", response.body
+    assert_match "ethereal-&gt;nado", response.body
+    assert_match "not in approved subset", response.body
+    assert_match "Extended venue: QUARANTINED", response.body
+    assert_match "Starting production with 2-route subset: Nado ↔ Ethereal. Extended quarantined and excluded.", response.body
+    assert_match "ROUTE SUBSET MODE active", response.body
   end
 
   test "production random stop safely calls production stop path" do
@@ -1605,11 +1652,13 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     position = production_random_position
     control = MigrationRandomProductionControl.new(control_mode: "bridge")
 
-    MigrationRandomProductionControl.stub(:new, -> { control }) do
-      post random_production_start_position_path(position), params: {
-        production_runner_mode: "production",
-        random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
-      }
+    stub_clean_start_preflight do
+      MigrationRandomProductionControl.stub(:new, -> { control }) do
+        post random_production_start_position_path(position), params: {
+          production_runner_mode: "production",
+          random_production_confirmation: MigrationRandomProductionRunner::CONFIRMATION
+        }
+      end
     end
 
     assert_nil OperationalSetting.where("value LIKE ?", "%PRODUCTION_RANDOM_ROTATION%").first
@@ -4954,6 +5003,15 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
 
   def random_production_control_guard(ok: false)
     RandomProductionControlGuard.new(ok: ok)
+  end
+
+  # Dashboard start runs a fresh fail-closed runner preflight; stub it clean so
+  # dispatch-path tests exercise the control adapter deterministically.
+  def stub_clean_start_preflight(&block)
+    fake = Class.new do
+      def start_preflight_blockers = []
+    end.new
+    MigrationRandomProductionRunner.stub(:new, ->(**_kwargs) { fake }, &block)
   end
 
   class RandomProductionControlGuard

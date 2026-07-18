@@ -274,6 +274,14 @@ class MigrationRandomProductionRunner
     payload
   end
 
+  # Fresh fail-closed preflight for dashboard-initiated starts (2026-07-18
+  # Path A): the endpoint refuses to dispatch a start while any blocker is
+  # present — subset malformed/changed, quarantine regression, tolerance,
+  # open orders, locks. The runner re-runs the same blockers itself at boot.
+  def start_preflight_blockers
+    start_blockers
+  end
+
   private
 
   attr_reader :position, :confirmation, :duration_minutes, :interval_seconds,

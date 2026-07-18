@@ -549,6 +549,15 @@ class PositionsController < ApplicationController
         alert: "Production random runner blocked: confirmation must equal #{MigrationRandomProductionRunner::CONFIRMATION}. No runner was started."
     end
 
+    # Fresh fail-closed backend preflight (2026-07-18 Path A): never dispatch a
+    # start while any blocker is present — subset changed/malformed, quarantine
+    # regression, tolerance, open orders. The runner re-checks at boot too.
+    preflight_blockers = MigrationRandomProductionRunner.new(position: position, live: false, trap_signals: false).start_preflight_blockers
+    if preflight_blockers.any?
+      return redirect_to position_path(position, hedge_venue: position.hedge&.execution_venue, tab: "migration"),
+        alert: "Production random runner blocked by fresh preflight: #{preflight_blockers.first(3).join('; ')}. No runner was started."
+    end
+
     result = random_production_control.start(position: position, mode: mode)
     level = result.ok ? :notice : :alert
     message = result.ok ? "Production random runner #{mode == 'canary' ? '24h canary' : '24/7'} start request submitted. No orders or signatures were created by the dashboard request." : "Production random runner start blocked: #{result.message}. No runner was started."
