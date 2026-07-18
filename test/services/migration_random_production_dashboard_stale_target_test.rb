@@ -77,6 +77,20 @@ class MigrationRandomProductionDashboardStaleTargetTest < ActiveSupport::TestCas
     assert warnings.any? { |w| w.include?("EXTENDED_AUTO_REBALANCE_ENABLED") && w.include?("DB override") }, warnings.inspect
   end
 
+  test "report surfaces the extended venue admission status" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+    OperationalSettings.set!(key: "EXTENDED_VENUE_PROBATION", enabled: true, reason: "test")
+
+    report = dashboard(dir).report
+
+    status = report[:extended_venue_status]
+    assert_equal "PROBATION", status[:state]
+    assert_equal true, status[:autonomous_production_blocked]
+    assert status.key?(:submit_health)
+  end
+
   test "running runner keeps heartbeat target as current" do
     @position = position_with_fresh_snapshot
     dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")

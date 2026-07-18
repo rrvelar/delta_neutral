@@ -44,6 +44,23 @@ class MigrationOperationalWarningsTest < ActiveSupport::TestCase
     assert warnings.any? { |w| w.include?("quarantined") }, warnings.inspect
   end
 
+  test "warns loudly while extended is in probation" do
+    position = warnings_position(execution_venue: "nado")
+    OperationalSettings.set!(key: "EXTENDED_VENUE_PROBATION", enabled: true, reason: "test")
+
+    warnings = warnings_for(position)
+
+    assert warnings.any? { |w| w.include?("PROBATION") && w.include?("EXTENDED_PROBATION_CANARY_ALLOWED") }, warnings.inspect
+  end
+
+  test "warns when the probation canary gate is persisted in the process environment" do
+    position = warnings_position(execution_venue: "nado")
+
+    warnings = MigrationOperationalWarnings.for(position: position, env: { "EXTENDED_PROBATION_CANARY_ALLOWED" => "true" }, recovery_receipt_dir: @receipt_dir)
+
+    assert warnings.any? { |w| w.include?("never persisted") }, warnings.inspect
+  end
+
   test "warns when EXTENDED_AUTO_REBALANCE_ENABLED is enabled by a DB override regardless of venue" do
     position = warnings_position(execution_venue: "nado")
     OperationalSettings.set!(key: "EXTENDED_AUTO_REBALANCE_ENABLED", enabled: true, reason: "test")

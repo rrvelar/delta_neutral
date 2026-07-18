@@ -16,6 +16,7 @@ class MigrationOperationalWarnings
   def warnings
     warnings = []
     warnings.concat(extended_survivor_warnings)
+    warnings.concat(extended_probation_warnings)
     warnings.concat(extended_auto_override_warnings)
     warnings.concat(recovery_mismatch_warnings)
     warnings
@@ -41,6 +42,17 @@ class MigrationOperationalWarnings
     end
     if HedgeVenueQuarantine.quarantined?("extended", env: env)
       warnings << "Extended is the surviving production venue while Extended is quarantined; autonomous production cannot open new Extended exposure and the runner will not start until the position migrates off Extended."
+    end
+    warnings
+  end
+
+  def extended_probation_warnings
+    warnings = []
+    if HedgeVenueQuarantine.state("extended", env: env) == "probation"
+      warnings << "Extended is in PROBATION — autonomous production remains blocked; supervised canaries targeting Extended require the explicit per-run gate EXTENDED_PROBATION_CANARY_ALLOWED=true passed inline."
+    end
+    if HedgeVenueQuarantine.probation_canary_allowed?("extended", env: env)
+      warnings << "EXTENDED_PROBATION_CANARY_ALLOWED is set in this process environment — the probation canary gate must only ever be passed inline per-run, never persisted."
     end
     warnings
   end

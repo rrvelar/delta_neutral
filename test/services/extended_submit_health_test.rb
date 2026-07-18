@@ -39,6 +39,23 @@ class ExtendedSubmitHealthTest < ActiveSupport::TestCase
     assert_equal false, ExtendedSubmitHealth.recently_failed?
   end
 
+  test "clean-streak and total counters update on success and reset on failure" do
+    ExtendedSubmitHealth.record_success!
+    ExtendedSubmitHealth.record_success!
+    assert_equal 2, ExtendedSubmitHealth.successes_since_last_failure
+    assert_equal 2, ExtendedSubmitHealth.snapshot["total_successes"]
+
+    ExtendedSubmitHealth.record_failure!(error: "HTTP 503", http_status: 503)
+    assert_equal 0, ExtendedSubmitHealth.successes_since_last_failure
+    assert_equal 2, ExtendedSubmitHealth.snapshot["total_successes"], "total is cumulative, not streak"
+    assert_equal 1, ExtendedSubmitHealth.snapshot["consecutive_failures"]
+
+    ExtendedSubmitHealth.record_success!
+    assert_equal 1, ExtendedSubmitHealth.successes_since_last_failure
+    assert_equal 3, ExtendedSubmitHealth.snapshot["total_successes"]
+    assert_equal 0, ExtendedSubmitHealth.snapshot["consecutive_failures"]
+  end
+
   test "a corrupt health file fails closed to not-recently-failed and never raises" do
     FileUtils.mkdir_p(File.dirname(ExtendedSubmitHealth.path))
     File.write(ExtendedSubmitHealth.path, "not json {")

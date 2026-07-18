@@ -108,6 +108,7 @@ class MigrationRandomProductionDashboard
       next_rotation_at: next_rotation_at(heartbeat),
       lock_pid: lock["pid"],
       gates_state: status["gates_state"] || gates_state,
+      extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended"),
       operational_warnings: operational_warnings,
       latest_blocker: historical_blocker,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic

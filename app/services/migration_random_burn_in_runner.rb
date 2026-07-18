@@ -357,7 +357,8 @@ class MigrationRandomBurnInRunner
       route[:from_venue] == current &&
         route[:status] == MigrationRouteProofRegistry::STATUSES[:ready] &&
         policy.route_enabled?(from: route[:from_venue], to: route[:to_venue]) &&
-        !HedgeVenueQuarantine.quarantined?(route[:to_venue], env: env)
+        !HedgeVenueQuarantine.autonomous_blocked?(route[:to_venue], env: env) &&
+        !HedgeVenueQuarantine.autonomous_blocked?(route[:from_venue], env: env)
     end
     return nil if routes.empty?
     return routes.find { |route| route[:route] == selector.call(routes) } || routes.first if selector

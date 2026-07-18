@@ -20,7 +20,9 @@ module ExtendedSubmitHealth
           "last_failure_at" => now.utc.iso8601,
           "last_error" => error.to_s,
           "last_http_status" => http_status,
-          "consecutive_failures" => state.fetch("consecutive_failures", 0).to_i + 1
+          "consecutive_failures" => state.fetch("consecutive_failures", 0).to_i + 1,
+          # A failure ends the clean streak (staged re-admission counts reset).
+          "successes_since_last_failure" => 0
         )
       )
     rescue StandardError
@@ -32,11 +34,20 @@ module ExtendedSubmitHealth
       write(
         state.merge(
           "last_success_at" => now.utc.iso8601,
-          "consecutive_failures" => 0
+          "consecutive_failures" => 0,
+          "successes_since_last_failure" => state.fetch("successes_since_last_failure", 0).to_i + 1,
+          "total_successes" => state.fetch("total_successes", 0).to_i + 1
         )
       )
     rescue StandardError
       nil
+    end
+
+    # Clean-streak count for staged venue re-admission criteria.
+    def successes_since_last_failure
+      snapshot.fetch("successes_since_last_failure", 0).to_i
+    rescue StandardError
+      0
     end
 
     # A failure is "recent" when it happened inside the window and no submit has

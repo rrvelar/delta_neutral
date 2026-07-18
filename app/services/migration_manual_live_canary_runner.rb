@@ -65,8 +65,20 @@ class MigrationManualLiveCanaryRunner
   def hard_blockers(plan:, confirmation:)
     blockers = []
     blockers.concat(plan.fetch(:blockers))
+    blockers.concat(venue_admission_blockers(plan))
     blockers << "submitted confirmation must equal #{CONFIRMATION}" unless confirmation == CONFIRMATION
     blockers.uniq
+  end
+
+  # Staged venue re-admission (2026-07-18): a supervised canary may not TARGET a
+  # quarantined venue; targeting a probation venue requires the explicit per-run
+  # env gate (e.g. EXTENDED_PROBATION_CANARY_ALLOWED=true passed inline). A
+  # canary whose SOURCE is the venue (migrate-out) is never blocked here.
+  def venue_admission_blockers(plan)
+    to_venue = plan[:to_venue]
+    return [] if to_venue.blank?
+
+    HedgeVenueQuarantine.supervised_canary_blockers(to_venue: to_venue, env: env)
   end
 
   def base_receipt(position:, plan:, confirmation:, blockers:)

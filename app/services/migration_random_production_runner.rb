@@ -168,6 +168,7 @@ class MigrationRandomProductionRunner
       gates_state: gates_state,
       duplicate_runner_process: orphan_process,
       stale_heartbeat: stale_heartbeat,
+      extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended", env: env),
       operational_warnings: operational_warnings_payload,
       blockers: status_blockers(effective_status, direct, confirmed_active, unknown_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
@@ -304,24 +305,26 @@ class MigrationRandomProductionRunner
     blockers.uniq
   end
 
-  # A quarantined venue (e.g. Extended after its submit endpoint failed live)
-  # must not gain new exposure from autonomous production. The runner refuses to
-  # start unless the enabled route subset excludes the quarantined venue as a
-  # target AND it is not the current production venue. Recovery and manual
-  # migrate-out paths are unaffected.
+  # A venue in quarantine OR probation (e.g. Extended after its submit endpoint
+  # failed live) must not gain exposure from autonomous production. The runner
+  # refuses to start unless the enabled route subset excludes the venue entirely
+  # (as source or target) AND it is not the current production venue. Recovery
+  # and manual migrate-out paths are unaffected.
   def quarantine_blockers
-    quarantined = HedgeVenueQuarantine.quarantined_venues(env: env)
-    return [] if quarantined.empty?
+    blocked_venues = HedgeVenueQuarantine.autonomous_blocked_venues(env: env)
+    return [] if blocked_venues.empty?
 
     policy_routes = MigrationRouteOperationalPolicy.new(env: env).report.fetch(:routes)
-    quarantined.flat_map do |venue|
+    blocked_venues.flat_map do |venue|
+      state = HedgeVenueQuarantine.state(venue, env: env)
+      label = state == "probation" ? "in probation" : state
       blockers = []
       if HedgeVenues.normalize(position.hedge&.execution_venue) == venue
-        blockers << "#{venue} is quarantined and is the current production venue; migrate off #{venue} via a supervised/recovery path before starting the runner"
+        blockers << "#{venue} is #{label} and is the current production venue; migrate off #{venue} via a supervised/recovery path before starting the runner"
       end
-      targeting = policy_routes.select { |route| route[:to_venue] == venue && route[:production_execution_enabled] }.map { |route| route[:route] }
-      if targeting.any?
-        blockers << "#{venue} is quarantined; enabled routes still target it (#{targeting.join(', ')}) — disable those routes or lift the quarantine before starting the runner"
+      involving = policy_routes.select { |route| (route[:to_venue] == venue || route[:from_venue] == venue) && route[:production_execution_enabled] }.map { |route| route[:route] }
+      if involving.any?
+        blockers << "#{venue} is #{label}; enabled routes involve it (#{involving.join(', ')}) — disable those routes or clear the venue state before starting the runner"
       end
       blockers
     end
@@ -458,6 +461,7 @@ class MigrationRandomProductionRunner
       proof_report: proof_report_payload(direct[:proof_report]),
       route_proofs_summary: route_proofs_summary(direct[:proof_report]),
       gates_state: gates_state,
+      extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended", env: env),
       operational_warnings: operational_warnings_payload,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.compact
