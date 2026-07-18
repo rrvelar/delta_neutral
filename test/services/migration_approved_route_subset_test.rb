@@ -115,6 +115,66 @@ class MigrationApprovedRouteSubsetTest < ActiveSupport::TestCase
     assert_empty runner.send(:quarantine_blockers), "subset excluding extended satisfies the quarantine route condition"
   end
 
+  # --- subset-aware aggregate proof gate (STOP finding fix) ---
+
+  test "aggregate proof gate ignores subset-excluded unproven routes" do
+    set_subset!(SUBSET)
+    position = subset_position(execution_venue: "nado")
+    report = proof_gate_report(overrides: { "extended->ethereal" => "NOT_PRODUCTION_SAFE_LATENCY" })
+
+    [ preflight(position), readiness(position) ].each do |service|
+      missing = service.send(:enabled_missing_route_proofs, report)
+      assert_empty missing, "#{service.class}: subset-excluded extended->ethereal must not require a proof"
+    end
+  end
+
+  test "aggregate proof gate still blocks on unproven routes without a subset" do
+    position = subset_position(execution_venue: "nado")
+    report = proof_gate_report(overrides: { "extended->ethereal" => "NOT_PRODUCTION_SAFE_LATENCY" })
+
+    [ preflight(position), readiness(position) ].each do |service|
+      missing = service.send(:enabled_missing_route_proofs, report)
+      assert missing.any? { |route| route[:route] == "extended->ethereal" }, "#{service.class}: without a subset the unproven route must stay in scope"
+    end
+  end
+
+  test "aggregate proof gate still blocks when an allowed subset route is unproven" do
+    set_subset!(SUBSET)
+    position = subset_position(execution_venue: "nado")
+    report = proof_gate_report(overrides: { "nado->ethereal" => "NOT_PRODUCTION_SAFE_LATENCY" })
+
+    [ preflight(position), readiness(position) ].each do |service|
+      missing = service.send(:enabled_missing_route_proofs, report)
+      assert missing.any? { |route| route[:route] == "nado->ethereal" }, "#{service.class}: an allowed-but-unproven route must block"
+    end
+  end
+
+  test "malformed subset does not silently ignore proofs (fail closed)" do
+    position = subset_position(execution_venue: "nado")
+    report = proof_gate_report(overrides: { "extended->ethereal" => "NOT_PRODUCTION_SAFE_LATENCY" })
+    env = { "MIGRATION_ALLOWED_ROUTES" => "foo->bar" }
+
+    [ MigrationExecutionPreflight.new(position: position, env: env), MigrationRandomReadiness.new(position: position, env: env) ].each do |service|
+      missing = service.send(:enabled_missing_route_proofs, report)
+      assert missing.any? { |route| route[:route] == "extended->ethereal" }, "#{service.class}: a malformed subset must keep every proof in scope"
+    end
+  end
+
+  test "stale proof blocker is also subset-aware" do
+    set_subset!(SUBSET)
+    position = subset_position(execution_venue: "nado")
+    stale = [ { route: "extended->ethereal", from_venue: "extended", to_venue: "ethereal", status: "STALE" } ]
+
+    [ preflight(position), readiness(position) ].each do |service|
+      assert_empty service.send(:subset_selectable_routes, stale), "#{service.class}: subset-excluded stale route must not block"
+    end
+
+    stale_allowed = [ { route: "nado->ethereal", from_venue: "nado", to_venue: "ethereal", status: "STALE" } ]
+    [ preflight(position), readiness(position) ].each do |service|
+      assert_equal 1, service.send(:subset_selectable_routes, stale_allowed).size, "#{service.class}: an allowed stale route must still block"
+    end
+  end
+
   test "report surfaces subset mode, allowed and excluded routes with reasons" do
     set_subset!(SUBSET)
 
@@ -140,6 +200,27 @@ class MigrationApprovedRouteSubsetTest < ActiveSupport::TestCase
       { route: route, status: overrides.fetch(route, READY) }
     end
     { routes: routes }
+  end
+
+  # Shape used by the preflight/readiness aggregate proof gates.
+  def proof_gate_report(overrides: {})
+    routes = OperationalSettings::ROUTE_KEYS_BY_ROUTE.keys.map do |route|
+      from, to = route.split("->")
+      { route: route, from_venue: from, to_venue: to, status: overrides.fetch(route, READY) }
+    end
+    {
+      routes: routes,
+      missing_route_proofs: routes.reject { |route| route[:status] == READY },
+      stale_route_proofs: []
+    }
+  end
+
+  def preflight(position)
+    MigrationExecutionPreflight.new(position: position, env: {})
+  end
+
+  def readiness(position)
+    MigrationRandomReadiness.new(position: position, env: {})
   end
 
   def fake_registry(*routes)

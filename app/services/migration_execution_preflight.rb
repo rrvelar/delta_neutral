@@ -130,7 +130,7 @@ class MigrationExecutionPreflight
     return unless require_route_proofs || require_random_readiness
 
     blockers << "all enabled route proofs must be READY_FOR_RANDOM" if enabled_missing_route_proofs(proof_report).present?
-    blockers << "stale route proofs must be resolved" if proof_report.fetch(:stale_route_proofs).present?
+    blockers << "stale route proofs must be resolved" if subset_selectable_routes(proof_report.fetch(:stale_route_proofs)).present?
     blockers << "pending target=Nado migration continuation must be completed before migration" if readiness[:pending_nado_target_continuation_blocking]
   end
 
@@ -358,9 +358,21 @@ class MigrationExecutionPreflight
 
   def enabled_missing_route_proofs(proof_report)
     policy = MigrationRouteOperationalPolicy.new(env: env)
-    proof_report.fetch(:missing_route_proofs, []).reject do |route|
+    subset_selectable_routes(proof_report.fetch(:missing_route_proofs, [])).reject do |route|
       !policy.route_enabled?(from: route[:from_venue], to: route[:to_venue])
     end
+  end
+
+  # Routes excluded by an ACTIVE approved subset cannot be selected, so they
+  # cannot require a proof (2026-07-18 Path A). Fail-closed: with no subset —
+  # or a malformed subset that allows nothing — every route stays in scope (the
+  # malformed subset itself blocks the runner via its own start blockers).
+  def subset_selectable_routes(routes)
+    subset = MigrationApprovedRouteSubset.new(env: env)
+    return Array(routes) unless subset.active?
+    return Array(routes) if subset.allowed_routes.empty?
+
+    Array(routes).select { |route| subset.route_allowed?(from: route[:from_venue], to: route[:to_venue]) }
   end
 
   def combined_short(reports)
