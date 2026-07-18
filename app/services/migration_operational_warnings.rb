@@ -17,6 +17,7 @@ class MigrationOperationalWarnings
     warnings = []
     warnings.concat(extended_survivor_warnings)
     warnings.concat(extended_probation_warnings)
+    warnings.concat(route_subset_warnings)
     warnings.concat(extended_auto_override_warnings)
     warnings.concat(recovery_mismatch_warnings)
     warnings
@@ -55,6 +56,15 @@ class MigrationOperationalWarnings
       warnings << "EXTENDED_PROBATION_CANARY_ALLOWED is set in this process environment — the probation canary gate must only ever be passed inline per-run, never persisted."
     end
     warnings
+  end
+
+  def route_subset_warnings
+    subset = MigrationApprovedRouteSubset.new(env: env)
+    return [] unless subset.active?
+
+    allowed = subset.allowed_routes
+    excluded = subset.excluded_routes
+    [ "ROUTE SUBSET MODE active: autonomous selection restricted to #{allowed.presence&.join(', ') || '(no valid routes — fail closed)'}; excluded: #{excluded.join(', ')}." ]
   end
 
   def extended_auto_override_warnings

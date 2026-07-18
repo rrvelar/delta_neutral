@@ -48,10 +48,13 @@ class OperationalSettings
   }.freeze
   ROUTE_STRATEGY_KEYS = ROUTE_STRATEGY_KEYS_BY_ROUTE.values.freeze
   ROUTE_STRATEGIES = %w[target_first source_first manual_only disabled disabled_pending_latency_proof].freeze
+  # Explicit approved-route allow-list for autonomous production (CSV of known
+  # routes, e.g. "nado->ethereal,ethereal->nado"). Blank clears subset mode.
+  ROUTE_SUBSET_KEY = "MIGRATION_ALLOWED_ROUTES".freeze
   RUNTIME_GATE_KEYS = (AUTO_KEYS_BY_VENUE.values + MIGRATION_KEYS).freeze
   ROUTE_POLICY_KEYS = (ROUTE_KEYS + ROUTE_STRATEGY_KEYS).freeze
   BOOLEAN_KEYS = (RUNTIME_GATE_KEYS + ROUTE_KEYS).freeze
-  ALLOWED_KEYS = (BOOLEAN_KEYS + ROUTE_STRATEGY_KEYS).freeze
+  ALLOWED_KEYS = (BOOLEAN_KEYS + ROUTE_STRATEGY_KEYS + [ ROUTE_SUBSET_KEY ]).freeze
 
   Result = Data.define(:ok, :setting, :errors, :audit)
   Value = Data.define(:key, :enabled, :source, :raw_value)
@@ -67,9 +70,23 @@ class OperationalSettings
   def self.valid_value_for_key?(key, value)
     if ROUTE_STRATEGY_KEYS.include?(key.to_s)
       ROUTE_STRATEGIES.include?(value.to_s)
+    elsif key.to_s == ROUTE_SUBSET_KEY
+      valid_route_subset?(value)
     else
       valid_value?(value)
     end
+  end
+
+  # Blank clears subset mode; otherwise every CSV entry must be a known route.
+  def self.valid_route_subset?(value)
+    text = value.to_s.strip
+    return true if text.empty?
+
+    text.split(",").map(&:strip).reject(&:empty?).all? { |route| ROUTE_KEYS_BY_ROUTE.key?(route) }
+  end
+
+  def self.string_key?(key)
+    ROUTE_STRATEGY_KEYS.include?(key.to_s) || key.to_s == ROUTE_SUBSET_KEY
   end
 
   def self.get(key, env: ENV)
@@ -92,11 +109,25 @@ class OperationalSettings
   def self.set!(key:, enabled:, updated_by: nil, reason: nil)
     key = key.to_s
     return Result.new(false, nil, [ "invalid operational setting key" ], nil) unless allowed_key?(key)
-    value = ROUTE_STRATEGY_KEYS.include?(key) ? enabled.to_s : normalize_value(enabled)
+    value = string_key?(key) ? enabled.to_s : normalize_value(enabled)
     return Result.new(false, nil, [ "invalid operational setting value" ], nil) unless valid_value_for_key?(key, value)
 
     current = OperationalSetting.find_by(key: key)
     old_value = current&.value
+    # A blank route subset clears subset mode: the row is removed (the model
+    # requires a non-blank value) and the clear is audited.
+    if key == ROUTE_SUBSET_KEY && value.strip.empty?
+      audit = nil
+      ActiveRecord::Base.transaction do
+        current&.destroy!
+        audit = OperationalSettingAudit.create!(
+          key: key, old_value: old_value, new_value: "",
+          updated_by: updated_by, reason: reason
+        )
+      end
+      return Result.new(true, nil, [], audit)
+    end
+
     setting = nil
     audit = nil
     ActiveRecord::Base.transaction do

@@ -169,6 +169,7 @@ class MigrationRandomProductionRunner
       duplicate_runner_process: orphan_process,
       stale_heartbeat: stale_heartbeat,
       extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended", env: env),
+      route_subset: MigrationApprovedRouteSubset.new(env: env).report(proof_report: direct[:proof_report]),
       operational_warnings: operational_warnings_payload,
       blockers: status_blockers(effective_status, direct, confirmed_active, unknown_venues),
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
@@ -301,8 +302,16 @@ class MigrationRandomProductionRunner
     blockers << "duplicate_runner_process" if duplicate_runner_process_running?
     blockers.concat(active_lock_blockers)
     blockers.concat(quarantine_blockers)
+    blockers.concat(route_subset_blockers)
     blockers.concat(restart_safety_blockers)
     blockers.uniq
+  end
+
+  # Fail-closed validation of the explicit approved-route subset (Path A):
+  # while MIGRATION_ALLOWED_ROUTES is set, every allowed route must be known,
+  # policy-enabled, READY_FOR_RANDOM and free of quarantined/probation venues.
+  def route_subset_blockers
+    MigrationApprovedRouteSubset.new(env: env).start_blockers(proof_report: direct_report[:proof_report])
   end
 
   # A venue in quarantine OR probation (e.g. Extended after its submit endpoint
@@ -315,6 +324,10 @@ class MigrationRandomProductionRunner
     return [] if blocked_venues.empty?
 
     policy_routes = MigrationRouteOperationalPolicy.new(env: env).report.fetch(:routes)
+    # An active approved subset narrows the selectable set: routes it excludes
+    # cannot be chosen, so they do not block the start. (A malformed subset
+    # allows nothing here but fails closed via route_subset_blockers.)
+    subset = MigrationApprovedRouteSubset.new(env: env)
     blocked_venues.flat_map do |venue|
       state = HedgeVenueQuarantine.state(venue, env: env)
       label = state == "probation" ? "in probation" : state
@@ -322,9 +335,13 @@ class MigrationRandomProductionRunner
       if HedgeVenues.normalize(position.hedge&.execution_venue) == venue
         blockers << "#{venue} is #{label} and is the current production venue; migrate off #{venue} via a supervised/recovery path before starting the runner"
       end
-      involving = policy_routes.select { |route| (route[:to_venue] == venue || route[:from_venue] == venue) && route[:production_execution_enabled] }.map { |route| route[:route] }
+      involving = policy_routes.select do |route|
+        (route[:to_venue] == venue || route[:from_venue] == venue) &&
+          route[:production_execution_enabled] &&
+          subset.route_allowed?(from: route[:from_venue], to: route[:to_venue])
+      end.map { |route| route[:route] }
       if involving.any?
-        blockers << "#{venue} is #{label}; enabled routes involve it (#{involving.join(', ')}) — disable those routes or clear the venue state before starting the runner"
+        blockers << "#{venue} is #{label}; enabled routes involve it (#{involving.join(', ')}) — disable those routes, exclude them via #{MigrationApprovedRouteSubset::KEY}, or clear the venue state before starting the runner"
       end
       blockers
     end
@@ -462,6 +479,7 @@ class MigrationRandomProductionRunner
       route_proofs_summary: route_proofs_summary(direct[:proof_report]),
       gates_state: gates_state,
       extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended", env: env),
+      route_subset: MigrationApprovedRouteSubset.new(env: env).report(proof_report: direct[:proof_report]),
       operational_warnings: operational_warnings_payload,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
     }.compact

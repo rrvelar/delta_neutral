@@ -77,6 +77,22 @@ class MigrationRandomProductionDashboardStaleTargetTest < ActiveSupport::TestCas
     assert warnings.any? { |w| w.include?("EXTENDED_AUTO_REBALANCE_ENABLED") && w.include?("DB override") }, warnings.inspect
   end
 
+  test "report surfaces route subset mode" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+    OperationalSettings.set!(key: "MIGRATION_ALLOWED_ROUTES", enabled: "nado->ethereal,ethereal->nado", reason: "test")
+
+    report = dashboard(dir).report
+
+    subset = report[:route_subset]
+    assert_equal true, subset[:subset_mode]
+    assert_equal %w[nado->ethereal ethereal->nado], subset[:allowed_routes]
+    assert subset[:excluded_routes].any? { |r| r[:route] == "nado->extended" }
+    warnings = Array(report[:operational_warnings])
+    assert warnings.any? { |w| w.include?("ROUTE SUBSET MODE active") }, warnings.inspect
+  end
+
   test "report surfaces the extended venue admission status" do
     @position = position_with_fresh_snapshot
     dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")

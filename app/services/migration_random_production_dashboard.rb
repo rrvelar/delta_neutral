@@ -109,6 +109,7 @@ class MigrationRandomProductionDashboard
       lock_pid: lock["pid"],
       gates_state: status["gates_state"] || gates_state,
       extended_venue_status: HedgeVenueQuarantine.status_report(venue: "extended"),
+      route_subset: MigrationApprovedRouteSubset.new.report,
       operational_warnings: operational_warnings,
       latest_blocker: historical_blocker,
       dashboard_snapshot_diagnostic: dashboard_snapshot_diagnostic
