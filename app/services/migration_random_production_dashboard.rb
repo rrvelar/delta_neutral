@@ -319,12 +319,20 @@ class MigrationRandomProductionDashboard
     decimal(target_short) * decimal(position.hedge.tolerance)
   end
 
+  # Next autonomous coverage target for DISPLAY: follows the daily rotation but
+  # skips venues autonomous production cannot reach (quarantine/probation or
+  # excluded by the approved route subset) so the Dashboard never advertises an
+  # unselectable next target (2026-07-19). Returns nil when no venue qualifies.
   def next_daily_coverage_target(current_venue)
     venues = %w[extended ethereal nado]
     current = HedgeVenues.normalize(current_venue)
     return nil unless venues.include?(current)
 
-    venues[(venues.index(current) + 1) % venues.size]
+    venues.rotate(venues.index(current) + 1).find do |venue|
+      venue != current &&
+        !HedgeVenueQuarantine.autonomous_blocked?(venue) &&
+        MigrationApprovedRouteSubset.route_allowed?(from: current, to: venue)
+    end
   end
 
   def next_rotation_at(heartbeat)

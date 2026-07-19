@@ -1328,6 +1328,22 @@ class PositionsControllerTest < ActionDispatch::IntegrationTest
     assert_match "Extended venue: QUARANTINED", response.body
     assert_match "Starting production with 2-route subset: Nado ↔ Ethereal. Extended quarantined and excluded.", response.body
     assert_match "ROUTE SUBSET MODE active", response.body
+    # The manual-migration preview must not DEFAULT to the excluded Extended
+    # target, and the naive next-target rotation must not advertise Extended.
+    assert_no_match(/Preview only — Extended is excluded/, response.body)
+    assert_match "Ethereal · daily coverage policy", response.body
+    assert_no_match(/Extended · daily coverage policy/, response.body)
+  end
+
+  test "show flags an explicitly previewed Extended route as excluded from autonomous production" do
+    position = production_random_position
+    OperationalSettings.set!(key: "MIGRATION_ALLOWED_ROUTES", enabled: "nado->ethereal,ethereal->nado", reason: "test")
+    OperationalSettings.set!(key: "EXTENDED_VENUE_QUARANTINED", enabled: true, reason: "test")
+
+    get position_path(position, hedge_venue: "nado", tab: "migration", preview_to_venue: "extended")
+
+    assert_response :success
+    assert_match "Preview only — Extended is excluded from autonomous production (quarantine / approved subset)", response.body
   end
 
   test "production random stop safely calls production stop path" do

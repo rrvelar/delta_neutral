@@ -613,9 +613,10 @@ end %>
       <% end %>
 
       <% random_production_tail_visible = ActiveModel::Type::Boolean.new.cast(params[:show_random_production_tail]) %>
-      <% daily_coverage_venues = %w[extended ethereal nado] %>
-      <% current_policy_venue = HedgeVenues.normalize(random_production[:current_production_venue] || @position.hedge&.execution_venue) %>
-      <% next_policy_target = daily_coverage_venues[(daily_coverage_venues.index(current_policy_venue).to_i + 1) % daily_coverage_venues.size] %>
+      <%# Next target comes from the dashboard service, which skips quarantined /
+          probation venues and routes excluded by the approved subset — the view
+          must never re-derive it naively (2026-07-19). %>
+      <% next_policy_target = random_production[:next_target_venue] %>
       <div class="mt-4 rounded-xl border border-gray-800 bg-gray-950/60 p-4">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -643,7 +644,7 @@ end %>
           <% route_summary = random_production[:route_proofs_summary] || {} %>
           <div><p class="text-xs text-gray-500">Route proofs</p><p class="text-white"><%= route_summary[:missing_cache] || route_summary["missing_cache"] ? "cache missing" : "ready #{route_summary[:ready] || route_summary['ready']} / total #{route_summary[:total] || route_summary['total']} · missing #{route_summary[:missing] || route_summary['missing'] || 0} · stale #{route_summary[:stale] || route_summary['stale'] || 0}" %></p></div>
           <div><p class="text-xs text-gray-500">Migration policy</p><p class="text-white">3/day · interval 28800s · hold check 300s</p></div>
-          <div><p class="text-xs text-gray-500">Next target venue</p><p class="text-white"><%= HedgeVenues.label(next_policy_target) %> · daily coverage policy</p></div>
+          <div><p class="text-xs text-gray-500">Next target venue</p><p class="text-white"><%= next_policy_target ? "#{HedgeVenues.label(next_policy_target)} · daily coverage policy" : "— · no eligible target (subset/quarantine)" %></p></div>
           <div><p class="text-xs text-gray-500">Latest blocker</p><p class="break-words text-white"><%= random_production[:latest_blocker].presence || "none" %></p></div>
         </div>
 
@@ -810,7 +811,14 @@ end %>
               <p class="text-xs uppercase tracking-wide text-gray-500">Current plan</p>
               <p class="mt-1 text-sm text-gray-300"><%= HedgeVenues.label(migration_plan[:from_venue]) %> → <%= HedgeVenues.label(migration_plan[:to_venue]) %> · <%= migration_plan[:mode].presence || "preview" %> · <%= migration_plan[:migration_sequence].to_s.tr("_", "-") %></p>
             </div>
-            <span class="rounded-full border <%= migration_plan[:blockers].present? ? 'border-yellow-800 bg-yellow-950/50 text-yellow-200' : 'border-green-800 bg-green-950/60 text-green-300' %> px-3 py-1 text-xs"><%= migration_plan[:blockers].present? ? "Blocked preview" : "Preview ready" %></span>
+            <% preview_to = HedgeVenues.normalize(migration_plan[:to_venue]) %>
+            <% preview_route_excluded = preview_to.present? && (HedgeVenueQuarantine.autonomous_blocked?(preview_to) || !MigrationApprovedRouteSubset.route_allowed?(from: migration_plan[:from_venue], to: preview_to)) %>
+            <div class="flex flex-wrap items-center gap-2">
+              <% if preview_route_excluded %>
+                <span class="rounded-full border border-red-800 bg-red-950/60 px-3 py-1 text-xs text-red-200">Preview only — <%= HedgeVenues.label(preview_to) %> is excluded from autonomous production (quarantine / approved subset)</span>
+              <% end %>
+              <span class="rounded-full border <%= migration_plan[:blockers].present? ? 'border-yellow-800 bg-yellow-950/50 text-yellow-200' : 'border-green-800 bg-green-950/60 text-green-300' %> px-3 py-1 text-xs"><%= migration_plan[:blockers].present? ? "Blocked preview" : "Preview ready" %></span>
+            </div>
           </div>
           <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
             <div><p class="text-xs text-gray-500">Production venue</p><p class="text-white"><%= HedgeVenues.label(migration_plan[:production_venue] || @position.hedge&.execution_venue) %></p></div>

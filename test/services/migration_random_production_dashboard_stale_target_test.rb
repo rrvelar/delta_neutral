@@ -77,6 +77,21 @@ class MigrationRandomProductionDashboardStaleTargetTest < ActiveSupport::TestCas
     assert warnings.any? { |w| w.include?("EXTENDED_AUTO_REBALANCE_ENABLED") && w.include?("DB override") }, warnings.inspect
   end
 
+  test "next daily coverage target skips quarantined and subset-excluded venues" do
+    @position = position_with_fresh_snapshot
+    dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")
+    write_files(dir, running: false)
+
+    # without flags: naive rotation from nado -> extended (legacy default)
+    assert_equal "extended", dashboard(dir).send(:next_daily_coverage_target, "nado")
+
+    OperationalSettings.set!(key: "MIGRATION_ALLOWED_ROUTES", enabled: "nado->ethereal,ethereal->nado", reason: "test")
+    OperationalSettings.set!(key: "EXTENDED_VENUE_QUARANTINED", enabled: true, reason: "test")
+
+    assert_equal "ethereal", dashboard(dir).send(:next_daily_coverage_target, "nado"), "extended is quarantined and subset-excluded; the display must advertise ethereal"
+    assert_nil dashboard(dir).send(:next_daily_coverage_target, "extended"), "no eligible target from a venue whose routes are all excluded"
+  end
+
   test "report builds the Path A start confirmation notice from subset and quarantine" do
     @position = position_with_fresh_snapshot
     dir = Rails.root.join("tmp/prod-dash-target-#{SecureRandom.hex(4)}")

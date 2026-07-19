@@ -1165,9 +1165,19 @@ class PositionsController < ApplicationController
     }
   end
 
+  # Default target for the manual migration PREVIEW widget. Prefer a venue that
+  # autonomous production could actually reach (not quarantined/probation, not
+  # excluded by the approved route subset) so the Dashboard never defaults to
+  # previewing an excluded route (2026-07-19). Operators can still explicitly
+  # preview any venue via params (e.g. for supervised migrate-out planning).
   def selected_migration_to_venue
     production = HedgeVenues.normalize(@position.hedge&.execution_venue)
-    production == "extended" ? "ethereal" : "extended"
+    candidates = HedgeVenues::SUPPORTED_KEYS - [ production ]
+    preferred = candidates.find do |venue|
+      !HedgeVenueQuarantine.autonomous_blocked?(venue) &&
+        MigrationApprovedRouteSubset.route_allowed?(from: production, to: venue)
+    end
+    preferred || (production == "extended" ? "ethereal" : "extended")
   end
 
   def default_migration_step_size_eth
